@@ -1,0 +1,307 @@
+# 项目交接说明
+
+更新时间：2026-07-15
+
+## 当前快照
+
+| 项目 | 状态 |
+| --- | --- |
+| 包名 | `xvt-video-translate` |
+| CLI | `xvt` |
+| 版本 | `0.1.0` |
+| Python | 3.11 及以上 |
+| 当前主线 | 先打磨 CLI，再评估 App |
+| Job schema | v1 |
+| 自动化测试 | 128 个，全部通过 |
+| 静态检查 | Ruff lint 和 formatter 通过 |
+| 打包 | wheel 和 source distribution 已验证 |
+| Git | 已初始化，当前分支为 `main`，`origin` 已关联 GitHub |
+
+当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
+
+## 项目背景
+
+这个项目要解决的是视频字幕翻译链路中最容易失控的三件事：时间轴、翻译上下文和最终显示质量。用户可以只提供视频，也可以同时提供源字幕、机翻字幕或译文字幕。系统需要识别哪些步骤可以跳过，并且始终以源 cue 的时间轴为准。
+
+方案选择了 Python CLI 作为核心，原因是 FFmpeg、yt-dlp、Whisper 和字幕生态在 Python 中接入成本较低。Skill 只负责调用 CLI 或完成 Agent 翻译，不拥有时间轴和媒体处理逻辑。App 暂缓，未来只消费 `job.json` 和 JSONL 事件，不复制业务逻辑。
+
+## 已完成能力
+
+### 输入和素材获取
+
+- 支持本地视频、音频和 HTTP/HTTPS 远程 URL。
+- YouTube 通过 yt-dlp 获取元数据、人工字幕、自动字幕、音频或完整视频。
+- 人工字幕优先。只有显式传入 `--allow-auto-subtitles` 才使用自动字幕。
+- 请求烧录时，远程完整视频在前置阶段下载一次，ASR 和烧录复用同一文件。
+- Cookie 来源和代理必须显式传入，不会默认读取浏览器状态。
+
+### 转写和时间轴
+
+- 支持 MLX Whisper 和 faster-whisper，保留词级时间戳。
+- 分段综合停顿、标点、字幕时长和显示宽度。
+- 可导入 SRT、VTT、ASS 和 SSA 源字幕，默认保留用户时间轴。
+- `--align-subtitles` 会额外运行 ASR，并用顺序模糊对齐修正整体偏移或漂移。
+- cue 结束时间、相邻重叠和媒体边界会在分段与 QA 阶段校正或阻断。
+
+### 翻译
+
+- 支持 OpenAI-compatible Chat Completions，实际请求地址为 `<base-url>/chat/completions`。
+- 默认环境变量为 `XVT_TRANSLATION_BASE_URL`、`XVT_TRANSLATION_MODEL` 和 `XVT_TRANSLATION_API_KEY`。
+- `--provider auto` 在配置完整时调用 API，配置不完整时降级为 Agent 批次。
+- `--provider openai-compatible` 缺少配置时直接失败，不静默降级。
+- API 翻译按批次保存进度，指纹包含源 cue checksum、语言、端点、模型、批次大小和提示词版本。
+- 429、部分 4xx、5xx、网络异常和超时具有明确的重试分类。`Retry-After` 会优先使用。
+- 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID。
+- 批次包含相邻上下文。上下文只用于理解，输出仍按原 cue ID 回填。
+
+### 字幕和显示质量
+
+- 输出 `source.srt`、`translated.srt`、`bilingual.srt` 和 `bilingual.ass`。
+- 双语字幕固定为译文一行、原文一行。每种语言内部的原始换行会被折叠。
+- 16:9 横版英文在 64 个显示单位以内通过，65 到 72 为警告，超过 72 需要复核。窄画幅会收紧限制，中文限制更严格。
+- ASS 使用独立的中英文字体和字号。macOS 默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`。
+- 字幕 QA 失败或进入 `needs_review` 时，工作流停止，不允许继续烧录。
+
+### 烧录和媒体 QA
+
+- FFmpeg 烧录支持 VideoToolbox 和 libx264。
+- 默认优先硬件编码，只在明确的硬件编码器错误时回退 libx264。
+- 视频码率按分辨率选择，不再使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数。
+- 输出媒体会检查视频流、音频流、AAC 音频、分辨率和时长偏差。
+- 烧录派生指纹包含译文 checksum、媒体身份、编码方式和字体。`continue` 只复用 artifact 与指纹都有效的成品。
+
+### Job、恢复和事件
+
+- 每次 `run` 创建独立 Job，stage 和 artifact 写入 `job.json`。
+- artifact 使用 SHA-256 checksum，`verify` 会重新计算。
+- `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。
+- Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
+- JSONL 已覆盖工作流、stage、artifact、翻译批次、下载进度和烧录进度。
+- 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
+
+## 支持的输入组合
+
+| 输入 | 行为 |
+| --- | --- |
+| 本地视频 | ASR，按需翻译和烧录 |
+| 本地视频 + 源字幕 | 跳过 ASR，保留源字幕时间轴 |
+| 本地视频 + 源字幕 + 译文字幕 | 跳过 ASR 和翻译 API，合并后可烧录 |
+| 本地音频 | ASR 和字幕输出；烧录时必须增加 `--burn-media` |
+| YouTube URL | 按参数选择平台字幕或 Whisper |
+| YouTube URL + 人工字幕请求 | 优先下载人工字幕，缺失时按配置回退自动字幕或 ASR |
+| 已有 Job | `status` 查看下一步，`verify` 校验，`resume` 恢复转写，`continue` 完成端到端目标 |
+
+当前不支持脱离媒体文件的纯字幕 Job。一个 Job 也不能同时生成多个目标语言。
+
+## 端到端工作流
+
+```mermaid
+flowchart TD
+    A["本地媒体或 YouTube URL"] --> B["检查输入并创建 Job"]
+    B --> C{"有可用源字幕吗"}
+    C -->|"有"| D["导入源字幕"]
+    C -->|"没有"| E["获取或规范化音频"]
+    E --> F["Whisper 词级转写"]
+    F --> G["分段生成源 cue"]
+    D --> H["源字幕 QA"]
+    G --> H
+    H --> I{"请求目标语言吗"}
+    I -->|"否"| J["输出 source.srt"]
+    I -->|"是"| K{"已有译文字幕吗"}
+    K -->|"有"| L["映射译文到源 cue"]
+    K -->|"没有"| M{"API 配置完整吗"}
+    M -->|"是"| N["逐批翻译并保存进度"]
+    M -->|"否"| O["生成 Agent 批次并等待回填"]
+    O --> L
+    N --> L
+    L --> P["译文 QA 和双语 SRT/ASS"]
+    P --> Q{"请求烧录吗"}
+    Q -->|"否"| R["工作流完成"]
+    Q -->|"是"| S["FFmpeg 烧录和媒体 QA"]
+    S --> R
+```
+
+## 常用命令
+
+完整本地流程：
+
+```bash
+uv run --no-sync xvt run "/path/to/video.mp4" \
+  --output "/absolute/output" \
+  --language en \
+  --target-language zh-CN \
+  --provider auto \
+  --burn \
+  --events-jsonl
+```
+
+YouTube 平台字幕优先：
+
+```bash
+uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --output "/absolute/output" \
+  --youtube-subtitles \
+  --subtitle-language en \
+  --allow-auto-subtitles \
+  --target-language zh-CN \
+  --burn
+```
+
+已有源字幕和译文字幕：
+
+```bash
+uv run --no-sync xvt run "/path/to/video.mp4" \
+  --output "/absolute/output" \
+  --subtitles "/path/to/source.srt" \
+  --translation-subtitles "/path/to/translated.srt" \
+  --target-language zh-CN \
+  --burn
+```
+
+恢复和诊断：
+
+```bash
+uv run --no-sync xvt status "/path/to/job.json"
+uv run --no-sync xvt verify "/path/to/job.json" --json
+uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
+uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
+```
+
+Agent 翻译回填：
+
+```bash
+uv run --no-sync xvt apply-translation "/path/to/job.json" \
+  "/path/to/translation-response.json" \
+  --target-language zh-CN
+
+uv run --no-sync xvt continue "/path/to/job.json"
+```
+
+## Job 模型
+
+Stage 包含：
+
+```text
+inspect
+acquire
+normalize_audio
+import_subtitles
+transcribe
+align
+segment
+translate
+subtitle_qa
+render
+burn
+media_qa
+```
+
+Stage 状态为 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 或 `skipped`。
+
+典型 artifact 包含：
+
+```text
+media.json
+remote.json
+audio.wav
+words.json
+source-cues.json
+source.srt
+translation-batches.json
+translation-progress.json
+translation-response.json
+translated-cues.json
+translated.srt
+bilingual.srt
+bilingual.ass
+qa.json
+qa-translated.json
+burned.mp4
+media-qa.json
+```
+
+`job.config.workflow` 保存目标语言、请求产物、翻译提供方、模型、API Key 环境变量名、烧录参数和派生指纹。它不保存 API Key 或代理凭据。
+
+## 关键设计决定
+
+1. CLI 是唯一业务内核。Skill 和未来 App 都只做调用与展示。
+2. Python 继续作为当前实现语言。暂时没有迁移到 TypeScript 的收益，App 层可以使用 React 和 TypeScript。
+3. 时间轴优先于翻译文本。任何翻译优化都必须保持 cue ID 和时间不变。
+4. 单目标语言对应单 Job。多语言需求创建多个 Job，避免现在就改 schema 和 artifact 命名。
+5. `resume` 和 `continue` 保持独立。一个处理转写 checkpoint，一个处理用户目标。
+6. 平台字幕和用户字幕属于可跳过 ASR 的输入，不是 ASR 结果的附属品。
+7. Agent 降级是明确的等待状态。缺少 API 配置时不能假装端到端任务已经完成。
+8. 硬件编码回退只识别编码器错误。字幕文件、路径或滤镜错误必须原样失败。
+
+## 已知限制
+
+- 超过硬显示阈值的长 cue 目前会被 QA 阻断，还没有自动做语义成对切分。
+- 没有术语表、专有名词保护、翻译风格或 cue 级局部重译。
+- 没有短片段预览命令和分段预设。
+- 下载、翻译和烧录已有进度事件，Whisper 转写还没有统一的细粒度进度。
+- 不支持纯字幕文件创建 Job。
+- 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
+- 没有可视化校对界面和桌面 App。
+- `continue` 只适用于带 `job.config.workflow` 的端到端 Job。旧 Job 继续使用原子命令。
+
+## 后续任务规划
+
+### P0：语义成对切分
+
+对超过硬显示阈值的 cue，基于词级时间戳和语义边界拆成两个或多个 cue。中英文必须按同一组时间边界拆分，不能分别换行或独立切句。
+
+建议验收：
+
+- 英文和中文都不超过对应硬限制。
+- 新 cue 连续、无重叠、无时间倒退。
+- 原文和译文片段数量一致，语义对应。
+- 用户提供的源字幕默认不自动重写时间轴，除非明确启用相关模式。
+
+主要文件：`segment.py`、`qa.py`、`subtitles.py`、`pipeline.py` 及对应测试。
+
+### P1：术语和翻译质量控制
+
+增加术语表、专有名词保护、翻译风格和局部重译。配置要进入翻译指纹，配置变化后不能复用旧进度。
+
+建议验收：
+
+- 术语在全部批次中保持一致。
+- 专有名词可选择保留、替换或锁定。
+- 局部重译只更新指定 cue，不修改其他 cue 或时间轴。
+- QA 能把缺失译文、明显超长和术语违规定位到 cue ID。
+
+主要文件：`translate.py`、`translation_provider.py`、`pipeline.py`、`workflow.py` 及对应测试。
+
+### P1：预览和分段预设
+
+增加短片段预览，避免整段烧录后才检查字体、位置和换行。同时提供保守、平衡和紧凑预设，把现有分段参数收敛为可理解的用户选项。
+
+建议验收：预览复用正式 ASS 和烧录参数，产物可明确标记为 preview，不覆盖正式视频。
+
+### P2：转写进度
+
+为 MLX Whisper 和 faster-whisper 增加统一事件，至少包含已处理时长、总时长和百分比。事件名称和数据结构要能直接被未来 App 消费。
+
+### P2：纯字幕、批处理和 GUI
+
+纯字幕 Job、目录批处理和可视化校对应分开实现。GUI 使用 React 和 TypeScript，只读取 Job、artifact 和 JSONL 事件。单机 CLI 稳定前，不引入服务端队列或多租户架构。
+
+## 接手步骤
+
+1. 阅读 [AGENTS.md](AGENTS.md)、[README.md](README.md)、[架构说明](docs/ARCHITECTURE.md)、[路线图](ROADMAP.md) 和 [贡献指南](CONTRIBUTING.md)。
+2. 运行 `uv run --no-sync xvt --help`，确认命令面与本文一致。
+3. 运行 Ruff 和全量测试，确认基线没有漂移。
+4. 运行 `git status --short --branch -uall`，确认当前分支和 `origin/main` 的同步状态。
+5. 从后续任务规划中选择一个小阶段，先提交方案和验收标准，再开始编码。
+6. 修改完成后同步相关文档，并更新本文件的测试数量、当前限制和下一步。
+
+基线验证命令：
+
+```bash
+uv run --no-sync ruff check src tests
+uv run --no-sync ruff format --check src tests
+uv run --no-sync pytest -q
+uv run --no-sync xvt --help
+```
+
+真实 YouTube、API 和烧录验收不应默认执行。需要运行时，先确认公开测试素材、输出目录、网络权限和用户凭据，完成后只记录结论，不记录密钥、Cookie、代理凭据或个人文件路径。

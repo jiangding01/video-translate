@@ -1,0 +1,837 @@
+import json
+import tempfile
+import unittest
+from dataclasses import asdict
+from pathlib import Path
+from unittest.mock import patch
+
+from xvt.download import RemoteMediaInfo
+from xvt.job_store import create_job, save_job
+from xvt.media import MediaInfo
+from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
+from xvt.pipeline import (
+    apply_agent_translation,
+    apply_subtitle_translation,
+    burn_translated_job,
+    prepare_agent_translation,
+    resume_job,
+    run_local_transcription,
+    run_remote_transcription,
+)
+from xvt.process import CommandResult
+from xvt.qa import check_subtitles, display_width, display_width_limit
+from xvt.recovery import file_checksum
+from xvt.segment import segment_transcript
+
+
+class PipelineTest(unittest.TestCase):
+    def test_segmenter_respects_language_display_width(self) -> None:
+        tokens = (
+            "This workflow keeps every generated bilingual subtitle safely inside the video frame."
+        ).split()
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=tuple(
+                Word(("" if index == 0 else " ") + token, index * 300, index * 300 + 250, 0.9)
+                for index, token in enumerate(tokens)
+            ),
+        )
+
+        cues = segment_transcript(transcript)
+
+        self.assertGreater(len(cues), 1)
+        self.assertTrue(
+            all(display_width(cue.source_text) <= display_width_limit("en") for cue in cues)
+        )
+
+        balanced = segment_transcript(
+            Transcript(
+                language="en",
+                engine="mlx",
+                words=tuple(
+                    Word(
+                        ("" if index == 0 else " ") + token,
+                        index * 300,
+                        index * 300 + 250,
+                        0.9,
+                    )
+                    for index, token in enumerate(
+                        "And now Codex handles this next one for me.".split()
+                    )
+                ),
+            )
+        )
+        self.assertEqual(
+            [cue.source_text for cue in balanced],
+            ["And now Codex handles this next one for me."],
+        )
+
+        long_sentence = (
+            "It remembers where our metadata lives, how the upload package is organized, "
+            "and how we add captions, save, and verify each upload."
+        )
+        balanced_long = segment_transcript(
+            Transcript(
+                language="en",
+                engine="mlx",
+                words=tuple(
+                    Word(
+                        ("" if index == 0 else " ") + token,
+                        index * 300,
+                        index * 300 + 250,
+                        0.9,
+                    )
+                    for index, token in enumerate(long_sentence.split())
+                ),
+            )
+        )
+        self.assertTrue(all(len(cue.source_text.split()) > 1 for cue in balanced_long))
+
+    def test_bilingual_qa_requires_review_for_visual_overflow(self) -> None:
+        cues = [
+            Cue(
+                1,
+                0,
+                5000,
+                "Short source",
+                target_text="这是一条明显超过单行显示宽度限制的中文字幕",
+                source_language="en",
+                target_language="zh-CN",
+            )
+        ]
+
+        report = check_subtitles(cues, require_translation=True)
+
+        self.assertEqual(report.status, "needs_review")
+        self.assertIn("bilingual_overflow_risk", {issue.code for issue in report.issues})
+
+    def test_run_local_transcription_persists_artifacts_and_stage_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            media_info = MediaInfo(
+                path=str(media),
+                duration_ms=5000,
+                size_bytes=5,
+                format_name="mp4",
+                width=1920,
+                height=1080,
+                frame_rate=30.0,
+                video_codec="h264",
+                audio_codec="aac",
+                has_video=True,
+                has_audio=True,
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+            with (
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                job = run_local_transcription(
+                    media,
+                    root,
+                    workflow_config={"target_language": "zh-CN", "burn": True},
+                )
+
+            artifact_kinds = {artifact.kind for artifact in job.artifacts}
+            self.assertEqual(job.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
+            self.assertEqual(job.stages[StageName.TRANSLATE].status, StageStatus.SKIPPED)
+            self.assertIn("source_srt", artifact_kinds)
+            self.assertEqual(job.config["workflow"]["target_language"], "zh-CN")
+            self.assertTrue(job.config["workflow"]["burn"])
+            qa_path = next(Path(item.path) for item in job.artifacts if item.kind == "subtitle_qa")
+            self.assertEqual(json.loads(qa_path.read_text())["status"], "pass")
+
+    def test_pipeline_failure_is_persisted_on_current_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            with patch("xvt.pipeline.probe_media", side_effect=ValueError("bad media")):
+                with self.assertRaisesRegex(ValueError, "bad media"):
+                    run_local_transcription(media, root)
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            data = json.loads(job_file.read_text())
+            self.assertEqual(data["stages"]["inspect"]["status"], "failed")
+            self.assertEqual(data["stages"]["inspect"]["error"], "bad media")
+
+    def test_qa_review_fails_job_instead_of_reporting_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Uncertain.", 0, 1000, 0.1),),
+            )
+            with (
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "subtitle QA needs_review"):
+                    run_local_transcription(media, root)
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            data = json.loads(job_file.read_text())
+            self.assertEqual(data["stages"]["subtitle_qa"]["status"], "failed")
+            qa = json.loads((job_file.parent / "artifacts" / "qa.json").read_text())
+            self.assertEqual(qa["status"], "needs_review")
+
+    def test_resume_reuses_normalized_audio_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"engine": "mlx", "source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            audio_path = artifacts / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            media_path = artifacts / "media.json"
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("normalized_audio", str(audio_path), file_checksum(audio_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+
+            with patch("xvt.pipeline.transcribe_audio", return_value=transcript) as transcribe:
+                resumed = resume_job(job_file)
+
+            transcribe.assert_called_once_with(audio_path, engine="mlx", language="en")
+            self.assertEqual(resumed.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
+            self.assertIn("source_srt", {artifact.kind for artifact in resumed.artifacts})
+
+    def test_resume_reuses_source_cues_without_asr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(json.dumps([asdict(Cue(1, 0, 1000, "Hello"))]), encoding="utf-8")
+            media_path = artifacts / "media.json"
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+
+            with patch("xvt.pipeline.transcribe_audio") as transcribe:
+                resumed = resume_job(job_file)
+
+            transcribe.assert_not_called()
+            self.assertEqual(resumed.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
+
+    def test_resume_rejects_job_without_valid_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+
+            with self.assertRaisesRegex(ValueError, "media_info checkpoint"):
+                resume_job(save_job(job))
+
+    def test_source_subtitles_skip_asr_and_preserve_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+                encoding="utf-8",
+            )
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            with (
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command") as run_command_mock,
+                patch("xvt.pipeline.transcribe_audio") as transcribe_mock,
+            ):
+                job = run_local_transcription(media, root, subtitles=subtitles, language="en")
+
+            run_command_mock.assert_not_called()
+            transcribe_mock.assert_not_called()
+            self.assertEqual(job.stages[StageName.IMPORT_SUBTITLES].status, StageStatus.SUCCEEDED)
+            self.assertEqual(job.stages[StageName.TRANSCRIBE].status, StageStatus.SKIPPED)
+            source_cues = next(item for item in job.artifacts if item.kind == "source_cues")
+            cue = json.loads(Path(source_cues.path).read_text())[0]
+            self.assertEqual((cue["start_ms"], cue["end_ms"]), (1000, 2000))
+            self.assertEqual(cue["provenance"], "user_source_subtitle")
+
+    def test_source_subtitles_can_be_aligned_to_asr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello", 1500, 2200, 0.9),),
+            )
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                job = run_local_transcription(
+                    media,
+                    root,
+                    subtitles=subtitles,
+                    align_subtitles=True,
+                )
+
+            self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SUCCEEDED)
+            self.assertIn("subtitle_alignment", {item.kind for item in job.artifacts})
+            source_cues = next(item for item in job.artifacts if item.kind == "source_cues")
+            cue = json.loads(Path(source_cues.path).read_text())[0]
+            self.assertEqual((cue["start_ms"], cue["end_ms"]), (1500, 2200))
+
+    def test_low_confidence_subtitle_alignment_fails_with_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Unrelated", 1500, 2200, 0.9),),
+            )
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                with self.assertRaisesRegex(ValueError, "confidence is below"):
+                    run_local_transcription(
+                        media,
+                        root,
+                        subtitles=subtitles,
+                        align_subtitles=True,
+                    )
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            data = json.loads(job_file.read_text())
+            self.assertEqual(data["stages"]["align"]["status"], "failed")
+            self.assertTrue((job_file.parent / "artifacts" / "alignment.json").exists())
+
+    def test_remote_pipeline_downloads_audio_then_reuses_local_processing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote_info = RemoteMediaInfo("abc", "Example", 5000, "https://youtu.be/abc", (), ())
+            media_info = MediaInfo(
+                path="source.m4a",
+                duration_ms=5000,
+                size_bytes=5,
+                format_name="m4a",
+                width=None,
+                height=None,
+                frame_rate=None,
+                video_codec=None,
+                audio_codec="aac",
+                has_video=False,
+                has_audio=True,
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+
+            def download(_url, output_directory, **_kwargs):
+                path = Path(output_directory) / "source.m4a"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"audio")
+                return path
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"normalized")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.download_remote_media", side_effect=download),
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                job = run_remote_transcription("https://youtu.be/abc", root)
+
+        self.assertEqual(job.stages[StageName.ACQUIRE].status, StageStatus.SUCCEEDED)
+        self.assertIn("downloaded_media", {artifact.kind for artifact in job.artifacts})
+
+    def test_remote_source_subtitles_skip_unused_audio_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello.\n",
+                encoding="utf-8",
+            )
+            remote_info = RemoteMediaInfo(
+                "abc",
+                "Example",
+                5000,
+                "https://youtu.be/abc",
+                (),
+                (),
+            )
+
+            with (
+                patch("xvt.pipeline.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.download_remote_media") as download,
+                patch("xvt.pipeline.transcribe_audio") as transcribe,
+            ):
+                job = run_remote_transcription(
+                    "https://youtu.be/abc",
+                    root,
+                    subtitles=subtitles,
+                    language="en",
+                )
+
+            media_path = next(
+                Path(artifact.path) for artifact in job.artifacts if artifact.kind == "media_info"
+            )
+            media_data = json.loads(media_path.read_text(encoding="utf-8"))
+
+        download.assert_not_called()
+        transcribe.assert_not_called()
+        self.assertEqual(job.stages[StageName.ACQUIRE].status, StageStatus.SKIPPED)
+        self.assertEqual(job.stages[StageName.TRANSCRIBE].status, StageStatus.SKIPPED)
+        self.assertEqual(media_data["duration_ms"], 5000)
+        self.assertNotIn("downloaded_media", {artifact.kind for artifact in job.artifacts})
+
+    def test_remote_burn_workflow_downloads_full_video_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello.\n",
+                encoding="utf-8",
+            )
+            remote_info = RemoteMediaInfo("abc", "Example", 5000, "https://youtu.be/abc", (), ())
+            media_info = MediaInfo(
+                "source.mp4", 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+
+            def download(_url, output_directory, **_kwargs):
+                path = Path(output_directory) / "source.mp4"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"video")
+                return path
+
+            with (
+                patch("xvt.pipeline.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.download_remote_media", side_effect=download) as acquire,
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcribe_audio") as transcribe,
+            ):
+                job = run_remote_transcription(
+                    "https://youtu.be/abc",
+                    root,
+                    subtitles=subtitles,
+                    language="en",
+                    workflow_config={"target_language": "zh-CN", "burn": True},
+                )
+
+        self.assertFalse(acquire.call_args.kwargs["audio_only"])
+        transcribe.assert_not_called()
+        self.assertIn("source_video", {artifact.kind for artifact in job.artifacts})
+
+    def test_remote_pipeline_prefers_manual_youtube_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote_info = RemoteMediaInfo(
+                "abc",
+                "Example",
+                5000,
+                "https://youtu.be/abc",
+                ("en-US",),
+                ("en",),
+            )
+
+            def download_subtitles(_url, output_directory, **kwargs):
+                path = Path(output_directory) / "source.en-US.srt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "1\n00:00:01,000 --> 00:00:02,000\nHello.\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(kwargs["language"], "en-US")
+                self.assertFalse(kwargs["automatic"])
+                return path
+
+            with (
+                patch("xvt.pipeline.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.download_remote_subtitles", side_effect=download_subtitles),
+                patch("xvt.pipeline.download_remote_media") as download_media,
+                patch("xvt.pipeline.transcribe_audio") as transcribe,
+            ):
+                job = run_remote_transcription(
+                    "https://youtu.be/abc",
+                    root,
+                    youtube_subtitles=True,
+                    subtitle_language="en",
+                    allow_auto_subtitles=True,
+                )
+
+        download_media.assert_not_called()
+        transcribe.assert_not_called()
+        self.assertEqual(job.stages[StageName.ACQUIRE].status, StageStatus.SUCCEEDED)
+        artifact_kinds = {artifact.kind for artifact in job.artifacts}
+        self.assertIn("downloaded_subtitles", artifact_kinds)
+        self.assertIn("source_srt", artifact_kinds)
+
+    def test_agent_translation_round_trip_exports_all_subtitle_formats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            media_info = MediaInfo(
+                path=str(media),
+                duration_ms=5000,
+                size_bytes=5,
+                format_name="mp4",
+                width=1920,
+                height=1080,
+                frame_rate=30.0,
+                video_codec="h264",
+                audio_codec="aac",
+                has_video=True,
+                has_audio=True,
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+            with (
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                job = run_local_transcription(media, root)
+
+            batch_path = prepare_agent_translation(
+                root / "jobs" / job.id / "job.json",
+                source_language="en",
+                target_language="zh-CN",
+            )
+            batch_data = json.loads(batch_path.read_text())
+            item = batch_data["batches"][0]["items"][0]
+            self.assertEqual(item["id"], 1)
+            self.assertEqual(item["duration_ms"], 950)
+            self.assertEqual(item["max_target_characters"], 8)
+
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+            translated, bilingual, bilingual_ass = apply_agent_translation(
+                root / "jobs" / job.id / "job.json",
+                response_path,
+                target_language="zh-CN",
+            )
+
+            self.assertTrue(translated.exists())
+            self.assertIn("你好", bilingual.read_text())
+            self.assertTrue(bilingual_ass.exists())
+            persisted = json.loads((root / "jobs" / job.id / "job.json").read_text())
+            self.assertEqual(persisted["stages"]["translate"]["status"], "succeeded")
+            self.assertIn(
+                "bilingual_ass", {artifact["kind"] for artifact in persisted["artifacts"]}
+            )
+
+    def test_agent_translation_rejects_incomplete_cue_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job_directory = root / "jobs" / job.id
+            artifacts = job_directory / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello"))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 2000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path)),
+                    Artifact("media_info", str(media_path)),
+                ]
+            )
+            save_job(job)
+            response_path = root / "response.json"
+            response_path.write_text(json.dumps({"items": []}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "cover every cue"):
+                apply_agent_translation(
+                    job_directory / "job.json",
+                    response_path,
+                    target_language="zh-CN",
+                )
+
+    def test_existing_translation_uses_source_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 1000, 2000, "Hello"))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 3000}), encoding="utf-8")
+            job.artifacts.extend(
+                [Artifact("source_cues", str(source_path)), Artifact("media_info", str(media_path))]
+            )
+            save_job(job)
+            translation_path = root / "translation.srt"
+            translation_path.write_text(
+                "1\n00:00:00,000 --> 00:00:00,500\n你好\n",
+                encoding="utf-8",
+            )
+
+            translated, bilingual = apply_subtitle_translation(
+                artifacts.parent / "job.json",
+                translation_path,
+                target_language="zh-CN",
+            )
+
+            self.assertIn("00:00:01,000 --> 00:00:02,000", translated.read_text())
+            self.assertIn("你好", bilingual.read_text())
+
+    def test_existing_translation_rejects_cue_count_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "One")), asdict(Cue(2, 1000, 2000, "Two"))]),
+                encoding="utf-8",
+            )
+            job.artifacts.append(Artifact("source_cues", str(source_path)))
+            save_job(job)
+            translation_path = root / "translation.srt"
+            translation_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n一个\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "do not cover source cues"):
+                apply_subtitle_translation(
+                    artifacts.parent / "job.json",
+                    translation_path,
+                    target_language="zh-CN",
+                )
+
+    def test_burn_translated_job_generates_ass_and_validates_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job = create_job("https://youtu.be/abc", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        asdict(
+                            Cue(
+                                1,
+                                0,
+                                1000,
+                                "Hello",
+                                target_text="你好",
+                                source_language="en",
+                                target_language="zh-CN",
+                            )
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts.append(Artifact("translated_cues", str(translated_path)))
+            job.artifacts.append(Artifact("source_video", str(media), file_checksum(media)))
+            save_job(job)
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            output_info = MediaInfo(
+                str(artifacts / "burned.mp4"),
+                2000,
+                10,
+                "mp4",
+                1920,
+                1080,
+                30.0,
+                "h264",
+                "aac",
+                True,
+                True,
+            )
+
+            burn_options = {}
+
+            def burn(_media, _subtitles, output, **kwargs):
+                burn_options.update(kwargs)
+                Path(output).write_bytes(b"burned")
+                return Path(output)
+
+            with (
+                patch("xvt.pipeline.probe_media", side_effect=[input_info, output_info]),
+                patch("xvt.pipeline.burn_subtitles", side_effect=burn),
+                patch("xvt.pipeline.download_remote_media") as download,
+            ):
+                result = burn_translated_job(root / "jobs" / job.id / "job.json")
+
+            self.assertTrue(result.exists())
+            persisted = json.loads((root / "jobs" / job.id / "job.json").read_text())
+            self.assertEqual(persisted["stages"]["media_qa"]["status"], "succeeded")
+            self.assertTrue((artifacts / "bilingual.ass").exists())
+            self.assertEqual(burn_options["video_bitrate"], "5M")
+            download.assert_not_called()
+
+    def test_burn_media_qa_rejects_missing_audio_and_changed_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job = create_job(str(media), root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        asdict(
+                            Cue(
+                                1,
+                                0,
+                                1000,
+                                "Hello",
+                                target_text="你好",
+                                source_language="en",
+                                target_language="zh-CN",
+                            )
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts.append(Artifact("translated_cues", str(translated_path)))
+            save_job(job)
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            output_info = MediaInfo(
+                str(artifacts / "burned.mp4"),
+                2000,
+                10,
+                "mp4",
+                1280,
+                720,
+                30.0,
+                "h264",
+                None,
+                True,
+                False,
+            )
+
+            def burn(_media, _subtitles, output, **_kwargs):
+                Path(output).write_bytes(b"burned")
+                return Path(output)
+
+            with (
+                patch("xvt.pipeline.probe_media", side_effect=[input_info, output_info]),
+                patch("xvt.pipeline.burn_subtitles", side_effect=burn),
+                self.assertRaisesRegex(RuntimeError, "failed media QA"),
+            ):
+                burn_translated_job(root / "jobs" / job.id / "job.json")
+
+            report = json.loads((artifacts / "media-qa.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("output has no audio stream", report["issues"])
+        self.assertIn("output dimensions differ from source video", report["issues"])
+
+
+if __name__ == "__main__":
+    unittest.main()

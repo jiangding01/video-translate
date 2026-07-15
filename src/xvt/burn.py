@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from xvt.events import EventSink, create_event
+from xvt.process import CommandError, CommandResult, run_command
+
+CommandRunner = Callable[..., CommandResult]
+
+HARDWARE_ENCODER_ERRORS = (
+    "cannot create compression session",
+    "error while opening encoder",
+    "hardware encoder may be busy",
+    "qscale not available for encoder",
+    "videotoolbox session",
+)
+
+
+def escape_filter_path(path: Path) -> str:
+    return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def recommended_video_bitrate(video_height: int) -> str:
+    if video_height <= 480:
+        return "2M"
+    if video_height <= 720:
+        return "3M"
+    if video_height <= 1080:
+        return "5M"
+    if video_height <= 1440:
+        return "9M"
+    return "16M"
+
+
+def _is_hardware_encoder_error(error: CommandError) -> bool:
+    detail = f"{error.result.stderr}\n{error.result.stdout}".casefold()
+    return any(marker in detail for marker in HARDWARE_ENCODER_ERRORS)
+
+
+def build_burn_command(
+    media_path: Path,
+    subtitle_path: Path,
+    output_path: Path,
+    *,
+    hardware_encoding: bool = True,
+    video_bitrate: str = "5M",
+    progress: bool = False,
+) -> list[str]:
+    video_codec = "h264_videotoolbox" if hardware_encoding else "libx264"
+    subtitle_filter = f"ass=filename='{escape_filter_path(subtitle_path)}'"
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(media_path),
+        "-vf",
+        subtitle_filter,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        video_codec,
+    ]
+    if hardware_encoding:
+        command.extend(["-b:v", video_bitrate])
+    else:
+        command.extend(["-preset", "medium", "-crf", "18"])
+    command.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+    if progress:
+        command.extend(["-progress", "pipe:1", "-nostats"])
+    command.append(str(output_path))
+    return command
+
+
+def burn_subtitles(
+    media: str | Path,
+    subtitles: str | Path,
+    output: str | Path,
+    *,
+    hardware_encoding: bool = True,
+    video_bitrate: str = "5M",
+    duration_ms: int | None = None,
+    event_sink: EventSink | None = None,
+    runner: CommandRunner = run_command,
+) -> Path:
+    media_path = Path(media).expanduser()
+    subtitle_path = Path(subtitles).expanduser()
+    output_path = Path(output).expanduser()
+    if not media_path.is_file():
+        raise ValueError(f"media file does not exist: {media_path}")
+    if not subtitle_path.is_file():
+        raise ValueError(f"subtitle file does not exist: {subtitle_path}")
+    if not output_path.is_absolute():
+        raise ValueError("output path must be absolute")
+
+    media_path = media_path.resolve()
+    subtitle_path = subtitle_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    runner_kwargs = {}
+    if event_sink:
+        progress_state: dict[str, str] = {}
+
+        def handle_line(_stream: str, line: str) -> None:
+            key, separator, value = line.partition("=")
+            if not separator:
+                return
+            progress_state[key] = value
+            if key != "progress":
+                return
+            try:
+                out_time_ms = (
+                    int(progress_state.get("out_time_us") or progress_state.get("out_time_ms") or 0)
+                    // 1000
+                )
+            except ValueError:
+                out_time_ms = 0
+            event_sink(
+                create_event(
+                    "burn_progress",
+                    out_time_ms=out_time_ms,
+                    duration_ms=duration_ms,
+                    percent=(
+                        round(min(out_time_ms / duration_ms * 100, 100), 2) if duration_ms else None
+                    ),
+                    frame=progress_state.get("frame"),
+                    speed=progress_state.get("speed"),
+                    state=value,
+                )
+            )
+
+        runner_kwargs["line_callback"] = handle_line
+    try:
+        runner(
+            build_burn_command(
+                media_path,
+                subtitle_path,
+                output_path,
+                hardware_encoding=hardware_encoding,
+                video_bitrate=video_bitrate,
+                progress=event_sink is not None,
+            ),
+            **runner_kwargs,
+        )
+    except CommandError as error:
+        if not hardware_encoding or not _is_hardware_encoder_error(error):
+            raise
+        runner(
+            build_burn_command(
+                media_path,
+                subtitle_path,
+                output_path,
+                hardware_encoding=False,
+                video_bitrate=video_bitrate,
+                progress=event_sink is not None,
+            ),
+            **runner_kwargs,
+        )
+    return output_path

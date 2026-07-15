@@ -1,0 +1,265 @@
+import json
+import os
+import tempfile
+import unittest
+from dataclasses import asdict
+from email.message import Message
+from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
+
+from xvt.job_store import create_job, save_job
+from xvt.models import Artifact, Cue
+from xvt.pipeline import run_translation
+from xvt.recovery import file_checksum
+from xvt.translate import build_translation_batches
+from xvt.translation_provider import (
+    CompatibleProviderConfig,
+    TranslationProviderError,
+    resolve_provider,
+    translate_batch,
+)
+
+
+class TranslationProviderTest(unittest.TestCase):
+    def test_auto_mode_falls_back_when_configuration_is_incomplete(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            mode, config, reason = resolve_provider(
+                "auto",
+                base_url=None,
+                model=None,
+                api_key_env="XVT_TRANSLATION_API_KEY",
+            )
+
+        self.assertEqual(mode, "agent")
+        self.assertIsNone(config)
+        self.assertIn("base URL", reason)
+
+    def test_compatible_provider_parses_fenced_json(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                payload = {
+                    "choices": [
+                        {"message": {"content": '```json\n{"items":[{"id":1,"text":"你好"}]}\n```'}}
+                    ]
+                }
+                return json.dumps(payload).encode()
+
+        def opener(_request, **_kwargs):
+            return Response()
+
+        translated = translate_batch(
+            batch,
+            CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+            opener=opener,
+        )
+
+        self.assertEqual(translated, {1: "你好"})
+
+    def test_provider_classifies_rate_limit_as_retryable(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+        headers = Message()
+        headers["Retry-After"] = "3"
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 429, "rate limited", headers, None)
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after, 3)
+
+    def test_provider_does_not_retry_authentication_errors(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 401, "unauthorized", Message(), None)
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertFalse(raised.exception.retryable)
+
+    def test_pipeline_retries_rate_limit_with_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cue = Cue(1, 0, 2000, "Hello", source_language="en")
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(json.dumps([asdict(cue)]), encoding="utf-8")
+            media_path = artifacts / "media.json"
+            media_path.write_text(
+                json.dumps({"duration_ms": 3000, "width": None, "height": None}),
+                encoding="utf-8",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            environment = {
+                "XVT_TRANSLATION_BASE_URL": "https://example.com/v1",
+                "XVT_TRANSLATION_MODEL": "model",
+                "XVT_TRANSLATION_API_KEY": "secret",
+            }
+            corrections = []
+
+            def translate(_batch, _config, *, correction=None):
+                corrections.append(correction)
+                if len(corrections) == 1:
+                    raise TranslationProviderError("rate limited", retryable=True, retry_after=3)
+                return {1: "你好"}
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("xvt.pipeline.translate_batch", side_effect=translate),
+                patch("xvt.pipeline.time.sleep") as sleep,
+            ):
+                result = run_translation(
+                    job_file,
+                    target_language="zh-CN",
+                    max_retries=1,
+                )
+
+        sleep.assert_called_once_with(3)
+        self.assertEqual(corrections[0], None)
+        self.assertIsNotNone(corrections[1])
+        self.assertTrue(any(path.name == "translated.srt" for path in result.paths))
+
+    def test_translation_resumes_from_completed_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues = [
+                Cue(1, 0, 2000, "Hello", source_language="en"),
+                Cue(2, 2000, 4000, "World", source_language="en"),
+            ]
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(json.dumps([asdict(cue) for cue in cues]), encoding="utf-8")
+            media_path = artifacts / "media.json"
+            media_path.write_text(
+                json.dumps({"duration_ms": 5000, "width": None, "height": None}),
+                encoding="utf-8",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            environment = {
+                "XVT_TRANSLATION_BASE_URL": "https://example.com/v1",
+                "XVT_TRANSLATION_MODEL": "model",
+                "XVT_TRANSLATION_API_KEY": "secret",
+            }
+            first_calls = []
+
+            def first_attempt(batch, _config):
+                first_calls.append(batch.id)
+                if batch.id == 2:
+                    raise RuntimeError("temporary failure")
+                return {1: "你好"}
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("xvt.pipeline.translate_batch", side_effect=first_attempt),
+                self.assertRaisesRegex(RuntimeError, "temporary failure"),
+            ):
+                run_translation(job_file, target_language="zh-CN", batch_size=1, max_retries=0)
+
+            second_calls = []
+
+            def second_attempt(batch, _config):
+                second_calls.append(batch.id)
+                return {2: "世界"}
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("xvt.pipeline.translate_batch", side_effect=second_attempt),
+            ):
+                result = run_translation(
+                    job_file,
+                    target_language="zh-CN",
+                    batch_size=1,
+                    max_retries=0,
+                )
+
+        self.assertEqual(first_calls, [1, 2])
+        self.assertEqual(second_calls, [2])
+        self.assertEqual(result.mode, "openai-compatible")
+        self.assertTrue(any(path.name == "translated.srt" for path in result.paths))
+
+    def test_translation_discards_progress_when_target_language_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cue = Cue(1, 0, 2000, "Hello", source_language="en")
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(json.dumps([asdict(cue)]), encoding="utf-8")
+            media_path = artifacts / "media.json"
+            media_path.write_text(
+                json.dumps({"duration_ms": 3000, "width": None, "height": None}),
+                encoding="utf-8",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            environment = {
+                "XVT_TRANSLATION_BASE_URL": "https://example.com/v1",
+                "XVT_TRANSLATION_MODEL": "model",
+                "XVT_TRANSLATION_API_KEY": "secret",
+            }
+            calls = []
+
+            def translate(batch, _config):
+                calls.append(batch.target_language)
+                text = "你好" if batch.target_language == "zh-CN" else "こんにちは"
+                return {1: text}
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("xvt.pipeline.translate_batch", side_effect=translate),
+            ):
+                run_translation(job_file, target_language="zh-CN")
+                run_translation(job_file, target_language="ja")
+
+            progress = json.loads(
+                (artifacts / "translation-progress.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(calls, ["zh-CN", "ja"])
+        self.assertIn("fingerprint", progress)
+        self.assertEqual(progress["items"], [{"id": 1, "text": "こんにちは"}])

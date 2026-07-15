@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video Translate"
+  short_description: "Transcribe, translate, and burn bilingual subtitles"
+  default_prompt: "Use $video-translate to transcribe and translate this video into bilingual subtitles."

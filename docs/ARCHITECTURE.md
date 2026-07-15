@@ -1,0 +1,117 @@
+# 架构说明
+
+## 设计目标
+
+Video Translate 采用“稳定 CLI 内核 + 薄 Skill + 后续可选 GUI”的结构。媒体处理、时间轴和文件产物由确定性代码负责；兼容 API 或 Agent 只处理自然语言翻译，不能修改 cue ID 或时间轴。
+
+核心原则：
+
+1. 本地优先：媒体和中间产物默认留在用户指定目录。
+2. 时间轴单一来源：ASR 或用户字幕确定 cue 时间，翻译阶段只替换文本。
+3. 可恢复：每一步写入 `job.json`，任务失败后可以定位到具体 stage。
+4. 可审计：关键输入、字幕、QA 和视频产物均登记 checksum。
+5. 系统边界显式校验：URL、媒体文件、翻译响应和外部命令输出都必须验证。
+6. 保守恢复：只复用 checksum 验证通过的 checkpoint，派生产物重新生成。
+
+## 工作流
+
+```mermaid
+flowchart LR
+    A["本地媒体或 YouTube URL"] --> B["inspect / acquire"]
+    S["可选 SRT / VTT / ASS"] --> E
+    B --> C["按输入组合和目标决定获取字幕、音频或完整视频"]
+    C --> N["已有源字幕且无需对齐：跳过音频与 ASR"]
+    C --> W["需要转写或对齐：FFmpeg 16kHz mono WAV"]
+    W --> D["Whisper 词级时间戳"]
+    N --> E
+    D --> E["字幕分段与时间轴 QA"]
+    E --> F["source.srt"]
+    E --> G["translation-batches.json"]
+    G --> H{"翻译提供方"}
+    H -->|"配置完整"| P["OpenAI-compatible API，逐批保存"]
+    H -->|"未配置或显式 agent"| Q["Agent awaiting_input"]
+    P --> I["cue ID 完整性校验"]
+    Q --> I
+    I --> J["translated.srt / bilingual.srt"]
+    J --> K["bilingual.ass"]
+    K --> L["FFmpeg burn-in"]
+    L --> M["burned.mp4 + media QA"]
+```
+
+## 模块职责
+
+| 模块 | 职责 |
+| --- | --- |
+| `cli.py` | 参数解析、命令路由、用户可读/JSONL 输出 |
+| `workflow.py` | 端到端目标编排、等待/继续语义和烧录派生指纹 |
+| `pipeline.py` | stage 编排、artifact 登记和任务状态推进 |
+| `job_store.py` / `models.py` | 任务模型、原子持久化、schema 和 checksum |
+| `download.py` / `media.py` | yt-dlp 获取、ffprobe 媒体检查 |
+| `transcribe.py` | MLX Whisper、faster-whisper 引擎适配 |
+| `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠 |
+| `subtitles.py` / `align.py` | 字幕读写和已有字幕到 ASR 的顺序模糊对齐 |
+| `translate.py` / `translation_provider.py` | 翻译批次协议、兼容 API 调用、断点恢复、cue ID 覆盖校验和译文回填 |
+| `qa.py` | 空文本、时间重叠、时长、翻译完整性和按画幅计算的字幕显示宽度检查 |
+| `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式、分辨率自适应码率与安全的 FFmpeg 参数构造 |
+| `events.py` / `process.py` | 结构化事件、敏感命令参数脱敏与流式外部进程执行 |
+
+## Job 与 Artifact
+
+每次 `run` 创建独立任务目录：
+
+```text
+output/<job-id>/
+├── job.json
+├── input/
+└── artifacts/
+    ├── media.json
+    ├── audio.wav
+    ├── words.json
+    ├── source-cues.json
+    ├── source.srt
+    ├── translation-batches.json
+    ├── translation-progress.json
+    ├── translation-response.json
+    ├── translated-cues.json
+    ├── translated.srt
+    ├── bilingual.srt
+    ├── bilingual.ass
+    ├── qa*.json
+    └── burned.mp4
+```
+
+Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 和 `skipped`。Agent 翻译批次生成后任务进入 `awaiting_input`；兼容 API 模式逐批更新进度文件，全部完成后直接继续 QA 和渲染。
+
+`verify` 会重新计算所有 artifact 的 SHA-256。`resume` 只恢复规范化音频、词级转写或源 cue 等转写 checkpoint；`continue` 读取 `job.config.workflow` 中的持久化目标，补齐翻译和烧录。Agent 等待时必须先执行 `apply-translation` 或 `import-translation`，再由 `continue` 完成余下步骤。
+
+`run` 会根据输入组合跳过不需要的阶段：源字幕跳过 ASR，已有译文跳过翻译提供方。远程作业请求烧录时前置下载完整视频，ASR 和烧录复用 `source_video`。烧录派生指纹包含译文 checksum、媒体身份、字体和编码参数；只有 artifact 与指纹同时有效时 `continue` 才复用成品。
+
+Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
+
+## 时间轴策略
+
+- ASR 请求词级时间戳，segmenter 才能依据停顿和标点切分。
+- cue 的结束时间来自最后一个词，并添加受控尾部 padding。
+- 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。
+- 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
+- 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
+
+## 安全边界
+
+- 外部命令始终以参数数组执行，不经过 shell 字符串拼接。
+- 下载路径限制在任务目录内。
+- Cookie 和代理只接受显式参数，不自动读取浏览器数据。
+- 日志和 Job 配置只记录 Cookie 来源名称及代理是否启用，不写入凭据。
+- 翻译响应必须一一覆盖全部 cue ID，拒绝重复、缺失和额外 ID。
+- API Key 只从指定环境变量读取，不写入 Job、事件或命令行参数。
+- 命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和签名查询参数。
+- 自动模式配置不完整时显式降级为 Agent；显式 API 模式配置错误时直接失败。
+- `doctor` 通过真实 libass 渲染检查平台默认中文字幕字体，烧录命令允许显式覆盖中英文字体。
+
+## 迭代顺序
+
+1. 对超过硬显示阈值的 cue 做语义成对切分。
+2. 增加术语表、翻译风格、局部重译和 QA 定向修复。
+3. 增加预览输出与分段预设。
+4. 实现 Electron + React 桌面壳，只消费 JSONL 事件和 `job.json`，不复制业务逻辑；下载和烧录进度直接复用 CLI 事件。
+5. 最后评估目录批处理、队列、远程执行和 Web 服务。

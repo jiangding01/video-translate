@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from xvt.events import EventSink, create_event
+from xvt.process import CommandResult, run_command
+
+CommandRunner = Callable[..., CommandResult]
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteMediaInfo:
+    id: str
+    title: str
+    duration_ms: int
+    webpage_url: str
+    subtitle_languages: tuple[str, ...]
+    automatic_subtitle_languages: tuple[str, ...]
+
+
+def validate_remote_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("input must be an HTTP or HTTPS URL")
+    return url
+
+
+def parse_remote_info(data: dict[str, Any]) -> RemoteMediaInfo:
+    return RemoteMediaInfo(
+        id=str(data.get("id") or ""),
+        title=str(data.get("title") or ""),
+        duration_ms=round(float(data.get("duration") or 0) * 1000),
+        webpage_url=str(data.get("webpage_url") or data.get("original_url") or ""),
+        subtitle_languages=tuple(sorted((data.get("subtitles") or {}).keys())),
+        automatic_subtitle_languages=tuple(sorted((data.get("automatic_captions") or {}).keys())),
+    )
+
+
+def inspect_remote(url: str, runner: CommandRunner = run_command) -> RemoteMediaInfo:
+    validated_url = validate_remote_url(url)
+    result = runner(
+        [
+            "yt-dlp",
+            "--dump-single-json",
+            "--skip-download",
+            "--no-warnings",
+            validated_url,
+        ]
+    )
+    data = json.loads(result.stdout)
+    if not isinstance(data, dict):
+        raise ValueError("yt-dlp output must be a JSON object")
+    return parse_remote_info(data)
+
+
+def select_subtitle_language(requested: str, available: tuple[str, ...]) -> str | None:
+    normalized = requested.casefold()
+    exact = next((language for language in available if language.casefold() == normalized), None)
+    if exact:
+        return exact
+    base = normalized.split("-", 1)[0]
+    return next(
+        (language for language in available if language.casefold().split("-", 1)[0] == base),
+        None,
+    )
+
+
+def download_remote_subtitles(
+    url: str,
+    output_directory: str | Path,
+    *,
+    language: str,
+    automatic: bool = False,
+    cookies_from_browser: str | None = None,
+    proxy: str | None = None,
+    runner: CommandRunner = run_command,
+) -> Path:
+    validated_url = validate_remote_url(url)
+    root = Path(output_directory).expanduser()
+    if not root.is_absolute():
+        raise ValueError("subtitle download output directory must be absolute")
+    root.mkdir(parents=True, exist_ok=True)
+    command = [
+        "yt-dlp",
+        "--no-playlist",
+        "--skip-download",
+        "--no-progress",
+        "--no-warnings",
+        "--write-auto-subs" if automatic else "--write-subs",
+        "--sub-langs",
+        language,
+        "--sub-format",
+        "srt/vtt/best",
+        "--convert-subs",
+        "srt",
+        "-o",
+        str(root / "source.%(ext)s"),
+    ]
+    if cookies_from_browser:
+        command.extend(["--cookies-from-browser", cookies_from_browser])
+    if proxy:
+        command.extend(["--proxy", proxy])
+    command.append(validated_url)
+    runner(command)
+
+    candidates = sorted(root.glob("source*.srt"))
+    if not candidates:
+        raise RuntimeError("yt-dlp completed without producing a subtitle file")
+    subtitle_path = candidates[0].resolve()
+    try:
+        subtitle_path.relative_to(root.resolve())
+    except ValueError as error:
+        raise RuntimeError("yt-dlp produced subtitles outside the job directory") from error
+    return subtitle_path
+
+
+def download_remote_media(
+    url: str,
+    output_directory: str | Path,
+    *,
+    audio_only: bool = False,
+    cookies_from_browser: str | None = None,
+    proxy: str | None = None,
+    event_sink: EventSink | None = None,
+    runner: CommandRunner = run_command,
+) -> Path:
+    validated_url = validate_remote_url(url)
+    root = Path(output_directory).expanduser()
+    if not root.is_absolute():
+        raise ValueError("download output directory must be absolute")
+    root.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        "yt-dlp",
+        "--no-playlist",
+        "--no-warnings",
+        "--print",
+        "after_move:filepath",
+        "-o",
+        str(root / "source.%(ext)s"),
+    ]
+    if event_sink:
+        command.extend(
+            [
+                "--newline",
+                "--progress",
+                "--progress-template",
+                "download:XVT_PROGRESS:%(progress)j",
+            ]
+        )
+    else:
+        command.append("--no-progress")
+    if audio_only:
+        command.extend(["-f", "bestaudio/best"])
+    else:
+        command.extend(["-f", "bv*+ba/b", "--merge-output-format", "mp4"])
+    if cookies_from_browser:
+        command.extend(["--cookies-from-browser", cookies_from_browser])
+    if proxy:
+        command.extend(["--proxy", proxy])
+    command.append(validated_url)
+
+    runner_kwargs = {}
+    if event_sink:
+
+        def handle_line(_stream: str, line: str) -> None:
+            if not line.startswith("XVT_PROGRESS:"):
+                return
+            try:
+                progress = json.loads(line.removeprefix("XVT_PROGRESS:"))
+            except json.JSONDecodeError:
+                return
+            try:
+                downloaded = int(float(progress.get("downloaded_bytes") or 0))
+            except (TypeError, ValueError):
+                downloaded = 0
+            try:
+                total = int(
+                    float(progress.get("total_bytes") or progress.get("total_bytes_estimate") or 0)
+                )
+            except (TypeError, ValueError):
+                total = 0
+            event_sink(
+                create_event(
+                    "download_progress",
+                    downloaded_bytes=downloaded,
+                    total_bytes=total or None,
+                    percent=round(downloaded / total * 100, 2) if total else None,
+                    speed=progress.get("speed"),
+                    eta_seconds=progress.get("eta"),
+                )
+            )
+
+        runner_kwargs["line_callback"] = handle_line
+    result = runner(command, **runner_kwargs)
+    output_lines = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip() and not line.startswith("XVT_PROGRESS:")
+    ]
+    if not output_lines:
+        raise RuntimeError("yt-dlp completed without reporting an output file")
+    downloaded = Path(output_lines[-1]).expanduser().resolve()
+    try:
+        downloaded.relative_to(root.resolve())
+    except ValueError as error:
+        raise RuntimeError("yt-dlp reported a file outside the job directory") from error
+    if not downloaded.is_file():
+        raise RuntimeError(f"yt-dlp output file does not exist: {downloaded}")
+    return downloaded
