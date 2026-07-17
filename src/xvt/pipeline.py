@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from xvt.align import align_source_cues
 from xvt.burn import burn_subtitles, recommended_video_bitrate
 from xvt.download import (
+    RemoteMediaInfo,
     download_remote_media,
     download_remote_subtitles,
     inspect_remote,
@@ -184,7 +185,8 @@ def _process_acquired_media(
             if not subtitle_path.is_file():
                 raise ValueError(f"subtitle file does not exist: {subtitle_path}")
             imported_path = artifacts_directory / f"input-subtitles{subtitle_path.suffix.lower()}"
-            shutil.copy2(subtitle_path, imported_path)
+            if subtitle_path.resolve() != imported_path.resolve():
+                shutil.copy2(subtitle_path, imported_path)
             imported_cues = load_subtitles(
                 imported_path,
                 role="source",
@@ -420,79 +422,19 @@ def run_remote_transcription(
             )
         )
 
-    current_stage = StageName.INSPECT
     try:
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        remote_info = inspect_remote(url)
-        remote_path = get_job_directory(job) / "artifacts" / "remote.json"
-        remote_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(remote_path, asdict(remote_info))
-        _add_artifact(job, "remote_info", remote_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.ACQUIRE
-        selected_subtitles = subtitles
-        acquired_subtitles = False
-        if youtube_subtitles:
-            manual_language = select_subtitle_language(
-                subtitle_language or "",
-                remote_info.subtitle_languages,
-            )
-            automatic_language = None
-            if manual_language is None and allow_auto_subtitles:
-                automatic_language = select_subtitle_language(
-                    subtitle_language or "",
-                    remote_info.automatic_subtitle_languages,
-                )
-            selected_language = manual_language or automatic_language
-            if selected_language:
-                _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-                selected_subtitles = download_remote_subtitles(
-                    url,
-                    get_job_directory(job) / "input" / "subtitles",
-                    language=selected_language,
-                    automatic=manual_language is None,
-                    cookies_from_browser=cookies_from_browser,
-                    proxy=proxy,
-                )
-                acquired_subtitles = True
-                _add_artifact(job, "downloaded_subtitles", selected_subtitles, event_sink)
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            "remote_subtitles_selected",
-                            job_id=job.id,
-                            language=selected_language,
-                            automatic=manual_language is None,
-                        )
-                    )
-
-        needs_audio = not selected_subtitles or align_subtitles or remote_info.duration_ms <= 0
-        download_for_burn = bool(workflow_config and workflow_config.get("burn"))
-        if needs_audio or download_for_burn:
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-            source = download_remote_media(
-                url,
-                get_job_directory(job) / "input",
-                audio_only=not download_for_burn,
-                cookies_from_browser=cookies_from_browser,
-                proxy=proxy,
-                event_sink=event_sink,
-            )
-            _add_artifact(job, "downloaded_media", source, event_sink)
-            if download_for_burn:
-                _add_artifact(job, "source_video", source, event_sink)
-            media_info = probe_media(source)
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        else:
-            source = None
-            media_info = _media_info_from_remote_metadata(url, remote_info.duration_ms)
-            status = StageStatus.SUCCEEDED if acquired_subtitles else StageStatus.SKIPPED
-            _set_stage(job, current_stage, status, event_sink)
-        media_path = get_job_directory(job) / "artifacts" / "media.json"
-        _write_json(media_path, asdict(media_info))
-        _add_artifact(job, "media_info", media_path, event_sink)
+        source, media_info, selected_subtitles = _acquire_remote_job(
+            job,
+            cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
+            event_sink=event_sink,
+        )
     except Exception as error:
+        current_stage = (
+            StageName.INSPECT
+            if job.stages[StageName.INSPECT].status is StageStatus.RUNNING
+            else StageName.ACQUIRE
+        )
         _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
         raise
     return _process_acquired_media(
@@ -507,6 +449,162 @@ def run_remote_transcription(
         allow_low_confidence_alignment=allow_low_confidence_alignment,
         event_sink=event_sink,
         emit_job_completed=emit_job_completed,
+    )
+
+
+def _load_remote_info(path: Path) -> RemoteMediaInfo:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return RemoteMediaInfo(
+        id=str(data["id"]),
+        title=str(data["title"]),
+        duration_ms=int(data["duration_ms"]),
+        webpage_url=str(data["webpage_url"]),
+        subtitle_languages=tuple(data.get("subtitle_languages", ())),
+        automatic_subtitle_languages=tuple(data.get("automatic_subtitle_languages", ())),
+    )
+
+
+def _acquire_remote_job(
+    job: Job,
+    *,
+    cookies_from_browser: str | None,
+    proxy: str | None,
+    event_sink: EventSink | None,
+) -> tuple[Path | None, MediaInfo, str | Path | None]:
+    url = job.input
+    remote_path = valid_artifact_path(job, "remote_info")
+    if remote_path is None:
+        _set_stage(job, StageName.INSPECT, StageStatus.RUNNING, event_sink)
+        remote_info = inspect_remote(
+            url,
+            cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
+        )
+        remote_path = get_job_directory(job) / "artifacts" / "remote.json"
+        remote_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(remote_path, asdict(remote_info))
+        _add_artifact(job, "remote_info", remote_path, event_sink)
+    else:
+        remote_info = _load_remote_info(remote_path)
+    _set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
+
+    selected_subtitles = valid_artifact_path(job, "input_subtitles") or job.config.get("subtitles")
+    downloaded_subtitles = valid_artifact_path(job, "downloaded_subtitles")
+    acquired_subtitles = downloaded_subtitles is not None
+    if downloaded_subtitles is not None:
+        selected_subtitles = downloaded_subtitles
+    elif job.config.get("youtube_subtitles"):
+        manual_language = select_subtitle_language(
+            str(job.config.get("subtitle_language") or ""),
+            remote_info.subtitle_languages,
+        )
+        automatic_language = None
+        if manual_language is None and job.config.get("allow_auto_subtitles"):
+            automatic_language = select_subtitle_language(
+                str(job.config.get("subtitle_language") or ""),
+                remote_info.automatic_subtitle_languages,
+            )
+        selected_language = manual_language or automatic_language
+        if selected_language:
+            _set_stage(job, StageName.ACQUIRE, StageStatus.RUNNING, event_sink)
+            selected_subtitles = download_remote_subtitles(
+                url,
+                get_job_directory(job) / "input" / "subtitles",
+                language=selected_language,
+                automatic=manual_language is None,
+                cookies_from_browser=cookies_from_browser,
+                proxy=proxy,
+            )
+            acquired_subtitles = True
+            _add_artifact(job, "downloaded_subtitles", selected_subtitles, event_sink)
+            if event_sink:
+                event_sink(
+                    create_event(
+                        "remote_subtitles_selected",
+                        job_id=job.id,
+                        language=selected_language,
+                        automatic=manual_language is None,
+                    )
+                )
+
+    workflow = job.config.get("workflow")
+    download_for_burn = bool(isinstance(workflow, dict) and workflow.get("burn"))
+    needs_audio = not selected_subtitles or bool(job.config.get("align_subtitles"))
+    needs_audio = needs_audio or remote_info.duration_ms <= 0
+    source = valid_artifact_path(job, "source_video" if download_for_burn else "downloaded_media")
+    if source is None and download_for_burn:
+        source = valid_artifact_path(job, "downloaded_media")
+    if needs_audio or download_for_burn:
+        _set_stage(job, StageName.ACQUIRE, StageStatus.RUNNING, event_sink)
+        if source is None:
+            source = download_remote_media(
+                url,
+                get_job_directory(job) / "input",
+                audio_only=not download_for_burn,
+                cookies_from_browser=cookies_from_browser,
+                proxy=proxy,
+                event_sink=event_sink,
+            )
+            _add_artifact(job, "downloaded_media", source, event_sink)
+        media_info = probe_media(source)
+        if download_for_burn and valid_artifact_path(job, "source_video") is None:
+            _add_artifact(job, "source_video", source, event_sink)
+        _set_stage(job, StageName.ACQUIRE, StageStatus.SUCCEEDED, event_sink)
+    else:
+        source = None
+        media_info = _media_info_from_remote_metadata(url, remote_info.duration_ms)
+        status = StageStatus.SUCCEEDED if acquired_subtitles else StageStatus.SKIPPED
+        _set_stage(job, StageName.ACQUIRE, status, event_sink)
+    media_path = get_job_directory(job) / "artifacts" / "media.json"
+    _write_json(media_path, asdict(media_info))
+    _add_artifact(job, "media_info", media_path, event_sink)
+    return source, media_info, selected_subtitles
+
+
+def resume_remote_transcription(
+    job_file: str | Path,
+    *,
+    cookies_from_browser: str | None = None,
+    proxy: str | None = None,
+    event_sink: EventSink | None = None,
+) -> Job:
+    job = load_job(job_file)
+    parsed = urlparse(job.input)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("job input is not a remote URL")
+    try:
+        source, media_info, subtitles = _acquire_remote_job(
+            job,
+            cookies_from_browser=cookies_from_browser or job.config.get("cookies_from_browser"),
+            proxy=proxy,
+            event_sink=event_sink,
+        )
+    except Exception as error:
+        current_stage = (
+            StageName.INSPECT
+            if job.stages[StageName.INSPECT].status is StageStatus.RUNNING
+            else StageName.ACQUIRE
+        )
+        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        raise
+    return _process_acquired_media(
+        job,
+        source,
+        media_info,
+        engine=str(job.config.get("engine", "mlx")),
+        language=(
+            None
+            if job.config.get("source_language") == "auto"
+            else str(job.config.get("source_language"))
+        ),
+        subtitles=subtitles,
+        align_subtitles=bool(job.config.get("align_subtitles")),
+        minimum_alignment_confidence=float(job.config.get("minimum_alignment_confidence", 0.55)),
+        allow_low_confidence_alignment=bool(
+            job.config.get("allow_low_confidence_alignment", False)
+        ),
+        event_sink=event_sink,
+        emit_job_completed=False,
     )
 
 

@@ -82,7 +82,7 @@ output/<job-id>/
 
 Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 和 `skipped`。Agent 翻译批次生成后任务进入 `awaiting_input`；兼容 API 模式逐批更新进度文件，全部完成后直接继续 QA 和渲染。
 
-`verify` 会重新计算所有 artifact 的 SHA-256。`resume` 只恢复规范化音频、词级转写或源 cue 等转写 checkpoint；`continue` 读取 `job.config.workflow` 中的持久化目标，补齐翻译和烧录。Agent 等待时必须先执行 `apply-translation` 或 `import-translation`，再由 `continue` 完成余下步骤。
+`verify` 会重新计算所有 artifact 的 SHA-256。`resume` 只恢复规范化音频、词级转写或源 cue 等转写 checkpoint；`continue` 读取 `job.config.workflow` 中的持久化目标，并可在同一个远程 Job 中重新进入 `inspect / acquire`，随后补齐转写、翻译和烧录。重入时只复用 checksum 有效的远程元数据、平台字幕和媒体文件。Agent 等待时必须先执行 `apply-translation` 或 `import-translation`，再由 `continue` 完成余下步骤。
 
 `run` 会根据输入组合跳过不需要的阶段：源字幕跳过 ASR，已有译文跳过翻译提供方。远程作业请求烧录时前置下载完整视频，ASR 和烧录复用 `source_video`。烧录派生指纹包含译文 checksum、媒体身份、字体和编码参数；只有 artifact 与指纹同时有效时 `continue` 才复用成品。
 
@@ -100,7 +100,7 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。AP
 
 - 外部命令始终以参数数组执行，不经过 shell 字符串拼接。
 - 下载路径限制在任务目录内。
-- Cookie 和代理只接受显式参数，不自动读取浏览器数据。
+- Cookie 和代理只接受显式参数，不自动读取浏览器数据；远程检查和下载使用同一组访问参数。
 - 日志和 Job 配置只记录 Cookie 来源名称及代理是否启用，不写入凭据。
 - 翻译响应必须一一覆盖全部 cue ID，拒绝重复、缺失和额外 ID。
 - API Key 只从指定环境变量读取，不写入 Job、事件或命令行参数。

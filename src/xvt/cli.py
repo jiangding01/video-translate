@@ -21,7 +21,7 @@ from xvt.pipeline import (
     run_translation,
 )
 from xvt.process import CommandError
-from xvt.recovery import verify_job
+from xvt.recovery import RecoveryPlan, build_recovery_plan, verify_job
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 
 
@@ -321,27 +321,38 @@ class _HumanEventSink(_TrackedEventSink):
             parts.append(str(speed))
         self._progress("burn", "  ".join(parts), force=percent == 100)
 
-    def report_failure(self, message: str) -> None:
+    def _render_recovery(self, plan: RecoveryPlan | None) -> None:
+        if plan:
+            self._line(f"恢复建议：{plan.reason}")
+            for path in plan.report_paths:
+                self._line(f"报告: {path}")
+            for command in plan.prerequisite_commands:
+                self._line(f"  {command}")
+            if plan.primary_command:
+                self._line(f"  {plan.primary_command}")
+        if self.job_file:
+            self._line("查看详情：")
+            self._line(f'  xvt status "{self.job_file}"')
+
+    def report_failure(self, message: str, plan: RecoveryPlan | None = None) -> None:
         self._clear_progress()
         self._line(f"任务失败：{message}")
         if self.current_stage:
             self._line(f"失败阶段：{_STAGE_LABELS.get(self.current_stage, self.current_stage)}")
         if self.job_file:
             self._line(f"任务文件: {self.job_file}")
-            self._line("查看任务状态和恢复建议：")
-            self._line(f'  xvt status "{self.job_file}"')
+            self._render_recovery(plan)
         else:
             self._line("任务尚未创建，请修正输入后重新执行原命令。")
 
-    def report_interruption(self) -> None:
+    def report_interruption(self, plan: RecoveryPlan | None = None) -> None:
         self._clear_progress()
         self._line("任务已中断")
         if self.current_stage:
             self._line(f"失败阶段：{_STAGE_LABELS.get(self.current_stage, self.current_stage)}")
         if self.job_file:
             self._line(f"任务文件: {self.job_file}")
-            self._line("查看任务状态和恢复建议：")
-            self._line(f'  xvt status "{self.job_file}"')
+            self._render_recovery(plan)
         else:
             self._line("任务尚未创建，无可恢复状态。")
 
@@ -362,44 +373,18 @@ def _event_sink(arguments: argparse.Namespace) -> EventSink:
     return sink
 
 
+def _recovery_plan_for_sink(sink: EventSink) -> RecoveryPlan | None:
+    if not isinstance(sink, _TrackedEventSink) or not sink.job_file:
+        return None
+    try:
+        return build_recovery_plan(sink.job_file)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _complete(arguments: argparse.Namespace, **data: object) -> None:
     event_sink = _event_sink(arguments)
     event_sink(create_event("cli_completed", command=arguments.command, **data))
-
-
-def _next_action(job) -> str:
-    job_file = get_job_file(job)
-    workflow = job.config.get("workflow")
-    if isinstance(workflow, dict):
-        target_language = workflow.get("target_language") or "LANGUAGE"
-        if job.stages["translate"].status.value == "awaiting_input":
-            return (
-                f'xvt apply-translation "{job_file}" RESPONSE '
-                f'--target-language {target_language} && xvt continue "{job_file}"'
-            )
-        artifact_kinds = {artifact.kind for artifact in job.artifacts}
-        if "source_cues" not in artifact_kinds:
-            return f'xvt continue "{job_file}"'
-        if target_language != "LANGUAGE" and "translated_cues" not in artifact_kinds:
-            return f'xvt continue "{job_file}"'
-        if workflow.get("burn") and "burned_video" not in artifact_kinds:
-            return f'xvt continue "{job_file}"'
-        return f'xvt verify "{job_file}"'
-    failed_stages = [name for name, record in job.stages.items() if record.status.value == "failed"]
-    if failed_stages:
-        if failed_stages[-1] in {"burn", "media_qa"}:
-            return f'xvt burn "{job_file}"'
-        if failed_stages[-1] in {"translate", "subtitle_qa", "render"}:
-            return f'xvt translate "{job_file}" --target-language LANGUAGE'
-        return f'xvt resume "{job_file}"'
-    artifact_kinds = {artifact.kind for artifact in job.artifacts}
-    if job.stages["translate"].status.value == "awaiting_input":
-        return f'xvt apply-translation "{job_file}" RESPONSE --target-language LANGUAGE'
-    if "translated_cues" not in artifact_kinds:
-        return f'xvt translate "{job_file}" --target-language LANGUAGE'
-    if "burned_video" not in artifact_kinds:
-        return f'xvt burn "{job_file}"'
-    return f'xvt verify "{job_file}"'
 
 
 def _run_command(arguments: argparse.Namespace) -> int:
@@ -472,15 +457,23 @@ def _run_command(arguments: argparse.Namespace) -> int:
 
     if arguments.command == "status":
         job = load_job(arguments.job_file)
-        next_action = _next_action(job)
+        plan = build_recovery_plan(job)
+        next_action = plan.primary_command or plan.reason
         if arguments.json:
             data = job.to_dict()
             data["next_action"] = next_action
+            data["recovery_plan"] = plan.to_dict()
             _print_json(data)
         else:
             stages = ", ".join(f"{name}={record.status}" for name, record in job.stages.items())
             print(f"{job.id}: {stages}")
-            print(f"next: {next_action}")
+            print(f"recovery: {plan.category} - {plan.reason}")
+            for path in plan.report_paths:
+                print(f"report: {path}")
+            for command in plan.prerequisite_commands:
+                print(f"before: {command}")
+            if plan.primary_command:
+                print(f"next: {plan.primary_command}")
         return 0
 
     if arguments.command == "verify":
@@ -640,17 +633,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tracked_sink.current_stage,
                 event_sink=sink,
             )
+        recovery_plan = _recovery_plan_for_sink(sink)
         interruption_event = create_event(
             "cli_failed",
             command=parsed.command,
             category="interrupted",
             message="interrupted by user",
+            **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
         if getattr(parsed, "events_jsonl", False):
             sink(interruption_event)
             print("error: interrupted by user", file=sys.stderr)
         elif isinstance(sink, _HumanEventSink):
-            sink.report_interruption()
+            sink.report_interruption(recovery_plan)
         return 130
     except (OSError, RuntimeError, ValueError) as error:
         if isinstance(error, ValueError):
@@ -659,20 +654,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             category, return_code = "dependency_or_process", 3
         else:
             category, return_code = "workflow", 4
+        sink = getattr(parsed, "_event_sink_instance", None)
+        recovery_plan = _recovery_plan_for_sink(sink) if sink else None
         failure_event = create_event(
             "cli_failed",
             command=parsed.command,
             category=category,
             message=str(error),
+            **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
         safe_message = str(failure_event.data["message"])
         if getattr(parsed, "events_jsonl", False):
             _event_sink(parsed)(failure_event)
             print(f"error: {safe_message}", file=sys.stderr)
         else:
-            sink = getattr(parsed, "_event_sink_instance", None)
             if isinstance(sink, _HumanEventSink):
-                sink.report_failure(safe_message)
+                sink.report_failure(safe_message, recovery_plan)
             else:
                 print(f"error: {safe_message}", file=sys.stderr)
         return return_code

@@ -221,6 +221,25 @@ class WorkflowTest(unittest.TestCase):
 
         translate.assert_not_called()
 
+    def test_continue_retries_early_remote_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "https://youtu.be/abc",
+                directory,
+                {"workflow": {"target_language": None, "burn": False}},
+            )
+            job.stages[StageName.INSPECT].status = StageStatus.FAILED
+            save_job(job)
+            with (
+                patch("xvt.workflow.resume_remote_transcription") as resume_remote,
+                patch("xvt.workflow.resume_job") as resume,
+            ):
+                result = continue_workflow(get_job_file(job))
+
+        self.assertEqual(result.status, "completed")
+        resume_remote.assert_called_once()
+        resume.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

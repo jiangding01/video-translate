@@ -201,9 +201,9 @@ uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 ```
 
-`continue` 根据 `run` 时持久化的目标补齐翻译和烧录：API 中断会复用批次进度，Agent 等待会停在 `apply-translation`，烧录失败只重跑烧录，指纹有效的成品不会重复生成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256，`status` 会根据当前 Job 给出下一条建议命令。
+`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 中断会复用批次进度，Agent 等待会停在 `apply-translation`，烧录失败只重跑烧录，指纹有效的成品不会重复生成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
 
-任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径，以及保守可靠的 `xvt status JOB` 检查命令；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并显示同一套状态检查入口。在统一恢复计划完成前，不会根据未校验的 artifact 猜测续跑命令。任务创建前的参数或输入错误会明确提示修正后重新执行。
+任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
 `run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress` 和 `burn_progress`。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
