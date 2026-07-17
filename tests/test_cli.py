@@ -36,7 +36,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         status = json.loads(output.getvalue())
         self.assertEqual(status["id"], job.id)
-        self.assertIn("xvt translate", status["next_action"])
+        self.assertEqual(status["recovery_plan"]["category"], "unrecoverable")
+        self.assertIsNone(status["recovery_plan"]["primary_command"])
 
     def test_status_uses_persisted_workflow_goal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -49,7 +50,8 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         status = json.loads(output.getvalue())
-        self.assertIn("xvt continue", status["next_action"])
+        self.assertEqual(status["recovery_plan"]["category"], "unrecoverable")
+        self.assertNotIn("xvt continue", status["next_action"])
 
     def test_verify_json_returns_workflow_exit_code_for_invalid_artifact(self) -> None:
         output = StringIO()
@@ -306,6 +308,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(events[-2]["type"], "stage_failed")
         self.assertEqual(events[-1]["type"], "cli_failed")
         self.assertEqual(events[-1]["data"]["category"], "interrupted")
+        self.assertEqual(events[-1]["data"]["recovery_plan"]["category"], "unrecoverable")
         self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
 
     def test_run_forwards_youtube_subtitle_options(self) -> None:
