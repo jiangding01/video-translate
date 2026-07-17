@@ -5,7 +5,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 ## 能力概览
 
 - 本地视频、音频、YouTube URL 输入
-- MLX Whisper 或 faster-whisper 转写，保留词级时间戳；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
+- MLX Whisper 或 faster-whisper 转写，保留词级时间戳；超宽 ASR 片段会优先按语义边界切分；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
 - 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴
 - YouTube 人工字幕优先，允许显式回退自动字幕或 Whisper
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议

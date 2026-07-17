@@ -8,6 +8,23 @@ from xvt.qa import display_width, display_width_limit
 
 SENTENCE_END = frozenset(".?!。？！…")
 SOFT_BREAK = frozenset(",;:，；：、")
+BREAK_BEFORE = frozenset(
+    {
+        "and",
+        "as",
+        "because",
+        "but",
+        "for",
+        "if",
+        "or",
+        "so",
+        "that",
+        "to",
+        "when",
+        "while",
+        "with",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,26 +66,46 @@ def _soft_cut(words: list[Word]) -> int | None:
     return None
 
 
+def _break_penalty(words: list[Word], index: int) -> int:
+    previous = words[index - 1].text.rstrip()
+    following = _normalize_token(words[index])
+    if previous and previous[-1] in SENTENCE_END:
+        return 0
+    if previous and previous[-1] in SOFT_BREAK:
+        return 1
+    if following in BREAK_BEFORE:
+        return 2
+    return 4
+
+
 def _split_by_width(words: list[Word], max_width: int) -> list[list[Word]]:
     total_width = display_width(_text(words))
     minimum_parts = max(1, ceil(total_width / max_width))
     for part_count in range(min(minimum_parts, len(words)), len(words) + 1):
-        cuts = []
-        previous = 0
-        for part in range(1, part_count):
-            first = previous + 1
-            last = len(words) - (part_count - part)
-            desired_width = total_width * part / part_count
-            cut = min(
-                range(first, last + 1),
-                key=lambda index: abs(display_width(_text(words[:index])) - desired_width),
-            )
-            cuts.append(cut)
-            previous = cut
-        boundaries = [0, *cuts, len(words)]
-        chunks = [words[start:end] for start, end in zip(boundaries, boundaries[1:])]
-        if all(display_width(_text(chunk)) <= max_width for chunk in chunks):
-            return chunks
+        target_width = total_width / part_count
+        best: dict[tuple[int, int], tuple[int, list[int]]] = {(0, 0): (0, [])}
+        for chunk_count in range(part_count):
+            for (start, completed), (cost, cuts) in tuple(best.items()):
+                if completed != chunk_count:
+                    continue
+                last_end = len(words) - (part_count - chunk_count - 1)
+                for end in range(start + 1, last_end + 1):
+                    width = display_width(_text(words[start:end]))
+                    if width > max_width:
+                        break
+                    chunk_cost = round(abs(width - target_width))
+                    if len(words[start:end]) == 1 and len(words) > part_count:
+                        chunk_cost += max_width
+                    if end < len(words):
+                        chunk_cost += _break_penalty(words, end) * max_width
+                    key = (end, completed + 1)
+                    candidate = (cost + chunk_cost, [*cuts, end])
+                    if key not in best or candidate[0] < best[key][0]:
+                        best[key] = candidate
+        result = best.get((len(words), part_count))
+        if result:
+            boundaries = [0, *result[1][:-1]]
+            return [words[start:end] for start, end in zip(boundaries, result[1])]
     return [[word] for word in words]
 
 
