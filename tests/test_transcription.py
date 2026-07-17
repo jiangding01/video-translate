@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from xvt.models import Transcript, Word
-from xvt.segment import SegmentationConfig, segment_transcript
+from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
 from xvt.transcribe import (
     TranscriptionError,
     transcribe_faster,
@@ -15,6 +15,29 @@ from xvt.transcribe import (
 
 
 class TranscriptionTest(unittest.TestCase):
+    def test_segmentation_presets_preserve_default_and_change_cue_density(self) -> None:
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=tuple(
+                Word(f" word{index}", index * 900, index * 900 + 300) for index in range(10)
+            ),
+        )
+
+        conservative = segment_transcript(
+            transcript, segmentation_config_for_preset("conservative")
+        )
+        balanced = segment_transcript(transcript, segmentation_config_for_preset("balanced"))
+        compact = segment_transcript(transcript, segmentation_config_for_preset("compact"))
+
+        self.assertEqual(segmentation_config_for_preset("balanced"), SegmentationConfig())
+        self.assertLessEqual(len(conservative), len(balanced))
+        self.assertLessEqual(len(balanced), len(compact))
+
+    def test_rejects_unknown_segmentation_preset(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown segmentation preset"):
+            segmentation_config_for_preset("unknown")
+
     def test_mlx_uses_builtin_hallucination_guards(self) -> None:
         mlx_whisper = SimpleNamespace(
             transcribe=lambda *_args, **_kwargs: {

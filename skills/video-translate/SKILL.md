@@ -26,10 +26,11 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    ```bash
    uv run --no-sync xvt run "INPUT" --output "/absolute/output" --engine mlx \
+     --segmentation-preset balanced \
      --target-language zh-CN --burn --events-jsonl
    ```
 
-   Add `--language LANG` only when the source language is known. Use `--engine faster` only when the user requests it or MLX is unavailable. Omit `--target-language` and `--burn` when only source subtitles are requested.
+   Add `--language LANG` only when the source language is known. Use `--engine faster` only when the user requests it or MLX is unavailable. `balanced` preserves the default ASR segmentation; use `conservative` for longer cues or `compact` for shorter cues. Omit `--target-language` and `--burn` when only source subtitles are requested.
 
    When the user supplies SRT, VTT, ASS, or SSA subtitles, add `--subtitles "/path/to/file"`. This preserves the supplied timeline and skips ASR. Add `--align-subtitles` only when the user wants Whisper to correct possible subtitle offset or drift. The default confidence gate is `0.55`; inspect `alignment.json` before considering `--allow-low-confidence-alignment`.
 

@@ -27,7 +27,7 @@ from xvt.pipeline import (
 from xvt.process import CommandResult
 from xvt.qa import check_subtitles, display_width, display_width_limit
 from xvt.recovery import file_checksum
-from xvt.segment import SegmentationConfig, segment_transcript
+from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
 
 
 class PipelineTest(unittest.TestCase):
@@ -346,10 +346,12 @@ class PipelineTest(unittest.TestCase):
                 patch("xvt.pipeline.probe_media", return_value=media_info),
                 patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
                 patch("xvt.pipeline.transcribe_audio", return_value=transcript) as transcribe,
+                patch("xvt.pipeline.segment_transcript", wraps=segment_transcript) as segment,
             ):
                 job = run_local_transcription(
                     media,
                     root,
+                    segmentation_preset="compact",
                     workflow_config={"target_language": "zh-CN", "burn": True},
                     event_sink=events.append,
                 )
@@ -360,12 +362,14 @@ class PipelineTest(unittest.TestCase):
             self.assertIn("source_srt", artifact_kinds)
             self.assertEqual(job.config["workflow"]["target_language"], "zh-CN")
             self.assertTrue(job.config["workflow"]["burn"])
+            self.assertEqual(job.config["segmentation_preset"], "compact")
             qa_path = next(Path(item.path) for item in job.artifacts if item.kind == "subtitle_qa")
             self.assertEqual(json.loads(qa_path.read_text())["status"], "pass")
             started = next(event for event in events if event.type == "job_started")
             self.assertEqual(started.data["job_file"], str(get_job_file(job)))
             self.assertEqual(transcribe.call_args.kwargs["total_ms"], 5000)
             self.assertTrue(callable(transcribe.call_args.kwargs["event_sink"]))
+            self.assertEqual(segment.call_args.args[1], segmentation_config_for_preset("compact"))
 
     def test_pipeline_failure_is_persisted_on_current_stage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -439,7 +443,12 @@ class PipelineTest(unittest.TestCase):
                 words=(Word("Hello.", 1000, 1800, 0.9),),
             )
 
-            with patch("xvt.pipeline.transcribe_audio", return_value=transcript) as transcribe:
+            job.config["segmentation_preset"] = "compact"
+            job_file = save_job(job)
+            with (
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript) as transcribe,
+                patch("xvt.pipeline.segment_transcript", wraps=segment_transcript) as segment,
+            ):
                 resumed = resume_job(job_file)
 
             transcribe.assert_called_once_with(
@@ -451,6 +460,7 @@ class PipelineTest(unittest.TestCase):
             )
             self.assertEqual(resumed.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
             self.assertIn("source_srt", {artifact.kind for artifact in resumed.artifacts})
+            self.assertEqual(segment.call_args.args[1], segmentation_config_for_preset("compact"))
 
     def test_resume_reuses_source_cues_without_asr(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -478,6 +488,44 @@ class PipelineTest(unittest.TestCase):
 
             transcribe.assert_not_called()
             self.assertEqual(resumed.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
+
+    def test_resume_persists_failed_stage_for_unknown_segmentation_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job(
+                "/tmp/input.mp4",
+                root,
+                {"engine": "mlx", "source_language": "en", "segmentation_preset": "unknown"},
+            )
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            audio_path = artifacts / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            media_path = artifacts / "media.json"
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("normalized_audio", str(audio_path), file_checksum(audio_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+
+            with patch("xvt.pipeline.transcribe_audio", return_value=transcript):
+                with self.assertRaisesRegex(ValueError, "unknown segmentation preset"):
+                    resume_job(job_file)
+
+            stage = load_job(job_file).stages[StageName.SEGMENT]
+            self.assertEqual(stage.status, StageStatus.FAILED)
+            self.assertEqual(stage.error, "unknown segmentation preset: unknown")
 
     def test_resume_rejects_job_without_valid_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

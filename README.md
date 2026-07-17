@@ -12,6 +12,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
 - 原文、译文、双语 SRT，及独立中英样式的双语 ASS
 - 按 cue 或时间范围生成短片段预览，复用正式 ASS 样式和烧录参数
+- `conservative`、`balanced`、`compact` 三种 ASR 字幕分段预设，默认保持既有平衡行为
 - 字幕 QA、媒体 QA、FFmpeg 硬件或软件烧录
 - `job.json`、checksum 校验、恢复和 JSONL 结构化事件
 - 单命令端到端工作流，以及基于持久化目标的 `xvt continue`
@@ -62,6 +63,7 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
   --provider auto \
   --glossary "/path/to/glossary.json" \
   --translation-style natural \
+  --segmentation-preset balanced \
   --burn \
   --burn-output "/path/to/bilingual.mp4"
 ```
@@ -95,6 +97,8 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
 ```
 
 完成后，任务目录会包含 `job.json`、`artifacts/source-cues.json` 和 `artifacts/source.srt`。
+
+`--segmentation-preset conservative` 使用更长的停顿和时长阈值，适合更完整的句子；默认 `balanced` 保持既有分段；`compact` 使用更短的阈值，适合需要更频繁换行的短视频。预设仅作用于 ASR 分段：直接导入源字幕会保留原时间轴；`--align-subtitles` 跳过分段预设，并仅在用户明确请求时按 ASR 对齐修正时间轴。
 
 已有源字幕时可跳过 ASR，并保留其时间轴：
 

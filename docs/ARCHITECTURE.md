@@ -48,7 +48,7 @@ flowchart LR
 | `job_store.py` / `models.py` | 任务模型、原子持久化、schema 和 checksum |
 | `download.py` / `media.py` | yt-dlp 获取、ffprobe 媒体检查 |
 | `transcribe.py` | MLX Whisper、faster-whisper 引擎适配 |
-| `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠 |
+| `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠；提供可持久化的 ASR 分段预设 |
 | `subtitles.py` / `align.py` | 字幕读写和已有字幕到 ASR 的顺序模糊对齐 |
 | `translate.py` / `translation_provider.py` | 结构化术语表和翻译风格、翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填 |
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
@@ -91,7 +91,7 @@ Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`fai
 
 `preview` 是独立诊断命令，不进入持久化工作流目标，也不修改正式烧录 stage。它读取 checksum 有效且 QA 通过的译文 cue，将所选时间窗口平移到零点，复用正式 ASS 样式和 FFmpeg 编码参数生成 `preview.ass` 与 `preview.mp4`。预览 artifact 会在译文局部重译或重新分段后失效。
 
-Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。原子翻译命令和端到端工作流都会持久化解析后的术语表与风格；端到端配置保存策略快照而不保存源文件路径，因此 `continue` 能复现首次运行的策略。策略进入 API 翻译指纹，批次只携带命中自身源 cue 的术语。译文 QA 会把源 cue 已命中但译文缺失目标词的情况标记为 `glossary_violation` 错误。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
+Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。原子转写和端到端工作流都会持久化 `segmentation_preset`，恢复时以保存值重新构造 ASR cue；缺失该字段的旧 Job 按 `balanced` 处理。原子翻译命令和端到端工作流都会持久化解析后的术语表与风格；端到端配置保存策略快照而不保存源文件路径，因此 `continue` 能复现首次运行的策略。策略进入 API 翻译指纹，批次只携带命中自身源 cue 的术语。译文 QA 会把源 cue 已命中但译文缺失目标词的情况标记为 `glossary_violation` 错误。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
 
 ## 事件和用户反馈
 
@@ -101,7 +101,7 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。�
 
 ## 时间轴策略
 
-- ASR 请求词级时间戳，segmenter 才能依据停顿、标点和显示宽度切分。超宽片段会先满足硬显示宽度，再优先在句末、软标点、连接词或介词前的词级边界切开；切分发生在翻译前，译文按新的 cue ID 一一生成。若最终译文仍超过硬限制，可显式执行 `resegment-translation`，旧译文不复用，必须对新 cue ID 重新翻译。
+- ASR 请求词级时间戳，segmenter 才能依据停顿、标点和显示宽度切分。`conservative`、`balanced`、`compact` 只分别调整停顿和最大时长阈值；默认 `balanced` 保持既有结果。超宽片段会先满足硬显示宽度，再优先在句末、软标点、连接词或介词前的词级边界切开；切分发生在翻译前，译文按新的 cue ID 一一生成。若最终译文仍超过硬限制，可显式执行 `resegment-translation`，旧译文不复用，必须对新 cue ID 重新翻译。
 - cue 的结束时间来自最后一个词，并添加受控尾部 padding。
 - 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。

@@ -39,6 +39,20 @@ class SegmentationConfig:
     pathological_zero_duration_ratio: float = 0.5
 
 
+SEGMENTATION_PRESETS = {
+    "conservative": SegmentationConfig(pause_ms=850, max_duration_ms=8500),
+    "balanced": SegmentationConfig(),
+    "compact": SegmentationConfig(pause_ms=450, max_duration_ms=5500),
+}
+
+
+def segmentation_config_for_preset(preset: str) -> SegmentationConfig:
+    try:
+        return SEGMENTATION_PRESETS[preset]
+    except KeyError as error:
+        raise ValueError(f"unknown segmentation preset: {preset}") from error
+
+
 def _text(words: list[Word]) -> str:
     return "".join(word.text for word in words).strip()
 
