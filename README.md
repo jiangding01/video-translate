@@ -114,7 +114,9 @@ export XVT_TRANSLATION_MODEL="model-name"
 export XVT_TRANSLATION_API_KEY="secret"
 
 uv run --no-sync xvt translate "/path/to/job.json" \
-  --target-language zh-CN
+  --target-language zh-CN \
+  --glossary "/path/to/glossary.json" \
+  --translation-style natural
 ```
 
 DeepSeek 示例：
@@ -129,12 +131,27 @@ export XVT_TRANSLATION_API_KEY="secret"
 
 API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误和 5xx 会退避重试。
 
+`translate` 和 `prepare-translation` 支持结构化术语表及 `faithful`（默认）、`natural`、`concise` 三种风格。术语表是 JSON 文件；命中当前批次源 cue 的术语才会写入 API 请求或 Agent 批次，避免无关提示膨胀：
+
+```json
+{
+  "terms": [
+    {"source": "OpenAI", "target": "OpenAI"},
+    {"source": "Whisper", "target": "Whisper"}
+  ]
+}
+```
+
+所选策略会保存到 `job.json`，并进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。
+
 不使用 API 时，可走 Agent 协议：
 
 ```bash
 uv run --no-sync xvt prepare-translation "/path/to/job.json" \
   --source-language en \
-  --target-language zh-CN
+  --target-language zh-CN \
+  --glossary "/path/to/glossary.json" \
+  --translation-style natural
 
 uv run --no-sync xvt apply-translation "/path/to/job.json" \
   "/path/to/translation-response.json" \
