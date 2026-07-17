@@ -184,6 +184,33 @@ class WorkflowTest(unittest.TestCase):
             ),
         )
 
+    def test_continue_defaults_translation_policy_for_old_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {"workflow": {"target_language": "zh-CN", "burn": False}},
+            )
+            save_job(job)
+            with (
+                patch(
+                    "xvt.workflow.valid_artifact_path",
+                    side_effect=lambda _job, kind: (
+                        Path("/tmp/source-cues.json") if kind == "source_cues" else None
+                    ),
+                ),
+                patch(
+                    "xvt.workflow.run_translation",
+                    return_value=TranslationRunResult(
+                        "openai-compatible", (Path("/tmp/translated.srt"),)
+                    ),
+                ) as translate,
+            ):
+                result = continue_workflow(get_job_file(job))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy())
+
     def test_continue_burns_after_agent_translation_was_applied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job(
