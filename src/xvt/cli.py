@@ -18,6 +18,7 @@ from xvt.pipeline import (
     inspect_input,
     interrupt_running_stage,
     prepare_agent_translation,
+    preview_translated_job,
     resegment_translation,
     resume_job,
     retranslate_cues,
@@ -204,6 +205,22 @@ def build_parser() -> argparse.ArgumentParser:
     apply_retranslation_parser.add_argument("--target-language", required=True)
     apply_retranslation_parser.add_argument("--events-jsonl", action="store_true")
 
+    preview_parser = subparsers.add_parser(
+        "preview",
+        help="Render a short bilingual preview without changing the workflow goal",
+    )
+    preview_parser.add_argument("job_file")
+    preview_position = preview_parser.add_mutually_exclusive_group()
+    preview_position.add_argument("--cue", type=int)
+    preview_position.add_argument("--start", type=float)
+    preview_parser.add_argument("--duration", type=float, default=15)
+    preview_parser.add_argument("--media")
+    preview_parser.add_argument("--output")
+    preview_parser.add_argument("--software", action="store_true", default=None)
+    preview_parser.add_argument("--target-font")
+    preview_parser.add_argument("--source-font")
+    preview_parser.add_argument("--events-jsonl", action="store_true")
+
     burn_parser = subparsers.add_parser("burn", help="Burn bilingual ASS into a video")
     burn_parser.add_argument("job_file")
     burn_parser.add_argument("--media")
@@ -336,6 +353,8 @@ class _HumanEventSink(_TrackedEventSink):
             self._render_download(data)
         elif event.type == "burn_progress":
             self._render_burn(data)
+        elif event.type == "preview_progress":
+            self._render_preview(data)
         elif event.type == "transcription_progress":
             self._render_transcription(data)
         elif event.type == "translation_batch_started":
@@ -346,6 +365,10 @@ class _HumanEventSink(_TrackedEventSink):
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
         elif event.type == "workflow_completed":
             self._line("任务处理完成")
+        elif event.type == "preview_started":
+            self._line("[进行中] 生成短片段预览")
+        elif event.type == "preview_completed":
+            self._line("[完成] 生成短片段预览")
 
     def _render_stage(self, event: Event) -> None:
         stage = event.data.get("stage")
@@ -383,6 +406,15 @@ class _HumanEventSink(_TrackedEventSink):
         if speed := data.get("speed"):
             parts.append(str(speed))
         self._progress("burn", "  ".join(parts), force=percent == 100)
+
+    def _render_preview(self, data: dict[str, object]) -> None:
+        parts = ["[进行中] 生成短片段预览"]
+        percent = data.get("percent")
+        if isinstance(percent, int | float):
+            parts.append(f"{percent:.0f}%")
+        if speed := data.get("speed"):
+            parts.append(str(speed))
+        self._progress("preview", "  ".join(parts), force=percent == 100)
 
     def _render_transcription(self, data: dict[str, object]) -> None:
         engine = str(data.get("engine") or "Whisper")
@@ -439,6 +471,11 @@ class _HumanEventSink(_TrackedEventSink):
             self._render_recovery(plan)
         else:
             self._line("任务尚未创建，无可恢复状态。")
+
+    def report_preview_interruption(self) -> None:
+        self._clear_progress()
+        self._line("预览已中断")
+        self._line("正式任务和已有产物不受影响，请重新执行原 preview 命令。")
 
 
 def _event_sink(arguments: argparse.Namespace) -> EventSink:
@@ -771,6 +808,26 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 print(f'继续烧录: xvt continue "{arguments.job_file}"')
         return 0
 
+    if arguments.command == "preview":
+        event_sink = _event_sink(arguments)
+        path = preview_translated_job(
+            arguments.job_file,
+            cue_id=arguments.cue,
+            start_seconds=arguments.start,
+            duration_seconds=arguments.duration,
+            media=arguments.media,
+            output=arguments.output,
+            hardware_encoding=(None if arguments.software is None else False),
+            target_font=arguments.target_font,
+            source_font=arguments.source_font,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path)])
+        else:
+            print(path)
+        return 0
+
     if arguments.command == "burn":
         event_sink = _event_sink(arguments)
         path = burn_translated_job(
@@ -812,19 +869,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tracked_sink.current_stage,
                 event_sink=sink,
             )
-        recovery_plan = _recovery_plan_for_sink(sink)
+        recovery_plan = None if parsed.command == "preview" else _recovery_plan_for_sink(sink)
         interruption_event = create_event(
             "cli_failed",
             command=parsed.command,
             category="interrupted",
             message="interrupted by user",
+            **({"next_action": "rerun_preview"} if parsed.command == "preview" else {}),
             **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
         if getattr(parsed, "events_jsonl", False):
             sink(interruption_event)
             print("error: interrupted by user", file=sys.stderr)
         elif isinstance(sink, _HumanEventSink):
-            sink.report_interruption(recovery_plan)
+            if parsed.command == "preview":
+                sink.report_preview_interruption()
+            else:
+                sink.report_interruption(recovery_plan)
         return 130
     except (OSError, RuntimeError, ValueError) as error:
         if isinstance(error, ValueError):
@@ -834,7 +895,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             category, return_code = "workflow", 4
         sink = getattr(parsed, "_event_sink_instance", None)
-        recovery_plan = _recovery_plan_for_sink(sink) if sink else None
+        recovery_plan = None
+        if parsed.command != "preview" and sink:
+            recovery_plan = _recovery_plan_for_sink(sink)
         failure_event = create_event(
             "cli_failed",
             command=parsed.command,

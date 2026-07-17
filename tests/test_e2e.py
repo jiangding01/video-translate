@@ -5,10 +5,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.job_store import get_job_file
+import pysubs2
+
+from xvt.job_store import get_job_file, load_job
 from xvt.media import probe_media
 from xvt.models import Transcript, Word
-from xvt.pipeline import apply_subtitle_translation, burn_translated_job, run_local_transcription
+from xvt.pipeline import (
+    apply_subtitle_translation,
+    burn_translated_job,
+    preview_translated_job,
+    run_local_transcription,
+)
 
 
 @unittest.skipUnless(
@@ -97,6 +104,51 @@ class EndToEndTest(unittest.TestCase):
             self.assertFalse(audio.has_video)
             self.assertEqual(audio.audio_codec, "pcm_s16le")
             self.assertTrue(artifacts["source_srt"].is_file())
+
+    def test_nonzero_start_bilingual_preview_has_expected_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            self._create_video(media)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            job = run_local_transcription(media, root / "output", subtitles=source, language="en")
+            job_file = get_job_file(job)
+            apply_subtitle_translation(job_file, translated, target_language="zh-CN")
+            preview = preview_translated_job(
+                job_file,
+                start_seconds=0.5,
+                duration_seconds=1,
+                hardware_encoding=False,
+            )
+            info = probe_media(preview)
+            persisted = load_job(job_file)
+            preview_ass = pysubs2.load(
+                next(
+                    artifact.path
+                    for artifact in persisted.artifacts
+                    if artifact.kind == "preview_ass"
+                )
+            )
+
+            self.assertTrue(info.has_video)
+            self.assertTrue(info.has_audio)
+            self.assertLessEqual(abs(info.duration_ms - 1000), 250)
+            self.assertEqual(
+                {(event.start, event.end) for event in preview_ass.events},
+                {(0, 1000)},
+            )
+            self.assertIn("preview_ass", {artifact.kind for artifact in persisted.artifacts})
+            self.assertIn("preview_video", {artifact.kind for artifact in persisted.artifacts})
 
 
 if __name__ == "__main__":

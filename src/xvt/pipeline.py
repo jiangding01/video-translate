@@ -6,7 +6,7 @@ import os
 import shutil
 import time
 from dataclasses import asdict, dataclass, replace
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -212,6 +212,8 @@ def _invalidate_rendered_artifacts(job: Job) -> None:
         "bilingual_ass",
         "burned_video",
         "media_qa",
+        "preview_ass",
+        "preview_video",
     }
     job.artifacts = [
         artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
@@ -225,6 +227,14 @@ def _invalidate_rendered_artifacts(job: Job) -> None:
         record.started_at = None
         record.completed_at = None
         record.error = None
+
+
+def _invalidate_preview_artifacts(job: Job) -> None:
+    job.artifacts = [
+        artifact
+        for artifact in job.artifacts
+        if artifact.kind not in {"preview_ass", "preview_video"}
+    ]
 
 
 def apply_cue_retranslation(
@@ -1148,6 +1158,8 @@ def resegment_translation(
         "bilingual_ass",
         "burned_video",
         "media_qa",
+        "preview_ass",
+        "preview_video",
     }
     replacement_artifacts = [
         Artifact("source_cues", str(source_output), _checksum(source_output)),
@@ -1525,6 +1537,7 @@ def apply_agent_translation(
         artifacts_directory = get_job_directory(job) / "artifacts"
         translated_cues_path = artifacts_directory / "translated-cues.json"
         _write_json(translated_cues_path, [asdict(cue) for cue in translated])
+        _invalidate_preview_artifacts(job)
         _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
@@ -1588,6 +1601,7 @@ def apply_subtitle_translation(
 
         translated_cues_path = artifacts_directory / "translated-cues.json"
         _write_json(translated_cues_path, [asdict(cue) for cue in translated])
+        _invalidate_preview_artifacts(job)
         _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
         job.config["target_language"] = target_language
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
@@ -1616,6 +1630,202 @@ def apply_subtitle_translation(
     except Exception as error:
         _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
         raise
+
+
+def preview_translated_job(
+    job_file: str | Path,
+    *,
+    cue_id: int | None = None,
+    start_seconds: float | None = None,
+    duration_seconds: float = 15,
+    media: str | Path | None = None,
+    output: str | Path | None = None,
+    hardware_encoding: bool | None = None,
+    target_font: str | None = None,
+    source_font: str | None = None,
+    event_sink: EventSink | None = None,
+) -> Path:
+    if cue_id is not None and start_seconds is not None:
+        raise ValueError("--cue and --start cannot be used together")
+    if cue_id is not None and cue_id < 1:
+        raise ValueError("--cue must be a positive integer")
+    if start_seconds is not None and (not isfinite(start_seconds) or start_seconds < 0):
+        raise ValueError("--start must not be negative")
+    if not isfinite(duration_seconds) or duration_seconds <= 0:
+        raise ValueError("--duration must be positive")
+
+    job = load_job(job_file)
+    translated_path = valid_artifact_path(job, "translated_cues")
+    qa_path = valid_artifact_path(job, "translated_subtitle_qa")
+    if translated_path is None or qa_path is None:
+        raise ValueError("preview requires checksum-valid translated subtitles and QA")
+    qa_data = json.loads(qa_path.read_text(encoding="utf-8"))
+    if qa_data.get("status") not in {"pass", "warning"}:
+        raise RuntimeError("translated subtitle QA must pass before preview")
+
+    workflow_config = job.config.get("workflow")
+    workflow_config = workflow_config if isinstance(workflow_config, dict) else {}
+    if hardware_encoding is None:
+        hardware_encoding = bool(workflow_config.get("hardware_encoding", True))
+    if target_font is None and isinstance(workflow_config.get("target_font"), str):
+        target_font = workflow_config["target_font"]
+    if source_font is None and isinstance(workflow_config.get("source_font"), str):
+        source_font = workflow_config["source_font"]
+
+    configured_media = workflow_config.get("burn_media")
+    if media is not None:
+        media_path = Path(media).expanduser()
+    elif isinstance(configured_media, str) and configured_media:
+        media_path = Path(configured_media).expanduser()
+    else:
+        parsed = urlparse(job.input)
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            media_path = valid_artifact_path(job, "source_video")
+            if media_path is None:
+                raise ValueError(
+                    "remote preview requires a checksum-valid source_video or explicit --media"
+                )
+        else:
+            media_path = Path(job.input).expanduser()
+    if not media_path.is_file():
+        raise ValueError(f"video file does not exist: {media_path}")
+    media_path = media_path.resolve()
+    media_info = probe_media(media_path)
+    if not media_info.has_video or not media_info.width or not media_info.height:
+        raise ValueError("preview requires a video stream with known dimensions")
+    if media_info.duration_ms <= 0:
+        raise ValueError("preview requires media with a known positive duration")
+
+    translated = _load_cues(translated_path)
+    selected_cue = None
+    if start_seconds is None:
+        if cue_id is None:
+            selected_cue = next((cue for cue in translated if cue.target_text), None)
+            if selected_cue is None:
+                raise ValueError("translated subtitles contain no previewable cues")
+        else:
+            selected_cue = next((cue for cue in translated if cue.id == cue_id), None)
+            if selected_cue is None:
+                raise ValueError(f"translated subtitles do not contain cue {cue_id}")
+
+    requested_duration_ms = round(duration_seconds * 1000)
+    if selected_cue is not None:
+        preview_duration_ms = max(
+            requested_duration_ms,
+            selected_cue.end_ms - selected_cue.start_ms + 4000,
+        )
+        preview_duration_ms = min(preview_duration_ms, media_info.duration_ms)
+        start_ms = max(selected_cue.start_ms - 2000, 0)
+        end_ms = min(start_ms + preview_duration_ms, media_info.duration_ms)
+        start_ms = max(end_ms - preview_duration_ms, 0)
+    else:
+        start_ms = round((start_seconds or 0) * 1000)
+        if start_ms >= media_info.duration_ms:
+            raise ValueError("--start must be before the end of the media")
+        end_ms = min(start_ms + requested_duration_ms, media_info.duration_ms)
+
+    preview_cues = [
+        replace(
+            cue,
+            start_ms=max(cue.start_ms, start_ms) - start_ms,
+            end_ms=min(cue.end_ms, end_ms) - start_ms,
+        )
+        for cue in translated
+        if cue.start_ms < end_ms and cue.end_ms > start_ms and cue.target_text
+    ]
+    if not preview_cues:
+        raise ValueError("preview range contains no translated subtitle cues")
+
+    output_path = (
+        Path(output).expanduser()
+        if output is not None
+        else get_job_directory(job) / "artifacts" / "preview.mp4"
+    )
+    if not output_path.is_absolute():
+        raise ValueError("preview output path must be absolute")
+    artifacts_directory = get_job_directory(job) / "artifacts"
+    ass_path = artifacts_directory / "preview.ass"
+    output_resolved = output_path.resolve()
+    protected_paths = [
+        media_path,
+        get_job_file(job),
+        ass_path,
+        *(
+            Path(artifact.path).expanduser()
+            for artifact in job.artifacts
+            if artifact.kind != "preview_video"
+        ),
+    ]
+    for protected_path in protected_paths:
+        protected_resolved = protected_path.resolve()
+        same_file = output_resolved == protected_resolved
+        if not same_file and output_path.exists() and protected_path.exists():
+            try:
+                same_file = output_path.samefile(protected_path)
+            except OSError:
+                same_file = False
+        if same_file:
+            raise ValueError(
+                "preview output must not overwrite the source media, job file, "
+                "or an existing artifact"
+            )
+    _invalidate_preview_artifacts(job)
+    if event_sink:
+        event_sink(
+            create_event(
+                "preview_started",
+                job_id=job.id,
+                job_file=str(get_job_file(job)),
+                start_ms=start_ms,
+                duration_ms=end_ms - start_ms,
+            )
+        )
+    save_bilingual_ass(
+        preview_cues,
+        ass_path,
+        video_width=media_info.width,
+        video_height=media_info.height,
+        options=AssStyleOptions(target_font=target_font, source_font=source_font),
+    )
+    _add_artifact(job, "preview_ass", ass_path, event_sink)
+    preview_path = burn_subtitles(
+        media_path,
+        ass_path,
+        output_path,
+        hardware_encoding=hardware_encoding,
+        video_bitrate=recommended_video_bitrate(media_info.height),
+        duration_ms=end_ms - start_ms,
+        start_ms=start_ms,
+        clip_duration_ms=end_ms - start_ms,
+        progress_event_type="preview_progress",
+        event_sink=event_sink,
+    )
+    preview_info = probe_media(preview_path)
+    issues = []
+    if not preview_info.has_video:
+        issues.append("preview has no video stream")
+    if media_info.has_audio and not preview_info.has_audio:
+        issues.append("preview has no audio stream")
+    elif preview_info.has_audio and preview_info.audio_codec != "aac":
+        issues.append("preview audio codec is not AAC")
+    if (preview_info.width, preview_info.height) != (media_info.width, media_info.height):
+        issues.append("preview dimensions differ from source video")
+    if abs(preview_info.duration_ms - (end_ms - start_ms)) > 500:
+        issues.append("preview duration differs by more than 500ms")
+    if issues:
+        raise RuntimeError(f"preview video failed media QA: {', '.join(issues)}")
+    _add_artifact(job, "preview_video", preview_path, event_sink)
+    if event_sink:
+        event_sink(
+            create_event(
+                "preview_completed",
+                job_id=job.id,
+                path=str(preview_path),
+                start_ms=start_ms,
+                duration_ms=end_ms - start_ms,
+            )
+        )
+    return preview_path
 
 
 def burn_translated_job(

@@ -64,7 +64,15 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    This deliberately keeps the source cue timing and uses only the imported translated text. Different cue counts are accepted only when timeline overlap completely covers the source cues. Report mapping failures and the `translation-mapping.json` artifact instead of hand-editing a guessed mapping.
 
-8. If burn-in is requested, run:
+8. Before a full burn, generate a short preview when the user wants to inspect subtitle layout or timing:
+
+   ```bash
+   uv run --no-sync xvt preview "/path/to/job.json" --cue 18 --duration 15
+   ```
+
+   Preview requires checksum-valid translated cues and a passing translated subtitle QA report. It reuses the formal ASS style and encoding path without changing the persisted workflow goal. For an audio-only Job or a remote Job without a valid `source_video`, require a video via `--media`.
+
+9. If burn-in is requested, run:
 
    ```bash
    uv run --no-sync xvt burn "/path/to/job.json"
@@ -72,7 +80,7 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    Add `--software` when hardware encoding is unavailable. For an audio-only job, require a separate video via `--media`.
 
-9. Report the generated artifact paths and QA result. Typical outputs are `source.srt`, `translated.srt`, `bilingual.srt`, `bilingual.ass`, and `burned.mp4`.
+10. Report the generated artifact paths and QA result. Typical outputs are `source.srt`, `translated.srt`, `bilingual.srt`, `bilingual.ass`, `preview.mp4`, and `burned.mp4`.
 
 ## Recover interrupted jobs
 

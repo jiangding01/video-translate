@@ -12,10 +12,10 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 160 个，全部通过 |
+| 自动化测试 | 176 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| Git | `main` 已合并端到端策略恢复；当前开发分支为 `feat/glossary-qa`，`origin` 已关联 GitHub |
+| Git | 当前分支为 `main`，跟踪 `origin/main`，`origin` 已关联 GitHub |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 
@@ -74,6 +74,9 @@
 - 视频码率按分辨率选择，不再使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数。
 - 输出媒体会检查视频流、音频流、AAC 音频、分辨率和时长偏差。
 - 烧录派生指纹包含译文 checksum、媒体身份、编码方式和字体。`continue` 只复用 artifact 与指纹都有效的成品。
+- `preview` 可按 cue 或起始时间生成短片段预览；未显式覆盖时复用工作流保存的烧录媒体、字体和编码设置，不修改正式烧录 stage。
+- 预览生成 `preview.ass` 和 `preview.mp4` checksum artifact；译文局部重译或重新分段后旧预览会失效。
+- 预览输出不能覆盖源媒体、Job 文件或正式 artifact；路径别名和硬链接也会在写入前检查。
 
 ### Job、恢复和事件
 
@@ -81,7 +84,7 @@
 - 普通 CLI 默认把人类可读的阶段、下载、翻译批次、转写和烧录进度写入 stderr，最终路径继续写入 stdout。
 - `job_started` 在 Job 首次持久化后立即携带 `job_file`，早期素材获取失败也能定位任务文件。
 - 已有 Job 的原子命令会从 CLI 参数预先记录任务路径，早期失败不会误报为任务尚未创建。
-- Ctrl-C 返回退出码 130，并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`。
+- Ctrl-C 返回退出码 130，并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`；独立预览中断不会生成正式工作流恢复计划，而是提示重新运行 preview。
 - artifact 使用 SHA-256 checksum，`verify` 会重新计算。
 - `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。
 - 远程端到端 Job 在检查或下载阶段失败后，可以通过 `continue` 在同一个 Job 中重试；checksum 有效的远程元数据、字幕和媒体会被复用。
@@ -179,6 +182,7 @@ uv run --no-sync xvt status "/path/to/job.json"
 uv run --no-sync xvt verify "/path/to/job.json" --json
 uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
+uv run --no-sync xvt preview "/path/to/job.json" --cue 18 --duration 15
 ```
 
 Agent 翻译回填：
@@ -241,6 +245,8 @@ translated-cues.json
 translated.srt
 bilingual.srt
 bilingual.ass
+preview.ass
+preview.mp4
 qa.json
 qa-translated.json
 burned.mp4
@@ -263,7 +269,7 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- 没有短片段预览命令和分段预设。
+- 没有保守、平衡和紧凑等分段预设。
 - 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
@@ -271,11 +277,11 @@ media-qa.json
 
 ## 后续任务规划
 
-### P1：预览和分段预设
+### P1：分段预设
 
-增加短片段预览，避免整段烧录后才检查字体、位置和换行。同时提供保守、平衡和紧凑预设，把现有分段参数收敛为可理解的用户选项。
+提供保守、平衡和紧凑预设，把现有分段参数收敛为可理解的用户选项。
 
-建议验收：预览复用正式 ASS 和烧录参数，产物可明确标记为 preview，不覆盖正式视频。
+建议验收：预设只影响 ASR 分段，不改写用户导入字幕；配置进入 Job，恢复时保持一致。
 
 ### P2：纯字幕、批处理和 GUI
 

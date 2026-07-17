@@ -15,6 +15,82 @@ from xvt.workflow import WorkflowResult
 
 
 class CliTest(unittest.TestCase):
+    def test_preview_forwards_clip_and_render_options(self) -> None:
+        output = StringIO()
+        with (
+            patch(
+                "xvt.cli.preview_translated_job", return_value=Path("/tmp/preview.mp4")
+            ) as preview,
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "preview",
+                    "/tmp/job.json",
+                    "--cue",
+                    "18",
+                    "--duration",
+                    "12.5",
+                    "--media",
+                    "/tmp/input.mp4",
+                    "--output",
+                    "/tmp/custom-preview.mp4",
+                    "--software",
+                    "--target-font",
+                    "Target Font",
+                    "--source-font",
+                    "Source Font",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(preview.call_args.kwargs["cue_id"], 18)
+        self.assertEqual(preview.call_args.kwargs["duration_seconds"], 12.5)
+        self.assertEqual(preview.call_args.kwargs["media"], "/tmp/input.mp4")
+        self.assertFalse(preview.call_args.kwargs["hardware_encoding"])
+        self.assertEqual(preview.call_args.kwargs["target_font"], "Target Font")
+        self.assertEqual(output.getvalue(), "/tmp/preview.mp4\n")
+
+    def test_preview_interrupt_has_preview_specific_recovery_message(self) -> None:
+        error_output = StringIO()
+        with (
+            patch("xvt.cli.preview_translated_job", side_effect=KeyboardInterrupt),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["preview", "/tmp/job.json"])
+
+        self.assertEqual(return_code, 130)
+        failure = error_output.getvalue()
+        self.assertIn("预览已中断", failure)
+        self.assertIn("重新执行原 preview 命令", failure)
+        self.assertNotIn("xvt verify", failure)
+
+    def test_preview_leaves_encoding_unspecified_without_software_flag(self) -> None:
+        with patch(
+            "xvt.cli.preview_translated_job", return_value=Path("/tmp/preview.mp4")
+        ) as preview:
+            return_code = main(["preview", "/tmp/job.json"])
+
+        self.assertEqual(return_code, 0)
+        self.assertIsNone(preview.call_args.kwargs["hardware_encoding"])
+
+    def test_jsonl_preview_interrupt_has_no_workflow_recovery_plan(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        with (
+            patch("xvt.cli.preview_translated_job", side_effect=KeyboardInterrupt),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["preview", "/tmp/job.json", "--events-jsonl"])
+
+        event = json.loads(output.getvalue())
+        self.assertEqual(return_code, 130)
+        self.assertEqual(event["type"], "cli_failed")
+        self.assertNotIn("recovery_plan", event["data"])
+        self.assertEqual(event["data"]["next_action"], "rerun_preview")
+        self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
+
     def test_resegment_translation_shows_continue_command_for_workflow_jobs(self) -> None:
         output = StringIO()
         job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})

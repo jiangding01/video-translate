@@ -46,23 +46,34 @@ def build_burn_command(
     hardware_encoding: bool = True,
     video_bitrate: str = "5M",
     progress: bool = False,
+    start_ms: int | None = None,
+    clip_duration_ms: int | None = None,
 ) -> list[str]:
     video_codec = "h264_videotoolbox" if hardware_encoding else "libx264"
     subtitle_filter = f"ass=filename='{escape_filter_path(subtitle_path)}'"
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(media_path),
-        "-vf",
-        subtitle_filter,
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a?",
-        "-c:v",
-        video_codec,
-    ]
+    command = ["ffmpeg", "-y"]
+    if start_ms is not None:
+        command.extend(["-ss", f"{start_ms / 1000:.3f}"])
+    command.extend(
+        [
+            "-i",
+            str(media_path),
+        ]
+    )
+    if clip_duration_ms is not None:
+        command.extend(["-t", f"{clip_duration_ms / 1000:.3f}"])
+    command.extend(
+        [
+            "-vf",
+            subtitle_filter,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            video_codec,
+        ]
+    )
     if hardware_encoding:
         command.extend(["-b:v", video_bitrate])
     else:
@@ -82,6 +93,9 @@ def burn_subtitles(
     hardware_encoding: bool = True,
     video_bitrate: str = "5M",
     duration_ms: int | None = None,
+    start_ms: int | None = None,
+    clip_duration_ms: int | None = None,
+    progress_event_type: str = "burn_progress",
     event_sink: EventSink | None = None,
     runner: CommandRunner = run_command,
 ) -> Path:
@@ -94,6 +108,10 @@ def burn_subtitles(
         raise ValueError(f"subtitle file does not exist: {subtitle_path}")
     if not output_path.is_absolute():
         raise ValueError("output path must be absolute")
+    if start_ms is not None and start_ms < 0:
+        raise ValueError("start_ms must not be negative")
+    if clip_duration_ms is not None and clip_duration_ms <= 0:
+        raise ValueError("clip_duration_ms must be positive")
 
     media_path = media_path.resolve()
     subtitle_path = subtitle_path.resolve()
@@ -118,7 +136,7 @@ def burn_subtitles(
                 out_time_ms = 0
             event_sink(
                 create_event(
-                    "burn_progress",
+                    progress_event_type,
                     out_time_ms=out_time_ms,
                     duration_ms=duration_ms,
                     percent=(
@@ -140,6 +158,8 @@ def burn_subtitles(
                 hardware_encoding=hardware_encoding,
                 video_bitrate=video_bitrate,
                 progress=event_sink is not None,
+                start_ms=start_ms,
+                clip_duration_ms=clip_duration_ms,
             ),
             **runner_kwargs,
         )
@@ -154,6 +174,8 @@ def burn_subtitles(
                 hardware_encoding=False,
                 video_bitrate=video_bitrate,
                 progress=event_sink is not None,
+                start_ms=start_ms,
+                clip_duration_ms=clip_duration_ms,
             ),
             **runner_kwargs,
         )

@@ -31,6 +31,19 @@ class BurnTest(unittest.TestCase):
         self.assertEqual(recommended_video_bitrate(1440), "9M")
         self.assertEqual(recommended_video_bitrate(2160), "16M")
 
+    def test_builds_precise_preview_clip_command(self) -> None:
+        command = build_burn_command(
+            Path("/tmp/input.mp4"),
+            Path("/tmp/subtitle.ass"),
+            Path("/tmp/output.mp4"),
+            start_ms=12500,
+            clip_duration_ms=15000,
+        )
+
+        self.assertEqual(command[2:4], ["-ss", "12.500"])
+        self.assertEqual(command[command.index("-t") + 1], "15.000")
+        self.assertLess(command.index("-ss"), command.index("-i"))
+
     def test_escapes_ffmpeg_filter_path(self) -> None:
         escaped = escape_filter_path(Path("/tmp/a:b's.ass"))
 
@@ -110,6 +123,34 @@ class BurnTest(unittest.TestCase):
         self.assertEqual(events[0].type, "burn_progress")
         self.assertEqual(events[0].data["percent"], 50.0)
         self.assertEqual(events[0].data["frame"], "12")
+
+    def test_preview_can_use_a_distinct_progress_event(self) -> None:
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            subtitles = root / "subtitle.ass"
+            media.write_bytes(b"video")
+            subtitles.write_text("subtitle", encoding="utf-8")
+
+            def runner(args, **kwargs):
+                callback = kwargs["line_callback"]
+                callback("stdout", "out_time_us=1000000")
+                callback("stdout", "progress=end")
+                return CommandResult(tuple(args), 0, "", "")
+
+            burn_subtitles(
+                media,
+                subtitles,
+                root / "preview.mp4",
+                duration_ms=1000,
+                progress_event_type="preview_progress",
+                event_sink=events.append,
+                runner=runner,
+            )
+
+        self.assertEqual(events[0].type, "preview_progress")
+        self.assertEqual(events[0].data["percent"], 100.0)
 
     def test_does_not_mask_non_encoder_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
