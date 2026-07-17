@@ -6,6 +6,7 @@ from unittest.mock import patch
 from xvt.job_store import create_job, get_job_file, save_job
 from xvt.models import StageName, StageStatus
 from xvt.pipeline import TranslationRunResult
+from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 
 
@@ -33,6 +34,7 @@ class WorkflowTest(unittest.TestCase):
                         input="/tmp/video.mp4",
                         output=directory,
                         target_language="zh-CN",
+                        translation_style="natural",
                         burn=True,
                     ),
                     event_sink=events.append,
@@ -44,11 +46,13 @@ class WorkflowTest(unittest.TestCase):
         self.assertFalse(transcribe.call_args.kwargs["emit_job_completed"])
         workflow_config = transcribe.call_args.kwargs["workflow_config"]
         self.assertEqual(workflow_config["target_language"], "zh-CN")
+        self.assertEqual(workflow_config["translation_policy"], {"style": "natural", "terms": []})
         self.assertEqual(
             workflow_config["requested_outputs"],
             ["translated_subtitles", "bilingual_subtitles", "burned_video"],
         )
         translate.assert_called_once()
+        self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy(style="natural"))
         burn.assert_called_once()
         self.assertEqual(events[0].type, "workflow_started")
         self.assertEqual(events[1].data["steps"], ["transcribe", "translate", "burn"])
@@ -137,6 +141,48 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.status, "awaiting_input")
         self.assertEqual(result.artifacts, (Path("/tmp/translation-batches.json"),))
+
+    def test_continue_reuses_persisted_translation_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {
+                    "workflow": {
+                        "target_language": "zh-CN",
+                        "translation_policy": {
+                            "style": "natural",
+                            "terms": [{"source": "OpenAI", "target": "OpenAI"}],
+                        },
+                        "burn": False,
+                    }
+                },
+            )
+            save_job(job)
+            with (
+                patch(
+                    "xvt.workflow.valid_artifact_path",
+                    side_effect=lambda _job, kind: (
+                        Path("/tmp/source-cues.json") if kind == "source_cues" else None
+                    ),
+                ),
+                patch(
+                    "xvt.workflow.run_translation",
+                    return_value=TranslationRunResult(
+                        "openai-compatible", (Path("/tmp/translated.srt"),)
+                    ),
+                ) as translate,
+            ):
+                result = continue_workflow(get_job_file(job))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            translate.call_args.kwargs["policy"],
+            TranslationPolicy(
+                style="natural",
+                terms=(GlossaryTerm("OpenAI", "OpenAI"),),
+            ),
+        )
 
     def test_continue_burns_after_agent_translation_was_applied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

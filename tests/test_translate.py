@@ -12,6 +12,7 @@ from xvt.translate import (
     load_translation_policy,
     map_subtitle_translations,
     parse_translation_response,
+    translation_policy_from_dict,
 )
 
 
@@ -69,6 +70,25 @@ class TranslateTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "duplicate source term"):
                 load_translation_policy(glossary, style="concise")
+
+    def test_policy_from_dict_normalizes_and_validates_terms(self) -> None:
+        policy = translation_policy_from_dict(
+            {
+                "style": "natural",
+                "terms": [
+                    {"source": " Whisper ", "target": " Whisper "},
+                    {"source": "OpenAI", "target": "OpenAI"},
+                ],
+            }
+        )
+
+        self.assertEqual(policy.style, "natural")
+        self.assertEqual(
+            policy.terms,
+            (GlossaryTerm("OpenAI", "OpenAI"), GlossaryTerm("Whisper", "Whisper")),
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported style"):
+            translation_policy_from_dict({"style": "creative"})
 
     def test_translation_response_requires_exact_ids(self) -> None:
         batch = build_translation_batches(

@@ -1082,6 +1082,7 @@ def run_translation(
     batch_size: int = 40,
     max_retries: int = 2,
     timeout_seconds: float = 60,
+    policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
     translation_style: str = "faithful",
     event_sink: EventSink | None = None,
@@ -1091,7 +1092,7 @@ def run_translation(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     job = load_job(job_file)
-    policy = load_translation_policy(glossary, style=translation_style)
+    resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
     cues = _load_cues(_artifact_path(job, "source_cues"))
     source_language = next(
         (cue.source_language for cue in cues if cue.source_language),
@@ -1109,7 +1110,7 @@ def run_translation(
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
-        policy=policy,
+        policy=resolved_policy,
         event_sink=event_sink,
     )
     if mode == "agent":
@@ -1133,7 +1134,7 @@ def run_translation(
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
-        policy=policy,
+        policy=resolved_policy,
     )
     source_cues_checksum = _checksum(_artifact_path(job, "source_cues"))
     fingerprint_payload = {
@@ -1145,7 +1146,7 @@ def run_translation(
         "model": provider_config.model,
         "batch_size": batch_size,
         "prompt_version": TRANSLATION_PROMPT_VERSION,
-        "translation_policy": policy.to_dict(),
+        "translation_policy": resolved_policy.to_dict(),
     }
     translation_fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

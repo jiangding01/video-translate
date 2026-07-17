@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--batch-size", type=int, default=40)
     run_parser.add_argument("--max-retries", type=int, default=2)
     run_parser.add_argument("--timeout-seconds", type=float, default=60)
+    run_parser.add_argument("--glossary")
+    run_parser.add_argument(
+        "--translation-style",
+        choices=["faithful", "natural", "concise"],
+        default="faithful",
+    )
     run_parser.add_argument("--burn", action="store_true")
     run_parser.add_argument("--burn-media")
     run_parser.add_argument("--burn-output")
@@ -475,6 +481,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 batch_size=arguments.batch_size,
                 max_retries=arguments.max_retries,
                 timeout_seconds=arguments.timeout_seconds,
+                glossary=arguments.glossary,
+                translation_style=arguments.translation_style,
                 burn=arguments.burn,
                 burn_media=arguments.burn_media,
                 burn_output=arguments.burn_output,
