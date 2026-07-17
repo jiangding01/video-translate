@@ -146,6 +146,25 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 
 `translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。译文 QA 会确定性检查命中源 cue 的术语是否包含要求的目标词；违规会以 `glossary_violation` 写入 `qa-translated.json`，阻断渲染和烧录。
 
+对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
+
+```bash
+uv run --no-sync xvt retranslate-cues "/path/to/job.json" \
+  --cue 18 --cue 24 \
+  --target-language zh-CN
+```
+
+Agent 模式会生成 `cue-retranslation-batches.json`，完成后将只包含这些 cue ID 的响应回填：
+
+```bash
+uv run --no-sync xvt apply-cue-retranslation "/path/to/job.json" \
+  "/path/to/cue-retranslation-response.json" \
+  --cue 18 --cue 24 \
+  --target-language zh-CN
+```
+
+若端到端 Job 请求烧录，QA 通过并生成字幕后再执行 `xvt continue JOB`。局部修复不支持改变目标语言，也不接受重复或不存在的 cue ID。
+
 不使用 API 时，可走 Agent 协议：
 
 ```bash
@@ -232,7 +251,7 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
-`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
 ## 开发
 

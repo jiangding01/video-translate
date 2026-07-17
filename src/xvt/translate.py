@@ -177,6 +177,64 @@ def build_translation_batches(
     return batches
 
 
+def build_cue_retranslation_batches(
+    cues: list[Cue],
+    cue_ids: tuple[int, ...],
+    *,
+    source_language: str,
+    target_language: str,
+    policy: TranslationPolicy | None = None,
+    context_size: int = 2,
+) -> list[TranslationBatch]:
+    if not cue_ids:
+        raise ValueError("at least one cue id is required")
+    if len(set(cue_ids)) != len(cue_ids):
+        raise ValueError("cue ids must not contain duplicates")
+
+    speed_limit = reading_speed_limit(target_language)
+    line_limit = character_limit(target_language)
+    resolved_policy = policy or TranslationPolicy()
+    items = [
+        TranslationItem(
+            cue.id,
+            cue.source_text,
+            cue.end_ms - cue.start_ms,
+            max(1, min(line_limit, (cue.end_ms - cue.start_ms) * speed_limit // 1000)),
+        )
+        for cue in cues
+    ]
+    positions = {item.id: index for index, item in enumerate(items)}
+    if len(positions) != len(items):
+        raise ValueError("source cues contains duplicate cue ids")
+    missing = sorted(set(cue_ids) - positions.keys())
+    if missing:
+        raise ValueError(f"source cues do not contain ids: {missing}")
+
+    batches = []
+    for batch_id, cue_id in enumerate(cue_ids, 1):
+        position = positions[cue_id]
+        item = items[position]
+        batches.append(
+            TranslationBatch(
+                id=batch_id,
+                source_language=source_language,
+                target_language=target_language,
+                items=(item,),
+                context_before=tuple(items[max(0, position - context_size) : position]),
+                context_after=tuple(items[position + 1 : position + 1 + context_size]),
+                policy=TranslationPolicy(
+                    style=resolved_policy.style,
+                    terms=tuple(
+                        term
+                        for term in resolved_policy.terms
+                        if term.source.casefold() in item.source_text.casefold()
+                    ),
+                ),
+            )
+        )
+    return batches
+
+
 def parse_translation_response(
     batch: TranslationBatch,
     response: list[dict[str, Any]],
