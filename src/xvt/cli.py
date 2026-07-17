@@ -26,6 +26,7 @@ from xvt.pipeline import (
 )
 from xvt.process import CommandError
 from xvt.recovery import RecoveryPlan, build_recovery_plan, verify_job
+from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 
 
@@ -77,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--translation-style",
         choices=["faithful", "natural", "concise"],
         default="faithful",
+    )
+    run_parser.add_argument(
+        "--segmentation-preset",
+        choices=sorted(SEGMENTATION_PRESETS),
+        default="balanced",
     )
     run_parser.add_argument("--burn", action="store_true")
     run_parser.add_argument("--burn-media")
@@ -555,6 +561,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 timeout_seconds=arguments.timeout_seconds,
                 glossary=arguments.glossary,
                 translation_style=arguments.translation_style,
+                segmentation_preset=arguments.segmentation_preset,
                 burn=arguments.burn,
                 burn_media=arguments.burn_media,
                 burn_output=arguments.burn_output,

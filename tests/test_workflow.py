@@ -35,6 +35,7 @@ class WorkflowTest(unittest.TestCase):
                         output=directory,
                         target_language="zh-CN",
                         translation_style="natural",
+                        segmentation_preset="compact",
                         burn=True,
                     ),
                     event_sink=events.append,
@@ -47,6 +48,8 @@ class WorkflowTest(unittest.TestCase):
         workflow_config = transcribe.call_args.kwargs["workflow_config"]
         self.assertEqual(workflow_config["target_language"], "zh-CN")
         self.assertEqual(workflow_config["translation_policy"], {"style": "natural", "terms": []})
+        self.assertEqual(workflow_config["segmentation_preset"], "compact")
+        self.assertEqual(transcribe.call_args.kwargs["segmentation_preset"], "compact")
         self.assertEqual(
             workflow_config["requested_outputs"],
             ["translated_subtitles", "bilingual_subtitles", "burned_video"],
@@ -117,6 +120,16 @@ class WorkflowTest(unittest.TestCase):
     def test_burn_requires_target_language(self) -> None:
         with self.assertRaisesRegex(ValueError, "--burn requires --target-language"):
             run_workflow(WorkflowOptions(input="/tmp/video.mp4", output="/tmp/output", burn=True))
+
+    def test_rejects_unknown_segmentation_preset(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--segmentation-preset"):
+            run_workflow(
+                WorkflowOptions(
+                    input="/tmp/video.mp4",
+                    output="/tmp/output",
+                    segmentation_preset="unknown",
+                )
+            )
 
     def test_continue_waits_for_agent_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

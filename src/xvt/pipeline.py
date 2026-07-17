@@ -33,7 +33,7 @@ from xvt.qa import (
 )
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
-from xvt.segment import segment_transcript, split_cue_by_parts
+from xvt.segment import segment_transcript, segmentation_config_for_preset, split_cue_by_parts
 from xvt.subtitles import load_subtitles, normalize_display_text, save_subtitles
 from xvt.transcribe import transcribe_audio
 from xvt.translate import (
@@ -516,7 +516,13 @@ def _process_acquired_media(
             _set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
             current_stage = StageName.SEGMENT
             _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-            cues = segment_transcript(transcript, media_duration_ms=media_info.duration_ms)
+            cues = segment_transcript(
+                transcript,
+                segmentation_config_for_preset(
+                    str(job.config.get("segmentation_preset", "balanced"))
+                ),
+                media_duration_ms=media_info.duration_ms,
+            )
             if not cues:
                 raise RuntimeError("transcription produced no subtitle cues")
             _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
@@ -567,6 +573,7 @@ def run_local_transcription(
     align_subtitles: bool = False,
     minimum_alignment_confidence: float = 0.55,
     allow_low_confidence_alignment: bool = False,
+    segmentation_preset: str = "balanced",
     workflow_config: dict[str, Any] | None = None,
     event_sink: EventSink | None = None,
     emit_job_completed: bool = True,
@@ -585,6 +592,7 @@ def run_local_transcription(
             "align_subtitles": align_subtitles,
             "minimum_alignment_confidence": minimum_alignment_confidence,
             "allow_low_confidence_alignment": allow_low_confidence_alignment,
+            "segmentation_preset": segmentation_preset,
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
@@ -636,6 +644,7 @@ def run_remote_transcription(
     align_subtitles: bool = False,
     minimum_alignment_confidence: float = 0.55,
     allow_low_confidence_alignment: bool = False,
+    segmentation_preset: str = "balanced",
     cookies_from_browser: str | None = None,
     proxy: str | None = None,
     youtube_subtitles: bool = False,
@@ -655,6 +664,7 @@ def run_remote_transcription(
             "align_subtitles": align_subtitles,
             "minimum_alignment_confidence": minimum_alignment_confidence,
             "allow_low_confidence_alignment": allow_low_confidence_alignment,
+            "segmentation_preset": segmentation_preset,
             "cookies_from_browser": cookies_from_browser,
             "proxy_enabled": bool(proxy),
             "youtube_subtitles": youtube_subtitles,
@@ -869,6 +879,7 @@ def run_transcription(
     align_subtitles: bool = False,
     minimum_alignment_confidence: float = 0.55,
     allow_low_confidence_alignment: bool = False,
+    segmentation_preset: str = "balanced",
     cookies_from_browser: str | None = None,
     proxy: str | None = None,
     youtube_subtitles: bool = False,
@@ -889,6 +900,7 @@ def run_transcription(
             align_subtitles=align_subtitles,
             minimum_alignment_confidence=minimum_alignment_confidence,
             allow_low_confidence_alignment=allow_low_confidence_alignment,
+            segmentation_preset=segmentation_preset,
             cookies_from_browser=cookies_from_browser,
             proxy=proxy,
             youtube_subtitles=youtube_subtitles,
@@ -909,6 +921,7 @@ def run_transcription(
         align_subtitles=align_subtitles,
         minimum_alignment_confidence=minimum_alignment_confidence,
         allow_low_confidence_alignment=allow_low_confidence_alignment,
+        segmentation_preset=segmentation_preset,
         workflow_config=workflow_config,
         event_sink=event_sink,
         emit_job_completed=emit_job_completed,
@@ -1020,7 +1033,17 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         cues = list(alignment.cues)
     else:
         _set_stage(job, StageName.SEGMENT, StageStatus.RUNNING, event_sink)
-        cues = segment_transcript(transcript, media_duration_ms=media_info.duration_ms)
+        try:
+            cues = segment_transcript(
+                transcript,
+                segmentation_config_for_preset(
+                    str(job.config.get("segmentation_preset", "balanced"))
+                ),
+                media_duration_ms=media_info.duration_ms,
+            )
+        except ValueError as error:
+            _set_stage(job, StageName.SEGMENT, StageStatus.FAILED, event_sink, error=str(error))
+            raise
         if not cues:
             _set_stage(
                 job,

@@ -18,6 +18,7 @@ from xvt.pipeline import (
     run_translation,
 )
 from xvt.recovery import valid_artifact_path
+from xvt.segment import SEGMENTATION_PRESETS
 from xvt.translate import TranslationPolicy, load_translation_policy, translation_policy_from_dict
 
 
@@ -47,6 +48,7 @@ class WorkflowOptions:
     timeout_seconds: float = 60
     glossary: str | Path | None = None
     translation_style: str = "faithful"
+    segmentation_preset: str = "balanced"
     burn: bool = False
     burn_media: str | Path | None = None
     burn_output: str | Path | None = None
@@ -85,6 +87,8 @@ class WorkflowOptions:
             raise ValueError("--glossary requires --target-language")
         if self.glossary and self.translation_subtitles:
             raise ValueError("--glossary cannot be combined with --translation-subtitles")
+        if self.segmentation_preset not in SEGMENTATION_PRESETS:
+            raise ValueError("--segmentation-preset must be conservative, balanced, or compact")
 
     def persisted_config(self, policy: TranslationPolicy | None = None) -> dict[str, object]:
         requested_outputs = []
@@ -108,6 +112,7 @@ class WorkflowOptions:
             "max_retries": self.max_retries,
             "timeout_seconds": self.timeout_seconds,
             "translation_policy": policy.to_dict() if policy else None,
+            "segmentation_preset": self.segmentation_preset,
             "burn": self.burn,
             "burn_media": (
                 str(Path(self.burn_media).expanduser().resolve()) if self.burn_media else None
@@ -217,6 +222,7 @@ def run_workflow(
             align_subtitles=options.align_subtitles,
             minimum_alignment_confidence=options.minimum_alignment_confidence,
             allow_low_confidence_alignment=options.allow_low_confidence_alignment,
+            segmentation_preset=options.segmentation_preset,
             cookies_from_browser=options.cookies_from_browser,
             proxy=options.proxy,
             youtube_subtitles=options.youtube_subtitles,

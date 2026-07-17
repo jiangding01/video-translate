@@ -523,6 +523,8 @@ class CliTest(unittest.TestCase):
                     "/tmp/glossary.json",
                     "--translation-style",
                     "concise",
+                    "--segmentation-preset",
+                    "compact",
                     "--burn",
                 ]
             )
@@ -534,6 +536,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(options.model, "translate-model")
         self.assertEqual(options.glossary, "/tmp/glossary.json")
         self.assertEqual(options.translation_style, "concise")
+        self.assertEqual(options.segmentation_preset, "compact")
         self.assertTrue(options.burn)
 
     def test_align_subtitles_requires_subtitle_file(self) -> None:
