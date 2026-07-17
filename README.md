@@ -192,6 +192,14 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 固定为“译文一行 + 原文一行”。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的单行限制。
 
+若译文 QA 因超过硬显示阈值而失败，可对具有词级时间戳的 ASR cue 执行重切：
+
+```bash
+uv run --no-sync xvt resegment-translation "/path/to/job.json"
+```
+
+该命令只按语义优先边界重切超宽 cue，不会按字符拆旧译文；它会重建 `source-cues.json` 和 `source.srt`，使旧翻译批次、译文、QA、ASS 与烧录产物失效，并写入 `translation-resegmentation.json` 审计报告。端到端 Job 随后执行 `xvt continue JOB`，原子 Job 则按提示重新执行 `xvt translate`。用户导入的源字幕没有 ASR 词级时间戳，命令会拒绝改写其时间轴。
+
 ## 恢复与诊断
 
 ```bash
@@ -205,7 +213,7 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
-`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
 ## 开发
 

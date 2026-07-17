@@ -17,6 +17,7 @@ from xvt.pipeline import (
     inspect_input,
     interrupt_running_stage,
     prepare_agent_translation,
+    resegment_translation,
     resume_job,
     run_translation,
 )
@@ -142,6 +143,13 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument("--max-retries", type=int, default=2)
     translate_parser.add_argument("--timeout-seconds", type=float, default=60)
     translate_parser.add_argument("--events-jsonl", action="store_true")
+
+    resegment_parser = subparsers.add_parser(
+        "resegment-translation",
+        help="Re-segment overflowing ASR cues and invalidate their translations",
+    )
+    resegment_parser.add_argument("job_file")
+    resegment_parser.add_argument("--events-jsonl", action="store_true")
 
     burn_parser = subparsers.add_parser("burn", help="Burn bilingual ASS into a video")
     burn_parser.add_argument("job_file")
@@ -613,6 +621,36 @@ def _run_command(arguments: argparse.Namespace) -> int:
             print(f"mode: {result.mode}")
             for path in result.paths:
                 print(path)
+        return 0
+
+    if arguments.command == "resegment-translation":
+        event_sink = _event_sink(arguments)
+        result = resegment_translation(arguments.job_file, event_sink=event_sink)
+        if arguments.events_jsonl:
+            _complete(
+                arguments,
+                changed=result.changed,
+                artifacts=[
+                    str(path)
+                    for path in (result.source_cues_path, result.report_path)
+                    if path is not None
+                ],
+            )
+        elif not result.changed:
+            print("没有译文 cue 超过硬显示阈值，任务未改动。")
+        else:
+            print(f"已重切源字幕: {result.source_cues_path}")
+            print(f"审计报告: {result.report_path}")
+            job = load_job(arguments.job_file)
+            if isinstance(job.config.get("workflow"), dict):
+                print(f'继续重翻译: xvt continue "{arguments.job_file}"')
+            else:
+                target_language = job.config.get("target_language")
+                if isinstance(target_language, str) and target_language:
+                    print(
+                        f'重新翻译: xvt translate "{arguments.job_file}" '
+                        f"--target-language {target_language}"
+                    )
         return 0
 
     if arguments.command == "burn":

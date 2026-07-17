@@ -78,35 +78,70 @@ def _break_penalty(words: list[Word], index: int) -> int:
     return 4
 
 
+def _partition_words(
+    words: list[Word],
+    part_count: int,
+    *,
+    max_width: int | None = None,
+) -> list[list[Word]] | None:
+    target_width = display_width(_text(words)) / part_count
+    best: dict[tuple[int, int], tuple[int, list[int]]] = {(0, 0): (0, [])}
+    for chunk_count in range(part_count):
+        for (start, completed), (cost, cuts) in tuple(best.items()):
+            if completed != chunk_count:
+                continue
+            last_end = len(words) - (part_count - chunk_count - 1)
+            for end in range(start + 1, last_end + 1):
+                width = display_width(_text(words[start:end]))
+                if max_width is not None and width > max_width:
+                    break
+                chunk_cost = round(abs(width - target_width))
+                if len(words[start:end]) == 1 and len(words) > part_count:
+                    chunk_cost += max_width or round(target_width)
+                if end < len(words):
+                    chunk_cost += _break_penalty(words, end) * (max_width or round(target_width))
+                key = (end, completed + 1)
+                candidate = (cost + chunk_cost, [*cuts, end])
+                if key not in best or candidate[0] < best[key][0]:
+                    best[key] = candidate
+    result = best.get((len(words), part_count))
+    if result:
+        boundaries = [0, *result[1][:-1]]
+        return [words[start:end] for start, end in zip(boundaries, result[1])]
+    return None
+
+
 def _split_by_width(words: list[Word], max_width: int) -> list[list[Word]]:
     total_width = display_width(_text(words))
     minimum_parts = max(1, ceil(total_width / max_width))
     for part_count in range(min(minimum_parts, len(words)), len(words) + 1):
-        target_width = total_width / part_count
-        best: dict[tuple[int, int], tuple[int, list[int]]] = {(0, 0): (0, [])}
-        for chunk_count in range(part_count):
-            for (start, completed), (cost, cuts) in tuple(best.items()):
-                if completed != chunk_count:
-                    continue
-                last_end = len(words) - (part_count - chunk_count - 1)
-                for end in range(start + 1, last_end + 1):
-                    width = display_width(_text(words[start:end]))
-                    if width > max_width:
-                        break
-                    chunk_cost = round(abs(width - target_width))
-                    if len(words[start:end]) == 1 and len(words) > part_count:
-                        chunk_cost += max_width
-                    if end < len(words):
-                        chunk_cost += _break_penalty(words, end) * max_width
-                    key = (end, completed + 1)
-                    candidate = (cost + chunk_cost, [*cuts, end])
-                    if key not in best or candidate[0] < best[key][0]:
-                        best[key] = candidate
-        result = best.get((len(words), part_count))
-        if result:
-            boundaries = [0, *result[1][:-1]]
-            return [words[start:end] for start, end in zip(boundaries, result[1])]
+        if chunks := _partition_words(words, part_count, max_width=max_width):
+            return chunks
     return [[word] for word in words]
+
+
+def split_cue_by_parts(cue: Cue, part_count: int, *, tail_padding_ms: int = 150) -> list[Cue]:
+    if part_count < 2:
+        raise ValueError("part_count must be at least 2")
+    if len(cue.words) < part_count:
+        raise ValueError(f"cue {cue.id} has insufficient word timestamps for re-segmentation")
+    chunks = _partition_words(cue.words, part_count)
+    if chunks is None:
+        raise ValueError(f"cue {cue.id} cannot be re-segmented")
+
+    split_cues = [_to_cue(chunk, cue.source_language or "unknown") for chunk in chunks]
+    for index, split_cue in enumerate(split_cues):
+        split_cue.id = 0
+        split_cue.provenance = "asr_resegmented"
+        split_cue.start_ms = cue.start_ms if index == 0 else split_cue.start_ms
+        if index + 1 < len(split_cues):
+            split_cue.end_ms = min(
+                split_cue.end_ms + tail_padding_ms,
+                split_cues[index + 1].start_ms,
+            )
+        else:
+            split_cue.end_ms = cue.end_ms
+    return split_cues
 
 
 def _append_cues(cues: list[Cue], words: list[Word], language: str, max_width: int) -> None:

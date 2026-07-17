@@ -9,12 +9,27 @@ from unittest.mock import patch
 from xvt.cli import main
 from xvt.events import create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
-from xvt.models import StageName, StageStatus
-from xvt.pipeline import TranslationRunResult
+from xvt.models import Job, StageName, StageStatus
+from xvt.pipeline import ResegmentationResult, TranslationRunResult
 from xvt.workflow import WorkflowResult
 
 
 class CliTest(unittest.TestCase):
+    def test_resegment_translation_shows_continue_command_for_workflow_jobs(self) -> None:
+        output = StringIO()
+        job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})
+        result = ResegmentationResult(True, Path("/tmp/source-cues.json"), Path("/tmp/report.json"))
+
+        with (
+            patch("xvt.cli.resegment_translation", return_value=result),
+            patch("xvt.cli.load_job", return_value=job),
+            redirect_stdout(output),
+        ):
+            return_code = main(["resegment-translation", "/tmp/job.json"])
+
+        self.assertEqual(return_code, 0)
+        self.assertIn('xvt continue "/tmp/job.json"', output.getvalue())
+
     def test_inspect_prints_json(self) -> None:
         output = StringIO()
         with (
