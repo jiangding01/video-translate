@@ -88,6 +88,12 @@ Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`fai
 
 Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
 
+## 事件和用户反馈
+
+普通 CLI 默认把人类可读的进度写入 stderr，最终 Job 和产物路径保留在 stdout；`--events-jsonl` 则只在 stdout 写入结构化事件。下载、翻译、转写和烧录都通过同一事件边界对外暴露，不要求调用者解析外部工具输出。
+
+`transcription_progress` 包含引擎、已处理/总毫秒数、经过时间和可选 ETA。faster-whisper 的分段生成器提供真实完成位置，因此发送 `determinate=true` 的百分比。MLX Whisper 的公开调用接口没有稳定进度回调，只发送 `determinate=false` 的启动和十秒心跳；词级时间戳通过验证后才发送最终 100%，空结果或异常不会伪造成成功。
+
 ## 时间轴策略
 
 - ASR 请求词级时间戳，segmenter 才能依据停顿和标点切分。
@@ -113,5 +119,5 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。AP
 1. 对超过硬显示阈值的 cue 做语义成对切分。
 2. 增加术语表、翻译风格、局部重译和 QA 定向修复。
 3. 增加预览输出与分段预设。
-4. 实现 Electron + React 桌面壳，只消费 JSONL 事件和 `job.json`，不复制业务逻辑；下载和烧录进度直接复用 CLI 事件。
+4. 实现 Electron + React 桌面壳，只消费 JSONL 事件和 `job.json`，不复制业务逻辑；下载、转写和烧录进度直接复用 CLI 事件。
 5. 最后评估目录批处理、队列、远程执行和 Web 服务。

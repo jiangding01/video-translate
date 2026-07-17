@@ -5,7 +5,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 ## 能力概览
 
 - 本地视频、音频、YouTube URL 输入
-- MLX Whisper 或 faster-whisper 转写，保留词级时间戳
+- MLX Whisper 或 faster-whisper 转写，保留词级时间戳；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
 - 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴
 - YouTube 人工字幕优先，允许显式回退自动字幕或 Whisper
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议
@@ -79,7 +79,7 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 
 请求烧录时，远程视频会在前置阶段下载一次；ASR 和后续烧录复用同一文件。
 
-普通运行无需额外参数即可在终端看到阶段进度。阶段切换会立即显示，下载和烧录会显示百分比、速度或剩余时间，翻译会显示当前批次。进度写入 stderr，最终 Job 和产物路径仍写入 stdout，现有脚本可以继续读取路径。
+普通运行无需额外参数即可在终端看到阶段进度。阶段切换会立即显示，下载、faster-whisper 转写和烧录会显示百分比、速度或剩余时间，MLX Whisper 会显示已运行时长，翻译会显示当前批次。进度写入 stderr，最终 Job 和产物路径仍写入 stdout，现有脚本可以继续读取路径。
 
 ### 2. 只创建源字幕作业
 
@@ -205,7 +205,7 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
-`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress` 和 `burn_progress`。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
 ## 开发
 

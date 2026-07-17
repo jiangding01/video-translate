@@ -12,10 +12,10 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 143 个，全部通过 |
+| 自动化测试 | 145 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| Git | 已初始化，当前开发分支为 `feat/recovery-plan`，`origin` 已关联 GitHub |
+| Git | `main` 已合并恢复计划；当前开发分支为 `feat/transcription-progress`，`origin` 已关联 GitHub |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 
@@ -37,7 +37,7 @@
 
 ### 转写和时间轴
 
-- 支持 MLX Whisper 和 faster-whisper，保留词级时间戳。
+- 支持 MLX Whisper 和 faster-whisper，保留词级时间戳；faster-whisper 提供真实百分比，MLX 提供运行时长心跳。
 - 分段综合停顿、标点、字幕时长和显示宽度。
 - 可导入 SRT、VTT、ASS 和 SSA 源字幕，默认保留用户时间轴。
 - `--align-subtitles` 会额外运行 ASR，并用顺序模糊对齐修正整体偏移或漂移。
@@ -73,7 +73,7 @@
 ### Job、恢复和事件
 
 - 每次 `run` 创建独立 Job，stage 和 artifact 写入 `job.json`。
-- 普通 CLI 默认把人类可读的阶段、下载、翻译批次和烧录进度写入 stderr，最终路径继续写入 stdout。
+- 普通 CLI 默认把人类可读的阶段、下载、翻译批次、转写和烧录进度写入 stderr，最终路径继续写入 stdout。
 - `job_started` 在 Job 首次持久化后立即携带 `job_file`，早期素材获取失败也能定位任务文件。
 - 已有 Job 的原子命令会从 CLI 参数预先记录任务路径，早期失败不会误报为任务尚未创建。
 - Ctrl-C 返回退出码 130，并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`。
@@ -84,7 +84,7 @@
 - `status`、普通失败输出和 Ctrl-C 共用结构化 `RecoveryPlan`，只复用 checksum 验证通过的 artifact。
 - 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
-- JSONL 已覆盖工作流、stage、artifact、翻译批次、下载进度和烧录进度。
+- JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。
 - `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
 - 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
 
@@ -247,7 +247,6 @@ media-qa.json
 - 超过硬显示阈值的长 cue 目前会被 QA 阻断，还没有自动做语义成对切分。
 - 没有术语表、专有名词保护、翻译风格或 cue 级局部重译。
 - 没有短片段预览命令和分段预设。
-- 下载、翻译和烧录已有进度事件，Whisper 转写还没有统一的细粒度进度。
 - 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
@@ -286,10 +285,6 @@ media-qa.json
 增加短片段预览，避免整段烧录后才检查字体、位置和换行。同时提供保守、平衡和紧凑预设，把现有分段参数收敛为可理解的用户选项。
 
 建议验收：预览复用正式 ASS 和烧录参数，产物可明确标记为 preview，不覆盖正式视频。
-
-### P2：转写进度
-
-为 MLX Whisper 和 faster-whisper 增加统一事件，至少包含已处理时长、总时长和百分比。事件名称和数据结构要能直接被未来 App 消费。
 
 ### P2：纯字幕、批处理和 GUI
 

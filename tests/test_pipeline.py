@@ -139,7 +139,7 @@ class PipelineTest(unittest.TestCase):
             with (
                 patch("xvt.pipeline.probe_media", return_value=media_info),
                 patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
-                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript) as transcribe,
             ):
                 job = run_local_transcription(
                     media,
@@ -158,6 +158,8 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(json.loads(qa_path.read_text())["status"], "pass")
             started = next(event for event in events if event.type == "job_started")
             self.assertEqual(started.data["job_file"], str(get_job_file(job)))
+            self.assertEqual(transcribe.call_args.kwargs["total_ms"], 5000)
+            self.assertTrue(callable(transcribe.call_args.kwargs["event_sink"]))
 
     def test_pipeline_failure_is_persisted_on_current_stage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -234,7 +236,13 @@ class PipelineTest(unittest.TestCase):
             with patch("xvt.pipeline.transcribe_audio", return_value=transcript) as transcribe:
                 resumed = resume_job(job_file)
 
-            transcribe.assert_called_once_with(audio_path, engine="mlx", language="en")
+            transcribe.assert_called_once_with(
+                audio_path,
+                engine="mlx",
+                language="en",
+                event_sink=None,
+                total_ms=5000,
+            )
             self.assertEqual(resumed.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
             self.assertIn("source_srt", {artifact.kind for artifact in resumed.artifacts})
 

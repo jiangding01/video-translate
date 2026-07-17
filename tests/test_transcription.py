@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 from xvt.models import Transcript, Word
 from xvt.segment import SegmentationConfig, segment_transcript
-from xvt.transcribe import transcribe_mlx, words_from_faster_segments, words_from_mlx_segments
+from xvt.transcribe import (
+    TranscriptionError,
+    transcribe_faster,
+    transcribe_mlx,
+    words_from_faster_segments,
+    words_from_mlx_segments,
+)
 
 
 class TranscriptionTest(unittest.TestCase):
@@ -42,6 +48,45 @@ class TranscriptionTest(unittest.TestCase):
         words = words_from_faster_segments([segment])
 
         self.assertEqual(words, (Word(" world", 1000, 1500, 0.8),))
+
+    def test_faster_whisper_emits_monotonic_progress(self) -> None:
+        first = SimpleNamespace(
+            words=[SimpleNamespace(word=" Hello", start=0.0, end=2.0, probability=0.9)],
+            end=2.0,
+        )
+        second = SimpleNamespace(
+            words=[SimpleNamespace(word=" world", start=2.0, end=5.0, probability=0.9)],
+            end=5.0,
+        )
+        info = SimpleNamespace(language="en", language_probability=0.9, duration=5.0)
+        model = SimpleNamespace(transcribe=lambda *_args, **_kwargs: (iter([first, second]), info))
+        faster_whisper = SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: model)
+        events = []
+
+        with patch("xvt.transcribe.importlib.import_module", return_value=faster_whisper):
+            transcript = transcribe_faster(
+                Path("audio.wav"), event_sink=events.append, total_ms=5000
+            )
+
+        progress = [event.data for event in events if event.type == "transcription_progress"]
+        self.assertEqual(transcript.engine, "faster")
+        self.assertEqual(progress[-1]["percent"], 100.0)
+        self.assertEqual(progress[-1]["processed_ms"], 5000)
+        self.assertTrue(
+            all(left["percent"] <= right["percent"] for left, right in zip(progress, progress[1:]))
+        )
+
+    def test_mlx_does_not_emit_completion_when_words_are_missing(self) -> None:
+        mlx_whisper = SimpleNamespace(transcribe=lambda *_args, **_kwargs: {"segments": []})
+        events = []
+
+        with patch("xvt.transcribe.importlib.import_module", return_value=mlx_whisper):
+            with self.assertRaises(TranscriptionError):
+                transcribe_mlx(Path("audio.wav"), event_sink=events.append, total_ms=5000)
+
+        progress = [event.data for event in events if event.type == "transcription_progress"]
+        self.assertEqual(len(progress), 1)
+        self.assertIsNone(progress[0]["percent"])
 
     def test_segments_on_sentence_end_and_pause(self) -> None:
         transcript = Transcript(
