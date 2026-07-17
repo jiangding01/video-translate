@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 147 个，全部通过 |
+| 自动化测试 | 151 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | Git | `main` 已合并转写进度；当前开发分支为 `feat/semantic-cue-splitting`，`origin` 已关联 GitHub |
@@ -53,6 +53,7 @@
 - 429、部分 4xx、5xx、网络异常和超时具有明确的重试分类。`Retry-After` 会优先使用。
 - 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID。
 - 批次包含相邻上下文。上下文只用于理解，输出仍按原 cue ID 回填。
+- `resegment-translation` 仅对超过硬显示阈值且具有 ASR 词级时间戳的 cue 按语义优先边界重切；它重建 source cue 和 source SRT，废弃旧翻译及其下游产物，禁止复用或字符拆分旧译文。
 
 ### 字幕和显示质量
 
@@ -253,12 +254,6 @@ media-qa.json
 - `continue` 只适用于带 `job.config.workflow` 的端到端 Job。旧 Job 继续使用原子命令。
 
 ## 后续任务规划
-
-### P0：翻译后超宽 cue 的重切与重翻译
-
-当译文超过硬显示阈值时，依据源 cue 的词级时间戳重新划分 source cue，并为每个新片段重新请求翻译。旧翻译 checkpoint 和 Agent 批次必须失效，不能把既有译文按字符硬拆；用户提供的源字幕仍保持默认不改写时间轴。
-
-建议验收：中英文都不超过对应硬限制；新 cue 连续、无重叠、无时间倒退；新译文按新 cue ID 完整覆盖。
 
 ### P1：术语和翻译质量控制
 

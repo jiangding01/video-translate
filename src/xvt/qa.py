@@ -91,6 +91,28 @@ def _overflow_risk(
     return None
 
 
+def target_overflow_cue_ids(
+    cues: list[Cue],
+    *,
+    video_width: int | None = None,
+    video_height: int | None = None,
+) -> tuple[int, ...]:
+    overflow_ids = []
+    for cue in cues:
+        if not cue.target_text:
+            continue
+        overflow = _overflow_risk(
+            cue.target_text,
+            cue.target_language,
+            "target",
+            video_width=video_width,
+            video_height=video_height,
+        )
+        if overflow and overflow[0] == "review":
+            overflow_ids.append(cue.id)
+    return tuple(overflow_ids)
+
+
 def check_subtitles(
     cues: list[Cue],
     *,

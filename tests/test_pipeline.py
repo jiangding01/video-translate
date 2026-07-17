@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.download import RemoteMediaInfo
-from xvt.job_store import create_job, get_job_file, save_job
+from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
@@ -14,6 +14,7 @@ from xvt.pipeline import (
     apply_subtitle_translation,
     burn_translated_job,
     prepare_agent_translation,
+    resegment_translation,
     resume_job,
     resume_remote_transcription,
     run_local_transcription,
@@ -153,6 +154,128 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(report.status, "needs_review")
         self.assertIn("bilingual_overflow_risk", {issue.code for issue in report.issues})
+
+    def test_resegment_translation_replaces_source_cues_and_invalidates_downstream_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            words = [
+                Word(("" if index == 0 else " ") + token, index * 500, index * 500 + 400, 0.9)
+                for index, token in enumerate(("This", "subtitle", "needs", "splitting"))
+            ]
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 2000, "This subtitle needs splitting", words=words))]),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        asdict(
+                            Cue(
+                                1,
+                                0,
+                                2000,
+                                "This subtitle needs splitting",
+                                target_text="长" * 19,
+                                target_language="zh-CN",
+                            )
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(
+                json.dumps({"duration_ms": 2000, "width": 1920, "height": 1080}),
+                encoding="utf-8",
+            )
+            progress_path = artifacts / "translation-progress.json"
+            progress_path.write_text("{}", encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                    Artifact(
+                        "translated_cues", str(translated_path), file_checksum(translated_path)
+                    ),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                    Artifact(
+                        "translation_progress", str(progress_path), file_checksum(progress_path)
+                    ),
+                ]
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+            job_file = save_job(job)
+
+            result = resegment_translation(job_file)
+
+            self.assertTrue(result.changed)
+            updated = load_job(job_file)
+            updated_cues = json.loads(source_path.read_text(encoding="utf-8"))
+            self.assertEqual([cue["id"] for cue in updated_cues], [1, 2])
+            self.assertTrue(all(cue["provenance"] == "asr_resegmented" for cue in updated_cues))
+            artifact_kinds = {artifact.kind for artifact in updated.artifacts}
+            self.assertIn("source_srt", artifact_kinds)
+            self.assertNotIn("translated_cues", artifact_kinds)
+            self.assertNotIn("translation_progress", artifact_kinds)
+            self.assertIn("translation_resegmentation", artifact_kinds)
+            self.assertEqual(updated.stages[StageName.TRANSLATE].status, StageStatus.PENDING)
+            self.assertEqual(updated.stages[StageName.SUBTITLE_QA].status, StageStatus.PENDING)
+
+    def test_resegment_translation_rejects_imported_source_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps(
+                    [asdict(Cue(1, 0, 2000, "Imported", provenance="user_source_subtitle"))]
+                ),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        asdict(
+                            Cue(
+                                1,
+                                0,
+                                2000,
+                                "Imported",
+                                target_text="长" * 19,
+                                target_language="zh-CN",
+                            )
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(
+                json.dumps({"duration_ms": 2000, "width": 1920, "height": 1080}),
+                encoding="utf-8",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                    Artifact(
+                        "translated_cues", str(translated_path), file_checksum(translated_path)
+                    ),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+
+            with self.assertRaisesRegex(ValueError, "no ASR word timestamps"):
+                resegment_translation(job_file)
 
     def test_run_local_transcription_persists_artifacts_and_stage_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

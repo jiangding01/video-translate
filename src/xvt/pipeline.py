@@ -6,6 +6,7 @@ import os
 import shutil
 import time
 from dataclasses import asdict, dataclass
+from math import ceil
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -24,11 +25,16 @@ from xvt.job_store import create_job, get_job_directory, get_job_file, load_job,
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.process import run_command
-from xvt.qa import check_subtitles
+from xvt.qa import (
+    check_subtitles,
+    display_width,
+    display_width_review_limit,
+    target_overflow_cue_ids,
+)
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
-from xvt.segment import segment_transcript
-from xvt.subtitles import load_subtitles, save_subtitles
+from xvt.segment import segment_transcript, split_cue_by_parts
+from xvt.subtitles import load_subtitles, normalize_display_text, save_subtitles
 from xvt.transcribe import transcribe_audio
 from xvt.translate import apply_translations, build_translation_batches, map_subtitle_translations
 from xvt.translation_provider import (
@@ -44,6 +50,13 @@ class TranslationRunResult:
     mode: str
     paths: tuple[Path, ...]
     fallback_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResegmentationResult:
+    changed: bool
+    source_cues_path: Path | None = None
+    report_path: Path | None = None
 
 
 def inspect_input(input_value: str) -> dict[str, Any]:
@@ -805,6 +818,166 @@ def _load_cues(path: Path) -> list[Cue]:
         words = [Word(**word) for word in item.get("words", [])]
         cues.append(Cue(**{**item, "words": words}))
     return cues
+
+
+def _invalidate_artifacts(
+    job: Job,
+    kinds: set[str],
+    event_sink: EventSink | None,
+) -> None:
+    invalidated = [artifact for artifact in job.artifacts if artifact.kind in kinds]
+    job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in kinds]
+    save_job(job)
+    if event_sink:
+        for artifact in invalidated:
+            event_sink(
+                create_event(
+                    "artifact_invalidated",
+                    job_id=job.id,
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
+
+
+def resegment_translation(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> ResegmentationResult:
+    job = load_job(job_file)
+    workflow = job.config.get("workflow")
+    if isinstance(workflow, dict) and workflow.get("translation_subtitles"):
+        raise ValueError(
+            "cannot re-segment a workflow using an imported translation subtitle file; "
+            "provide a new translation for the re-segmented source cues"
+        )
+
+    source_path = valid_artifact_path(job, "source_cues")
+    translated_path = valid_artifact_path(job, "translated_cues")
+    media_path = valid_artifact_path(job, "media_info")
+    if source_path is None or translated_path is None or media_path is None:
+        raise ValueError(
+            "re-segmentation requires valid source_cues, translated_cues, and media_info"
+        )
+
+    source_cues = _load_cues(source_path)
+    translated_cues = _load_cues(translated_path)
+    source_ids = {cue.id for cue in source_cues}
+    if len(source_ids) != len(source_cues):
+        raise ValueError("source_cues contains duplicate cue ids")
+    translated_by_id = {cue.id: cue for cue in translated_cues}
+    if len(translated_by_id) != len(translated_cues):
+        raise ValueError("translated_cues contains duplicate cue ids")
+    media_data = json.loads(media_path.read_text(encoding="utf-8"))
+    overflow_ids = set(
+        target_overflow_cue_ids(
+            translated_cues,
+            video_width=media_data.get("width"),
+            video_height=media_data.get("height"),
+        )
+    )
+    if not overflow_ids:
+        return ResegmentationResult(False)
+    if missing_source_ids := overflow_ids - source_ids:
+        raise ValueError(
+            f"translated_cues has no matching source cue ids: {sorted(missing_source_ids)}"
+        )
+
+    resegmented: list[Cue] = []
+    report_items = []
+    for source_cue in source_cues:
+        if source_cue.id not in overflow_ids:
+            resegmented.append(source_cue)
+            continue
+        translated_cue = translated_by_id.get(source_cue.id)
+        if translated_cue is None or not translated_cue.target_text:
+            raise ValueError(f"cue {source_cue.id} has no translated text to re-segment")
+        if source_cue.provenance not in {"asr", "asr_resegmented"} or not source_cue.words:
+            raise ValueError(
+                f"cue {source_cue.id} has no ASR word timestamps; "
+                "imported subtitles are not re-segmented"
+            )
+        target_language = translated_cue.target_language
+        hard_limit = display_width_review_limit(
+            target_language,
+            video_width=media_data.get("width"),
+            video_height=media_data.get("height"),
+        )
+        target_width = display_width(normalize_display_text(translated_cue.target_text))
+        part_count = ceil(target_width / hard_limit)
+        split_cues = split_cue_by_parts(source_cue, part_count)
+        report_items.append(
+            {
+                "source_cue_id": source_cue.id,
+                "new_cue_count": len(split_cues),
+                "target_width": target_width,
+                "hard_display_limit": hard_limit,
+            }
+        )
+        resegmented.extend(split_cues)
+
+    for cue_id, cue in enumerate(resegmented, 1):
+        cue.id = cue_id
+
+    artifacts_directory = get_job_directory(job) / "artifacts"
+    source_output = artifacts_directory / "source-cues.json"
+    _write_json(source_output, [asdict(cue) for cue in resegmented])
+    _add_artifact(job, "source_cues", source_output, event_sink)
+    source_srt_output = save_subtitles(resegmented, artifacts_directory / "source.srt")
+    _add_artifact(job, "source_srt", source_srt_output, event_sink)
+    report_output = artifacts_directory / "translation-resegmentation.json"
+    _write_json(
+        report_output,
+        {
+            "source_cue_count": len(source_cues),
+            "resegmented_cue_count": len(resegmented),
+            "items": report_items,
+        },
+    )
+    _add_artifact(job, "translation_resegmentation", report_output, event_sink)
+    _invalidate_artifacts(
+        job,
+        {
+            "translation_batches",
+            "translation_progress",
+            "translation_response",
+            "translated_cues",
+            "translated_subtitle_qa",
+            "translated_srt",
+            "bilingual_srt",
+            "bilingual_ass",
+            "burned_video",
+            "media_qa",
+        },
+        event_sink,
+    )
+    if isinstance(workflow, dict):
+        workflow.pop("burn_fingerprint", None)
+    for stage in (
+        StageName.TRANSLATE,
+        StageName.SUBTITLE_QA,
+        StageName.RENDER,
+        StageName.BURN,
+        StageName.MEDIA_QA,
+    ):
+        record = job.stages[stage]
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
+    save_job(job)
+    if event_sink:
+        event_sink(
+            create_event(
+                "translation_resegmented",
+                job_id=job.id,
+                source_cue_count=len(source_cues),
+                resegmented_cue_count=len(resegmented),
+                report_path=str(report_output),
+            )
+        )
+    return ResegmentationResult(True, source_output, report_output)
 
 
 def _render_translated_outputs(

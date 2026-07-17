@@ -1,10 +1,20 @@
 import unittest
 
 from xvt.models import Cue
-from xvt.qa import check_subtitles
+from xvt.qa import check_subtitles, target_overflow_cue_ids
 
 
 class SubtitleQaTest(unittest.TestCase):
+    def test_target_overflow_ids_only_include_hard_limit_violations(self) -> None:
+        cues = [
+            Cue(1, 0, 2000, "Short", target_text="短" * 18, target_language="zh-CN"),
+            Cue(2, 2000, 4000, "Long", target_text="长" * 19, target_language="zh-CN"),
+        ]
+
+        overflow_ids = target_overflow_cue_ids(cues)
+
+        self.assertEqual(overflow_ids, (2,))
+
     def test_valid_subtitles_pass(self) -> None:
         cues = [Cue(1, 0, 2000, "Hello world", timing_confidence=0.9)]
 

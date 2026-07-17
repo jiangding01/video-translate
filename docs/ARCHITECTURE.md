@@ -69,6 +69,7 @@ output/<job-id>/
     ├── words.json
     ├── source-cues.json
     ├── source.srt
+    ├── translation-resegmentation.json
     ├── translation-batches.json
     ├── translation-progress.json
     ├── translation-response.json
@@ -84,7 +85,7 @@ Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`fai
 
 `verify` 会重新计算所有 artifact 的 SHA-256。`resume` 只恢复规范化音频、词级转写或源 cue 等转写 checkpoint；`continue` 读取 `job.config.workflow` 中的持久化目标，并可在同一个远程 Job 中重新进入 `inspect / acquire`，随后补齐转写、翻译和烧录。重入时只复用 checksum 有效的远程元数据、平台字幕和媒体文件。Agent 等待时必须先执行 `apply-translation` 或 `import-translation`，再由 `continue` 完成余下步骤。
 
-`run` 会根据输入组合跳过不需要的阶段：源字幕跳过 ASR，已有译文跳过翻译提供方。远程作业请求烧录时前置下载完整视频，ASR 和烧录复用 `source_video`。烧录派生指纹包含译文 checksum、媒体身份、字体和编码参数；只有 artifact 与指纹同时有效时 `continue` 才复用成品。
+`run` 会根据输入组合跳过不需要的阶段：源字幕跳过 ASR，已有译文跳过翻译提供方。远程作业请求烧录时前置下载完整视频，ASR 和烧录复用 `source_video`。烧录派生指纹包含译文 checksum、媒体身份、字体和编码参数；只有 artifact 与指纹同时有效时 `continue` 才复用成品。若译文超过硬显示阈值，`resegment-translation` 会仅对具备词级时间戳的 ASR cue 按语义边界重切，重新编号 source cue，重建源字幕并使翻译及其下游产物失效；它不拆分旧译文，也不改写用户导入字幕的时间轴。端到端 Job 随后可用 `continue` 重新翻译，带已有译文字幕的工作流会被明确拒绝。
 
 Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
 
@@ -96,7 +97,7 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。AP
 
 ## 时间轴策略
 
-- ASR 请求词级时间戳，segmenter 才能依据停顿、标点和显示宽度切分。超宽片段会先满足硬显示宽度，再优先在句末、软标点、连接词或介词前的词级边界切开；切分发生在翻译前，译文按新的 cue ID 一一生成。
+- ASR 请求词级时间戳，segmenter 才能依据停顿、标点和显示宽度切分。超宽片段会先满足硬显示宽度，再优先在句末、软标点、连接词或介词前的词级边界切开；切分发生在翻译前，译文按新的 cue ID 一一生成。若最终译文仍超过硬限制，可显式执行 `resegment-translation`，旧译文不复用，必须对新 cue ID 重新翻译。
 - cue 的结束时间来自最后一个词，并添加受控尾部 padding。
 - 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
@@ -116,8 +117,7 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。AP
 
 ## 迭代顺序
 
-1. 对翻译后超过硬显示阈值的 cue 做重切和重翻译。
-2. 增加术语表、翻译风格、局部重译和 QA 定向修复。
-3. 增加预览输出与分段预设。
-4. 实现 Electron + React 桌面壳，只消费 JSONL 事件和 `job.json`，不复制业务逻辑；下载、转写和烧录进度直接复用 CLI 事件。
-5. 最后评估目录批处理、队列、远程执行和 Web 服务。
+1. 增加术语表、翻译风格、局部重译和 QA 定向修复。
+2. 增加预览输出与分段预设。
+3. 实现 Electron + React 桌面壳，只消费 JSONL 事件和 `job.json`，不复制业务逻辑；下载、转写和烧录进度直接复用 CLI 事件。
+4. 最后评估目录批处理、队列、远程执行和 Web 服务。
