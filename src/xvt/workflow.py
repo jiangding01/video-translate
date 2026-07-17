@@ -13,6 +13,7 @@ from xvt.pipeline import (
     apply_subtitle_translation,
     burn_translated_job,
     resume_job,
+    resume_remote_transcription,
     run_transcription,
     run_translation,
 )
@@ -307,7 +308,24 @@ def continue_workflow(
         event_sink(create_event("workflow_started", job_file=str(path), continuation=True))
     try:
         if valid_artifact_path(job, "source_cues") is None:
-            resume_job(path, event_sink=event_sink)
+            parsed_input = urlparse(job.input)
+            media_info = valid_artifact_path(job, "media_info")
+            transcription_checkpoint = valid_artifact_path(
+                job, "word_transcript"
+            ) or valid_artifact_path(job, "normalized_audio")
+            if (
+                parsed_input.scheme in {"http", "https"}
+                and parsed_input.hostname
+                and not (media_info and transcription_checkpoint)
+            ):
+                resume_remote_transcription(
+                    path,
+                    cookies_from_browser=cookies_from_browser,
+                    proxy=proxy,
+                    event_sink=event_sink,
+                )
+            else:
+                resume_job(path, event_sink=event_sink)
             job = load_job(path)
 
         if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:

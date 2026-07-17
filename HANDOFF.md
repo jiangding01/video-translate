@@ -12,10 +12,10 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 137 个，全部通过 |
+| 自动化测试 | 143 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| Git | 已初始化，当前分支为 `main`，`origin` 已关联 GitHub |
+| Git | 已初始化，当前开发分支为 `feat/recovery-plan`，`origin` 已关联 GitHub |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 
@@ -79,6 +79,8 @@
 - Ctrl-C 返回退出码 130，并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`。
 - artifact 使用 SHA-256 checksum，`verify` 会重新计算。
 - `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。
+- 远程端到端 Job 在检查或下载阶段失败后，可以通过 `continue` 在同一个 Job 中重试；checksum 有效的远程元数据、字幕和媒体会被复用。
+- `--cookies-from-browser` 和 `--proxy` 同时作用于远程检查与下载，重试时可以重新显式提供。
 - `status`、普通失败输出和 Ctrl-C 共用结构化 `RecoveryPlan`，只复用 checksum 验证通过的 artifact。
 - 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
@@ -246,7 +248,6 @@ media-qa.json
 - 没有术语表、专有名词保护、翻译风格或 cue 级局部重译。
 - 没有短片段预览命令和分段预设。
 - 下载、翻译和烧录已有进度事件，Whisper 转写还没有统一的细粒度进度。
-- 远程素材在形成有效 checkpoint 前失败时，恢复计划会诚实标记为不可自动续跑；同 Job 重新进入素材获取阶段尚未实现。
 - 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。

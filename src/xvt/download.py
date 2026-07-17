@@ -41,17 +41,26 @@ def parse_remote_info(data: dict[str, Any]) -> RemoteMediaInfo:
     )
 
 
-def inspect_remote(url: str, runner: CommandRunner = run_command) -> RemoteMediaInfo:
+def inspect_remote(
+    url: str,
+    runner: CommandRunner = run_command,
+    *,
+    cookies_from_browser: str | None = None,
+    proxy: str | None = None,
+) -> RemoteMediaInfo:
     validated_url = validate_remote_url(url)
-    result = runner(
-        [
-            "yt-dlp",
-            "--dump-single-json",
-            "--skip-download",
-            "--no-warnings",
-            validated_url,
-        ]
-    )
+    command = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--skip-download",
+        "--no-warnings",
+    ]
+    if cookies_from_browser:
+        command.extend(["--cookies-from-browser", cookies_from_browser])
+    if proxy:
+        command.extend(["--proxy", proxy])
+    command.append(validated_url)
+    result = runner(command)
     data = json.loads(result.stdout)
     if not isinstance(data, dict):
         raise ValueError("yt-dlp output must be a JSON object")

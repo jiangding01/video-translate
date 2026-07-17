@@ -15,6 +15,7 @@ from xvt.pipeline import (
     burn_translated_job,
     prepare_agent_translation,
     resume_job,
+    resume_remote_transcription,
     run_local_transcription,
     run_remote_transcription,
 )
@@ -427,6 +428,114 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(job.stages[StageName.ACQUIRE].status, StageStatus.SUCCEEDED)
         self.assertIn("downloaded_media", {artifact.kind for artifact in job.artifacts})
+
+    def test_remote_pipeline_retries_acquisition_in_the_same_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote_info = RemoteMediaInfo("abc", "Example", 5000, "https://youtu.be/abc", (), ())
+            with (
+                patch("xvt.pipeline.inspect_remote", return_value=remote_info) as inspect,
+                patch(
+                    "xvt.pipeline.download_remote_media",
+                    side_effect=RuntimeError("temporary download failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "temporary download failure"):
+                    run_remote_transcription(
+                        "https://youtu.be/abc",
+                        root,
+                        workflow_config={"target_language": None, "burn": False},
+                    )
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            media_info = MediaInfo(
+                "source.m4a", 5000, 5, "m4a", None, None, None, None, "aac", False, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+
+            def download(_url, output_directory, **_kwargs):
+                path = Path(output_directory) / "source.m4a"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"audio")
+                return path
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"normalized")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.inspect_remote") as retry_inspect,
+                patch("xvt.pipeline.download_remote_media", side_effect=download),
+                patch("xvt.pipeline.probe_media", return_value=media_info),
+                patch("xvt.pipeline.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcribe_audio", return_value=transcript),
+            ):
+                resumed = resume_remote_transcription(job_file)
+
+        inspect.assert_called_once()
+        retry_inspect.assert_not_called()
+        self.assertEqual(resumed.stages[StageName.ACQUIRE].status, StageStatus.SUCCEEDED)
+        self.assertIn("source_cues", {artifact.kind for artifact in resumed.artifacts})
+
+    def test_remote_acquisition_retry_persists_repeated_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job(
+                "https://youtu.be/abc",
+                root,
+                {"workflow": {"target_language": None, "burn": False}},
+            )
+            job_file = save_job(job)
+            with (
+                patch(
+                    "xvt.pipeline.inspect_remote",
+                    side_effect=RuntimeError("inspection still unavailable"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "inspection still unavailable"),
+            ):
+                resume_remote_transcription(job_file)
+
+            persisted = json.loads(job_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(persisted["stages"]["inspect"]["status"], "failed")
+        self.assertEqual(persisted["stages"]["inspect"]["error"], "inspection still unavailable")
+
+    def test_remote_retry_reuses_copied_input_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "original.srt"
+            original.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello.\n",
+                encoding="utf-8",
+            )
+            remote_info = RemoteMediaInfo("abc", "Example", 5000, "https://youtu.be/abc", (), ())
+            with (
+                patch("xvt.pipeline.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.check_subtitles", side_effect=RuntimeError("QA unavailable")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "QA unavailable"):
+                    run_remote_transcription(
+                        "https://youtu.be/abc",
+                        root,
+                        subtitles=original,
+                        workflow_config={"target_language": None, "burn": False},
+                    )
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            original.unlink()
+            with (
+                patch("xvt.pipeline.inspect_remote") as inspect,
+                patch("xvt.pipeline.download_remote_media") as download,
+            ):
+                resumed = resume_remote_transcription(job_file)
+
+        inspect.assert_not_called()
+        download.assert_not_called()
+        self.assertIn("source_cues", {artifact.kind for artifact in resumed.artifacts})
 
     def test_remote_source_subtitles_skip_unused_audio_download(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -5,12 +5,34 @@ from pathlib import Path
 from xvt.download import (
     download_remote_media,
     download_remote_subtitles,
+    inspect_remote,
     select_subtitle_language,
 )
 from xvt.process import CommandResult
 
 
 class DownloadTest(unittest.TestCase):
+    def test_remote_inspection_forwards_explicit_access_options(self) -> None:
+        def runner(args):
+            self.assertIn("--cookies-from-browser", args)
+            self.assertIn("chrome", args)
+            self.assertIn("--proxy", args)
+            return CommandResult(
+                tuple(args),
+                0,
+                '{"id":"abc","title":"Example","duration":5}',
+                "",
+            )
+
+        info = inspect_remote(
+            "https://youtu.be/abc",
+            cookies_from_browser="chrome",
+            proxy="http://127.0.0.1:7890",
+            runner=runner,
+        )
+
+        self.assertEqual(info.id, "abc")
+
     def test_selects_exact_or_regional_subtitle_language(self) -> None:
         self.assertEqual(select_subtitle_language("en", ("fr", "en-US")), "en-US")
         self.assertEqual(select_subtitle_language("zh-CN", ("zh-CN", "zh-TW")), "zh-CN")

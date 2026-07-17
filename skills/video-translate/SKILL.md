@@ -76,7 +76,7 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
 ## Recover interrupted jobs
 
-Run `uv run --no-sync xvt verify "/path/to/job.json" --json` before recovery. Use `xvt continue "/path/to/job.json" --events-jsonl` for a persisted end-to-end goal; it resumes API batches and retries only missing translation or burn outputs. Translation waiting states still require `apply-translation` or `import-translation` before `continue`. Keep `xvt resume` for transcription checkpoints only. Never bypass a missing-file or checksum-mismatch result.
+Run `uv run --no-sync xvt verify "/path/to/job.json" --json` before recovery. Use `xvt continue "/path/to/job.json" --events-jsonl` for a persisted end-to-end goal; it can retry remote inspection or acquisition in the same Job, resume API batches, and retry missing translation or burn outputs. Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. Translation waiting states still require `apply-translation` or `import-translation` before `continue`. Keep `xvt resume` for transcription checkpoints only. Never bypass a missing-file or checksum-mismatch result.
 
 ## Safety and boundaries
 

@@ -15,6 +15,7 @@
 - 原文、译文、双语 SRT，独立中英样式 ASS，以及 FFmpeg 烧录。
 - 字幕 QA、媒体 QA、`job.json` 持久化、checksum 校验、恢复和 JSONL 事件。
 - 统一 `xvt run` 端到端编排与 `xvt continue` 目标恢复，覆盖 API 中断、Agent 等待和烧录重试。
+- 远程检查或下载失败后，可在同一个 Job 中重新进入素材获取阶段，并复用 checksum 有效的远程产物。
 - yt-dlp 下载与 FFmpeg 烧录的结构化实时进度事件。
 
 ### Changed
@@ -30,3 +31,4 @@
 - 修复 VideoToolbox 对不兼容质量参数的烧录失败，保留精确的软件编码回退。
 - 修复字幕内部换行被 ASS 原样保留，导致英文额外换行的问题。
 - 修复外部命令事件可能记录代理凭据、Cookie、鉴权头或签名 URL 的问题。
+- 修复远程元数据检查未使用显式 Cookie 来源和代理的问题。

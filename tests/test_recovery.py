@@ -120,3 +120,18 @@ class RecoveryTest(unittest.TestCase):
 
         self.assertEqual(plan.category, "retryable")
         self.assertIn("resume", plan.primary_command or "")
+
+    def test_recovery_plan_retries_early_remote_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "https://youtu.be/abc",
+                directory,
+                {"workflow": {"target_language": "zh-CN", "burn": True}},
+            )
+            job.stages[StageName.ACQUIRE].status = StageStatus.FAILED
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")

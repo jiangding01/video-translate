@@ -5,6 +5,7 @@ import shlex
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -122,6 +123,17 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                 "retryable",
                 "存在 checksum 有效的转写 checkpoint，可以从断点继续。",
                 primary_command=_job_command(command, job_file),
+            )
+        parsed_input = urlparse(job.input)
+        if (
+            isinstance(workflow, dict)
+            and parsed_input.scheme in {"http", "https"}
+            and parsed_input.hostname
+        ):
+            return plan(
+                "retryable",
+                "远程任务可以在当前 Job 中重新获取素材并继续。",
+                primary_command=_job_command("continue", job_file),
             )
         return plan(
             "unrecoverable",
