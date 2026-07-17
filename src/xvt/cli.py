@@ -12,6 +12,7 @@ from xvt.events import Event, EventSink, create_event
 from xvt.job_store import get_job_file, load_job
 from xvt.pipeline import (
     apply_agent_translation,
+    apply_cue_retranslation,
     apply_subtitle_translation,
     burn_translated_job,
     inspect_input,
@@ -19,6 +20,7 @@ from xvt.pipeline import (
     prepare_agent_translation,
     resegment_translation,
     resume_job,
+    retranslate_cues,
     run_translation,
 )
 from xvt.process import CommandError
@@ -168,6 +170,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resegment_parser.add_argument("job_file")
     resegment_parser.add_argument("--events-jsonl", action="store_true")
+
+    retranslate_parser = subparsers.add_parser(
+        "retranslate-cues",
+        help="Re-translate selected cues without changing their timing",
+    )
+    retranslate_parser.add_argument("job_file")
+    retranslate_parser.add_argument(
+        "--cue", dest="cue_ids", type=int, action="append", required=True
+    )
+    retranslate_parser.add_argument("--target-language", required=True)
+    retranslate_parser.add_argument(
+        "--provider",
+        choices=["auto", "openai-compatible", "agent"],
+        default="auto",
+    )
+    retranslate_parser.add_argument("--base-url")
+    retranslate_parser.add_argument("--model")
+    retranslate_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
+    retranslate_parser.add_argument("--max-retries", type=int, default=2)
+    retranslate_parser.add_argument("--timeout-seconds", type=float, default=60)
+    retranslate_parser.add_argument("--events-jsonl", action="store_true")
+
+    apply_retranslation_parser = subparsers.add_parser(
+        "apply-cue-retranslation",
+        help="Apply selected cue translations and re-run subtitle QA",
+    )
+    apply_retranslation_parser.add_argument("job_file")
+    apply_retranslation_parser.add_argument("response_file")
+    apply_retranslation_parser.add_argument(
+        "--cue", dest="cue_ids", type=int, action="append", required=True
+    )
+    apply_retranslation_parser.add_argument("--target-language", required=True)
+    apply_retranslation_parser.add_argument("--events-jsonl", action="store_true")
 
     burn_parser = subparsers.add_parser("burn", help="Burn bilingual ASS into a video")
     burn_parser.add_argument("job_file")
@@ -675,6 +710,65 @@ def _run_command(arguments: argparse.Namespace) -> int:
                         f'重新翻译: xvt translate "{arguments.job_file}" '
                         f"--target-language {target_language}"
                     )
+        return 0
+
+    if arguments.command == "retranslate-cues":
+        event_sink = _event_sink(arguments)
+        result = retranslate_cues(
+            arguments.job_file,
+            cue_ids=tuple(arguments.cue_ids),
+            target_language=arguments.target_language,
+            provider=arguments.provider,
+            base_url=arguments.base_url,
+            model=arguments.model,
+            api_key_env=arguments.api_key_env,
+            max_retries=arguments.max_retries,
+            timeout_seconds=arguments.timeout_seconds,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(
+                arguments,
+                mode=result.mode,
+                artifacts=[str(path) for path in result.paths],
+            )
+        else:
+            print(f"mode: {result.mode}")
+            for path in result.paths:
+                print(path)
+            if result.mode == "agent":
+                cues = " ".join(f"--cue {cue_id}" for cue_id in arguments.cue_ids)
+                print("完成 Agent 翻译后执行：")
+                print(
+                    "xvt apply-cue-retranslation "
+                    f'"{arguments.job_file}" RESPONSE {cues} '
+                    f"--target-language {arguments.target_language}"
+                )
+            else:
+                job = load_job(arguments.job_file)
+                workflow = job.config.get("workflow")
+                if isinstance(workflow, dict) and workflow.get("burn"):
+                    print(f'继续烧录: xvt continue "{arguments.job_file}"')
+        return 0
+
+    if arguments.command == "apply-cue-retranslation":
+        event_sink = _event_sink(arguments)
+        paths = apply_cue_retranslation(
+            arguments.job_file,
+            arguments.response_file,
+            cue_ids=tuple(arguments.cue_ids),
+            target_language=arguments.target_language,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+        else:
+            for path in paths:
+                print(path)
+            job = load_job(arguments.job_file)
+            workflow = job.config.get("workflow")
+            if isinstance(workflow, dict) and workflow.get("burn"):
+                print(f'继续烧录: xvt continue "{arguments.job_file}"')
         return 0
 
     if arguments.command == "burn":

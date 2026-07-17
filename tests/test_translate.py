@@ -8,6 +8,7 @@ from xvt.translate import (
     GlossaryTerm,
     TranslationPolicy,
     apply_translations,
+    build_cue_retranslation_batches,
     build_translation_batches,
     load_translation_policy,
     map_subtitle_translations,
@@ -36,6 +37,28 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual([item.id for item in batches[0].items], [1, 2])
         self.assertEqual([item.id for item in batches[0].context_after], [3])
         self.assertEqual([item.id for item in batches[1].context_before], [2])
+
+    def test_builds_cue_retranslation_batches_with_original_neighbors(self) -> None:
+        batches = build_cue_retranslation_batches(
+            self.cues,
+            (2,),
+            source_language="en",
+            target_language="zh-CN",
+            context_size=1,
+        )
+
+        self.assertEqual([item.id for item in batches[0].items], [2])
+        self.assertEqual([item.id for item in batches[0].context_before], [1])
+        self.assertEqual([item.id for item in batches[0].context_after], [3])
+
+    def test_cue_retranslation_rejects_duplicate_source_ids(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate cue ids"):
+            build_cue_retranslation_batches(
+                [self.cues[0], self.cues[0]],
+                (1,),
+                source_language="en",
+                target_language="zh-CN",
+            )
 
     def test_batches_include_only_matching_glossary_terms(self) -> None:
         batches = build_translation_batches(

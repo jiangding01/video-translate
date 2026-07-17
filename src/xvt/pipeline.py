@@ -5,7 +5,7 @@ import json
 import os
 import shutil
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from math import ceil
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,7 @@ from xvt.transcribe import transcribe_audio
 from xvt.translate import (
     TranslationPolicy,
     apply_translations,
+    build_cue_retranslation_batches,
     build_translation_batches,
     load_translation_policy,
     map_subtitle_translations,
@@ -182,6 +183,215 @@ def _complete_qa_stage(
 def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
     policy = translation_policy_from_dict(job.config.get("translation_policy"))
     return tuple((term.source, term.target) for term in policy.terms)
+
+
+def _load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
+    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    items = response.get("items") if isinstance(response, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("translation response must contain an items array")
+    translations = {}
+    for item in items:
+        cue_id = item.get("id") if isinstance(item, dict) else None
+        text = item.get("text") if isinstance(item, dict) else None
+        if not isinstance(cue_id, int) or cue_id in translations:
+            raise ValueError("translation response contains an invalid or duplicate cue id")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"translation for cue {cue_id} is empty")
+        translations[cue_id] = text.strip()
+    if set(translations) != expected_ids:
+        raise ValueError("translation response must cover the requested cue ids exactly once")
+    return translations
+
+
+def _invalidate_rendered_artifacts(job: Job) -> None:
+    invalidated_kinds = {
+        "translated_subtitle_qa",
+        "translated_srt",
+        "bilingual_srt",
+        "bilingual_ass",
+        "burned_video",
+        "media_qa",
+    }
+    job.artifacts = [
+        artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
+    ]
+    workflow = job.config.get("workflow")
+    if isinstance(workflow, dict):
+        workflow.pop("burn_fingerprint", None)
+    for stage in (StageName.SUBTITLE_QA, StageName.RENDER, StageName.BURN, StageName.MEDIA_QA):
+        record = job.stages[stage]
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
+
+
+def apply_cue_retranslation(
+    job_file: str | Path,
+    response_file: str | Path,
+    *,
+    cue_ids: tuple[int, ...],
+    target_language: str,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, ...]:
+    if not cue_ids:
+        raise ValueError("at least one cue id is required")
+    if len(set(cue_ids)) != len(cue_ids):
+        raise ValueError("cue ids must not contain duplicates")
+    job = load_job(job_file)
+    current_stage = StageName.TRANSLATE
+    _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+    try:
+        translated_cues = _load_cues(_artifact_path(job, "translated_cues"))
+        translated_by_id = {cue.id: cue for cue in translated_cues}
+        if len(translated_by_id) != len(translated_cues):
+            raise ValueError("translated_cues contains duplicate cue ids")
+        existing_languages = {cue.target_language for cue in translated_cues if cue.target_language}
+        if existing_languages and existing_languages != {target_language}:
+            raise ValueError("target language must match the existing translated cues")
+        expected_ids = set(cue_ids)
+        missing = sorted(expected_ids - translated_by_id.keys())
+        if missing:
+            raise ValueError(f"translated_cues does not contain ids: {missing}")
+        translations = _load_translation_response(response_file, expected_ids)
+        repaired = [
+            replace(
+                cue,
+                target_text=translations[cue.id],
+                target_language=target_language,
+            )
+            if cue.id in translations
+            else cue
+            for cue in translated_cues
+        ]
+
+        artifacts_directory = get_job_directory(job) / "artifacts"
+        repaired_path = artifacts_directory / "translated-cues.json"
+        _write_json(repaired_path, [asdict(cue) for cue in repaired])
+        _add_artifact(job, "translated_cues", repaired_path, event_sink)
+        _invalidate_rendered_artifacts(job)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+
+        current_stage = StageName.SUBTITLE_QA
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        media_data = json.loads(_artifact_path(job, "media_info").read_text(encoding="utf-8"))
+        report = check_subtitles(
+            repaired,
+            media_duration_ms=int(media_data["duration_ms"]),
+            video_width=media_data.get("width"),
+            video_height=media_data.get("height"),
+            require_translation=True,
+            required_terms=_required_glossary_terms(job),
+        )
+        qa_path = artifacts_directory / "qa-translated.json"
+        _write_json(qa_path, asdict(report))
+        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
+        _complete_qa_stage(job, report, event_sink)
+
+        current_stage = StageName.RENDER
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        paths = _render_translated_outputs(job, repaired, media_data, event_sink)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        return paths
+    except Exception as error:
+        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        raise
+
+
+def retranslate_cues(
+    job_file: str | Path,
+    *,
+    cue_ids: tuple[int, ...],
+    target_language: str,
+    provider: str = "auto",
+    base_url: str | None = None,
+    model: str | None = None,
+    api_key_env: str = "XVT_TRANSLATION_API_KEY",
+    max_retries: int = 2,
+    timeout_seconds: float = 60,
+    event_sink: EventSink | None = None,
+) -> TranslationRunResult:
+    if max_retries < 0:
+        raise ValueError("max_retries must not be negative")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    job = load_job(job_file)
+    source_cues = _load_cues(_artifact_path(job, "source_cues"))
+    translated_cues = _load_cues(_artifact_path(job, "translated_cues"))
+    translated_ids = {cue.id for cue in translated_cues}
+    missing = sorted(set(cue_ids) - translated_ids)
+    if missing:
+        raise ValueError(f"translated_cues does not contain ids: {missing}")
+    existing_languages = {cue.target_language for cue in translated_cues if cue.target_language}
+    if existing_languages and existing_languages != {target_language}:
+        raise ValueError("target language must match the existing translated cues")
+    source_language = next(
+        (cue.source_language for cue in source_cues if cue.source_language),
+        job.config.get("source_language", "auto"),
+    )
+    policy = translation_policy_from_dict(job.config.get("translation_policy"))
+    batches = build_cue_retranslation_batches(
+        source_cues,
+        cue_ids,
+        source_language=source_language,
+        target_language=target_language,
+        policy=policy,
+    )
+    mode, provider_config, fallback_reason = resolve_provider(
+        provider,
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        timeout_seconds=timeout_seconds,
+    )
+    artifacts_directory = get_job_directory(job) / "artifacts"
+    if mode == "agent":
+        batches_path = artifacts_directory / "cue-retranslation-batches.json"
+        _write_json(batches_path, {"batches": [batch.to_dict() for batch in batches]})
+        _add_artifact(job, "cue_retranslation_batches", batches_path, event_sink)
+        _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
+        return TranslationRunResult("agent", (batches_path,), fallback_reason)
+    if provider_config is None:
+        raise RuntimeError("translation provider configuration was not resolved")
+
+    translations = {}
+    _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
+    try:
+        for batch in batches:
+            for attempt in range(max_retries + 1):
+                try:
+                    translated_batch = translate_batch(batch, provider_config)
+                    break
+                except TranslationProviderError as error:
+                    if not error.retryable or attempt >= max_retries:
+                        raise
+                    time.sleep(
+                        error.retry_after if error.retry_after is not None else min(2**attempt, 30)
+                    )
+                except ValueError:
+                    if attempt >= max_retries:
+                        raise
+                    time.sleep(min(0.5 * (2**attempt), 4))
+            translations.update(translated_batch)
+    except Exception as error:
+        _set_stage(job, StageName.TRANSLATE, StageStatus.FAILED, event_sink, error=str(error))
+        raise
+
+    response_path = artifacts_directory / "cue-retranslation-response.json"
+    _write_json(
+        response_path,
+        {"items": [{"id": cue_id, "text": text} for cue_id, text in sorted(translations.items())]},
+    )
+    _add_artifact(job, "cue_retranslation_response", response_path, event_sink)
+    paths = apply_cue_retranslation(
+        job_file,
+        response_path,
+        cue_ids=cue_ids,
+        target_language=target_language,
+        event_sink=event_sink,
+    )
+    return TranslationRunResult(mode, (response_path, *paths))
 
 
 def _process_acquired_media(

@@ -57,6 +57,7 @@
 - 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID。
 - 批次包含相邻上下文。上下文只用于理解，输出仍按原 cue ID 回填。
 - `resegment-translation` 仅对超过硬显示阈值且具有 ASR 词级时间戳的 cue 按语义优先边界重切；它重建 source cue 和 source SRT，废弃旧翻译及其下游产物，禁止复用或字符拆分旧译文。
+- `retranslate-cues` 只翻译指定 cue ID，保留其他译文和时间轴；每个目标 cue 带相邻源 cue 作为上下文，回填后完整重跑译文 QA 并使旧渲染/烧录产物失效。
 
 ### 字幕和显示质量
 
@@ -190,6 +191,19 @@ uv run --no-sync xvt apply-translation "/path/to/job.json" \
 uv run --no-sync xvt continue "/path/to/job.json"
 ```
 
+局部重译与 Agent 回填：
+
+```bash
+uv run --no-sync xvt retranslate-cues "/path/to/job.json" \
+  --cue 18 --target-language zh-CN --provider agent
+
+uv run --no-sync xvt apply-cue-retranslation "/path/to/job.json" \
+  "/path/to/cue-retranslation-response.json" \
+  --cue 18 --target-language zh-CN
+
+uv run --no-sync xvt continue "/path/to/job.json"
+```
+
 ## Job 模型
 
 Stage 包含：
@@ -249,7 +263,6 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- cue 级局部重译尚未实现。
 - 没有短片段预览命令和分段预设。
 - 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
@@ -257,19 +270,6 @@ media-qa.json
 - `continue` 只适用于带 `job.config.workflow` 的端到端 Job。旧 Job 继续使用原子命令。
 
 ## 后续任务规划
-
-### P1：术语和翻译质量控制
-
-增加局部重译和 QA 定向修复。术语违规已经定位 cue ID 并阻断后续烧录；翻译策略已进入原子和端到端 API 指纹。
-
-建议验收：
-
-- 术语在全部批次中保持一致。
-- 专有名词可选择保留、替换或锁定。
-- 局部重译只更新指定 cue，不修改其他 cue 或时间轴。
-- QA 能把缺失译文、明显超长和术语违规定位到 cue ID。
-
-主要文件：`translate.py`、`translation_provider.py`、`pipeline.py`、`workflow.py` 及对应测试。
 
 ### P1：预览和分段预设
 

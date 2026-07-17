@@ -30,6 +30,33 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertIn('xvt continue "/tmp/job.json"', output.getvalue())
 
+    def test_retranslate_cues_forwards_requested_ids(self) -> None:
+        output = StringIO()
+        result = TranslationRunResult("agent", (Path("/tmp/cue-retranslation-batches.json"),))
+        with (
+            patch("xvt.cli.retranslate_cues", return_value=result) as retranslate,
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "retranslate-cues",
+                    "/tmp/job.json",
+                    "--cue",
+                    "3",
+                    "--cue",
+                    "7",
+                    "--target-language",
+                    "zh-CN",
+                    "--provider",
+                    "agent",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(retranslate.call_args.kwargs["cue_ids"], (3, 7))
+        self.assertIn("mode: agent", output.getvalue())
+        self.assertIn("apply-cue-retranslation", output.getvalue())
+
     def test_inspect_prints_json(self) -> None:
         output = StringIO()
         with (
