@@ -12,10 +12,10 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 154 个，全部通过 |
+| 自动化测试 | 156 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| Git | `main` 已合并语义重切；当前开发分支为 `feat/translation-policy`，`origin` 已关联 GitHub |
+| Git | `main` 已合并翻译策略；当前开发分支为 `feat/workflow-translation-policy`，`origin` 已关联 GitHub |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 
@@ -50,6 +50,7 @@
 - `--provider auto` 在配置完整时调用 API，配置不完整时降级为 Agent 批次。
 - `--provider openai-compatible` 缺少配置时直接失败，不静默降级。
 - `translate` 和 `prepare-translation` 支持 JSON 术语表与 `faithful`、`natural`、`concise` 风格；批次仅携带命中源 cue 的术语。
+- `run` 也支持同一套参数，并将解析后的策略快照写入工作流配置；`continue` 不依赖原术语表文件，始终复用该快照。
 - API 翻译按批次保存进度，指纹包含源 cue checksum、语言、端点、模型、批次大小、提示词版本和翻译策略。
 - 429、部分 4xx、5xx、网络异常和超时具有明确的重试分类。`Retry-After` 会优先使用。
 - 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID。
@@ -247,7 +248,7 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- `run` / `continue` 尚未透传术语表和翻译风格；术语违规的确定性 QA 与 cue 级局部重译尚未实现。
+- 术语违规的确定性 QA 与 cue 级局部重译尚未实现。
 - 没有短片段预览命令和分段预设。
 - 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
@@ -258,7 +259,7 @@ media-qa.json
 
 ### P1：术语和翻译质量控制
 
-为 `run` / `continue` 透传术语表和翻译风格，增加术语违规的确定性 QA 与局部重译。配置已进入原子翻译的指纹，端到端透传完成后也必须保持这一规则。
+增加术语违规的确定性 QA 与局部重译。QA 必须定位具体 cue ID，并在违规时阻断后续烧录；翻译策略已进入原子和端到端 API 指纹。
 
 建议验收：
 

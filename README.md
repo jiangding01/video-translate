@@ -59,6 +59,8 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
   --language en \
   --target-language zh-CN \
   --provider auto \
+  --glossary "/path/to/glossary.json" \
+  --translation-style natural \
   --burn \
   --burn-output "/path/to/bilingual.mp4"
 ```
@@ -142,7 +144,7 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 }
 ```
 
-所选策略会保存到 `job.json`，并进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。
+`translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。
 
 不使用 API 时，可走 Agent 协议：
 
