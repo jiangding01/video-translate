@@ -83,7 +83,7 @@ output/<job-id>/
     └── burned.mp4
 ```
 
-Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 和 `skipped`。Agent 翻译批次生成后任务进入 `awaiting_input`；兼容 API 模式逐批更新进度文件，全部完成后直接继续 QA 和渲染。`retranslate-cues` 为每个指定 cue 构造独立批次，并携带相邻源 cue 作为只读上下文；回填只改写指定 ID，之后完整重跑译文 QA。
+Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 和 `skipped`。纯字幕 Job 将媒体获取、ASR、对齐和分段标为 `skipped`，但仍保存导入字幕、source cue、QA 与渲染 artifact；它不保存 `media_info`。Agent 翻译批次生成后任务进入 `awaiting_input`；兼容 API 模式逐批更新进度文件，全部完成后直接继续 QA 和渲染。`retranslate-cues` 为每个指定 cue 构造独立批次，并携带相邻源 cue 作为只读上下文；回填只改写指定 ID，之后完整重跑译文 QA。
 
 `verify` 会重新计算所有 artifact 的 SHA-256。`resume` 只恢复规范化音频、词级转写或源 cue 等转写 checkpoint；`continue` 读取 `job.config.workflow` 中的持久化目标，并可在同一个远程 Job 中重新进入 `inspect / acquire`，随后补齐转写、翻译和烧录。重入时只复用 checksum 有效的远程元数据、平台字幕和媒体文件。Agent 等待时必须先执行 `apply-translation`、`import-translation` 或 `apply-cue-retranslation`，再由 `continue` 完成余下步骤。
 
@@ -105,7 +105,7 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。�
 - cue 的结束时间来自最后一个词，并添加受控尾部 padding。
 - 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
-- 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
+- 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。纯字幕 Job 没有媒体时长或画幅，只跳过这两类媒体相关检查，保留其余时间轴、文本、术语和阅读速度校验。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
 
 ## 安全边界
 

@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 180 个，全部通过 |
+| 自动化测试 | 187 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | Git | 当前分支为 `main`，跟踪 `origin/main`，`origin` 已关联 GitHub |
@@ -40,6 +40,7 @@
 - 支持 MLX Whisper 和 faster-whisper，保留词级时间戳；faster-whisper 提供真实百分比，MLX 提供运行时长心跳。
 - 分段综合停顿、标点、字幕时长和显示宽度；`conservative`、`balanced`、`compact` 预设仅调整 ASR 的停顿和最大时长，默认保持平衡行为。
 - 可导入 SRT、VTT、ASS 和 SSA 源字幕，默认保留用户时间轴。
+- 源字幕可直接作为 `run` 输入创建纯字幕 Job，无需媒体即可翻译、QA、恢复和导出三种 SRT；无媒体时不生成 ASS，也不支持预览、烧录或重分段。
 - `--align-subtitles` 会额外运行 ASR，并用顺序模糊对齐修正整体偏移或漂移。
 - cue 结束时间、相邻重叠和媒体边界会在分段与 QA 阶段校正或阻断。
 
@@ -269,16 +270,15 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
 - `continue` 只适用于带 `job.config.workflow` 的端到端 Job。旧 Job 继续使用原子命令。
 
 ## 后续任务规划
 
-### P1：纯字幕、批处理和 GUI
+### P1：批处理和 GUI
 
-纯字幕 Job、目录批处理和可视化校对应分开实现。GUI 使用 React 和 TypeScript，只读取 Job、artifact 和 JSONL 事件。单机 CLI 稳定前，不引入服务端队列或多租户架构。
+目录批处理和可视化校对应分开实现。GUI 使用 React 和 TypeScript，只读取 Job、artifact 和 JSONL 事件。单机 CLI 稳定前，不引入服务端队列或多租户架构。
 
 ## 接手步骤
 

@@ -111,7 +111,21 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
 
 只有确认字幕存在整体偏移或漂移时，才使用 `--align-subtitles`。该模式会额外运行 Whisper 并写入 `artifacts/alignment.json`。
 
-### 3. 单独翻译字幕
+### 3. 纯字幕文件工作流
+
+源字幕可以直接作为输入创建 Job，无需提供视频或音频：
+
+```bash
+uv run --no-sync xvt run "/path/to/source.srt" \
+  --output "/absolute/path/to/output" \
+  --language en \
+  --target-language zh-CN \
+  --provider auto
+```
+
+支持 SRT、VTT、ASS 和 SSA。该模式保留用户时间轴，输出 `source.srt`、`translated.srt` 和 `bilingual.srt`，并照常支持 Agent 翻译、`continue`、`verify` 和术语表 QA。由于没有媒体尺寸，不生成 ASS，也不支持 `--align-subtitles`、烧录、预览或 `resegment-translation`。
+
+### 4. 单独翻译字幕
 
 配置任意兼容 Chat Completions 的服务：
 

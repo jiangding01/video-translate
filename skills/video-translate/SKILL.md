@@ -34,6 +34,15 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    When the user supplies SRT, VTT, ASS, or SSA subtitles, add `--subtitles "/path/to/file"`. This preserves the supplied timeline and skips ASR. Add `--align-subtitles` only when the user wants Whisper to correct possible subtitle offset or drift. The default confidence gate is `0.55`; inspect `alignment.json` before considering `--allow-low-confidence-alignment`.
 
+   When the user needs subtitles only and has no media file, use the source subtitle as `INPUT` directly. This creates a pure-subtitle Job and exports source, translated, and bilingual SRT files without FFmpeg or ASR:
+
+   ```bash
+   uv run --no-sync xvt run "/path/to/source.srt" --output "/absolute/output" \
+     --language en --target-language zh-CN --provider auto
+   ```
+
+   Pure-subtitle Jobs preserve the source timeline and support Agent translation plus `continue`; they do not support alignment, preview, burn-in, re-segmentation, or ASS output because no media dimensions are available.
+
 4. Find the emitted `job.json`, then choose the translation path.
 
    When a compatible provider is configured, prefer the CLI translation path:
