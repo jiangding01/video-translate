@@ -15,7 +15,7 @@
 | 自动化测试 | 147 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| Git | `main` 已合并恢复计划；当前开发分支为 `feat/transcription-progress`，`origin` 已关联 GitHub |
+| Git | `main` 已合并转写进度；当前开发分支为 `feat/semantic-cue-splitting`，`origin` 已关联 GitHub |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 
