@@ -820,26 +820,6 @@ def _load_cues(path: Path) -> list[Cue]:
     return cues
 
 
-def _invalidate_artifacts(
-    job: Job,
-    kinds: set[str],
-    event_sink: EventSink | None,
-) -> None:
-    invalidated = [artifact for artifact in job.artifacts if artifact.kind in kinds]
-    job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in kinds]
-    save_job(job)
-    if event_sink:
-        for artifact in invalidated:
-            event_sink(
-                create_event(
-                    "artifact_invalidated",
-                    job_id=job.id,
-                    kind=artifact.kind,
-                    path=artifact.path,
-                )
-            )
-
-
 def resegment_translation(
     job_file: str | Path,
     *,
@@ -923,9 +903,7 @@ def resegment_translation(
     artifacts_directory = get_job_directory(job) / "artifacts"
     source_output = artifacts_directory / "source-cues.json"
     _write_json(source_output, [asdict(cue) for cue in resegmented])
-    _add_artifact(job, "source_cues", source_output, event_sink)
     source_srt_output = save_subtitles(resegmented, artifacts_directory / "source.srt")
-    _add_artifact(job, "source_srt", source_srt_output, event_sink)
     report_output = artifacts_directory / "translation-resegmentation.json"
     _write_json(
         report_output,
@@ -935,23 +913,33 @@ def resegment_translation(
             "items": report_items,
         },
     )
-    _add_artifact(job, "translation_resegmentation", report_output, event_sink)
-    _invalidate_artifacts(
-        job,
-        {
-            "translation_batches",
-            "translation_progress",
-            "translation_response",
-            "translated_cues",
-            "translated_subtitle_qa",
-            "translated_srt",
-            "bilingual_srt",
-            "bilingual_ass",
-            "burned_video",
-            "media_qa",
-        },
-        event_sink,
-    )
+    invalidated_kinds = {
+        "input_translation_subtitles",
+        "translation_mapping",
+        "translation_batches",
+        "translation_progress",
+        "translation_response",
+        "translated_cues",
+        "translated_subtitle_qa",
+        "translated_srt",
+        "bilingual_srt",
+        "bilingual_ass",
+        "burned_video",
+        "media_qa",
+    }
+    replacement_artifacts = [
+        Artifact("source_cues", str(source_output), _checksum(source_output)),
+        Artifact("source_srt", str(source_srt_output), _checksum(source_srt_output)),
+        Artifact("translation_resegmentation", str(report_output), _checksum(report_output)),
+    ]
+    replacement_kinds = {artifact.kind for artifact in replacement_artifacts}
+    invalidated = [artifact for artifact in job.artifacts if artifact.kind in invalidated_kinds]
+    job.artifacts = [
+        artifact
+        for artifact in job.artifacts
+        if artifact.kind not in invalidated_kinds | replacement_kinds
+    ]
+    job.artifacts.extend(replacement_artifacts)
     if isinstance(workflow, dict):
         workflow.pop("burn_fingerprint", None)
     for stage in (
@@ -968,6 +956,24 @@ def resegment_translation(
         record.error = None
     save_job(job)
     if event_sink:
+        for artifact in replacement_artifacts:
+            event_sink(
+                create_event(
+                    "artifact_created",
+                    job_id=job.id,
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
+        for artifact in invalidated:
+            event_sink(
+                create_event(
+                    "artifact_invalidated",
+                    job_id=job.id,
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
         event_sink(
             create_event(
                 "translation_resegmented",

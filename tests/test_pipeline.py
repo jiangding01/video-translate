@@ -197,6 +197,10 @@ class PipelineTest(unittest.TestCase):
             )
             progress_path = artifacts / "translation-progress.json"
             progress_path.write_text("{}", encoding="utf-8")
+            imported_translation_path = artifacts / "input-translation.srt"
+            imported_translation_path.write_text("old translation", encoding="utf-8")
+            mapping_path = artifacts / "translation-mapping.json"
+            mapping_path.write_text("{}", encoding="utf-8")
             job.artifacts.extend(
                 [
                     Artifact("source_cues", str(source_path), file_checksum(source_path)),
@@ -207,10 +211,18 @@ class PipelineTest(unittest.TestCase):
                     Artifact(
                         "translation_progress", str(progress_path), file_checksum(progress_path)
                     ),
+                    Artifact(
+                        "input_translation_subtitles",
+                        str(imported_translation_path),
+                        file_checksum(imported_translation_path),
+                    ),
+                    Artifact("translation_mapping", str(mapping_path), file_checksum(mapping_path)),
                 ]
             )
             job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
             job_file = save_job(job)
+            original_job_data = json.loads(job_file.read_text(encoding="utf-8"))
+            original_source = source_path.read_text(encoding="utf-8")
 
             result = resegment_translation(job_file)
 
@@ -223,9 +235,29 @@ class PipelineTest(unittest.TestCase):
             self.assertIn("source_srt", artifact_kinds)
             self.assertNotIn("translated_cues", artifact_kinds)
             self.assertNotIn("translation_progress", artifact_kinds)
+            self.assertNotIn("input_translation_subtitles", artifact_kinds)
+            self.assertNotIn("translation_mapping", artifact_kinds)
             self.assertIn("translation_resegmentation", artifact_kinds)
             self.assertEqual(updated.stages[StageName.TRANSLATE].status, StageStatus.PENDING)
             self.assertEqual(updated.stages[StageName.SUBTITLE_QA].status, StageStatus.PENDING)
+
+            job_file.write_text(
+                json.dumps(original_job_data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            source_path.write_text(original_source, encoding="utf-8")
+            with patch("xvt.pipeline.save_subtitles", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    resegment_translation(job_file)
+
+            failed_job = load_job(job_file)
+            failed_kinds = {artifact.kind for artifact in failed_job.artifacts}
+            self.assertIn("translated_cues", failed_kinds)
+            self.assertIn("translation_progress", failed_kinds)
+            self.assertEqual(
+                failed_job.stages[StageName.SUBTITLE_QA].status,
+                StageStatus.FAILED,
+            )
 
     def test_resegment_translation_rejects_imported_source_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
