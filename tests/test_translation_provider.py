@@ -12,7 +12,7 @@ from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, Cue
 from xvt.pipeline import run_translation
 from xvt.recovery import file_checksum
-from xvt.translate import build_translation_batches
+from xvt.translate import GlossaryTerm, TranslationPolicy, build_translation_batches
 from xvt.translation_provider import (
     CompatibleProviderConfig,
     TranslationProviderError,
@@ -64,6 +64,48 @@ class TranslationProviderTest(unittest.TestCase):
         )
 
         self.assertEqual(translated, {1: "你好"})
+
+    def test_provider_sends_style_and_glossary_policy(self) -> None:
+        cue = Cue(1, 0, 1000, "OpenAI is useful", source_language="en")
+        batch = build_translation_batches(
+            [cue],
+            source_language="en",
+            target_language="zh-CN",
+            policy=TranslationPolicy("natural", (GlossaryTerm("OpenAI", "OpenAI"),)),
+        )[0]
+        request_payload = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {"message": {"content": '{"items":[{"id":1,"text":"OpenAI 很有用"}]}'}}
+                        ]
+                    }
+                ).encode()
+
+        def opener(request, **_kwargs):
+            request_payload.update(json.loads(request.data))
+            return Response()
+
+        translate_batch(
+            batch,
+            CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+            opener=opener,
+        )
+
+        self.assertIn("idiomatic", request_payload["messages"][0]["content"])
+        self.assertEqual(
+            json.loads(request_payload["messages"][1]["content"])["policy"]["terms"],
+            [{"source": "OpenAI", "target": "OpenAI"}],
+        )
 
     def test_provider_classifies_rate_limit_as_retryable(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")
@@ -216,7 +258,7 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertEqual(result.mode, "openai-compatible")
         self.assertTrue(any(path.name == "translated.srt" for path in result.paths))
 
-    def test_translation_discards_progress_when_target_language_changes(self) -> None:
+    def test_translation_discards_progress_when_target_language_or_policy_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
@@ -245,7 +287,7 @@ class TranslationProviderTest(unittest.TestCase):
             calls = []
 
             def translate(batch, _config):
-                calls.append(batch.target_language)
+                calls.append((batch.target_language, batch.policy.style))
                 text = "你好" if batch.target_language == "zh-CN" else "こんにちは"
                 return {1: text}
 
@@ -255,11 +297,19 @@ class TranslationProviderTest(unittest.TestCase):
             ):
                 run_translation(job_file, target_language="zh-CN")
                 run_translation(job_file, target_language="ja")
+                run_translation(
+                    job_file,
+                    target_language="zh-CN",
+                    translation_style="natural",
+                )
 
             progress = json.loads(
                 (artifacts / "translation-progress.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(calls, ["zh-CN", "ja"])
+        self.assertEqual(
+            calls,
+            [("zh-CN", "faithful"), ("ja", "faithful"), ("zh-CN", "natural")],
+        )
         self.assertIn("fingerprint", progress)
-        self.assertEqual(progress["items"], [{"id": 1, "text": "こんにちは"}])
+        self.assertEqual(progress["items"], [{"id": 1, "text": "你好"}])
