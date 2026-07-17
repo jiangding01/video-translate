@@ -416,6 +416,10 @@ class CliTest(unittest.TestCase):
                     "https://api.example.com/v1",
                     "--model",
                     "translate-model",
+                    "--glossary",
+                    "/tmp/glossary.json",
+                    "--translation-style",
+                    "concise",
                     "--burn",
                 ]
             )
@@ -425,6 +429,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(options.provider, "openai-compatible")
         self.assertEqual(options.base_url, "https://api.example.com/v1")
         self.assertEqual(options.model, "translate-model")
+        self.assertEqual(options.glossary, "/tmp/glossary.json")
+        self.assertEqual(options.translation_style, "concise")
         self.assertTrue(options.burn)
 
     def test_align_subtitles_requires_subtitle_file(self) -> None:

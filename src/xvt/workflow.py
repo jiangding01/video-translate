@@ -18,6 +18,7 @@ from xvt.pipeline import (
     run_translation,
 )
 from xvt.recovery import valid_artifact_path
+from xvt.translate import TranslationPolicy, load_translation_policy, translation_policy_from_dict
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,8 @@ class WorkflowOptions:
     batch_size: int = 40
     max_retries: int = 2
     timeout_seconds: float = 60
+    glossary: str | Path | None = None
+    translation_style: str = "faithful"
     burn: bool = False
     burn_media: str | Path | None = None
     burn_output: str | Path | None = None
@@ -78,8 +81,12 @@ class WorkflowOptions:
             raise ValueError("--target-font and --source-font require --burn")
         if (self.base_url or self.model) and not self.target_language:
             raise ValueError("--base-url and --model require --target-language")
+        if self.glossary and not self.target_language:
+            raise ValueError("--glossary requires --target-language")
+        if self.glossary and self.translation_subtitles:
+            raise ValueError("--glossary cannot be combined with --translation-subtitles")
 
-    def persisted_config(self) -> dict[str, object]:
+    def persisted_config(self, policy: TranslationPolicy | None = None) -> dict[str, object]:
         requested_outputs = []
         if self.target_language:
             requested_outputs.extend(["translated_subtitles", "bilingual_subtitles"])
@@ -100,6 +107,7 @@ class WorkflowOptions:
             "batch_size": self.batch_size,
             "max_retries": self.max_retries,
             "timeout_seconds": self.timeout_seconds,
+            "translation_policy": policy.to_dict() if policy else None,
             "burn": self.burn,
             "burn_media": (
                 str(Path(self.burn_media).expanduser().resolve()) if self.burn_media else None
@@ -183,6 +191,11 @@ def run_workflow(
     event_sink: EventSink | None = None,
 ) -> WorkflowResult:
     options.validate()
+    policy = (
+        load_translation_policy(options.glossary, style=options.translation_style)
+        if options.target_language and not options.translation_subtitles
+        else None
+    )
     steps = ["transcribe"]
     if options.target_language:
         steps.append("import_translation" if options.translation_subtitles else "translate")
@@ -209,7 +222,7 @@ def run_workflow(
             youtube_subtitles=options.youtube_subtitles,
             subtitle_language=options.subtitle_language,
             allow_auto_subtitles=options.allow_auto_subtitles,
-            workflow_config=options.persisted_config(),
+            workflow_config=options.persisted_config(policy),
             event_sink=event_sink,
             emit_job_completed=not options.target_language,
         )
@@ -235,6 +248,7 @@ def run_workflow(
                 batch_size=options.batch_size,
                 max_retries=options.max_retries,
                 timeout_seconds=options.timeout_seconds,
+                policy=policy,
                 event_sink=event_sink,
             )
             artifacts.extend(translation.paths)
@@ -303,6 +317,7 @@ def continue_workflow(
     target_language = config.get("target_language")
     if target_language is not None and not isinstance(target_language, str):
         raise ValueError("persisted workflow target_language is invalid")
+    policy = translation_policy_from_dict(config.get("translation_policy"))
 
     if event_sink:
         event_sink(create_event("workflow_started", job_file=str(path), continuation=True))
@@ -365,6 +380,7 @@ def continue_workflow(
                     batch_size=int(config.get("batch_size", 40)),
                     max_retries=int(config.get("max_retries", 2)),
                     timeout_seconds=float(config.get("timeout_seconds", 60)),
+                    policy=policy,
                     event_sink=event_sink,
                 )
                 if translation.mode == "agent":

@@ -23,7 +23,44 @@ class TranslationPolicy:
     terms: tuple[GlossaryTerm, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "style": self.style,
+            "terms": [asdict(term) for term in self.terms],
+        }
+
+
+def translation_policy_from_dict(data: object) -> TranslationPolicy:
+    if data is None:
+        return TranslationPolicy()
+    if not isinstance(data, dict):
+        raise ValueError("translation policy must be an object")
+    style = data.get("style", "faithful")
+    if not isinstance(style, str) or style not in TRANSLATION_STYLES:
+        raise ValueError("translation policy has an unsupported style")
+    terms_data = data.get("terms", [])
+    if not isinstance(terms_data, list):
+        raise ValueError("translation policy terms must be an array")
+
+    terms = []
+    seen_sources = set()
+    for item in terms_data:
+        if not isinstance(item, dict):
+            raise ValueError("each translation policy term must be an object")
+        source = item.get("source")
+        target = item.get("target")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("translation policy term source must be non-empty text")
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError("translation policy term target must be non-empty text")
+        normalized_source = source.strip().casefold()
+        if normalized_source in seen_sources:
+            raise ValueError(f"translation policy contains duplicate source term: {source.strip()}")
+        seen_sources.add(normalized_source)
+        terms.append(GlossaryTerm(source.strip(), target.strip()))
+    return TranslationPolicy(
+        style=style,
+        terms=tuple(sorted(terms, key=lambda term: term.source.casefold())),
+    )
 
 
 def load_translation_policy(
@@ -64,10 +101,7 @@ def load_translation_policy(
         seen_sources.add(normalized_source)
         terms.append(GlossaryTerm(source.strip(), target.strip()))
 
-    return TranslationPolicy(
-        style=style,
-        terms=tuple(sorted(terms, key=lambda term: term.source.casefold())),
-    )
+    return translation_policy_from_dict({"style": style, "terms": [asdict(term) for term in terms]})
 
 
 @dataclass(frozen=True, slots=True)
