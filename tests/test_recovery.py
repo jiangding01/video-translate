@@ -8,6 +8,22 @@ from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_recovery_plan_resumes_subtitle_job_from_imported_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/source.srt", root, {"input_kind": "subtitle"})
+            artifact_path = root / "input-subtitles.srt"
+            artifact_path.write_text("subtitle", encoding="utf-8")
+            job.artifacts.append(
+                Artifact("input_subtitles", str(artifact_path), file_checksum(artifact_path))
+            )
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("resume", plan.primary_command or "")
+
     def _add_artifact(self, job, root: Path, kind: str, content: str = "{}") -> Path:
         path = root / f"{kind}.json"
         path.write_text(content, encoding="utf-8")

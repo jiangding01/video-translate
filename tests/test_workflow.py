@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.job_store import create_job, get_job_file, save_job
+from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import StageName, StageStatus
-from xvt.pipeline import TranslationRunResult
+from xvt.pipeline import TranslationRunResult, apply_subtitle_translation
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 
@@ -120,6 +120,94 @@ class WorkflowTest(unittest.TestCase):
     def test_burn_requires_target_language(self) -> None:
         with self.assertRaisesRegex(ValueError, "--burn requires --target-language"):
             run_workflow(WorkflowOptions(input="/tmp/video.mp4", output="/tmp/output", burn=True))
+
+    def test_subtitle_input_rejects_media_only_options(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--align-subtitles requires media input"):
+            run_workflow(
+                WorkflowOptions(
+                    input="/tmp/source.srt",
+                    output="/tmp/output",
+                    align_subtitles=True,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "--burn requires media input"):
+            run_workflow(
+                WorkflowOptions(
+                    input="/tmp/source.srt",
+                    output="/tmp/output",
+                    target_language="zh-CN",
+                    burn=True,
+                )
+            )
+
+    def test_subtitle_workflow_imports_translation_without_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            result = run_workflow(
+                WorkflowOptions(
+                    input=str(source),
+                    output=root / "output",
+                    language="en",
+                    target_language="zh-CN",
+                    translation_subtitles=translated,
+                )
+            )
+            artifacts = {artifact.kind for artifact in load_job(result.job_file).artifacts}
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            {path.name for path in result.artifacts}, {"translated.srt", "bilingual.srt"}
+        )
+        self.assertNotIn("media_info", artifacts)
+        self.assertIn("bilingual_srt", artifacts)
+
+    def test_subtitle_workflow_continues_after_agent_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            waiting = run_workflow(
+                WorkflowOptions(
+                    input=str(source),
+                    output=root / "output",
+                    language="en",
+                    target_language="zh-CN",
+                    provider="agent",
+                )
+            )
+            self.assertEqual(waiting.status, "awaiting_input")
+            apply_subtitle_translation(
+                waiting.job_file,
+                translated,
+                target_language="zh-CN",
+            )
+            completed = continue_workflow(waiting.job_file)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            {path.name for path in completed.artifacts},
+            {"translated.srt", "bilingual.srt"},
+        )
 
     def test_rejects_unknown_segmentation_preset(self) -> None:
         with self.assertRaisesRegex(ValueError, "--segmentation-preset"):

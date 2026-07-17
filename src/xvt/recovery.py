@@ -113,10 +113,20 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         target_language = value if isinstance(value, str) and value else None
 
     source_cues = valid_artifacts.get("source_cues")
+    subtitle_resumable = (
+        job.config.get("input_kind") == "subtitle" and "input_subtitles" in valid_artifacts
+    )
     resumable = "media_info" in valid_artifacts and bool(
         {"word_transcript", "normalized_audio"} & valid_artifacts.keys()
     )
     if source_cues is None:
+        if subtitle_resumable:
+            command = "continue" if isinstance(workflow, dict) else "resume"
+            return plan(
+                "retryable",
+                "存在 checksum 有效的源字幕，可以重新生成字幕产物。",
+                primary_command=_job_command(command, job_file),
+            )
         if resumable:
             command = "continue" if isinstance(workflow, dict) else "resume"
             return plan(

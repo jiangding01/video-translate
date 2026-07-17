@@ -34,7 +34,12 @@ from xvt.qa import (
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.segment import segment_transcript, segmentation_config_for_preset, split_cue_by_parts
-from xvt.subtitles import load_subtitles, normalize_display_text, save_subtitles
+from xvt.subtitles import (
+    SUPPORTED_SUBTITLE_EXTENSIONS,
+    load_subtitles,
+    normalize_display_text,
+    save_subtitles,
+)
 from xvt.transcribe import transcribe_audio
 from xvt.translate import (
     TranslationPolicy,
@@ -72,6 +77,11 @@ def inspect_input(input_value: str) -> dict[str, Any]:
     if parsed.scheme in {"http", "https"} and parsed.hostname:
         return {"kind": "remote", **asdict(inspect_remote(input_value))}
     return {"kind": "local", **asdict(probe_media(input_value))}
+
+
+def is_subtitle_input(input_value: str) -> bool:
+    parsed = urlparse(input_value)
+    return not parsed.scheme and Path(input_value).suffix.lower() in SUPPORTED_SUBTITLE_EXTENSIONS
 
 
 def _media_info_from_remote_metadata(url: str, duration_ms: int) -> MediaInfo:
@@ -285,10 +295,10 @@ def apply_cue_retranslation(
 
         current_stage = StageName.SUBTITLE_QA
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = json.loads(_artifact_path(job, "media_info").read_text(encoding="utf-8"))
+        media_data = _media_data(job)
         report = check_subtitles(
             repaired,
-            media_duration_ms=int(media_data["duration_ms"]),
+            media_duration_ms=_media_duration_ms(media_data),
             video_width=media_data.get("width"),
             video_height=media_data.get("height"),
             require_translation=True,
@@ -634,6 +644,118 @@ def run_local_transcription(
     )
 
 
+def _finish_subtitle_job(
+    job: Job,
+    cues: list[Cue],
+    *,
+    event_sink: EventSink | None,
+) -> Job:
+    artifacts_directory = get_job_directory(job) / "artifacts"
+    cues_path = artifacts_directory / "source-cues.json"
+    _write_json(cues_path, [asdict(cue) for cue in cues])
+    _add_artifact(job, "source_cues", cues_path, event_sink)
+    if job.stages[StageName.TRANSLATE].status is StageStatus.PENDING:
+        _set_stage(job, StageName.TRANSLATE, StageStatus.SKIPPED, event_sink)
+
+    current_stage = StageName.SUBTITLE_QA
+    try:
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        report = check_subtitles(cues)
+        qa_path = artifacts_directory / "qa.json"
+        _write_json(qa_path, asdict(report))
+        _add_artifact(job, "subtitle_qa", qa_path, event_sink)
+        _complete_qa_stage(job, report, event_sink)
+
+        current_stage = StageName.RENDER
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
+        _add_artifact(job, "source_srt", subtitle_path, event_sink)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        _set_stage(job, StageName.BURN, StageStatus.SKIPPED, event_sink)
+        _set_stage(job, StageName.MEDIA_QA, StageStatus.SKIPPED, event_sink)
+    except Exception as error:
+        if job.stages[current_stage].status is not StageStatus.FAILED:
+            _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        raise
+    return job
+
+
+def run_subtitle_transcription(
+    subtitle_file: str | Path,
+    output_root: str | Path,
+    *,
+    language: str | None = None,
+    workflow_config: dict[str, Any] | None = None,
+    event_sink: EventSink | None = None,
+    emit_job_completed: bool = True,
+) -> Job:
+    source = Path(subtitle_file).expanduser()
+    if not source.is_file():
+        raise ValueError(f"subtitle file does not exist: {source}")
+    if source.suffix.lower() not in SUPPORTED_SUBTITLE_EXTENSIONS:
+        raise ValueError(f"unsupported subtitle format: {source.suffix}")
+    source = source.resolve()
+    job = create_job(
+        str(source),
+        output_root,
+        {
+            "input_kind": "subtitle",
+            "source_language": language or "auto",
+            "subtitles": str(source),
+            **({"workflow": dict(workflow_config)} if workflow_config else {}),
+        },
+    )
+    if event_sink:
+        event_sink(
+            create_event(
+                "job_started",
+                job_id=job.id,
+                job_file=str(get_job_file(job)),
+                input=str(source),
+            )
+        )
+
+    try:
+        for stage in (
+            StageName.INSPECT,
+            StageName.ACQUIRE,
+            StageName.NORMALIZE_AUDIO,
+            StageName.TRANSCRIBE,
+            StageName.ALIGN,
+            StageName.SEGMENT,
+        ):
+            _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
+        _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.RUNNING, event_sink)
+        artifacts_directory = get_job_directory(job) / "artifacts"
+        artifacts_directory.mkdir(parents=True, exist_ok=True)
+        imported_path = artifacts_directory / f"input-subtitles{source.suffix.lower()}"
+        shutil.copy2(source, imported_path)
+        cues = load_subtitles(
+            imported_path,
+            role="source",
+            source_language=language,
+        )
+        if not cues:
+            raise ValueError("subtitle file contains no usable cues")
+        _add_artifact(job, "input_subtitles", imported_path, event_sink)
+        _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SUCCEEDED, event_sink)
+    except Exception as error:
+        _set_stage(
+            job,
+            StageName.IMPORT_SUBTITLES,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+        )
+        raise
+
+    job = _finish_subtitle_job(job, cues, event_sink=event_sink)
+
+    if event_sink and emit_job_completed:
+        event_sink(create_event("job_completed", job_id=job.id, job_file=str(get_job_file(job))))
+    return job
+
+
 def run_remote_transcription(
     url: str,
     output_root: str | Path,
@@ -912,6 +1034,19 @@ def run_transcription(
         )
     if youtube_subtitles:
         raise ValueError("--youtube-subtitles requires a remote URL input")
+    if is_subtitle_input(input_value):
+        if subtitles:
+            raise ValueError("subtitle input cannot be combined with --subtitles")
+        if align_subtitles:
+            raise ValueError("--align-subtitles requires media input")
+        return run_subtitle_transcription(
+            input_value,
+            output_root,
+            language=language,
+            workflow_config=workflow_config,
+            event_sink=event_sink,
+            emit_job_completed=emit_job_completed,
+        )
     return run_local_transcription(
         input_value,
         output_root,
@@ -972,6 +1107,31 @@ def _finish_resumed_source(
 
 def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> Job:
     job = load_job(job_file)
+    if job.config.get("input_kind") == "subtitle":
+        cues_path = valid_artifact_path(job, "source_cues")
+        if cues_path:
+            resumed = _finish_subtitle_job(job, _load_cues(cues_path), event_sink=event_sink)
+            if event_sink:
+                event_sink(
+                    create_event("job_resumed", job_id=job.id, job_file=str(get_job_file(job)))
+                )
+            return resumed
+        subtitle_path = valid_artifact_path(job, "input_subtitles")
+        if subtitle_path is None:
+            raise ValueError("subtitle job has no valid input_subtitles checkpoint")
+        language = job.config.get("source_language")
+        cues = load_subtitles(
+            subtitle_path,
+            role="source",
+            source_language=None if language == "auto" else str(language),
+        )
+        if not cues:
+            raise ValueError("subtitle file contains no usable cues")
+        resumed = _finish_subtitle_job(job, cues, event_sink=event_sink)
+        if event_sink:
+            event_sink(create_event("job_resumed", job_id=job.id, job_file=str(get_job_file(job))))
+        return resumed
+
     media_path = valid_artifact_path(job, "media_info")
     if media_path is None:
         raise ValueError("job has no valid media_info checkpoint; run the job again")
@@ -1081,6 +1241,10 @@ def resegment_translation(
     event_sink: EventSink | None = None,
 ) -> ResegmentationResult:
     job = load_job(job_file)
+    if job.config.get("input_kind") == "subtitle":
+        raise ValueError(
+            "re-segmentation requires ASR word timestamps; subtitle-only jobs are unsupported"
+        )
     workflow = job.config.get("workflow")
     if isinstance(workflow, dict) and workflow.get("translation_subtitles"):
         raise ValueError(
@@ -1241,6 +1405,18 @@ def resegment_translation(
             )
         )
     return ResegmentationResult(True, source_output, report_output)
+
+
+def _media_data(job: Job) -> dict[str, Any]:
+    if job.config.get("input_kind") == "subtitle":
+        return {}
+    media_path = _artifact_path(job, "media_info")
+    return json.loads(media_path.read_text(encoding="utf-8"))
+
+
+def _media_duration_ms(media_data: dict[str, Any]) -> int | None:
+    value = media_data.get("duration_ms")
+    return int(value) if value is not None else None
 
 
 def _render_translated_outputs(
@@ -1566,10 +1742,10 @@ def apply_agent_translation(
 
         current_stage = StageName.SUBTITLE_QA
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = json.loads(_artifact_path(job, "media_info").read_text(encoding="utf-8"))
+        media_data = _media_data(job)
         report = check_subtitles(
             translated,
-            media_duration_ms=int(media_data["duration_ms"]),
+            media_duration_ms=_media_duration_ms(media_data),
             video_width=media_data.get("width"),
             video_height=media_data.get("height"),
             require_translation=True,
@@ -1631,10 +1807,10 @@ def apply_subtitle_translation(
 
         current_stage = StageName.SUBTITLE_QA
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = json.loads(_artifact_path(job, "media_info").read_text(encoding="utf-8"))
+        media_data = _media_data(job)
         report = check_subtitles(
             translated,
-            media_duration_ms=int(media_data["duration_ms"]),
+            media_duration_ms=_media_duration_ms(media_data),
             video_width=media_data.get("width"),
             video_height=media_data.get("height"),
             require_translation=True,
@@ -1678,6 +1854,8 @@ def preview_translated_job(
         raise ValueError("--duration must be positive")
 
     job = load_job(job_file)
+    if job.config.get("input_kind") == "subtitle":
+        raise ValueError("preview requires media input")
     translated_path = valid_artifact_path(job, "translated_cues")
     qa_path = valid_artifact_path(job, "translated_subtitle_qa")
     if translated_path is None or qa_path is None:
@@ -1864,6 +2042,8 @@ def burn_translated_job(
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
+    if job.config.get("input_kind") == "subtitle":
+        raise ValueError("burn-in requires media input")
     current_stage = StageName.RENDER
     try:
         if media:

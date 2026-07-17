@@ -12,6 +12,7 @@ from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import (
     apply_subtitle_translation,
     burn_translated_job,
+    is_subtitle_input,
     resume_job,
     resume_remote_transcription,
     run_transcription,
@@ -57,6 +58,13 @@ class WorkflowOptions:
     source_font: str | None = None
 
     def validate(self) -> None:
+        subtitle_input = is_subtitle_input(self.input)
+        if subtitle_input and self.subtitles:
+            raise ValueError("subtitle input cannot be combined with --subtitles")
+        if subtitle_input and self.align_subtitles:
+            raise ValueError("--align-subtitles requires media input")
+        if subtitle_input and self.burn:
+            raise ValueError("--burn requires media input")
         if self.align_subtitles and not self.subtitles:
             raise ValueError("--align-subtitles requires --subtitles")
         if self.allow_low_confidence_alignment and not self.align_subtitles:
@@ -201,7 +209,7 @@ def run_workflow(
         if options.target_language and not options.translation_subtitles
         else None
     )
-    steps = ["transcribe"]
+    steps = ["import_subtitles"] if is_subtitle_input(options.input) else ["transcribe"]
     if options.target_language:
         steps.append("import_translation" if options.translation_subtitles else "translate")
     if options.burn:

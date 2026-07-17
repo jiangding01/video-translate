@@ -23,6 +23,7 @@ from xvt.pipeline import (
     retranslate_cues,
     run_local_transcription,
     run_remote_transcription,
+    run_subtitle_transcription,
 )
 from xvt.process import CommandResult
 from xvt.qa import check_subtitles, display_width, display_width_limit
@@ -31,6 +32,85 @@ from xvt.segment import SegmentationConfig, segment_transcript, segmentation_con
 
 
 class PipelineTest(unittest.TestCase):
+    def test_subtitle_job_exports_srt_without_media_and_recovers_source_cues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            job = run_subtitle_transcription(source, root / "output", language="en")
+            self.assertEqual(job.config["input_kind"], "subtitle")
+            self.assertNotIn("media_info", {artifact.kind for artifact in job.artifacts})
+            self.assertEqual(job.stages[StageName.IMPORT_SUBTITLES].status, StageStatus.SUCCEEDED)
+            self.assertEqual(job.stages[StageName.TRANSCRIBE].status, StageStatus.SKIPPED)
+            self.assertEqual(job.stages[StageName.SEGMENT].status, StageStatus.SKIPPED)
+            self.assertEqual(job.stages[StageName.TRANSLATE].status, StageStatus.SKIPPED)
+
+            paths = apply_subtitle_translation(
+                get_job_file(job),
+                translated,
+                target_language="zh-CN",
+            )
+            self.assertEqual({path.name for path in paths}, {"translated.srt", "bilingual.srt"})
+
+            source_srt = next(
+                artifact for artifact in job.artifacts if artifact.kind == "source_srt"
+            )
+            Path(source_srt.path).unlink()
+            resumed = resume_job(get_job_file(job))
+            self.assertTrue(
+                next(
+                    Path(item.path) for item in resumed.artifacts if item.kind == "source_srt"
+                ).is_file()
+            )
+
+    def test_subtitle_job_rejects_media_only_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root / "output", language="en")
+            job_file = get_job_file(job)
+
+            with self.assertRaisesRegex(ValueError, "preview requires media input"):
+                preview_translated_job(job_file)
+            with self.assertRaisesRegex(ValueError, "burn-in requires media input"):
+                burn_translated_job(job_file)
+            with self.assertRaisesRegex(ValueError, "subtitle-only jobs are unsupported"):
+                resegment_translation(job_file)
+
+    def test_subtitle_resume_rechecks_failed_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nFirst.\n\n"
+                "2\n00:00:01,000 --> 00:00:02,000\nSecond.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                run_subtitle_transcription(source, root / "output", language="en")
+            job_file = next((root / "output" / "jobs").glob("*/job.json"))
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                resume_job(job_file)
+
+            self.assertEqual(
+                load_job(job_file).stages[StageName.SUBTITLE_QA].status,
+                StageStatus.FAILED,
+            )
+
     def test_segmenter_respects_language_display_width(self) -> None:
         tokens = (
             "This workflow keeps every generated bilingual subtitle safely inside the video frame."
