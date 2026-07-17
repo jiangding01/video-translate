@@ -144,7 +144,7 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 }
 ```
 
-`translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。
+`translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。译文 QA 会确定性检查命中源 cue 的术语是否包含要求的目标词；违规会以 `glossary_violation` 写入 `qa-translated.json`，阻断渲染和烧录。
 
 不使用 API 时，可走 Agent 协议：
 

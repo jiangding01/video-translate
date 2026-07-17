@@ -945,6 +945,7 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(bilingual_ass.exists())
             persisted = json.loads((root / "jobs" / job.id / "job.json").read_text())
             self.assertEqual(persisted["stages"]["translate"]["status"], "succeeded")
+            self.assertEqual(persisted["stages"]["subtitle_qa"]["status"], "succeeded")
             self.assertEqual(persisted["config"]["translation_policy"], batch_data["policy"])
             self.assertIn(
                 "bilingual_ass", {artifact["kind"] for artifact in persisted["artifacts"]}
@@ -980,6 +981,51 @@ class PipelineTest(unittest.TestCase):
                     response_path,
                     target_language="zh-CN",
                 )
+
+    def test_agent_translation_blocks_glossary_violations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job(
+                "/tmp/input.mp4",
+                root,
+                {
+                    "translation_policy": {
+                        "style": "faithful",
+                        "terms": [{"source": "OpenAI", "target": "OpenAI"}],
+                    }
+                },
+            )
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "OpenAI is useful."))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 2000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path)),
+                    Artifact("media_info", str(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "开放人工智能很有用。"}]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                apply_agent_translation(job_file, response_path, target_language="zh-CN")
+
+            persisted = json.loads(job_file.read_text())
+            report = json.loads((artifacts / "qa-translated.json").read_text())
+
+        self.assertEqual(persisted["stages"]["subtitle_qa"]["status"], "failed")
+        self.assertEqual(report["issues"][0]["code"], "glossary_violation")
+        self.assertNotIn("bilingual_ass", {item["kind"] for item in persisted["artifacts"]})
 
     def test_existing_translation_uses_source_timeline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
