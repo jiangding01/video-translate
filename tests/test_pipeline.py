@@ -22,7 +22,7 @@ from xvt.pipeline import (
 from xvt.process import CommandResult
 from xvt.qa import check_subtitles, display_width, display_width_limit
 from xvt.recovery import file_checksum
-from xvt.segment import segment_transcript
+from xvt.segment import SegmentationConfig, segment_transcript
 
 
 class PipelineTest(unittest.TestCase):
@@ -88,6 +88,53 @@ class PipelineTest(unittest.TestCase):
             )
         )
         self.assertTrue(all(len(cue.source_text.split()) > 1 for cue in balanced_long))
+
+    def test_segmenter_prefers_semantic_boundaries_when_splitting_by_width(self) -> None:
+        text = (
+            "We should preserve the meaning of each subtitle, but still keep every line readable."
+        )
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=tuple(
+                Word(
+                    ("" if index == 0 else " ") + token,
+                    index * 300,
+                    index * 300 + 250,
+                    0.9,
+                )
+                for index, token in enumerate(text.split())
+            ),
+        )
+
+        cues = segment_transcript(transcript, SegmentationConfig(max_characters=50))
+
+        self.assertEqual(
+            [cue.source_text for cue in cues],
+            [
+                "We should preserve the meaning of each subtitle,",
+                "but still keep every line readable.",
+            ],
+        )
+        self.assertEqual([(cue.start_ms, cue.end_ms) for cue in cues], [(0, 2400), (2400, 4300)])
+
+    def test_segmenter_prefers_cjk_punctuation_when_splitting_by_width(self) -> None:
+        text = "我们需要保留每个字幕的含义，但是也要保证每行都清晰。"
+        transcript = Transcript(
+            language="zh-CN",
+            engine="mlx",
+            words=tuple(
+                Word(token, index * 300, index * 300 + 250, 0.9) for index, token in enumerate(text)
+            ),
+        )
+
+        cues = segment_transcript(transcript, SegmentationConfig(max_characters=28))
+
+        self.assertEqual(
+            [cue.source_text for cue in cues],
+            ["我们需要保留每个字幕的含义，", "但是也要保证每行都清晰。"],
+        )
+        self.assertEqual([(cue.start_ms, cue.end_ms) for cue in cues], [(0, 4200), (4200, 7900)])
 
     def test_bilingual_qa_requires_review_for_visual_overflow(self) -> None:
         cues = [
