@@ -79,6 +79,8 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 
 请求烧录时，远程视频会在前置阶段下载一次；ASR 和后续烧录复用同一文件。
 
+普通运行无需额外参数即可在终端看到阶段进度。阶段切换会立即显示，下载和烧录会显示百分比、速度或剩余时间，翻译会显示当前批次。进度写入 stderr，最终 Job 和产物路径仍写入 stdout，现有脚本可以继续读取路径。
+
 ### 2. 只创建源字幕作业
 
 ```bash
@@ -201,7 +203,9 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 
 `continue` 根据 `run` 时持久化的目标补齐翻译和烧录：API 中断会复用批次进度，Agent 等待会停在 `apply-translation`，烧录失败只重跑烧录，指纹有效的成品不会重复生成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256，`status` 会根据当前 Job 给出下一条建议命令。
 
-`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation` 和 `burn` 支持 `--events-jsonl`。该模式的 stdout 只输出逐行 JSON 事件；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress` 和 `burn_progress`。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径，以及保守可靠的 `xvt status JOB` 检查命令；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并显示同一套状态检查入口。在统一恢复计划完成前，不会根据未校验的 artifact 猜测续跑命令。任务创建前的参数或输入错误会明确提示修正后重新执行。
+
+`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress` 和 `burn_progress`。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
 ## 开发
 

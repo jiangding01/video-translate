@@ -94,6 +94,29 @@ def _set_stage(
         event_sink(create_event(event_type, job_id=job.id, stage=stage.value, status=status.value))
 
 
+def interrupt_running_stage(
+    job_file: str | Path,
+    stage: str,
+    *,
+    event_sink: EventSink | None = None,
+) -> bool:
+    try:
+        stage_name = StageName(stage)
+        job = load_job(job_file)
+        if job.stages[stage_name].status is not StageStatus.RUNNING:
+            return False
+        _set_stage(
+            job,
+            stage_name,
+            StageStatus.FAILED,
+            event_sink,
+            error="interrupted by user",
+        )
+    except (KeyError, OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def _write_json(path: Path, data: Any) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -313,7 +336,14 @@ def run_local_transcription(
         },
     )
     if event_sink:
-        event_sink(create_event("job_started", job_id=job.id, input=str(source)))
+        event_sink(
+            create_event(
+                "job_started",
+                job_id=job.id,
+                job_file=str(get_job_file(job)),
+                input=str(source),
+            )
+        )
 
     current_stage = StageName.INSPECT
     try:
@@ -381,7 +411,14 @@ def run_remote_transcription(
         },
     )
     if event_sink:
-        event_sink(create_event("job_started", job_id=job.id, input=url))
+        event_sink(
+            create_event(
+                "job_started",
+                job_id=job.id,
+                job_file=str(get_job_file(job)),
+                input=url,
+            )
+        )
 
     current_stage = StageName.INSPECT
     try:

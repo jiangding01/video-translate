@@ -7,7 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.cli import main
-from xvt.job_store import create_job, get_job_file, save_job
+from xvt.events import create_event
+from xvt.job_store import create_job, get_job_file, load_job, save_job
+from xvt.models import StageName, StageStatus
 from xvt.pipeline import TranslationRunResult
 from xvt.workflow import WorkflowResult
 
@@ -144,6 +146,167 @@ class CliTest(unittest.TestCase):
         self.assertTrue(options.align_subtitles)
         self.assertEqual(options.minimum_alignment_confidence, 0.7)
         self.assertTrue(options.allow_low_confidence_alignment)
+
+    def test_run_shows_human_progress_on_stderr_and_keeps_paths_on_stdout(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        result = WorkflowResult("completed", Path("/tmp/job.json"))
+
+        def run_with_progress(_options, *, event_sink):
+            event_sink(create_event("workflow_started"))
+            event_sink(
+                create_event(
+                    "job_started",
+                    job_id="job-1",
+                    job_file=str(result.job_file),
+                    input="/tmp/input.mp4",
+                )
+            )
+            event_sink(create_event("stage_started", stage="acquire", status="running"))
+            event_sink(
+                create_event(
+                    "download_progress",
+                    percent=42.0,
+                    speed=2 * 1024 * 1024,
+                    eta_seconds=15,
+                )
+            )
+            event_sink(create_event("stage_completed", stage="acquire", status="succeeded"))
+            event_sink(create_event("workflow_completed", job_file=str(result.job_file)))
+            return result
+
+        with (
+            patch("xvt.cli.run_workflow", side_effect=run_with_progress),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(output.getvalue(), "/tmp/job.json\n")
+        progress = error_output.getvalue()
+        self.assertIn("XVT 开始处理任务", progress)
+        self.assertIn("任务文件: /tmp/job.json", progress)
+        self.assertIn("[进行中] 下载源视频  42%  2.0 MB/s  剩余 00:15", progress)
+        self.assertIn("任务处理完成", progress)
+
+    def test_run_failure_shows_job_and_safe_status_command(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+
+        def fail_after_job_created(_options, *, event_sink):
+            event_sink(create_event("workflow_started"))
+            event_sink(
+                create_event(
+                    "job_started",
+                    job_id="job-1",
+                    job_file="/tmp/job.json",
+                    input="https://example.com/video",
+                )
+            )
+            event_sink(create_event("stage_started", stage="acquire", status="running"))
+            raise RuntimeError("download unavailable")
+
+        with (
+            patch("xvt.cli.run_workflow", side_effect=fail_after_job_created),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "https://example.com/video", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 4)
+        self.assertEqual(output.getvalue(), "")
+        failure = error_output.getvalue()
+        self.assertIn("任务失败：download unavailable", failure)
+        self.assertIn("失败阶段：获取素材", failure)
+        self.assertIn("任务文件: /tmp/job.json", failure)
+        self.assertIn('xvt status "/tmp/job.json"', failure)
+
+    def test_existing_job_failure_keeps_job_path(self) -> None:
+        error_output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/input.mp4", directory)
+            job_file = get_job_file(job)
+            with (
+                patch("xvt.cli.run_translation", side_effect=ValueError("missing source cues")),
+                redirect_stderr(error_output),
+            ):
+                return_code = main(["translate", str(job_file), "--target-language", "zh-CN"])
+
+        self.assertEqual(return_code, 2)
+        failure = error_output.getvalue()
+        self.assertIn(f"任务文件: {job_file}", failure)
+        self.assertIn(f'xvt status "{job_file}"', failure)
+        self.assertNotIn("任务尚未创建", failure)
+
+    def test_keyboard_interrupt_fails_running_stage_and_returns_130(self) -> None:
+        error_output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/input.mp4", directory)
+            job.stages[StageName.ACQUIRE].status = StageStatus.RUNNING
+            job_file = save_job(job)
+
+            def interrupt_workflow(_options, *, event_sink):
+                event_sink(
+                    create_event(
+                        "job_started",
+                        job_id=job.id,
+                        job_file=str(job_file),
+                        input=job.input,
+                    )
+                )
+                event_sink(create_event("stage_started", stage="acquire", status="running"))
+                raise KeyboardInterrupt
+
+            with (
+                patch("xvt.cli.run_workflow", side_effect=interrupt_workflow),
+                redirect_stderr(error_output),
+            ):
+                return_code = main(["run", job.input, "--output", directory])
+
+            interrupted = load_job(job_file)
+
+        self.assertEqual(return_code, 130)
+        self.assertEqual(interrupted.stages[StageName.ACQUIRE].status, StageStatus.FAILED)
+        self.assertEqual(interrupted.stages[StageName.ACQUIRE].error, "interrupted by user")
+        failure = error_output.getvalue()
+        self.assertIn("任务已中断", failure)
+        self.assertIn("失败阶段：获取素材", failure)
+        self.assertIn(f'xvt status "{job_file}"', failure)
+
+    def test_jsonl_keyboard_interrupt_ends_with_structured_failure(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/input.mp4", directory)
+            job.stages[StageName.ACQUIRE].status = StageStatus.RUNNING
+            job_file = save_job(job)
+
+            def interrupt_workflow(_options, *, event_sink):
+                event_sink(
+                    create_event(
+                        "job_started",
+                        job_id=job.id,
+                        job_file=str(job_file),
+                        input=job.input,
+                    )
+                )
+                event_sink(create_event("stage_started", stage="acquire", status="running"))
+                raise KeyboardInterrupt
+
+            with (
+                patch("xvt.cli.run_workflow", side_effect=interrupt_workflow),
+                redirect_stdout(output),
+                redirect_stderr(error_output),
+            ):
+                return_code = main(["run", job.input, "--output", directory, "--events-jsonl"])
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(return_code, 130)
+        self.assertEqual(events[-2]["type"], "stage_failed")
+        self.assertEqual(events[-1]["type"], "cli_failed")
+        self.assertEqual(events[-1]["data"]["category"], "interrupted")
+        self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
 
     def test_run_forwards_youtube_subtitle_options(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -341,11 +504,18 @@ class CliTest(unittest.TestCase):
 
     def test_jsonl_mode_has_structured_terminal_event(self) -> None:
         output = StringIO()
+        error_output = StringIO()
         with tempfile.TemporaryDirectory() as directory:
             result = WorkflowResult("completed", Path(directory) / "job.json")
+
+            def run_with_event(_options, *, event_sink):
+                event_sink(create_event("stage_started", stage="inspect", status="running"))
+                return result
+
             with (
-                patch("xvt.cli.run_workflow", return_value=result),
+                patch("xvt.cli.run_workflow", side_effect=run_with_event),
                 redirect_stdout(output),
+                redirect_stderr(error_output),
             ):
                 return_code = main(
                     ["run", "/tmp/input.mp4", "--output", directory, "--events-jsonl"]
@@ -353,8 +523,10 @@ class CliTest(unittest.TestCase):
 
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(return_code, 0)
+        self.assertEqual(lines[0]["type"], "stage_started")
         self.assertEqual(lines[-1]["type"], "cli_completed")
         self.assertEqual(lines[-1]["data"]["job_file"], str(result.job_file))
+        self.assertEqual(error_output.getvalue(), "")
 
     def test_jsonl_error_is_structured_and_keeps_stderr_diagnostic(self) -> None:
         output = StringIO()

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.download import RemoteMediaInfo
-from xvt.job_store import create_job, save_job
+from xvt.job_store import create_job, get_job_file, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
@@ -111,6 +111,7 @@ class PipelineTest(unittest.TestCase):
             root = Path(directory)
             media = root / "input.mp4"
             media.write_bytes(b"video")
+            events = []
 
             def run_ffmpeg(args, **_kwargs):
                 Path(args[-1]).write_bytes(b"audio")
@@ -143,6 +144,7 @@ class PipelineTest(unittest.TestCase):
                     media,
                     root,
                     workflow_config={"target_language": "zh-CN", "burn": True},
+                    event_sink=events.append,
                 )
 
             artifact_kinds = {artifact.kind for artifact in job.artifacts}
@@ -153,6 +155,8 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(job.config["workflow"]["burn"])
             qa_path = next(Path(item.path) for item in job.artifacts if item.kind == "subtitle_qa")
             self.assertEqual(json.loads(qa_path.read_text())["status"], "pass")
+            started = next(event for event in events if event.type == "job_started")
+            self.assertEqual(started.data["job_file"], str(get_job_file(job)))
 
     def test_pipeline_failure_is_persisted_on_current_stage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

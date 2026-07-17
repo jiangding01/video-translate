@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-07-15
+更新时间：2026-07-17
 
 ## 当前快照
 
@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 128 个，全部通过 |
+| 自动化测试 | 133 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | Git | 已初始化，当前分支为 `main`，`origin` 已关联 GitHub |
@@ -73,10 +73,15 @@
 ### Job、恢复和事件
 
 - 每次 `run` 创建独立 Job，stage 和 artifact 写入 `job.json`。
+- 普通 CLI 默认把人类可读的阶段、下载、翻译批次和烧录进度写入 stderr，最终路径继续写入 stdout。
+- `job_started` 在 Job 首次持久化后立即携带 `job_file`，早期素材获取失败也能定位任务文件。
+- 已有 Job 的原子命令会从 CLI 参数预先记录任务路径，早期失败不会误报为任务尚未创建。
+- Ctrl-C 返回退出码 130，并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`。
 - artifact 使用 SHA-256 checksum，`verify` 会重新计算。
 - `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
 - JSONL 已覆盖工作流、stage、artifact、翻译批次、下载进度和烧录进度。
+- `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
 - 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
 
 ## 支持的输入组合
@@ -239,6 +244,7 @@ media-qa.json
 - 没有术语表、专有名词保护、翻译风格或 cue 级局部重译。
 - 没有短片段预览命令和分段预设。
 - 下载、翻译和烧录已有进度事件，Whisper 转写还没有统一的细粒度进度。
+- 失败输出当前只提供安全的 `status` 检查入口；精确到 `continue`、`resume` 或人工修复的统一恢复计划尚未实现。
 - 不支持纯字幕文件创建 Job。
 - 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
