@@ -451,11 +451,17 @@ class CliTest(unittest.TestCase):
                     "en",
                     "--target-language",
                     "zh-CN",
+                    "--glossary",
+                    "/tmp/glossary.json",
+                    "--translation-style",
+                    "natural",
                 ]
             )
 
         self.assertEqual(return_code, 0)
         self.assertEqual(prepare.call_args.kwargs["source_language"], "en")
+        self.assertEqual(prepare.call_args.kwargs["glossary"], "/tmp/glossary.json")
+        self.assertEqual(prepare.call_args.kwargs["translation_style"], "natural")
         self.assertEqual(output.getvalue(), "/tmp/batches.json\n")
 
     def test_translate_reports_agent_fallback(self) -> None:
@@ -469,10 +475,23 @@ class CliTest(unittest.TestCase):
             patch("xvt.cli.run_translation", return_value=result) as translate,
             redirect_stdout(output),
         ):
-            return_code = main(["translate", "/tmp/job.json", "--target-language", "zh-CN"])
+            return_code = main(
+                [
+                    "translate",
+                    "/tmp/job.json",
+                    "--target-language",
+                    "zh-CN",
+                    "--glossary",
+                    "/tmp/glossary.json",
+                    "--translation-style",
+                    "concise",
+                ]
+            )
 
         self.assertEqual(return_code, 0)
         self.assertEqual(translate.call_args.kwargs["provider"], "auto")
+        self.assertEqual(translate.call_args.kwargs["glossary"], "/tmp/glossary.json")
+        self.assertEqual(translate.call_args.kwargs["translation_style"], "concise")
         self.assertIn("using Agent mode", output.getvalue())
         self.assertIn("translation-batches.json", output.getvalue())
 

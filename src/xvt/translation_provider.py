@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 from xvt.translate import TranslationBatch, parse_translation_response
 
-TRANSLATION_PROMPT_VERSION = 1
+TRANSLATION_PROMPT_VERSION = 2
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
@@ -95,11 +95,21 @@ def translate_batch(
     opener=None,
     correction: str | None = None,
 ) -> dict[int, str]:
+    style_instruction = {
+        "faithful": "Preserve meaning, tone, and formality faithfully.",
+        "natural": "Use idiomatic target-language phrasing without adding or omitting meaning.",
+        "concise": "Keep the core meaning while removing only non-semantic repetition when needed.",
+    }[batch.policy.style]
     system_content = (
-        "Translate subtitle items faithfully and concisely. Preserve every integer id, "
+        f"{style_instruction} Preserve every integer id, "
         "respect max_target_characters, use neighboring context only for meaning, and "
         'return JSON only in the form {"items":[{"id":1,"text":"..."}]}.'
     )
+    if batch.policy.terms:
+        system_content = (
+            f"{system_content} When a glossary source term appears in an item, use its exact "
+            "required target term."
+        )
     if correction:
         system_content = f"{system_content} {correction}"
     payload = {

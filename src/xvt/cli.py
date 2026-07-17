@@ -105,6 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--source-language", required=True)
     prepare_parser.add_argument("--target-language", required=True)
     prepare_parser.add_argument("--batch-size", type=int, default=40)
+    prepare_parser.add_argument("--glossary")
+    prepare_parser.add_argument(
+        "--translation-style",
+        choices=["faithful", "natural", "concise"],
+        default="faithful",
+    )
     prepare_parser.add_argument("--events-jsonl", action="store_true")
 
     apply_parser = subparsers.add_parser(
@@ -142,6 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument("--batch-size", type=int, default=40)
     translate_parser.add_argument("--max-retries", type=int, default=2)
     translate_parser.add_argument("--timeout-seconds", type=float, default=60)
+    translate_parser.add_argument("--glossary")
+    translate_parser.add_argument(
+        "--translation-style",
+        choices=["faithful", "natural", "concise"],
+        default="faithful",
+    )
     translate_parser.add_argument("--events-jsonl", action="store_true")
 
     resegment_parser = subparsers.add_parser(
@@ -555,6 +567,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
             source_language=arguments.source_language,
             target_language=arguments.target_language,
             batch_size=arguments.batch_size,
+            glossary=arguments.glossary,
+            translation_style=arguments.translation_style,
             event_sink=event_sink,
         )
         if arguments.events_jsonl:
@@ -605,6 +619,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
             batch_size=arguments.batch_size,
             max_retries=arguments.max_retries,
             timeout_seconds=arguments.timeout_seconds,
+            glossary=arguments.glossary,
+            translation_style=arguments.translation_style,
             event_sink=event_sink,
         )
         if arguments.events_jsonl:

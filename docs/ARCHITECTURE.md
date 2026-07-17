@@ -50,7 +50,7 @@ flowchart LR
 | `transcribe.py` | MLX Whisper、faster-whisper 引擎适配 |
 | `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠 |
 | `subtitles.py` / `align.py` | 字幕读写和已有字幕到 ASR 的顺序模糊对齐 |
-| `translate.py` / `translation_provider.py` | 翻译批次协议、兼容 API 调用、断点恢复、cue ID 覆盖校验和译文回填 |
+| `translate.py` / `translation_provider.py` | 结构化术语表和翻译风格、翻译批次协议、兼容 API 调用、断点恢复、cue ID 覆盖校验和译文回填 |
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性和按画幅计算的字幕显示宽度检查 |
 | `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式、分辨率自适应码率与安全的 FFmpeg 参数构造 |
 | `events.py` / `process.py` | 结构化事件、敏感命令参数脱敏与流式外部进程执行 |
@@ -87,7 +87,7 @@ Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`fai
 
 `run` 会根据输入组合跳过不需要的阶段：源字幕跳过 ASR，已有译文跳过翻译提供方。远程作业请求烧录时前置下载完整视频，ASR 和烧录复用 `source_video`。烧录派生指纹包含译文 checksum、媒体身份、字体和编码参数；只有 artifact 与指纹同时有效时 `continue` 才复用成品。若译文超过硬显示阈值，`resegment-translation` 会仅对具备词级时间戳的 ASR cue 按语义边界重切，重新编号 source cue，重建源字幕并使翻译及其下游产物失效；它不拆分旧译文，也不改写用户导入字幕的时间轴。端到端 Job 随后可用 `continue` 重新翻译，带已有译文字幕的工作流会被明确拒绝。
 
-Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
+Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。原子翻译命令选择的术语表和风格以 `config.translation_policy` 持久化，并进入 API 翻译指纹；批次只携带命中自身源 cue 的术语。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
 
 ## 事件和用户反馈
 
@@ -117,7 +117,7 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存。AP
 
 ## 迭代顺序
 
-1. 增加术语表、翻译风格、局部重译和 QA 定向修复。
+1. 为端到端 `run` / `continue` 透传翻译策略，并增加术语违规的确定性 QA、局部重译和 QA 定向修复。
 2. 增加预览输出与分段预设。
 3. 实现 Electron + React 桌面壳，只消费 JSONL 事件和 `job.json`，不复制业务逻辑；下载、转写和烧录进度直接复用 CLI 事件。
 4. 最后评估目录批处理、队列、远程执行和 Web 服务。

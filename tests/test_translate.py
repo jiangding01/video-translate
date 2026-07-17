@@ -1,9 +1,15 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from xvt.models import Cue
 from xvt.translate import (
+    GlossaryTerm,
+    TranslationPolicy,
     apply_translations,
     build_translation_batches,
+    load_translation_policy,
     map_subtitle_translations,
     parse_translation_response,
 )
@@ -29,6 +35,40 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual([item.id for item in batches[0].items], [1, 2])
         self.assertEqual([item.id for item in batches[0].context_after], [3])
         self.assertEqual([item.id for item in batches[1].context_before], [2])
+
+    def test_batches_include_only_matching_glossary_terms(self) -> None:
+        batches = build_translation_batches(
+            self.cues,
+            source_language="en",
+            target_language="zh-CN",
+            batch_size=1,
+            policy=TranslationPolicy(
+                style="natural",
+                terms=(GlossaryTerm("One", "一"), GlossaryTerm("Unused", "未使用")),
+            ),
+        )
+
+        self.assertEqual(batches[0].policy.style, "natural")
+        self.assertEqual(batches[0].policy.terms, (GlossaryTerm("One", "一"),))
+        self.assertEqual(batches[1].policy.terms, ())
+
+    def test_glossary_rejects_duplicate_source_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            glossary = Path(directory) / "glossary.json"
+            glossary.write_text(
+                json.dumps(
+                    {
+                        "terms": [
+                            {"source": "OpenAI", "target": "OpenAI"},
+                            {"source": "openai", "target": "开放人工智能"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "duplicate source term"):
+                load_translation_policy(glossary, style="concise")
 
     def test_translation_response_requires_exact_ids(self) -> None:
         batch = build_translation_batches(

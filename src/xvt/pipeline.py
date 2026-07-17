@@ -36,7 +36,13 @@ from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.segment import segment_transcript, split_cue_by_parts
 from xvt.subtitles import load_subtitles, normalize_display_text, save_subtitles
 from xvt.transcribe import transcribe_audio
-from xvt.translate import apply_translations, build_translation_batches, map_subtitle_translations
+from xvt.translate import (
+    TranslationPolicy,
+    apply_translations,
+    build_translation_batches,
+    load_translation_policy,
+    map_subtitle_translations,
+)
 from xvt.translation_provider import (
     TRANSLATION_PROMPT_VERSION,
     TranslationProviderError,
@@ -1027,9 +1033,13 @@ def prepare_agent_translation(
     source_language: str,
     target_language: str,
     batch_size: int = 40,
+    policy: TranslationPolicy | None = None,
+    glossary: str | Path | None = None,
+    translation_style: str = "faithful",
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
+    resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     try:
         cues = _load_cues(_artifact_path(job, "source_cues"))
@@ -1038,6 +1048,7 @@ def prepare_agent_translation(
             source_language=source_language,
             target_language=target_language,
             batch_size=batch_size,
+            policy=resolved_policy,
         )
         output_path = get_job_directory(job) / "artifacts" / "translation-batches.json"
         _write_json(
@@ -1046,11 +1057,13 @@ def prepare_agent_translation(
                 "job_id": job.id,
                 "source_language": source_language,
                 "target_language": target_language,
+                "policy": resolved_policy.to_dict(),
                 "batches": [batch.to_dict() for batch in batches],
             },
         )
         _add_artifact(job, "translation_batches", output_path, event_sink)
         job.config["target_language"] = target_language
+        job.config["translation_policy"] = resolved_policy.to_dict()
         _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return output_path
     except Exception as error:
@@ -1069,6 +1082,8 @@ def run_translation(
     batch_size: int = 40,
     max_retries: int = 2,
     timeout_seconds: float = 60,
+    glossary: str | Path | None = None,
+    translation_style: str = "faithful",
     event_sink: EventSink | None = None,
 ) -> TranslationRunResult:
     if max_retries < 0:
@@ -1076,6 +1091,7 @@ def run_translation(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     job = load_job(job_file)
+    policy = load_translation_policy(glossary, style=translation_style)
     cues = _load_cues(_artifact_path(job, "source_cues"))
     source_language = next(
         (cue.source_language for cue in cues if cue.source_language),
@@ -1093,6 +1109,7 @@ def run_translation(
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
+        policy=policy,
         event_sink=event_sink,
     )
     if mode == "agent":
@@ -1116,6 +1133,7 @@ def run_translation(
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
+        policy=policy,
     )
     source_cues_checksum = _checksum(_artifact_path(job, "source_cues"))
     fingerprint_payload = {
@@ -1127,6 +1145,7 @@ def run_translation(
         "model": provider_config.model,
         "batch_size": batch_size,
         "prompt_version": TRANSLATION_PROMPT_VERSION,
+        "translation_policy": policy.to_dict(),
     }
     translation_fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

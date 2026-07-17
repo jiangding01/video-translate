@@ -904,16 +904,30 @@ class PipelineTest(unittest.TestCase):
             ):
                 job = run_local_transcription(media, root)
 
+            glossary = root / "glossary.json"
+            glossary.write_text(
+                json.dumps({"terms": [{"source": "Hello", "target": "你好"}]}),
+                encoding="utf-8",
+            )
             batch_path = prepare_agent_translation(
                 root / "jobs" / job.id / "job.json",
                 source_language="en",
                 target_language="zh-CN",
+                glossary=glossary,
+                translation_style="natural",
             )
             batch_data = json.loads(batch_path.read_text())
             item = batch_data["batches"][0]["items"][0]
             self.assertEqual(item["id"], 1)
             self.assertEqual(item["duration_ms"], 950)
             self.assertEqual(item["max_target_characters"], 8)
+            self.assertEqual(
+                batch_data["policy"],
+                {
+                    "style": "natural",
+                    "terms": [{"source": "Hello", "target": "你好"}],
+                },
+            )
 
             response_path = root / "response.json"
             response_path.write_text(
@@ -931,6 +945,7 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(bilingual_ass.exists())
             persisted = json.loads((root / "jobs" / job.id / "job.json").read_text())
             self.assertEqual(persisted["stages"]["translate"]["status"], "succeeded")
+            self.assertEqual(persisted["config"]["translation_policy"], batch_data["policy"])
             self.assertIn(
                 "bilingual_ass", {artifact["kind"] for artifact in persisted["artifacts"]}
             )
