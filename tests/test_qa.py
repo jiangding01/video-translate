@@ -45,6 +45,58 @@ class SubtitleQaTest(unittest.TestCase):
         self.assertEqual(report.status, "needs_review")
         self.assertEqual(report.issues[0].code, "low_timing_confidence")
 
+    def test_glossary_terms_require_exact_target_text(self) -> None:
+        report = check_subtitles(
+            [
+                Cue(
+                    1,
+                    0,
+                    2000,
+                    "OpenAI uses AI.",
+                    target_text="开放人工智能使用人工智能。",
+                    source_language="en",
+                    target_language="zh-CN",
+                )
+            ],
+            require_translation=True,
+            required_terms=(("OpenAI", "OpenAI"), ("AI", "人工智能")),
+        )
+
+        self.assertEqual(report.status, "failed")
+        self.assertEqual(
+            [(issue.code, issue.cue_id) for issue in report.issues],
+            [("glossary_violation", 1)],
+        )
+
+    def test_glossary_terms_do_not_match_inside_ascii_words(self) -> None:
+        report = check_subtitles(
+            [
+                Cue(
+                    1,
+                    0,
+                    2000,
+                    "A chair is useful.",
+                    target_text="一把椅子很有用。",
+                    source_language="en",
+                    target_language="zh-CN",
+                ),
+                Cue(
+                    2,
+                    2000,
+                    4000,
+                    "机器学习很有用。",
+                    target_text="Machine learning is useful.",
+                    source_language="zh-CN",
+                    target_language="en",
+                ),
+            ],
+            require_translation=True,
+            required_terms=(("AI", "人工智能"), ("机器学习", "Machine learning")),
+        )
+
+        self.assertEqual(report.status, "pass")
+        self.assertNotIn("glossary_violation", {issue.code for issue in report.issues})
+
     def test_trimmed_hallucination_is_recorded_as_warning(self) -> None:
         cues = [
             Cue(

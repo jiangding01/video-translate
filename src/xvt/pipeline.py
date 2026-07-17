@@ -42,6 +42,7 @@ from xvt.translate import (
     build_translation_batches,
     load_translation_policy,
     map_subtitle_translations,
+    translation_policy_from_dict,
 )
 from xvt.translation_provider import (
     TRANSLATION_PROMPT_VERSION,
@@ -176,6 +177,11 @@ def _complete_qa_stage(
         )
         raise RuntimeError(message)
     _set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
+
+
+def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
+    policy = translation_policy_from_dict(job.config.get("translation_policy"))
+    return tuple((term.source, term.target) for term in policy.terms)
 
 
 def _process_acquired_media(
@@ -1321,6 +1327,7 @@ def apply_agent_translation(
             video_width=media_data.get("width"),
             video_height=media_data.get("height"),
             require_translation=True,
+            required_terms=_required_glossary_terms(job),
         )
         qa_path = artifacts_directory / "qa-translated.json"
         _write_json(qa_path, asdict(report))
@@ -1384,6 +1391,7 @@ def apply_subtitle_translation(
             video_width=media_data.get("width"),
             video_height=media_data.get("height"),
             require_translation=True,
+            required_terms=_required_glossary_terms(job),
         )
         qa_path = artifacts_directory / "qa-translated.json"
         _write_json(qa_path, asdict(report))

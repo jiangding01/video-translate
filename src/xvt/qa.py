@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from unicodedata import east_asian_width
 
@@ -68,6 +69,21 @@ def _reading_units(text: str, language: str | None) -> int:
     return len(text.replace("\n", ""))
 
 
+def _contains_glossary_term(text: str, term: str) -> bool:
+    normalized_text = text.casefold()
+    normalized_term = term.casefold()
+    if not normalized_term:
+        return False
+    if normalized_term[0].isascii() and normalized_term[0].isalnum():
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9_]){re.escape(normalized_term)}(?![a-z0-9_])",
+                normalized_text,
+            )
+        )
+    return normalized_term in normalized_text
+
+
 def _overflow_risk(
     text: str,
     language: str | None,
@@ -120,6 +136,7 @@ def check_subtitles(
     video_width: int | None = None,
     video_height: int | None = None,
     require_translation: bool = False,
+    required_terms: tuple[tuple[str, str], ...] = (),
 ) -> SubtitleQaReport:
     issues = []
     for index, cue in enumerate(cues):
@@ -150,6 +167,19 @@ def check_subtitles(
                 SubtitleIssue("missing_translation", "error", cue.id, "translated text is missing")
             )
             continue
+        if require_translation:
+            for source_term, target_term in required_terms:
+                if _contains_glossary_term(
+                    cue.source_text, source_term
+                ) and not _contains_glossary_term(cue.target_text or "", target_term):
+                    issues.append(
+                        SubtitleIssue(
+                            "glossary_violation",
+                            "error",
+                            cue.id,
+                            f"glossary term {source_term!r} requires {target_term!r}",
+                        )
+                    )
         if len(text.splitlines()) > 2:
             issues.append(
                 SubtitleIssue("too_many_lines", "warning", cue.id, "cue exceeds two lines")
