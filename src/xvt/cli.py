@@ -275,6 +275,8 @@ class _HumanEventSink(_TrackedEventSink):
             self._render_download(data)
         elif event.type == "burn_progress":
             self._render_burn(data)
+        elif event.type == "transcription_progress":
+            self._render_transcription(data)
         elif event.type == "translation_batch_started":
             self._line(f"[进行中] 翻译字幕（批次 {data.get('batch')}）")
         elif event.type == "translation_batch_retrying":
@@ -320,6 +322,27 @@ class _HumanEventSink(_TrackedEventSink):
         if speed := data.get("speed"):
             parts.append(str(speed))
         self._progress("burn", "  ".join(parts), force=percent == 100)
+
+    def _render_transcription(self, data: dict[str, object]) -> None:
+        engine = str(data.get("engine") or "Whisper")
+        determinate = data.get("determinate") is True
+        parts = ["[进行中] 转写音频"]
+        if determinate:
+            percent = data.get("percent")
+            if isinstance(percent, int | float):
+                parts.append(f"{percent:.0f}%")
+            processed = _format_duration((data.get("processed_ms") or 0) / 1000)
+            total = _format_duration((data.get("total_ms") or 0) / 1000)
+            if processed and total:
+                parts.append(f"{processed}/{total}")
+            if eta := _format_duration(data.get("eta_seconds")):
+                parts.append(f"剩余 {eta}")
+        else:
+            parts[0] = f"[进行中] 转写音频（{engine}）"
+            if elapsed := _format_duration(data.get("elapsed_seconds")):
+                parts.append(f"已运行 {elapsed}")
+        percent = data.get("percent")
+        self._progress("transcription", "  ".join(parts), force=percent == 100)
 
     def _render_recovery(self, plan: RecoveryPlan | None) -> None:
         if plan:

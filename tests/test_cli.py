@@ -173,6 +173,18 @@ class CliTest(unittest.TestCase):
                     eta_seconds=15,
                 )
             )
+            event_sink(
+                create_event(
+                    "transcription_progress",
+                    engine="faster",
+                    determinate=True,
+                    processed_ms=210000,
+                    total_ms=500000,
+                    percent=42.0,
+                    elapsed_seconds=30,
+                    eta_seconds=41,
+                )
+            )
             event_sink(create_event("stage_completed", stage="acquire", status="succeeded"))
             event_sink(create_event("workflow_completed", job_file=str(result.job_file)))
             return result
@@ -190,6 +202,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("XVT 开始处理任务", progress)
         self.assertIn("任务文件: /tmp/job.json", progress)
         self.assertIn("[进行中] 下载源视频  42%  2.0 MB/s  剩余 00:15", progress)
+        self.assertIn("[进行中] 转写音频  42%  03:30/08:20  剩余 00:41", progress)
         self.assertIn("任务处理完成", progress)
 
     def test_run_failure_shows_job_and_safe_status_command(self) -> None:

@@ -230,7 +230,13 @@ def _process_acquired_media(
 
             current_stage = StageName.TRANSCRIBE
             _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-            transcript = transcribe_audio(audio_path, engine=engine, language=language)
+            transcript = transcribe_audio(
+                audio_path,
+                engine=engine,
+                language=language,
+                event_sink=event_sink,
+                total_ms=media_info.duration_ms,
+            )
             words_path = artifacts_directory / "words.json"
             _write_json(words_path, asdict(transcript))
             _add_artifact(job, "word_transcript", words_path, event_sink)
@@ -730,6 +736,8 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             audio_path,
             engine=job.config.get("engine", "mlx"),
             language=None if language == "auto" else language,
+            event_sink=event_sink,
+            total_ms=media_info.duration_ms,
         )
         transcript_path = get_job_directory(job) / "artifacts" / "words.json"
         _write_json(transcript_path, asdict(transcript))

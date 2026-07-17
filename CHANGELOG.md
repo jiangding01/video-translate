@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的分类方式。以下记录基于首次公开版本前已验证的功能状态。
 
+## [Unreleased]
+
+### Added
+
+- `transcription_progress` 结构化事件：faster-whisper 使用词级分段提供真实百分比和 ETA，MLX Whisper 提供运行时长心跳。
+
+### Fixed
+
+- 修复转写失败或缺少词级时间戳时可能误报完成进度的问题。
+
 ## [0.1.0] - 2026-07-15
 
 ### Added
