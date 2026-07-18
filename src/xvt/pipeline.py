@@ -65,6 +65,7 @@ from xvt.translate import (
 )
 from xvt.translation_provider import (
     TRANSLATION_PROMPT_VERSION,
+    ProviderResponseError,
     TranslationProviderError,
     resolve_provider,
     translate_batch,
@@ -455,7 +456,7 @@ def retranslate_cues(
                     time.sleep(
                         error.retry_after if error.retry_after is not None else min(2**attempt, 30)
                     )
-                except ValueError:
+                except (ValueError, ProviderResponseError):
                     if attempt >= max_retries:
                         raise
                     time.sleep(min(0.5 * (2**attempt), 4))
@@ -1780,7 +1781,7 @@ def run_translation(
                             )
                         )
                     time.sleep(delay)
-                except ValueError:
+                except (ValueError, ProviderResponseError):
                     if attempt >= max_retries:
                         raise
                     delay = min(0.5 * (2**attempt), 4)

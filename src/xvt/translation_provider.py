@@ -14,7 +14,9 @@ TRANSLATION_PROMPT_VERSION = 2
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
-class TranslationProviderError(RuntimeError):
+class TranslationProviderError(DependencyError):
+    """翻译提供方传输层故障（HTTP 状态、网络、超时），按 retryable 决定原样退避重试。"""
+
     def __init__(
         self,
         message: str,
@@ -25,6 +27,14 @@ class TranslationProviderError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+
+
+class ProviderResponseError(DependencyError):
+    """翻译提供方返回了结构性无效的响应（缺 items、报文不完整、内容非文本）。
+
+    与传输层故障不同：原样重发大概率得到同样的畸形输出，这类错误应进入
+    携带纠正提示词的纠错重试分支；重试耗尽后仍按依赖故障分类（退出码 3）。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +95,7 @@ def _response_items(content: str) -> list[dict[str, Any]]:
     data = json.loads(text)
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
-        raise DependencyError("translation provider response must contain an items array")
+        raise ProviderResponseError("translation provider response must contain an items array")
     return items
 
 
@@ -166,7 +176,9 @@ def translate_batch(
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
-        raise DependencyError("translation provider returned an incompatible response") from error
+        raise ProviderResponseError(
+            "translation provider returned an incompatible response"
+        ) from error
     if not isinstance(content, str):
-        raise DependencyError("translation provider response content must be text")
+        raise ProviderResponseError("translation provider response content must be text")
     return parse_translation_response(batch, _response_items(content))
