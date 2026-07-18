@@ -43,6 +43,15 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    Pure-subtitle Jobs preserve the source timeline and support Agent translation plus `continue`; they do not support alignment, preview, burn-in, re-segmentation, or ASS output because no media dimensions are available.
 
+   When the user provides a directory of local media or subtitle files, use the batch workflow. It creates one independent Job per supported file and continues after individual failures:
+
+   ```bash
+   uv run --no-sync xvt batch "/path/to/input-directory" --output "/absolute/output" \
+     --target-language zh-CN --provider auto --events-jsonl
+   ```
+
+   Add `--recursive` only when the user wants nested directories. Batch execution is serial. Do not silently add newly discovered files to an existing batch or promise background queue behavior.
+
 4. Find the emitted `job.json`, then choose the translation path.
 
    When a compatible provider is configured, prefer the CLI translation path:
@@ -95,6 +104,8 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 ## Recover interrupted jobs
 
 Run `uv run --no-sync xvt verify "/path/to/job.json" --json` before recovery. Use `xvt continue "/path/to/job.json" --events-jsonl` for a persisted end-to-end goal; it can retry remote inspection or acquisition in the same Job, resume API batches, and retry missing translation or burn outputs. Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. Translation waiting states still require `apply-translation` or `import-translation` before `continue`. Keep `xvt resume` for transcription checkpoints only. Never bypass a missing-file or checksum-mismatch result.
+
+For a directory batch, use `uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl`. Read each incomplete item's `recovery_plan` before claiming the batch is recoverable: retryable Jobs continue automatically, Agent waits still require translation application, and manual or unrecoverable items remain blocked. Completed items are skipped only when their Job recovery plan confirms checksum-valid outputs.
 
 ## Safety and boundaries
 

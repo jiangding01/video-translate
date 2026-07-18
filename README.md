@@ -16,6 +16,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - 字幕 QA、媒体 QA、FFmpeg 硬件或软件烧录
 - `job.json`、checksum 校验、恢复和 JSONL 结构化事件
 - 单命令端到端工作流，以及基于持久化目标的 `xvt continue`
+- 目录批处理、独立 Job、失败隔离和可恢复的 `batch.json` 汇总报告
 
 时间轴只由 ASR 或源字幕决定。翻译阶段只能替换文本，不能改动 cue ID 或时间码。
 
@@ -125,7 +126,29 @@ uv run --no-sync xvt run "/path/to/source.srt" \
 
 支持 SRT、VTT、ASS 和 SSA。该模式保留用户时间轴，输出 `source.srt`、`translated.srt` 和 `bilingual.srt`，并照常支持 Agent 翻译、`continue`、`verify` 和术语表 QA。由于没有媒体尺寸，不生成 ASS，也不支持 `--align-subtitles`、烧录、预览或 `resegment-translation`。
 
-### 4. 单独翻译字幕
+### 4. 目录批处理
+
+目录中的本地视频、音频和字幕文件可以按稳定顺序串行处理，每个输入创建独立 Job：
+
+```bash
+uv run --no-sync xvt batch "/path/to/input-directory" \
+  --output "/absolute/path/to/output" \
+  --target-language zh-CN \
+  --provider auto \
+  --burn
+```
+
+默认只扫描目录第一层；使用 `--recursive` 才递归扫描。批处理支持常见视频、音频及 SRT、VTT、ASS、SSA，忽略隐藏文件和输出目录。使用 `--burn` 时目录只能包含视频；音频和纯字幕输入应拆成不烧录的独立批次。单项失败不会阻断后续文件，执行状态会原子写入 `batches/<batch-id>/batch.json`，其中包含每个输入的 Job 文件、产物、错误和恢复计划。
+
+中断、部分失败或 Agent 等待后，继续原批次：
+
+```bash
+uv run --no-sync xvt batch-continue "/path/to/batch.json"
+```
+
+`batch-continue` 会校验已有 Job，只跳过目标和 checksum 均有效的已完成项；可重试项调用原有 `continue` 工作流，需要人工修复或 Agent 回填的项保留恢复指令。批处理当前串行执行，不监控目录变化，也不提供队列或后台并发。
+
+### 5. 单独翻译字幕
 
 配置任意兼容 Chat Completions 的服务：
 
@@ -210,7 +233,7 @@ uv run --no-sync xvt import-translation "/path/to/job.json" \
 
 源字幕时间轴始终优先。数量不一致的译文只有在时间覆盖完整时才能合并。
 
-### 4. 只使用 YouTube 字幕
+### 6. 只使用 YouTube 字幕
 
 ```bash
 uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
@@ -222,7 +245,7 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 
 XVT 优先选择人工字幕。只有传入 `--allow-auto-subtitles` 才会使用自动字幕。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
 
-### 5. 生成短片段预览
+### 7. 生成短片段预览
 
 在烧录整段视频前，可以围绕指定 cue 快速检查字体、位置、换行和同步：
 
@@ -243,7 +266,7 @@ uv run --no-sync xvt preview "/path/to/job.json" \
 
 不传 `--cue` 或 `--start` 时，默认从第一条有效译文 cue 附近生成 15 秒预览。预览要求译文 QA 已通过，使用与正式烧录相同的字体、分辨率自适应码率和硬件回退逻辑，但不会修改正式 `burn`、`media_qa` stage，也不会覆盖 `bilingual.ass` 或 `burned.mp4`。本地纯音频 Job 以及没有有效 `source_video` 的远程 Job 必须通过 `--media` 提供视频。
 
-### 6. 单独烧录双语字幕
+### 8. 单独烧录双语字幕
 
 ```bash
 uv run --no-sync xvt burn "/path/to/job.json" \
@@ -286,13 +309,14 @@ uv run --no-sync xvt status "/path/to/job.json"
 uv run --no-sync xvt verify "/path/to/job.json" --json
 uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
+uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 ```
 
 `continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 中断会复用批次进度，Agent 等待会停在 `apply-translation`，烧录失败只重跑烧录，指纹有效的成品不会重复生成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C 时，当前运行阶段会记录为失败，CLI 返回退出码 130 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
-`run`、`continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以 `cli_completed`、`workflow_waiting` 或 `cli_failed` 收口。命令事件会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+`run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
 ## 开发
 

@@ -1,5 +1,6 @@
 import argparse
 import json
+import shlex
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -7,6 +8,7 @@ from time import monotonic
 from typing import TextIO
 
 from xvt import __version__
+from xvt.batch import BatchResult, continue_batch, run_batch
 from xvt.doctor import run_doctor
 from xvt.events import Event, EventSink, create_event
 from xvt.job_store import get_job_file, load_job
@@ -91,6 +93,49 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--target-font")
     run_parser.add_argument("--source-font")
     run_parser.add_argument("--events-jsonl", action="store_true")
+
+    batch_parser = subparsers.add_parser(
+        "batch", help="Process supported files in a directory as independent jobs"
+    )
+    batch_parser.add_argument("input_directory")
+    batch_parser.add_argument("--output", required=True)
+    batch_parser.add_argument("--recursive", action="store_true")
+    batch_parser.add_argument("--engine", choices=["mlx", "faster"], default="mlx")
+    batch_parser.add_argument("--language")
+    batch_parser.add_argument("--target-language")
+    batch_parser.add_argument(
+        "--provider",
+        choices=["auto", "openai-compatible", "agent"],
+        default="auto",
+    )
+    batch_parser.add_argument("--base-url")
+    batch_parser.add_argument("--model")
+    batch_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
+    batch_parser.add_argument("--batch-size", type=int, default=40)
+    batch_parser.add_argument("--max-retries", type=int, default=2)
+    batch_parser.add_argument("--timeout-seconds", type=float, default=60)
+    batch_parser.add_argument("--glossary")
+    batch_parser.add_argument(
+        "--translation-style",
+        choices=["faithful", "natural", "concise"],
+        default="faithful",
+    )
+    batch_parser.add_argument(
+        "--segmentation-preset",
+        choices=sorted(SEGMENTATION_PRESETS),
+        default="balanced",
+    )
+    batch_parser.add_argument("--burn", action="store_true")
+    batch_parser.add_argument("--software", action="store_true")
+    batch_parser.add_argument("--target-font")
+    batch_parser.add_argument("--source-font")
+    batch_parser.add_argument("--events-jsonl", action="store_true")
+
+    batch_continue_parser = subparsers.add_parser(
+        "batch-continue", help="Continue incomplete jobs from a persisted batch"
+    )
+    batch_continue_parser.add_argument("batch_file")
+    batch_continue_parser.add_argument("--events-jsonl", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Read a persisted job file")
     status_parser.add_argument("job_file")
@@ -287,9 +332,13 @@ def _format_speed(value: object) -> str | None:
 class _TrackedEventSink:
     def __init__(self, job_file: str | None = None) -> None:
         self.job_file = job_file
+        self.batch_file: str | None = None
         self.current_stage: str | None = None
 
     def _track(self, event: Event) -> None:
+        batch_file = event.data.get("batch_file")
+        if isinstance(batch_file, str):
+            self.batch_file = batch_file
         job_file = event.data.get("job_file")
         if isinstance(job_file, str):
             self.job_file = job_file
@@ -371,6 +420,36 @@ class _HumanEventSink(_TrackedEventSink):
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
         elif event.type == "workflow_completed":
             self._line("任务处理完成")
+        elif event.type == "batch_started":
+            self._line(f"批处理开始：共 {data.get('total')} 个文件")
+            if data.get("batch_file"):
+                self._line(f"批处理文件: {data.get('batch_file')}")
+        elif event.type == "batch_item_started":
+            path = Path(str(data.get("input")))
+            self._line(f"[批处理 {data.get('index')}/{data.get('total')}] 开始处理 {path.name}")
+        elif event.type == "batch_item_completed":
+            self._line(f"[批处理完成] {Path(str(data.get('input'))).name}")
+        elif event.type == "batch_item_waiting":
+            self._line(f"[批处理等待] {Path(str(data.get('input'))).name}")
+            self._render_batch_recovery(data)
+        elif event.type == "batch_item_failed":
+            self._line(f"[批处理失败] {Path(str(data.get('input'))).name}")
+            if data.get("message"):
+                self._line(f"原因：{data.get('message')}")
+            self._render_batch_recovery(data)
+        elif event.type == "batch_item_interrupted":
+            self._line(f"[批处理中断] {Path(str(data.get('input'))).name}")
+            if data.get("next_action"):
+                self._line(f"继续批处理：{data.get('next_action')}")
+        elif event.type == "batch_finished":
+            self._line(
+                "批处理结束："
+                f"{data.get('completed')} 完成，"
+                f"{data.get('awaiting_input')} 等待，"
+                f"{data.get('failed')} 失败"
+            )
+            if data.get("next_action"):
+                self._line(f"继续批处理：{data.get('next_action')}")
         elif event.type == "preview_started":
             self._line("[进行中] 生成短片段预览")
         elif event.type == "preview_completed":
@@ -392,6 +471,17 @@ class _HumanEventSink(_TrackedEventSink):
             self._line(f"[等待] {label}")
         else:
             self._line(f"[完成] {label}")
+
+    def _render_batch_recovery(self, data: dict[str, object]) -> None:
+        plan = data.get("recovery_plan")
+        if not isinstance(plan, dict):
+            return
+        if plan.get("reason"):
+            self._line(f"恢复建议：{plan.get('reason')}")
+        for command in plan.get("prerequisite_commands", []):
+            self._line(f"  {command}")
+        if plan.get("primary_command"):
+            self._line(f"  {plan.get('primary_command')}")
 
     def _render_download(self, data: dict[str, object]) -> None:
         parts = ["[进行中] 下载源视频"]
@@ -464,6 +554,9 @@ class _HumanEventSink(_TrackedEventSink):
         if self.job_file:
             self._line(f"任务文件: {self.job_file}")
             self._render_recovery(plan)
+        elif self.batch_file:
+            self._line(f"批处理文件: {self.batch_file}")
+            self._line("请修正批处理文件或路径后重新执行原命令。")
         else:
             self._line("任务尚未创建，请修正输入后重新执行原命令。")
 
@@ -475,6 +568,12 @@ class _HumanEventSink(_TrackedEventSink):
         if self.job_file:
             self._line(f"任务文件: {self.job_file}")
             self._render_recovery(plan)
+            if self.batch_file:
+                self._line(f"批处理文件: {self.batch_file}")
+                self._line(f"继续批处理：xvt batch-continue {shlex.quote(self.batch_file)}")
+        elif self.batch_file:
+            self._line(f"批处理文件: {self.batch_file}")
+            self._line(f"继续批处理：xvt batch-continue {shlex.quote(self.batch_file)}")
         else:
             self._line("任务尚未创建，无可恢复状态。")
 
@@ -492,10 +591,16 @@ def _event_sink(arguments: argparse.Namespace) -> EventSink:
     initial_job_file = (
         str(Path(job_file).expanduser().resolve()) if isinstance(job_file, str) else None
     )
+    batch_file = getattr(arguments, "batch_file", None)
+    initial_batch_file = (
+        str(Path(batch_file).expanduser().resolve()) if isinstance(batch_file, str) else None
+    )
     if getattr(arguments, "events_jsonl", False):
         sink: EventSink = _JsonlEventSink(initial_job_file)
     else:
         sink = _HumanEventSink(initial_job_file)
+    if isinstance(sink, _TrackedEventSink):
+        sink.batch_file = initial_batch_file
     setattr(arguments, "_event_sink_instance", sink)
     return sink
 
@@ -512,6 +617,16 @@ def _recovery_plan_for_sink(sink: EventSink) -> RecoveryPlan | None:
 def _complete(arguments: argparse.Namespace, **data: object) -> None:
     event_sink = _event_sink(arguments)
     event_sink(create_event("cli_completed", command=arguments.command, **data))
+
+
+def _print_batch_result(result: BatchResult) -> None:
+    print(result.batch_file)
+    print(
+        f"batch: {result.completed} completed, "
+        f"{result.awaiting_input} awaiting input, {result.failed} failed"
+    )
+    if result.status != "completed":
+        print(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
 
 
 def _run_command(arguments: argparse.Namespace) -> int:
@@ -584,6 +699,51 @@ def _run_command(arguments: argparse.Namespace) -> int:
             if result.status == "awaiting_input":
                 print(f"translation is awaiting input: {result.message}")
         return 0
+
+    if arguments.command == "batch":
+        event_sink = _event_sink(arguments)
+        result = run_batch(
+            arguments.input_directory,
+            WorkflowOptions(
+                input="",
+                output=arguments.output,
+                engine=arguments.engine,
+                language=arguments.language,
+                target_language=arguments.target_language,
+                provider=arguments.provider,
+                base_url=arguments.base_url,
+                model=arguments.model,
+                api_key_env=arguments.api_key_env,
+                batch_size=arguments.batch_size,
+                max_retries=arguments.max_retries,
+                timeout_seconds=arguments.timeout_seconds,
+                glossary=arguments.glossary,
+                translation_style=arguments.translation_style,
+                segmentation_preset=arguments.segmentation_preset,
+                burn=arguments.burn,
+                hardware_encoding=not arguments.software,
+                target_font=arguments.target_font,
+                source_font=arguments.source_font,
+            ),
+            recursive=arguments.recursive,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            if result.status == "completed":
+                _complete(arguments, batch_file=str(result.batch_file), status=result.status)
+        else:
+            _print_batch_result(result)
+        return 4 if result.status == "partial_failure" else 0
+
+    if arguments.command == "batch-continue":
+        event_sink = _event_sink(arguments)
+        result = continue_batch(arguments.batch_file, event_sink=event_sink)
+        if arguments.events_jsonl:
+            if result.status == "completed":
+                _complete(arguments, batch_file=str(result.batch_file), status=result.status)
+        else:
+            _print_batch_result(result)
+        return 4 if result.status == "partial_failure" else 0
 
     if arguments.command == "status":
         job = load_job(arguments.job_file)
@@ -877,12 +1037,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 event_sink=sink,
             )
         recovery_plan = None if parsed.command == "preview" else _recovery_plan_for_sink(sink)
+        batch_file = tracked_sink.batch_file if tracked_sink else None
         interruption_event = create_event(
             "cli_failed",
             command=parsed.command,
             category="interrupted",
             message="interrupted by user",
             **({"next_action": "rerun_preview"} if parsed.command == "preview" else {}),
+            **(
+                {
+                    "batch_file": batch_file,
+                    "next_action": f"xvt batch-continue {shlex.quote(batch_file)}",
+                }
+                if parsed.command in {"batch", "batch-continue"} and batch_file
+                else {}
+            ),
             **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
         if getattr(parsed, "events_jsonl", False):
@@ -910,6 +1079,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=parsed.command,
             category=category,
             message=str(error),
+            **(
+                {"batch_file": sink.batch_file}
+                if isinstance(sink, _TrackedEventSink) and sink.batch_file
+                else {}
+            ),
             **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
         safe_message = str(failure_event.data["message"])

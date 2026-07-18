@@ -16,7 +16,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 4. 字幕 QA 或媒体 QA 失败时，任务必须失败或等待人工处理，不能继续烧录或宣告完成。
 5. API Key 只从环境变量读取。Cookie 内容、代理凭据、签名 URL、本地媒体和生成产物不得提交到仓库，也不得原样写入事件。
 6. 外部命令必须以参数数组执行，不拼接 shell 字符串。
-7. Job 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。
+7. Job、batch manifest 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。
 8. 每个 Job 当前只支持一个目标语言。不要在现有 schema 上隐式加入多目标语言。
 
 ## 代码结构
@@ -24,6 +24,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | 路径 | 职责 |
 | --- | --- |
 | `src/xvt/cli.py` | 参数定义、命令路由、普通输出和 JSONL 终态 |
+| `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复 |
 | `src/xvt/workflow.py` | 端到端目标编排、`continue`、Agent 等待和烧录派生指纹 |
 | `src/xvt/pipeline.py` | stage 推进、artifact 登记、转写、翻译、QA、渲染和烧录主流程 |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
@@ -48,6 +49,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 ## CLI 语义
 
 - `xvt run` 创建新 Job。没有 `--target-language` 时停在源字幕；提供目标语言后继续翻译；同时提供 `--burn` 时继续烧录。
+- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。
 - `xvt continue JOB` 读取 `job.config.workflow`，补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue。
 - `xvt translate JOB` 是独立翻译入口。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
