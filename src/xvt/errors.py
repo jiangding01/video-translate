@@ -12,6 +12,7 @@ class ExitCode(IntEnum):
     PARTIAL_FAILURE = 6  # 批处理整体完成但存在失败条目
     LOCKED = 7  # 目标 Job 或 batch 已被占用（本 PR 仅定义，P4c 落地并发锁时使用）
     INTERRUPTED = 130  # 被用户中断（SIGINT / Ctrl-C）
+    TERMINATED = 143  # 被 SIGTERM 终止（128 + 15），中断状态已持久化
 
 
 class XvtError(Exception):
@@ -44,3 +45,10 @@ class InternalError(XvtError):
 
     exit_code = ExitCode.WORKFLOW_ERROR
     category = "workflow"
+
+
+class JobLockedError(XvtError):
+    """目标 Job 或 batch 正被另一个 XVT 进程独占执行。"""
+
+    exit_code = ExitCode.LOCKED
+    category = "locked"

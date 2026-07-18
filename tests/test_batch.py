@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from xvt.batch import continue_batch, discover_batch_inputs, run_batch
 from xvt.pipeline import apply_subtitle_translation
+from xvt.process import CommandCancelled
 from xvt.workflow import WorkflowOptions, WorkflowResult
 
 
@@ -221,22 +222,48 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(report["summary"]["failed"], 1)
         self.assertIn("xvt batch-continue", report["next_action"])
 
-    def test_failure_message_is_redacted_in_report(self) -> None:
+    def test_command_cancelled_is_persisted_as_interruption_not_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = root / "inputs"
             output = root / "output"
             _write_subtitle(inputs / "source.srt")
 
+            with patch("xvt.batch.run_workflow", side_effect=CommandCancelled("cancelled")):
+                with self.assertRaises(CommandCancelled):
+                    run_batch(inputs, WorkflowOptions(input="", output=output))
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["items"][0]["status"], "interrupted")
+        self.assertEqual(report["status"], "interrupted")
+
+    def test_failure_message_is_redacted_in_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+            events = []
+
             with patch(
                 "xvt.batch.run_workflow",
                 side_effect=ValueError("https://example.com/video?token=secret"),
             ):
-                result = run_batch(inputs, WorkflowOptions(input="", output=output))
+                result = run_batch(
+                    inputs, WorkflowOptions(input="", output=output), event_sink=events.append
+                )
             report = json.loads(result.batch_file.read_text(encoding="utf-8"))
 
         self.assertNotIn("secret", report["items"][0]["error"])
         self.assertIn("%3Credacted%3E", report["items"][0]["error"])
+        failed = next(event for event in events if event.type == "batch_item_failed")
+        self.assertNotIn("error_type", failed.data)
+        self.assertNotIn("message", failed.data)
+        self.assertEqual(failed.data["error"]["category"], "workflow")
+        self.assertNotIn("secret", failed.data["error"]["message"])
+        self.assertIn("%3Credacted%3E", failed.data["error"]["message"])
 
     def test_waiting_message_is_redacted_in_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

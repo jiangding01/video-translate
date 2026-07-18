@@ -446,7 +446,11 @@ class PipelineTest(unittest.TestCase):
             qa_path = next(Path(item.path) for item in job.artifacts if item.kind == "subtitle_qa")
             self.assertEqual(json.loads(qa_path.read_text())["status"], "pass")
             started = next(event for event in events if event.type == "job_started")
+            self.assertEqual(started.data["job_id"], job.id)
             self.assertEqual(started.data["job_file"], str(get_job_file(job)))
+            artifact_created = next(event for event in events if event.type == "artifact_created")
+            self.assertEqual(artifact_created.data["job_id"], job.id)
+            self.assertEqual(artifact_created.data["job_file"], str(get_job_file(job)))
             self.assertEqual(transcribe.call_args.kwargs["total_ms"], 5000)
             self.assertTrue(callable(transcribe.call_args.kwargs["event_sink"]))
             self.assertEqual(segment.call_args.args[1], segmentation_config_for_preset("compact"))
@@ -456,14 +460,21 @@ class PipelineTest(unittest.TestCase):
             root = Path(directory)
             media = root / "input.mp4"
             media.write_bytes(b"video")
+            events = []
             with patch("xvt.pipeline.probe_media", side_effect=ValueError("bad media")):
                 with self.assertRaisesRegex(ValueError, "bad media"):
-                    run_local_transcription(media, root)
+                    run_local_transcription(media, root, event_sink=events.append)
 
             job_file = next((root / "jobs").glob("*/job.json"))
             data = json.loads(job_file.read_text())
             self.assertEqual(data["stages"]["inspect"]["status"], "failed")
             self.assertEqual(data["stages"]["inspect"]["error"], "bad media")
+            stage_failed = next(event for event in events if event.type == "stage_failed")
+            self.assertEqual(
+                stage_failed.data["error"],
+                {"category": "workflow", "message": "bad media"},
+            )
+            self.assertEqual(Path(stage_failed.data["job_file"]).resolve(), job_file.resolve())
 
     def test_qa_review_fails_job_instead_of_reporting_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

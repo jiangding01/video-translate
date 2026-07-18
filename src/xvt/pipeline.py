@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from math import ceil, isfinite
 from pathlib import Path
@@ -12,7 +13,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xvt.align import align_source_cues
+from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.burn import burn_subtitles, recommended_video_bitrate
+from xvt.config import (
+    DEFAULT_ENGINE,
+    DEFAULT_HARDWARE_ENCODING,
+    DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
+    DEFAULT_SEGMENTATION_PRESET,
+)
 from xvt.download import (
     RemoteMediaInfo,
     download_remote_media,
@@ -20,11 +28,11 @@ from xvt.download import (
     inspect_remote,
     select_subtitle_language,
 )
-from xvt.events import EventSink, create_event
+from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
-from xvt.process import run_command
+from xvt.process import raise_if_cancelled, run_command
 from xvt.qa import (
     check_subtitles,
     display_width,
@@ -34,6 +42,11 @@ from xvt.qa import (
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.segment import segment_transcript, segmentation_config_for_preset, split_cue_by_parts
+from xvt.stages import (
+    SUBTITLE_INPUT_SKIPS,
+    TRAILING_TRANSCRIPTION_SKIPS,
+    media_transcription_skips,
+)
 from xvt.subtitles import (
     SUPPORTED_SUBTITLE_EXTENSIONS,
     load_subtitles,
@@ -100,6 +113,19 @@ def _media_info_from_remote_metadata(url: str, duration_ms: int) -> MediaInfo:
     )
 
 
+_STAGE_EVENT_TYPES: dict[StageStatus, EventType] = {
+    StageStatus.RUNNING: EventType.STAGE_STARTED,
+    StageStatus.AWAITING_INPUT: EventType.STAGE_WAITING,
+    StageStatus.FAILED: EventType.STAGE_FAILED,
+    StageStatus.SUCCEEDED: EventType.STAGE_COMPLETED,
+    StageStatus.SKIPPED: EventType.STAGE_COMPLETED,
+}
+
+
+def _error_category(error: Exception) -> str:
+    return getattr(error, "category", "workflow")
+
+
 def _set_stage(
     job: Job,
     stage: StageName,
@@ -107,6 +133,7 @@ def _set_stage(
     event_sink: EventSink | None,
     *,
     error: str | None = None,
+    error_category: str = "workflow",
 ) -> None:
     record = job.stages[stage]
     now = utc_now()
@@ -115,15 +142,19 @@ def _set_stage(
     if status == StageStatus.RUNNING:
         record.started_at = now
         record.completed_at = None
-        event_type = "stage_started"
-    elif status == StageStatus.AWAITING_INPUT:
-        event_type = "stage_waiting"
-    else:
+    elif status != StageStatus.AWAITING_INPUT:
         record.completed_at = now
-        event_type = "stage_failed" if status == StageStatus.FAILED else "stage_completed"
     save_job(job)
     if event_sink:
-        event_sink(create_event(event_type, job_id=job.id, stage=stage.value, status=status.value))
+        event_type = _STAGE_EVENT_TYPES[status]
+        payload: dict[str, Any] = {
+            **job_event_fields(job.id, get_job_file(job)),
+            "stage": stage.value,
+            "status": status.value,
+        }
+        if status == StageStatus.FAILED and error is not None:
+            payload.update(error_event_fields(error_category, error))
+        event_sink(create_event(event_type, **payload))
 
 
 def interrupt_running_stage(
@@ -169,7 +200,14 @@ def _add_artifact(job: Job, kind: str, path: Path, event_sink: EventSink | None)
     job.artifacts.append(artifact)
     save_job(job)
     if event_sink:
-        event_sink(create_event("artifact_created", job_id=job.id, kind=kind, path=str(path)))
+        event_sink(
+            create_event(
+                EventType.ARTIFACT_CREATED,
+                **job_event_fields(job.id, get_job_file(job)),
+                kind=kind,
+                path=str(path),
+            )
+        )
 
 
 def _complete_qa_stage(
@@ -215,16 +253,8 @@ def _load_translation_response(response_file: str | Path, expected_ids: set[int]
 
 
 def _invalidate_rendered_artifacts(job: Job) -> None:
-    invalidated_kinds = {
-        "translated_subtitle_qa",
-        "translated_srt",
-        "bilingual_srt",
-        "bilingual_ass",
-        "burned_video",
-        "media_qa",
-        "preview_ass",
-        "preview_video",
-    }
+    # 失效集合由依赖图闭包推导：translated_cues 的全部下游产物。
+    invalidated_kinds = downstream_of(ArtifactKind.TRANSLATED_CUES)
     job.artifacts = [
         artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
     ]
@@ -240,11 +270,65 @@ def _invalidate_rendered_artifacts(job: Job) -> None:
 
 
 def _invalidate_preview_artifacts(job: Job) -> None:
+    # preview_ass 自身及其下游（preview_video）。
+    invalidated_kinds = downstream_of(ArtifactKind.PREVIEW_ASS) | {ArtifactKind.PREVIEW_ASS}
     job.artifacts = [
-        artifact
-        for artifact in job.artifacts
-        if artifact.kind not in {"preview_ass", "preview_video"}
+        artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
     ]
+
+
+def _finalize_translation(
+    job: Job,
+    translated: list[Cue],
+    event_sink: EventSink | None,
+    *,
+    invalidate: Callable[[Job], None],
+) -> tuple[Path, ...]:
+    """翻译成功后的统一收尾：写译文 cue → 失效旧下游产物 → 译文 QA → 渲染。
+
+    三条译文回填路径（局部重译、Agent/API 响应、导入译文字幕）共用本函数，
+    保证 stage 记账、QA 参数与渲染行为完全一致；QA/渲染阶段的失败在此持久化。
+    """
+    current_stage = StageName.TRANSLATE
+    try:
+        artifacts_directory = get_job_directory(job) / "artifacts"
+        translated_cues_path = artifacts_directory / "translated-cues.json"
+        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
+        invalidate(job)
+        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+
+        current_stage = StageName.SUBTITLE_QA
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        media_data = _media_data(job)
+        report = check_subtitles(
+            translated,
+            media_duration_ms=_media_duration_ms(media_data),
+            video_width=media_data.get("width"),
+            video_height=media_data.get("height"),
+            require_translation=True,
+            required_terms=_required_glossary_terms(job),
+        )
+        qa_path = artifacts_directory / "qa-translated.json"
+        _write_json(qa_path, asdict(report))
+        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
+        _complete_qa_stage(job, report, event_sink)
+
+        current_stage = StageName.RENDER
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        paths = _render_translated_outputs(job, translated, media_data, event_sink)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        return paths
+    except Exception as error:
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
+        raise
 
 
 def apply_cue_retranslation(
@@ -285,38 +369,19 @@ def apply_cue_retranslation(
             else cue
             for cue in translated_cues
         ]
-
-        artifacts_directory = get_job_directory(job) / "artifacts"
-        repaired_path = artifacts_directory / "translated-cues.json"
-        _write_json(repaired_path, [asdict(cue) for cue in repaired])
-        _add_artifact(job, "translated_cues", repaired_path, event_sink)
-        _invalidate_rendered_artifacts(job)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = _media_data(job)
-        report = check_subtitles(
-            repaired,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
-            require_translation=True,
-            required_terms=_required_glossary_terms(job),
-        )
-        qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
-
-        current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        paths = _render_translated_outputs(job, repaired, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        return paths
     except Exception as error:
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
+    return _finalize_translation(
+        job, repaired, event_sink, invalidate=_invalidate_rendered_artifacts
+    )
 
 
 def retranslate_cues(
@@ -379,6 +444,7 @@ def retranslate_cues(
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     try:
         for batch in batches:
+            raise_if_cancelled()
             for attempt in range(max_retries + 1):
                 try:
                     translated_batch = translate_batch(batch, provider_config)
@@ -395,7 +461,14 @@ def retranslate_cues(
                     time.sleep(min(0.5 * (2**attempt), 4))
             translations.update(translated_batch)
     except Exception as error:
-        _set_stage(job, StageName.TRANSLATE, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            StageName.TRANSLATE,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
 
     response_path = artifacts_directory / "cue-retranslation-response.json"
@@ -431,6 +504,14 @@ def _process_acquired_media(
     job_directory = get_job_directory(job)
     artifacts_directory = job_directory / "artifacts"
     artifacts_directory.mkdir(parents=True, exist_ok=True)
+    for stage in (
+        *media_transcription_skips(
+            has_source_subtitles=bool(subtitles),
+            align_subtitles=align_subtitles,
+        ),
+        *TRAILING_TRANSCRIPTION_SKIPS,
+    ):
+        _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
     current_stage = StageName.IMPORT_SUBTITLES
     try:
         imported_cues = None
@@ -451,8 +532,6 @@ def _process_acquired_media(
                 raise ValueError("subtitle file contains no usable cues")
             _add_artifact(job, "input_subtitles", imported_path, event_sink)
             _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        else:
-            _set_stage(job, current_stage, StageStatus.SKIPPED, event_sink)
 
         transcript = None
         if imported_cues is None or align_subtitles:
@@ -496,9 +575,6 @@ def _process_acquired_media(
             _write_json(words_path, asdict(transcript))
             _add_artifact(job, "word_transcript", words_path, event_sink)
             _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        else:
-            _set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SKIPPED, event_sink)
-            _set_stage(job, StageName.TRANSCRIBE, StageStatus.SKIPPED, event_sink)
 
         if imported_cues is not None and align_subtitles:
             current_stage = StageName.ALIGN
@@ -517,19 +593,15 @@ def _process_acquired_media(
                     f"({alignment.confidence:.3f} < {minimum_alignment_confidence:.3f})"
                 )
             _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-            _set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
         elif imported_cues is not None:
             cues = imported_cues
-            _set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
-            _set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
         else:
-            _set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
             current_stage = StageName.SEGMENT
             _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             cues = segment_transcript(
                 transcript,
                 segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", "balanced"))
+                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
                 ),
                 media_duration_ms=media_info.duration_ms,
             )
@@ -540,7 +612,6 @@ def _process_acquired_media(
         cues_path = artifacts_directory / "source-cues.json"
         _write_json(cues_path, [asdict(cue) for cue in cues])
         _add_artifact(job, "source_cues", cues_path, event_sink)
-        _set_stage(job, StageName.TRANSLATE, StageStatus.SKIPPED, event_sink)
 
         current_stage = StageName.SUBTITLE_QA
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
@@ -560,15 +631,23 @@ def _process_acquired_media(
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
         _add_artifact(job, "source_srt", subtitle_path, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        _set_stage(job, StageName.BURN, StageStatus.SKIPPED, event_sink)
-        _set_stage(job, StageName.MEDIA_QA, StageStatus.SKIPPED, event_sink)
     except Exception as error:
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
 
     if event_sink and emit_job_completed:
         event_sink(
-            create_event("job_completed", job_id=job.id, job_file=str(job_directory / "job.json"))
+            create_event(
+                EventType.JOB_COMPLETED,
+                **job_event_fields(job.id, job_directory / "job.json"),
+            )
         )
     return job
 
@@ -609,9 +688,8 @@ def run_local_transcription(
     if event_sink:
         event_sink(
             create_event(
-                "job_started",
-                job_id=job.id,
-                job_file=str(get_job_file(job)),
+                EventType.JOB_STARTED,
+                **job_event_fields(job.id, get_job_file(job)),
                 input=str(source),
             )
         )
@@ -627,7 +705,14 @@ def run_local_transcription(
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         _set_stage(job, StageName.ACQUIRE, StageStatus.SKIPPED, event_sink)
     except Exception as error:
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
     return _process_acquired_media(
         job,
@@ -671,11 +756,18 @@ def _finish_subtitle_job(
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
         _add_artifact(job, "source_srt", subtitle_path, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        _set_stage(job, StageName.BURN, StageStatus.SKIPPED, event_sink)
-        _set_stage(job, StageName.MEDIA_QA, StageStatus.SKIPPED, event_sink)
+        for stage in (StageName.BURN, StageName.MEDIA_QA):
+            _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
-            _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+            _set_stage(
+                job,
+                current_stage,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=_error_category(error),
+            )
         raise
     return job
 
@@ -708,22 +800,14 @@ def run_subtitle_transcription(
     if event_sink:
         event_sink(
             create_event(
-                "job_started",
-                job_id=job.id,
-                job_file=str(get_job_file(job)),
+                EventType.JOB_STARTED,
+                **job_event_fields(job.id, get_job_file(job)),
                 input=str(source),
             )
         )
 
     try:
-        for stage in (
-            StageName.INSPECT,
-            StageName.ACQUIRE,
-            StageName.NORMALIZE_AUDIO,
-            StageName.TRANSCRIBE,
-            StageName.ALIGN,
-            StageName.SEGMENT,
-        ):
+        for stage in SUBTITLE_INPUT_SKIPS:
             _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
         _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.RUNNING, event_sink)
         artifacts_directory = get_job_directory(job) / "artifacts"
@@ -746,13 +830,16 @@ def run_subtitle_transcription(
             StageStatus.FAILED,
             event_sink,
             error=str(error),
+            error_category=_error_category(error),
         )
         raise
 
     job = _finish_subtitle_job(job, cues, event_sink=event_sink)
 
     if event_sink and emit_job_completed:
-        event_sink(create_event("job_completed", job_id=job.id, job_file=str(get_job_file(job))))
+        event_sink(
+            create_event(EventType.JOB_COMPLETED, **job_event_fields(job.id, get_job_file(job)))
+        )
     return job
 
 
@@ -798,9 +885,8 @@ def run_remote_transcription(
     if event_sink:
         event_sink(
             create_event(
-                "job_started",
-                job_id=job.id,
-                job_file=str(get_job_file(job)),
+                EventType.JOB_STARTED,
+                **job_event_fields(job.id, get_job_file(job)),
                 input=url,
             )
         )
@@ -818,7 +904,14 @@ def run_remote_transcription(
             if job.stages[StageName.INSPECT].status is StageStatus.RUNNING
             else StageName.ACQUIRE
         )
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
     return _process_acquired_media(
         job,
@@ -903,7 +996,7 @@ def _acquire_remote_job(
             if event_sink:
                 event_sink(
                     create_event(
-                        "remote_subtitles_selected",
+                        EventType.REMOTE_SUBTITLES_SELECTED,
                         job_id=job.id,
                         language=selected_language,
                         automatic=manual_language is None,
@@ -968,13 +1061,20 @@ def resume_remote_transcription(
             if job.stages[StageName.INSPECT].status is StageStatus.RUNNING
             else StageName.ACQUIRE
         )
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
     return _process_acquired_media(
         job,
         source,
         media_info,
-        engine=str(job.config.get("engine", "mlx")),
+        engine=str(job.config.get("engine", DEFAULT_ENGINE)),
         language=(
             None
             if job.config.get("source_language") == "auto"
@@ -982,7 +1082,9 @@ def resume_remote_transcription(
         ),
         subtitles=subtitles,
         align_subtitles=bool(job.config.get("align_subtitles")),
-        minimum_alignment_confidence=float(job.config.get("minimum_alignment_confidence", 0.55)),
+        minimum_alignment_confidence=float(
+            job.config.get("minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE)
+        ),
         allow_low_confidence_alignment=bool(
             job.config.get("allow_low_confidence_alignment", False)
         ),
@@ -1101,7 +1203,9 @@ def _finish_resumed_source(
     _add_artifact(job, "source_srt", subtitle_path, event_sink)
     _set_stage(job, StageName.RENDER, StageStatus.SUCCEEDED, event_sink)
     if event_sink:
-        event_sink(create_event("job_resumed", job_id=job.id, job_file=str(get_job_file(job))))
+        event_sink(
+            create_event(EventType.JOB_RESUMED, **job_event_fields(job.id, get_job_file(job)))
+        )
     return job
 
 
@@ -1113,7 +1217,9 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             resumed = _finish_subtitle_job(job, _load_cues(cues_path), event_sink=event_sink)
             if event_sink:
                 event_sink(
-                    create_event("job_resumed", job_id=job.id, job_file=str(get_job_file(job)))
+                    create_event(
+                        EventType.JOB_RESUMED, **job_event_fields(job.id, get_job_file(job))
+                    )
                 )
             return resumed
         subtitle_path = valid_artifact_path(job, "input_subtitles")
@@ -1129,7 +1235,9 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             raise ValueError("subtitle file contains no usable cues")
         resumed = _finish_subtitle_job(job, cues, event_sink=event_sink)
         if event_sink:
-            event_sink(create_event("job_resumed", job_id=job.id, job_file=str(get_job_file(job))))
+            event_sink(
+                create_event(EventType.JOB_RESUMED, **job_event_fields(job.id, get_job_file(job)))
+            )
         return resumed
 
     media_path = valid_artifact_path(job, "media_info")
@@ -1152,7 +1260,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         language = job.config.get("source_language")
         transcript = transcribe_audio(
             audio_path,
-            engine=job.config.get("engine", "mlx"),
+            engine=job.config.get("engine", DEFAULT_ENGINE),
             language=None if language == "auto" else language,
             event_sink=event_sink,
             total_ms=media_info.duration_ms,
@@ -1176,7 +1284,9 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         alignment_path = get_job_directory(job) / "artifacts" / "alignment.json"
         _write_json(alignment_path, asdict(alignment))
         _add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
-        minimum_confidence = float(job.config.get("minimum_alignment_confidence", 0.55))
+        minimum_confidence = float(
+            job.config.get("minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE)
+        )
         if (
             not job.config.get("allow_low_confidence_alignment", False)
             and alignment.confidence < minimum_confidence
@@ -1197,12 +1307,19 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             cues = segment_transcript(
                 transcript,
                 segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", "balanced"))
+                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
                 ),
                 media_duration_ms=media_info.duration_ms,
             )
         except ValueError as error:
-            _set_stage(job, StageName.SEGMENT, StageStatus.FAILED, event_sink, error=str(error))
+            _set_stage(
+                job,
+                StageName.SEGMENT,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=_error_category(error),
+            )
             raise
         if not cues:
             _set_stage(
@@ -1332,21 +1449,21 @@ def resegment_translation(
             "items": report_items,
         },
     )
-    invalidated_kinds = {
-        "input_translation_subtitles",
-        "translation_mapping",
-        "translation_batches",
-        "translation_progress",
-        "translation_response",
-        "translated_cues",
-        "translated_subtitle_qa",
-        "translated_srt",
-        "bilingual_srt",
-        "bilingual_ass",
-        "burned_video",
-        "media_qa",
-        "preview_ass",
-        "preview_video",
+    # source_cues 的下游闭包，扣除本函数原位重建/维持现状的产物，并入被作废的用户输入。
+    invalidated_kinds = (
+        downstream_of(ArtifactKind.SOURCE_CUES)
+        - {
+            # source_srt/subtitle_qa 由本函数在下方原位重建（source_srt 写入 replacement，
+            # subtitle_qa 由后续 stage 重跑），不在此失效。
+            ArtifactKind.SOURCE_SRT,
+            ArtifactKind.SUBTITLE_QA,
+            # cue_retranslation_* 维持现状不失效（潜在改进留待后续单独评估）。
+            ArtifactKind.CUE_RETRANSLATION_BATCHES,
+            ArtifactKind.CUE_RETRANSLATION_RESPONSE,
+        }
+    ) | {
+        # input_translation_subtitles 是被 resegment 作废的用户输入而非派生产物，显式并入。
+        ArtifactKind.INPUT_TRANSLATION_SUBTITLES
     }
     replacement_artifacts = [
         Artifact("source_cues", str(source_output), _checksum(source_output)),
@@ -1380,8 +1497,8 @@ def resegment_translation(
         for artifact in replacement_artifacts:
             event_sink(
                 create_event(
-                    "artifact_created",
-                    job_id=job.id,
+                    EventType.ARTIFACT_CREATED,
+                    **job_event_fields(job.id, get_job_file(job)),
                     kind=artifact.kind,
                     path=artifact.path,
                 )
@@ -1389,15 +1506,15 @@ def resegment_translation(
         for artifact in invalidated:
             event_sink(
                 create_event(
-                    "artifact_invalidated",
-                    job_id=job.id,
+                    EventType.ARTIFACT_INVALIDATED,
+                    **job_event_fields(job.id, get_job_file(job)),
                     kind=artifact.kind,
                     path=artifact.path,
                 )
             )
         event_sink(
             create_event(
-                "translation_resegmented",
+                EventType.TRANSLATION_RESEGMENTED,
                 job_id=job.id,
                 source_cue_count=len(source_cues),
                 resegmented_cue_count=len(resegmented),
@@ -1494,7 +1611,14 @@ def prepare_agent_translation(
         _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return output_path
     except Exception as error:
-        _set_stage(job, StageName.TRANSLATE, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            StageName.TRANSLATE,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
 
 
@@ -1544,7 +1668,7 @@ def run_translation(
         if fallback_reason and event_sink:
             event_sink(
                 create_event(
-                    "translation_fallback",
+                    EventType.TRANSLATION_FALLBACK,
                     job_id=job.id,
                     mode="agent",
                     reason=fallback_reason,
@@ -1582,7 +1706,7 @@ def run_translation(
     if event_sink:
         event_sink(
             create_event(
-                "translation_provider_selected",
+                EventType.TRANSLATION_PROVIDER_SELECTED,
                 job_id=job.id,
                 provider=mode,
                 model=provider_config.model,
@@ -1606,7 +1730,7 @@ def run_translation(
         elif event_sink:
             event_sink(
                 create_event(
-                    "translation_progress_reset",
+                    EventType.TRANSLATION_PROGRESS_RESET,
                     job_id=job.id,
                     reason="translation fingerprint changed",
                 )
@@ -1616,11 +1740,14 @@ def run_translation(
     progress_output = artifacts_directory / "translation-progress.json"
     try:
         for batch in batches:
+            raise_if_cancelled()
             batch_ids = {item.id for item in batch.items}
             if batch.id in completed_batches and batch_ids <= translations.keys():
                 continue
             if event_sink:
-                event_sink(create_event("translation_batch_started", job_id=job.id, batch=batch.id))
+                event_sink(
+                    create_event(EventType.TRANSLATION_BATCH_STARTED, job_id=job.id, batch=batch.id)
+                )
             for attempt in range(max_retries + 1):
                 try:
                     if attempt == 0:
@@ -1644,7 +1771,7 @@ def run_translation(
                     if event_sink:
                         event_sink(
                             create_event(
-                                "translation_batch_retrying",
+                                EventType.TRANSLATION_BATCH_RETRYING,
                                 job_id=job.id,
                                 batch=batch.id,
                                 attempt=attempt + 2,
@@ -1660,7 +1787,7 @@ def run_translation(
                     if event_sink:
                         event_sink(
                             create_event(
-                                "translation_batch_retrying",
+                                EventType.TRANSLATION_BATCH_RETRYING,
                                 job_id=job.id,
                                 batch=batch.id,
                                 attempt=attempt + 2,
@@ -1685,10 +1812,19 @@ def run_translation(
             _add_artifact(job, "translation_progress", progress_output, event_sink)
             if event_sink:
                 event_sink(
-                    create_event("translation_batch_completed", job_id=job.id, batch=batch.id)
+                    create_event(
+                        EventType.TRANSLATION_BATCH_COMPLETED, job_id=job.id, batch=batch.id
+                    )
                 )
     except Exception as error:
-        _set_stage(job, StageName.TRANSLATE, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            StageName.TRANSLATE,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
 
     response_path = artifacts_directory / "translation-response.json"
@@ -1732,38 +1868,19 @@ def apply_agent_translation(
                 raise ValueError(f"translation for cue {cue_id} is empty")
             translations[cue_id] = text.strip()
         translated = apply_translations(cues, translations, target_language=target_language)
-
-        artifacts_directory = get_job_directory(job) / "artifacts"
-        translated_cues_path = artifacts_directory / "translated-cues.json"
-        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
-        _invalidate_preview_artifacts(job)
-        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = _media_data(job)
-        report = check_subtitles(
-            translated,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
-            require_translation=True,
-            required_terms=_required_glossary_terms(job),
-        )
-        qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
-
-        current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        paths = _render_translated_outputs(job, translated, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        return paths
     except Exception as error:
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
+    return _finalize_translation(
+        job, translated, event_sink, invalidate=_invalidate_preview_artifacts
+    )
 
 
 def apply_subtitle_translation(
@@ -1797,38 +1914,20 @@ def apply_subtitle_translation(
         mapping_path = artifacts_directory / "translation-mapping.json"
         _write_json(mapping_path, mapping_report)
         _add_artifact(job, "translation_mapping", mapping_path, event_sink)
-
-        translated_cues_path = artifacts_directory / "translated-cues.json"
-        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
-        _invalidate_preview_artifacts(job)
-        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
         job.config["target_language"] = target_language
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = _media_data(job)
-        report = check_subtitles(
-            translated,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
-            require_translation=True,
-            required_terms=_required_glossary_terms(job),
-        )
-        qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
-
-        current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        paths = _render_translated_outputs(job, translated, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        return paths
     except Exception as error:
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise
+    return _finalize_translation(
+        job, translated, event_sink, invalidate=_invalidate_preview_artifacts
+    )
 
 
 def preview_translated_job(
@@ -1867,7 +1966,9 @@ def preview_translated_job(
     workflow_config = job.config.get("workflow")
     workflow_config = workflow_config if isinstance(workflow_config, dict) else {}
     if hardware_encoding is None:
-        hardware_encoding = bool(workflow_config.get("hardware_encoding", True))
+        hardware_encoding = bool(
+            workflow_config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)
+        )
     if target_font is None and isinstance(workflow_config.get("target_font"), str):
         target_font = workflow_config["target_font"]
     if source_font is None and isinstance(workflow_config.get("source_font"), str):
@@ -1974,9 +2075,8 @@ def preview_translated_job(
     if event_sink:
         event_sink(
             create_event(
-                "preview_started",
-                job_id=job.id,
-                job_file=str(get_job_file(job)),
+                EventType.PREVIEW_STARTED,
+                **job_event_fields(job.id, get_job_file(job)),
                 start_ms=start_ms,
                 duration_ms=end_ms - start_ms,
             )
@@ -1998,7 +2098,7 @@ def preview_translated_job(
         duration_ms=end_ms - start_ms,
         start_ms=start_ms,
         clip_duration_ms=end_ms - start_ms,
-        progress_event_type="preview_progress",
+        progress_event_type=EventType.PREVIEW_PROGRESS,
         event_sink=event_sink,
     )
     preview_info = probe_media(preview_path)
@@ -2019,7 +2119,7 @@ def preview_translated_job(
     if event_sink:
         event_sink(
             create_event(
-                "preview_completed",
+                EventType.PREVIEW_COMPLETED,
                 job_id=job.id,
                 path=str(preview_path),
                 start_ms=start_ms,
@@ -2132,5 +2232,12 @@ def burn_translated_job(
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         return burned_path
     except Exception as error:
-        _set_stage(job, current_stage, StageStatus.FAILED, event_sink, error=str(error))
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
         raise

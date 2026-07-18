@@ -1,18 +1,33 @@
 import argparse
 import json
 import shlex
+import signal
 import sys
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from time import monotonic
 from typing import TextIO
 
 from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
+from xvt.cancellation import install_signal_handlers, received_signal
+from xvt.config import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_ENGINE,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
+    DEFAULT_PROVIDER,
+    DEFAULT_SEGMENTATION_PRESET,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TRANSLATION_STYLE,
+)
 from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
-from xvt.events import Event, EventSink, create_event
+from xvt.events import Event, EventSink, EventType, create_event
 from xvt.job_store import get_job_file, load_job
+from xvt.locking import batch_lock, job_lock
 from xvt.pipeline import (
     apply_agent_translation,
     apply_cue_retranslation,
@@ -27,7 +42,7 @@ from xvt.pipeline import (
     retranslate_cues,
     run_translation,
 )
-from xvt.process import CommandError
+from xvt.process import CommandCancelled, CommandError
 from xvt.recovery import RecoveryPlan, build_recovery_plan, verify_job
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
@@ -52,11 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Transcribe media or import source subtitles")
     run_parser.add_argument("input")
     run_parser.add_argument("--output", required=True)
-    run_parser.add_argument("--engine", choices=["mlx", "faster"], default="mlx")
+    run_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
     run_parser.add_argument("--language")
     run_parser.add_argument("--subtitles")
     run_parser.add_argument("--align-subtitles", action="store_true")
-    run_parser.add_argument("--min-alignment-confidence", type=float, default=0.55)
+    run_parser.add_argument(
+        "--min-alignment-confidence", type=float, default=DEFAULT_MIN_ALIGNMENT_CONFIDENCE
+    )
     run_parser.add_argument("--allow-low-confidence-alignment", action="store_true")
     run_parser.add_argument("--cookies-from-browser")
     run_parser.add_argument("--proxy")
@@ -68,24 +85,24 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     run_parser.add_argument("--base-url")
     run_parser.add_argument("--model")
-    run_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    run_parser.add_argument("--batch-size", type=int, default=40)
-    run_parser.add_argument("--max-retries", type=int, default=2)
-    run_parser.add_argument("--timeout-seconds", type=float, default=60)
+    run_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    run_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    run_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    run_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     run_parser.add_argument("--glossary")
     run_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     run_parser.add_argument(
         "--segmentation-preset",
         choices=sorted(SEGMENTATION_PRESETS),
-        default="balanced",
+        default=DEFAULT_SEGMENTATION_PRESET,
     )
     run_parser.add_argument("--burn", action="store_true")
     run_parser.add_argument("--burn-media")
@@ -101,30 +118,30 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("input_directory")
     batch_parser.add_argument("--output", required=True)
     batch_parser.add_argument("--recursive", action="store_true")
-    batch_parser.add_argument("--engine", choices=["mlx", "faster"], default="mlx")
+    batch_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
     batch_parser.add_argument("--language")
     batch_parser.add_argument("--target-language")
     batch_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     batch_parser.add_argument("--base-url")
     batch_parser.add_argument("--model")
-    batch_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    batch_parser.add_argument("--batch-size", type=int, default=40)
-    batch_parser.add_argument("--max-retries", type=int, default=2)
-    batch_parser.add_argument("--timeout-seconds", type=float, default=60)
+    batch_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    batch_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    batch_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    batch_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     batch_parser.add_argument("--glossary")
     batch_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     batch_parser.add_argument(
         "--segmentation-preset",
         choices=sorted(SEGMENTATION_PRESETS),
-        default="balanced",
+        default=DEFAULT_SEGMENTATION_PRESET,
     )
     batch_parser.add_argument("--burn", action="store_true")
     batch_parser.add_argument("--software", action="store_true")
@@ -165,12 +182,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("job_file")
     prepare_parser.add_argument("--source-language", required=True)
     prepare_parser.add_argument("--target-language", required=True)
-    prepare_parser.add_argument("--batch-size", type=int, default=40)
+    prepare_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     prepare_parser.add_argument("--glossary")
     prepare_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     prepare_parser.add_argument("--events-jsonl", action="store_true")
 
@@ -201,19 +218,19 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     translate_parser.add_argument("--base-url")
     translate_parser.add_argument("--model")
-    translate_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    translate_parser.add_argument("--batch-size", type=int, default=40)
-    translate_parser.add_argument("--max-retries", type=int, default=2)
-    translate_parser.add_argument("--timeout-seconds", type=float, default=60)
+    translate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    translate_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    translate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    translate_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     translate_parser.add_argument("--glossary")
     translate_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     translate_parser.add_argument("--events-jsonl", action="store_true")
 
@@ -236,13 +253,15 @@ def build_parser() -> argparse.ArgumentParser:
     retranslate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     retranslate_parser.add_argument("--base-url")
     retranslate_parser.add_argument("--model")
-    retranslate_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    retranslate_parser.add_argument("--max-retries", type=int, default=2)
-    retranslate_parser.add_argument("--timeout-seconds", type=float, default=60)
+    retranslate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    retranslate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    retranslate_parser.add_argument(
+        "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS
+    )
     retranslate_parser.add_argument("--events-jsonl", action="store_true")
 
     apply_retranslation_parser = subparsers.add_parser(
@@ -346,7 +365,7 @@ class _TrackedEventSink:
         stage = event.data.get("stage")
         if not isinstance(stage, str):
             return
-        if event.type in {"stage_started", "stage_failed", "stage_waiting"}:
+        if event.type in {EventType.STAGE_STARTED, EventType.STAGE_FAILED, EventType.STAGE_WAITING}:
             self.current_stage = stage
         elif self.current_stage == stage:
             self.current_stage = None
@@ -396,53 +415,53 @@ class _HumanEventSink(_TrackedEventSink):
     def __call__(self, event: Event) -> None:
         self._track(event)
         data = event.data
-        if event.type == "workflow_started":
+        if event.type == EventType.WORKFLOW_STARTED:
             message = "XVT 正在继续任务" if data.get("continuation") else "XVT 开始处理任务"
             self._line(message)
-        elif event.type in {"job_started", "job_resumed"}:
+        elif event.type in {EventType.JOB_STARTED, EventType.JOB_RESUMED}:
             job_file = data.get("job_file")
             if isinstance(job_file, str):
                 self._line(f"任务文件: {job_file}")
         elif event.type.startswith("stage_"):
             self._render_stage(event)
-        elif event.type == "download_progress":
+        elif event.type == EventType.DOWNLOAD_PROGRESS:
             self._render_download(data)
-        elif event.type == "burn_progress":
+        elif event.type == EventType.BURN_PROGRESS:
             self._render_burn(data)
-        elif event.type == "preview_progress":
+        elif event.type == EventType.PREVIEW_PROGRESS:
             self._render_preview(data)
-        elif event.type == "transcription_progress":
+        elif event.type == EventType.TRANSCRIPTION_PROGRESS:
             self._render_transcription(data)
-        elif event.type == "translation_batch_started":
+        elif event.type == EventType.TRANSLATION_BATCH_STARTED:
             self._line(f"[进行中] 翻译字幕（批次 {data.get('batch')}）")
-        elif event.type == "translation_batch_retrying":
+        elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
             self._line(f"[重试] 翻译字幕（批次 {data.get('batch')}）")
-        elif event.type == "workflow_waiting":
+        elif event.type == EventType.WORKFLOW_WAITING:
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
-        elif event.type == "workflow_completed":
+        elif event.type == EventType.WORKFLOW_COMPLETED:
             self._line("任务处理完成")
-        elif event.type == "batch_started":
+        elif event.type == EventType.BATCH_STARTED:
             self._line(f"批处理开始：共 {data.get('total')} 个文件")
             if data.get("batch_file"):
                 self._line(f"批处理文件: {data.get('batch_file')}")
-        elif event.type == "batch_item_started":
+        elif event.type == EventType.BATCH_ITEM_STARTED:
             path = Path(str(data.get("input")))
             self._line(f"[批处理 {data.get('index')}/{data.get('total')}] 开始处理 {path.name}")
-        elif event.type == "batch_item_completed":
+        elif event.type == EventType.BATCH_ITEM_COMPLETED:
             self._line(f"[批处理完成] {Path(str(data.get('input'))).name}")
-        elif event.type == "batch_item_waiting":
+        elif event.type == EventType.BATCH_ITEM_WAITING:
             self._line(f"[批处理等待] {Path(str(data.get('input'))).name}")
             self._render_batch_recovery(data)
-        elif event.type == "batch_item_failed":
+        elif event.type == EventType.BATCH_ITEM_FAILED:
             self._line(f"[批处理失败] {Path(str(data.get('input'))).name}")
             if data.get("message"):
                 self._line(f"原因：{data.get('message')}")
             self._render_batch_recovery(data)
-        elif event.type == "batch_item_interrupted":
+        elif event.type == EventType.BATCH_ITEM_INTERRUPTED:
             self._line(f"[批处理中断] {Path(str(data.get('input'))).name}")
             if data.get("next_action"):
                 self._line(f"继续批处理：{data.get('next_action')}")
-        elif event.type == "batch_finished":
+        elif event.type == EventType.BATCH_FINISHED:
             self._line(
                 "批处理结束："
                 f"{data.get('completed')} 完成，"
@@ -451,9 +470,9 @@ class _HumanEventSink(_TrackedEventSink):
             )
             if data.get("next_action"):
                 self._line(f"继续批处理：{data.get('next_action')}")
-        elif event.type == "preview_started":
+        elif event.type == EventType.PREVIEW_STARTED:
             self._line("[进行中] 生成短片段预览")
-        elif event.type == "preview_completed":
+        elif event.type == EventType.PREVIEW_COMPLETED:
             self._line("[完成] 生成短片段预览")
 
     def _render_stage(self, event: Event) -> None:
@@ -462,9 +481,9 @@ class _HumanEventSink(_TrackedEventSink):
             return
         label = _STAGE_LABELS.get(stage, stage)
         status = event.data.get("status")
-        if event.type == "stage_started":
+        if event.type == EventType.STAGE_STARTED:
             self._line(f"[进行中] {label}")
-        elif event.type == "stage_failed":
+        elif event.type == EventType.STAGE_FAILED:
             self._line(f"[失败] {label}")
         elif status == "skipped":
             self._line(f"[跳过] {label}")
@@ -617,7 +636,7 @@ def _recovery_plan_for_sink(sink: EventSink) -> RecoveryPlan | None:
 
 def _complete(arguments: argparse.Namespace, **data: object) -> None:
     event_sink = _event_sink(arguments)
-    event_sink(create_event("cli_completed", command=arguments.command, **data))
+    event_sink(create_event(EventType.CLI_COMPLETED, command=arguments.command, **data))
 
 
 def _print_batch_result(result: BatchResult) -> None:
@@ -1018,6 +1037,34 @@ def _run_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+# 会写入既有 Job 的子命令：在 CLI 入口取 Job 目录锁，保证独占执行。
+# `run` 与 `batch` 每次创建全新 Job/batch 目录，创建路径无竞争；在途 `run` 与并发
+# `continue` 的窗口将在 run 统一为 continue 特例后由同一锁点收口。
+_JOB_MUTATING_COMMANDS = frozenset(
+    {
+        "continue",
+        "resume",
+        "translate",
+        "prepare-translation",
+        "apply-translation",
+        "import-translation",
+        "retranslate-cues",
+        "apply-cue-retranslation",
+        "resegment-translation",
+        "preview",
+        "burn",
+    }
+)
+
+
+def _execution_lock(parsed: argparse.Namespace):
+    if parsed.command in _JOB_MUTATING_COMMANDS:
+        return job_lock(parsed.job_file)
+    if parsed.command == "batch-continue":
+        return batch_lock(parsed.batch_file)
+    return nullcontext()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -1026,9 +1073,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     parsed = parser.parse_args(arguments)
+    install_signal_handlers()
     try:
-        return _run_command(parsed)
-    except KeyboardInterrupt:
+        with _execution_lock(parsed):
+            return _run_command(parsed)
+    except (KeyboardInterrupt, CommandCancelled):
         sink = _event_sink(parsed)
         tracked_sink = sink if isinstance(sink, _TrackedEventSink) else None
         if tracked_sink and tracked_sink.job_file and tracked_sink.current_stage:
@@ -1040,7 +1089,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         recovery_plan = None if parsed.command == "preview" else _recovery_plan_for_sink(sink)
         batch_file = tracked_sink.batch_file if tracked_sink else None
         interruption_event = create_event(
-            "cli_failed",
+            EventType.CLI_FAILED,
             command=parsed.command,
             category="interrupted",
             message="interrupted by user",
@@ -1063,7 +1112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sink.report_preview_interruption()
             else:
                 sink.report_interruption(recovery_plan)
-        return ExitCode.INTERRUPTED
+        return ExitCode.TERMINATED if received_signal() == signal.SIGTERM else ExitCode.INTERRUPTED
     except (XvtError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, XvtError):
             category, return_code = error.category, error.exit_code
@@ -1078,7 +1127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command != "preview" and sink:
             recovery_plan = _recovery_plan_for_sink(sink)
         failure_event = create_event(
-            "cli_failed",
+            EventType.CLI_FAILED,
             command=parsed.command,
             category=category,
             message=str(error),

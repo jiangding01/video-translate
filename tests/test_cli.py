@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -6,13 +8,15 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt import cancellation
 from xvt.batch import BatchResult
 from xvt.cli import main
 from xvt.errors import DependencyError, InternalError, UserInputError
-from xvt.events import create_event
+from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import ResegmentationResult, TranslationRunResult
+from xvt.process import CommandCancelled
 from xvt.workflow import WorkflowResult
 
 
@@ -61,7 +65,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse(recursive)
             event_sink(
                 create_event(
-                    "batch_finished",
+                    EventType.BATCH_FINISHED,
                     batch_file="/tmp/batch.json",
                     status="partial_failure",
                     total=2,
@@ -100,10 +104,10 @@ class CliTest(unittest.TestCase):
 
         def run_with_failure(_directory, _options, *, recursive, event_sink):
             self.assertFalse(recursive)
-            event_sink(create_event("batch_started", batch_file="/tmp/batch.json", total=1))
+            event_sink(create_event(EventType.BATCH_STARTED, batch_file="/tmp/batch.json", total=1))
             event_sink(
                 create_event(
-                    "batch_item_failed",
+                    EventType.BATCH_ITEM_FAILED,
                     input="/tmp/source.srt",
                     message="subtitle QA failed",
                     recovery_plan={
@@ -115,7 +119,7 @@ class CliTest(unittest.TestCase):
             )
             event_sink(
                 create_event(
-                    "batch_finished",
+                    EventType.BATCH_FINISHED,
                     status="partial_failure",
                     completed=0,
                     awaiting_input=0,
@@ -169,7 +173,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse(recursive)
             event_sink(
                 create_event(
-                    "batch_finished",
+                    EventType.BATCH_FINISHED,
                     batch_file="/tmp/batch.json",
                     status="awaiting_input",
                     total=1,
@@ -219,7 +223,7 @@ class CliTest(unittest.TestCase):
 
         def interrupt(_directory, _options, *, recursive, event_sink):
             self.assertFalse(recursive)
-            event_sink(create_event("batch_started", batch_file="/tmp/batch.json", total=1))
+            event_sink(create_event(EventType.BATCH_STARTED, batch_file="/tmp/batch.json", total=1))
             raise KeyboardInterrupt
 
         with (
@@ -521,19 +525,19 @@ class CliTest(unittest.TestCase):
         result = WorkflowResult("completed", Path("/tmp/job.json"))
 
         def run_with_progress(_options, *, event_sink):
-            event_sink(create_event("workflow_started"))
+            event_sink(create_event(EventType.WORKFLOW_STARTED))
             event_sink(
                 create_event(
-                    "job_started",
+                    EventType.JOB_STARTED,
                     job_id="job-1",
                     job_file=str(result.job_file),
                     input="/tmp/input.mp4",
                 )
             )
-            event_sink(create_event("stage_started", stage="acquire", status="running"))
+            event_sink(create_event(EventType.STAGE_STARTED, stage="acquire", status="running"))
             event_sink(
                 create_event(
-                    "download_progress",
+                    EventType.DOWNLOAD_PROGRESS,
                     percent=42.0,
                     speed=2 * 1024 * 1024,
                     eta_seconds=15,
@@ -541,7 +545,7 @@ class CliTest(unittest.TestCase):
             )
             event_sink(
                 create_event(
-                    "transcription_progress",
+                    EventType.TRANSCRIPTION_PROGRESS,
                     engine="faster",
                     determinate=True,
                     processed_ms=210000,
@@ -551,8 +555,8 @@ class CliTest(unittest.TestCase):
                     eta_seconds=41,
                 )
             )
-            event_sink(create_event("stage_completed", stage="acquire", status="succeeded"))
-            event_sink(create_event("workflow_completed", job_file=str(result.job_file)))
+            event_sink(create_event(EventType.STAGE_COMPLETED, stage="acquire", status="succeeded"))
+            event_sink(create_event(EventType.WORKFLOW_COMPLETED, job_file=str(result.job_file)))
             return result
 
         with (
@@ -576,16 +580,16 @@ class CliTest(unittest.TestCase):
         error_output = StringIO()
 
         def fail_after_job_created(_options, *, event_sink):
-            event_sink(create_event("workflow_started"))
+            event_sink(create_event(EventType.WORKFLOW_STARTED))
             event_sink(
                 create_event(
-                    "job_started",
+                    EventType.JOB_STARTED,
                     job_id="job-1",
                     job_file="/tmp/job.json",
                     input="https://example.com/video",
                 )
             )
-            event_sink(create_event("stage_started", stage="acquire", status="running"))
+            event_sink(create_event(EventType.STAGE_STARTED, stage="acquire", status="running"))
             raise RuntimeError("download unavailable")
 
         with (
@@ -630,13 +634,13 @@ class CliTest(unittest.TestCase):
             def interrupt_workflow(_options, *, event_sink):
                 event_sink(
                     create_event(
-                        "job_started",
+                        EventType.JOB_STARTED,
                         job_id=job.id,
                         job_file=str(job_file),
                         input=job.input,
                     )
                 )
-                event_sink(create_event("stage_started", stage="acquire", status="running"))
+                event_sink(create_event(EventType.STAGE_STARTED, stage="acquire", status="running"))
                 raise KeyboardInterrupt
 
             with (
@@ -655,6 +659,60 @@ class CliTest(unittest.TestCase):
         self.assertIn("失败阶段：获取素材", failure)
         self.assertIn(f'xvt status "{job_file}"', failure)
 
+    def test_sigterm_returns_143_and_persists_interrupted_stage(self) -> None:
+        error_output = StringIO()
+        original_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                job = create_job("/tmp/input.mp4", directory)
+                job.stages[StageName.ACQUIRE].status = StageStatus.RUNNING
+                job_file = save_job(job)
+
+                def terminate_workflow(_options, *, event_sink):
+                    event_sink(
+                        create_event(
+                            EventType.JOB_STARTED,
+                            job_id=job.id,
+                            job_file=str(job_file),
+                            input=job.input,
+                        )
+                    )
+                    event_sink(
+                        create_event(EventType.STAGE_STARTED, stage="acquire", status="running")
+                    )
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    self.fail("signal handler should have raised before this line")
+
+                with (
+                    patch("xvt.cli.run_workflow", side_effect=terminate_workflow),
+                    redirect_stderr(error_output),
+                ):
+                    return_code = main(["run", job.input, "--output", directory])
+
+                interrupted = load_job(job_file)
+
+            self.assertEqual(return_code, 143)
+            self.assertEqual(interrupted.stages[StageName.ACQUIRE].status, StageStatus.FAILED)
+            self.assertEqual(interrupted.stages[StageName.ACQUIRE].error, "interrupted by user")
+        finally:
+            cancellation.reset()
+            for sig, handler in original_handlers.items():
+                signal.signal(sig, handler)
+
+    def test_command_cancelled_is_reported_as_interruption(self) -> None:
+        error_output = StringIO()
+        try:
+            with (
+                patch("xvt.cli.run_workflow", side_effect=CommandCancelled("cancelled")),
+                redirect_stderr(error_output),
+            ):
+                return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+            self.assertEqual(return_code, 130)
+            self.assertIn("任务已中断", error_output.getvalue())
+        finally:
+            cancellation.reset()
+
     def test_jsonl_keyboard_interrupt_ends_with_structured_failure(self) -> None:
         output = StringIO()
         error_output = StringIO()
@@ -666,13 +724,13 @@ class CliTest(unittest.TestCase):
             def interrupt_workflow(_options, *, event_sink):
                 event_sink(
                     create_event(
-                        "job_started",
+                        EventType.JOB_STARTED,
                         job_id=job.id,
                         job_file=str(job_file),
                         input=job.input,
                     )
                 )
-                event_sink(create_event("stage_started", stage="acquire", status="running"))
+                event_sink(create_event(EventType.STAGE_STARTED, stage="acquire", status="running"))
                 raise KeyboardInterrupt
 
             with (
@@ -919,7 +977,7 @@ class CliTest(unittest.TestCase):
             result = WorkflowResult("completed", Path(directory) / "job.json")
 
             def run_with_event(_options, *, event_sink):
-                event_sink(create_event("stage_started", stage="inspect", status="running"))
+                event_sink(create_event(EventType.STAGE_STARTED, stage="inspect", status="running"))
                 return result
 
             with (

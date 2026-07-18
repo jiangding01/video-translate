@@ -16,6 +16,18 @@ class WorkflowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/video.mp4", directory)
             events = []
+            burned_path = Path(directory) / "burned.mp4"
+
+            def fake_burn(job_file, **_kwargs):
+                # 模拟真实烧录：写出成品并在 Job 上登记 checksum 有效的 artifact。
+                burned_path.write_bytes(b"video")
+                burned_job = load_job(job_file)
+                burned_job.artifacts.append(
+                    Artifact("burned_video", str(burned_path), file_checksum(burned_path))
+                )
+                save_job(burned_job)
+                return burned_path
+
             with (
                 patch("xvt.workflow.run_transcription", return_value=job) as transcribe,
                 patch(
@@ -27,7 +39,7 @@ class WorkflowTest(unittest.TestCase):
                 ) as translate,
                 patch(
                     "xvt.workflow.burn_translated_job",
-                    return_value=Path("/tmp/burned.mp4"),
+                    side_effect=fake_burn,
                 ) as burn,
             ):
                 result = run_workflow(
@@ -44,7 +56,7 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.job_file, get_job_file(job))
-        self.assertEqual(result.artifacts[-1], Path("/tmp/burned.mp4"))
+        self.assertEqual(result.artifacts[-1], burned_path)
         self.assertFalse(transcribe.call_args.kwargs["emit_job_completed"])
         workflow_config = transcribe.call_args.kwargs["workflow_config"]
         self.assertEqual(workflow_config["target_language"], "zh-CN")
@@ -59,8 +71,28 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy(style="natural"))
         burn.assert_called_once()
         self.assertEqual(events[0].type, "workflow_started")
+        self.assertIsNone(events[0].data["job_id"])
+        self.assertIsNone(events[0].data["job_file"])
         self.assertEqual(events[1].data["steps"], ["transcribe", "translate", "burn"])
         self.assertEqual(events[-1].type, "workflow_completed")
+        self.assertEqual(events[-1].data["job_id"], job.id)
+        self.assertEqual(events[-1].data["job_file"], str(get_job_file(job)))
+
+    def test_workflow_failed_uses_error_envelope(self) -> None:
+        events = []
+        with patch("xvt.workflow.run_transcription", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                run_workflow(
+                    WorkflowOptions(input="/tmp/video.mp4", output="/tmp/output"),
+                    event_sink=events.append,
+                )
+
+        failed = events[-1]
+        self.assertEqual(failed.type, "workflow_failed")
+        self.assertEqual(failed.data["error"], {"category": "workflow", "message": "boom"})
+        self.assertNotIn("error_type", failed.data)
+        self.assertIsNone(failed.data["job_id"])
+        self.assertIsNone(failed.data["job_file"])
 
     def test_agent_fallback_waits_and_does_not_burn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

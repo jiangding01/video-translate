@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from xvt.events import Event, EventSink, create_event
+from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
+from xvt.locking import job_lock
+from xvt.process import CommandCancelled, raise_if_cancelled
 from xvt.recovery import build_recovery_plan
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
@@ -238,6 +240,10 @@ def _item_event_sink(
     return sink
 
 
+def _error_category(error: Exception) -> str:
+    return getattr(error, "category", "workflow")
+
+
 def _mark_unfinished_item(
     batch_file: Path,
     batch: dict[str, Any],
@@ -249,7 +255,11 @@ def _mark_unfinished_item(
     item["status"] = status
     _write_batch(batch_file, batch)
     if event_sink:
-        event_type = "batch_item_waiting" if status == "awaiting_input" else "batch_item_failed"
+        event_type = (
+            EventType.BATCH_ITEM_WAITING
+            if status == "awaiting_input"
+            else EventType.BATCH_ITEM_FAILED
+        )
         event_sink(
             create_event(
                 event_type,
@@ -275,7 +285,7 @@ def _process_item(
     if event_sink:
         event_sink(
             create_event(
-                "batch_item_started",
+                EventType.BATCH_ITEM_STARTED,
                 batch_file=str(batch_file),
                 input=item["input"],
                 index=index,
@@ -284,6 +294,7 @@ def _process_item(
         )
 
     try:
+        raise_if_cancelled()
         job_file = item.get("job_file")
         if isinstance(job_file, str):
             category = _record_recovery(item)
@@ -307,7 +318,7 @@ def _process_item(
                 if event_sink:
                     event_sink(
                         create_event(
-                            "batch_item_completed",
+                            EventType.BATCH_ITEM_COMPLETED,
                             batch_file=str(batch_file),
                             input=item["input"],
                             job_file=item["job_file"],
@@ -327,10 +338,12 @@ def _process_item(
                     event_sink=event_sink,
                 )
                 return
-            workflow_result = continue_workflow(
-                job_file,
-                event_sink=_item_event_sink(batch_file, batch, item, event_sink),
-            )
+            # 锁序约定：CLI 已持有 batch 锁，这里再取单个 Job 的锁（先 batch 后 job）。
+            with job_lock(job_file):
+                workflow_result = continue_workflow(
+                    job_file,
+                    event_sink=_item_event_sink(batch_file, batch, item, event_sink),
+                )
         else:
             options = WorkflowOptions(
                 input=str(item["input"]),
@@ -345,7 +358,7 @@ def _process_item(
         item["job_file"] = str(workflow_result.job_file)
         item["status"] = workflow_result.status
         item["error"] = (
-            create_event("batch_message", message=workflow_result.message).data["message"]
+            create_event(EventType.BATCH_MESSAGE, message=workflow_result.message).data["message"]
             if workflow_result.message
             else None
         )
@@ -354,9 +367,9 @@ def _process_item(
         _write_batch(batch_file, batch)
         if event_sink:
             event_type = (
-                "batch_item_completed"
+                EventType.BATCH_ITEM_COMPLETED
                 if workflow_result.status == "completed"
-                else "batch_item_waiting"
+                else EventType.BATCH_ITEM_WAITING
             )
             event_sink(
                 create_event(
@@ -369,7 +382,7 @@ def _process_item(
                     recovery_plan=item.get("recovery_plan"),
                 )
             )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, CommandCancelled):
         item["status"] = "interrupted"
         batch["status"] = "interrupted"
         batch["next_action"] = f"xvt batch-continue {shlex.quote(str(batch_file))}"
@@ -377,7 +390,7 @@ def _process_item(
         if event_sink:
             event_sink(
                 create_event(
-                    "batch_item_interrupted",
+                    EventType.BATCH_ITEM_INTERRUPTED,
                     batch_file=str(batch_file),
                     input=item["input"],
                     job_file=item.get("job_file"),
@@ -388,9 +401,10 @@ def _process_item(
             )
         raise
     except Exception as error:
-        sanitized = create_event("batch_error", message=str(error))
+        category = _error_category(error)
+        sanitized = create_event(EventType.BATCH_ERROR, **error_event_fields(category, str(error)))
         item["status"] = "failed"
-        item["error"] = sanitized.data["message"]
+        item["error"] = sanitized.data["error"]["message"]
         try:
             _record_recovery(item)
             _record_artifacts(item)
@@ -401,14 +415,13 @@ def _process_item(
         if event_sink:
             event_sink(
                 create_event(
-                    "batch_item_failed",
+                    EventType.BATCH_ITEM_FAILED,
                     batch_file=str(batch_file),
                     input=item["input"],
                     job_file=item.get("job_file"),
                     index=index,
                     total=len(batch["items"]),
-                    error_type=type(error).__name__,
-                    message=item["error"],
+                    **error_event_fields(category, item["error"]),
                     recovery_plan=item.get("recovery_plan"),
                 )
             )
@@ -423,7 +436,7 @@ def _process_batch(
     if event_sink:
         event_sink(
             create_event(
-                "batch_started",
+                EventType.BATCH_STARTED,
                 batch_file=str(batch_file),
                 total=len(batch["items"]),
             )
@@ -444,7 +457,7 @@ def _process_batch(
     if event_sink:
         event_sink(
             create_event(
-                "batch_finished",
+                EventType.BATCH_FINISHED,
                 batch_file=str(batch_file),
                 status=result.status,
                 total=result.total,
