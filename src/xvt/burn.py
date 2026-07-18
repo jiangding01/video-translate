@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from xvt.events import EventSink, create_event
+from xvt.events import EventSink, EventType, create_event
 from xvt.process import CommandError, CommandResult, run_command
 
 CommandRunner = Callable[..., CommandResult]
@@ -95,7 +95,7 @@ def burn_subtitles(
     duration_ms: int | None = None,
     start_ms: int | None = None,
     clip_duration_ms: int | None = None,
-    progress_event_type: str = "burn_progress",
+    progress_event_type: EventType = EventType.BURN_PROGRESS,
     event_sink: EventSink | None = None,
     runner: CommandRunner = run_command,
 ) -> Path:

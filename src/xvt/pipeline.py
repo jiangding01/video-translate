@@ -2119,7 +2119,7 @@ def preview_translated_job(
         duration_ms=end_ms - start_ms,
         start_ms=start_ms,
         clip_duration_ms=end_ms - start_ms,
-        progress_event_type="preview_progress",
+        progress_event_type=EventType.PREVIEW_PROGRESS,
         event_sink=event_sink,
     )
     preview_info = probe_media(preview_path)

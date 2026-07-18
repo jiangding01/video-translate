@@ -617,7 +617,7 @@ def _recovery_plan_for_sink(sink: EventSink) -> RecoveryPlan | None:
 
 def _complete(arguments: argparse.Namespace, **data: object) -> None:
     event_sink = _event_sink(arguments)
-    event_sink(create_event("cli_completed", command=arguments.command, **data))
+    event_sink(create_event(EventType.CLI_COMPLETED, command=arguments.command, **data))
 
 
 def _print_batch_result(result: BatchResult) -> None:
@@ -1040,7 +1040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         recovery_plan = None if parsed.command == "preview" else _recovery_plan_for_sink(sink)
         batch_file = tracked_sink.batch_file if tracked_sink else None
         interruption_event = create_event(
-            "cli_failed",
+            EventType.CLI_FAILED,
             command=parsed.command,
             category="interrupted",
             message="interrupted by user",
@@ -1078,7 +1078,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command != "preview" and sink:
             recovery_plan = _recovery_plan_for_sink(sink)
         failure_event = create_event(
-            "cli_failed",
+            EventType.CLI_FAILED,
             command=parsed.command,
             category=category,
             message=str(error),

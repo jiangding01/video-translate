@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from xvt.events import EventSink, create_event
+from xvt.events import EventSink, EventType, create_event
 from xvt.process import CommandResult, run_command
 
 CommandRunner = Callable[..., CommandResult]
@@ -196,7 +196,7 @@ def download_remote_media(
                 total = 0
             event_sink(
                 create_event(
-                    "download_progress",
+                    EventType.DOWNLOAD_PROGRESS,
                     downloaded_bytes=downloaded,
                     total_bytes=total or None,
                     percent=round(downloaded / total * 100, 2) if total else None,

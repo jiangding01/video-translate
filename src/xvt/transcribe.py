@@ -7,7 +7,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from xvt.events import EventSink, create_event
+from xvt.events import EventSink, EventType, create_event
 from xvt.models import Transcript, Word
 
 DEFAULT_MODEL = "large-v3-turbo"
@@ -35,7 +35,7 @@ def _emit_progress(
         percent = round(min(processed_ms / total_ms * 100, 100), 2)
     event_sink(
         create_event(
-            "transcription_progress",
+            EventType.TRANSCRIPTION_PROGRESS,
             engine=engine,
             determinate=determinate,
             processed_ms=processed_ms,

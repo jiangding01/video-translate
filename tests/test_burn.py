@@ -8,6 +8,7 @@ from xvt.burn import (
     escape_filter_path,
     recommended_video_bitrate,
 )
+from xvt.events import EventType
 from xvt.process import CommandError, CommandResult
 
 
@@ -144,7 +145,7 @@ class BurnTest(unittest.TestCase):
                 subtitles,
                 root / "preview.mp4",
                 duration_ms=1000,
-                progress_event_type="preview_progress",
+                progress_event_type=EventType.PREVIEW_PROGRESS,
                 event_sink=events.append,
                 runner=runner,
             )

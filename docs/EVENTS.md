@@ -27,7 +27,7 @@
 - **失败类事件的错误载荷统一为 `error: {category, message}`**：辅助函数 `error_event_fields(category, message)` 提供该形态。
 - 所有 URL、鉴权头、Cookie、签名查询参数在写入事件前统一脱敏。
 
-> 注意：`pipeline.py`、`workflow.py`、`batch.py`（P3b）已全面对齐本文件描述的 v1 信封目标契约。`process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）尚未接入 `job_event_fields`/`error_event_fields`，下文「当前形态」列如实标注这些模块的现状。
+> `pipeline.py`、`workflow.py`、`batch.py`（P3b）与 `process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）均已全面对齐本文件描述的 v1 信封目标契约：全部 `create_event` 调用引用 `EventType` 枚举成员，携带错误信息的失败类事件统一使用 `error_event_fields` 信封。生产端 v1 迁移至此全量完成。
 
 ---
 
@@ -349,6 +349,7 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline.py`）。
 | --- | --- | --- |
 | `command` | string[] | 脱敏后的命令参数数组 |
 | `exit_code` | int | 退出码（`127` 表示命令不存在，其余为实际返回码） |
+| `error` | object | `{category, message}`，`category` 恒为 `"dependency_or_process"`；`message` 为命令不存在时的异常信息，或命令返回非零退出码时的 `stderr`/`stdout` 摘要（均已脱敏） |
 
 ## CLI 终态
 

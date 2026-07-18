@@ -148,11 +148,10 @@ def _redact_event_value(value: Any) -> Any:
     return value
 
 
-def create_event(event_type: EventType | str, **data: Any) -> Event:
+def create_event(event_type: EventType, **data: Any) -> Event:
     """构造一个带协议版本信封的事件。
 
-    过渡期同时接受 ``EventType`` 与裸 ``str``，以便生产端逐步迁移。P3c 完成生产端全面
-    迁移后，本签名应收紧为纯 ``EventType``，届时删除 ``str`` 兼容分支。
+    ``event_type`` 必须是 ``EventType`` 枚举成员；生产端不应传入裸 ``str``。
     """
     return Event(
         type=str(event_type),
@@ -165,7 +164,7 @@ def job_event_fields(job_id: str | None, job_file: str | Path | None) -> dict[st
     """构造关联 Job 事件的 v1 信封字段。
 
     同时返回 ``job_id`` 与 ``job_file`` 两键，即使取值为 ``None`` 也写入，保证下游消费端
-    可以稳定读取两个键。生产端在 P3b/P3c 逐步接入本辅助函数。
+    可以稳定读取两个键。生产端已全量接入本辅助函数。
     """
     return {
         "job_id": job_id,
@@ -176,7 +175,7 @@ def job_event_fields(job_id: str | None, job_file: str | Path | None) -> dict[st
 def error_event_fields(category: str, message: str) -> dict[str, Any]:
     """构造失败类事件的 v1 统一错误载荷 ``error: {category, message}``。
 
-    生产端在 P3b/P3c 逐步接入本辅助函数，取代旧的 ``error`` / ``error_type`` /
+    生产端已全量接入本辅助函数，取代旧的 ``error`` / ``error_type`` /
     ``message`` + ``category`` 三种分裂写法。
     """
     return {"error": {"category": category, "message": message}}

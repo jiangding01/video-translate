@@ -2,7 +2,7 @@ import json
 import sys
 import unittest
 
-from xvt.events import create_event
+from xvt.events import EventType, create_event
 from xvt.process import CommandError, run_command
 
 
@@ -102,7 +102,7 @@ class ProcessTest(unittest.TestCase):
         self.assertNotIn("password", json.dumps(events[0].data))
 
     def test_event_serializes_as_json(self) -> None:
-        event = create_event("stage_started", stage="inspect")
+        event = create_event(EventType.STAGE_STARTED, stage="inspect")
 
         data = json.loads(event.to_json())
 
@@ -111,7 +111,7 @@ class ProcessTest(unittest.TestCase):
 
     def test_event_redacts_credentials_and_signed_url_query(self) -> None:
         event = create_event(
-            "job_started",
+            EventType.JOB_STARTED,
             input=("https://user:password@example.com/video.mp4?id=42&X-Amz-Signature=secret"),
         )
 

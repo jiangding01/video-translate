@@ -10,7 +10,7 @@ from threading import Thread
 from typing import TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from xvt.events import EventSink, create_event
+from xvt.events import EventSink, EventType, create_event, error_event_fields
 
 _REDACTED = "<redacted>"
 _SENSITIVE_OPTIONS = {
@@ -191,7 +191,7 @@ def run_command(
     event_command = _redact_command(command)
 
     if event_sink:
-        event_sink(create_event("command_started", command=event_command))
+        event_sink(create_event(EventType.COMMAND_STARTED, command=event_command))
 
     try:
         if line_callback is not None:
@@ -219,20 +219,29 @@ def run_command(
     except FileNotFoundError as error:
         result = CommandResult(command, 127, "", str(error))
         if event_sink:
-            event_sink(create_event("command_failed", command=event_command, exit_code=127))
+            event_sink(
+                create_event(
+                    EventType.COMMAND_FAILED,
+                    command=event_command,
+                    exit_code=127,
+                    **error_event_fields("dependency_or_process", str(error)),
+                )
+            )
         raise CommandError(result) from error
 
     if result.returncode != 0:
         if event_sink:
+            detail = result.stderr.strip() or result.stdout.strip() or "no output"
             event_sink(
                 create_event(
-                    "command_failed",
+                    EventType.COMMAND_FAILED,
                     command=event_command,
                     exit_code=result.returncode,
+                    **error_event_fields("dependency_or_process", detail),
                 )
             )
         raise CommandError(result)
 
     if event_sink:
-        event_sink(create_event("command_completed", command=event_command, exit_code=0))
+        event_sink(create_event(EventType.COMMAND_COMPLETED, command=event_command, exit_code=0))
     return result
