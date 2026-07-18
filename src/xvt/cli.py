@@ -11,7 +11,7 @@ from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
 from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
-from xvt.events import Event, EventSink, create_event
+from xvt.events import Event, EventSink, EventType, create_event
 from xvt.job_store import get_job_file, load_job
 from xvt.pipeline import (
     apply_agent_translation,
@@ -346,7 +346,7 @@ class _TrackedEventSink:
         stage = event.data.get("stage")
         if not isinstance(stage, str):
             return
-        if event.type in {"stage_started", "stage_failed", "stage_waiting"}:
+        if event.type in {EventType.STAGE_STARTED, EventType.STAGE_FAILED, EventType.STAGE_WAITING}:
             self.current_stage = stage
         elif self.current_stage == stage:
             self.current_stage = None
@@ -396,53 +396,53 @@ class _HumanEventSink(_TrackedEventSink):
     def __call__(self, event: Event) -> None:
         self._track(event)
         data = event.data
-        if event.type == "workflow_started":
+        if event.type == EventType.WORKFLOW_STARTED:
             message = "XVT 正在继续任务" if data.get("continuation") else "XVT 开始处理任务"
             self._line(message)
-        elif event.type in {"job_started", "job_resumed"}:
+        elif event.type in {EventType.JOB_STARTED, EventType.JOB_RESUMED}:
             job_file = data.get("job_file")
             if isinstance(job_file, str):
                 self._line(f"任务文件: {job_file}")
         elif event.type.startswith("stage_"):
             self._render_stage(event)
-        elif event.type == "download_progress":
+        elif event.type == EventType.DOWNLOAD_PROGRESS:
             self._render_download(data)
-        elif event.type == "burn_progress":
+        elif event.type == EventType.BURN_PROGRESS:
             self._render_burn(data)
-        elif event.type == "preview_progress":
+        elif event.type == EventType.PREVIEW_PROGRESS:
             self._render_preview(data)
-        elif event.type == "transcription_progress":
+        elif event.type == EventType.TRANSCRIPTION_PROGRESS:
             self._render_transcription(data)
-        elif event.type == "translation_batch_started":
+        elif event.type == EventType.TRANSLATION_BATCH_STARTED:
             self._line(f"[进行中] 翻译字幕（批次 {data.get('batch')}）")
-        elif event.type == "translation_batch_retrying":
+        elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
             self._line(f"[重试] 翻译字幕（批次 {data.get('batch')}）")
-        elif event.type == "workflow_waiting":
+        elif event.type == EventType.WORKFLOW_WAITING:
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
-        elif event.type == "workflow_completed":
+        elif event.type == EventType.WORKFLOW_COMPLETED:
             self._line("任务处理完成")
-        elif event.type == "batch_started":
+        elif event.type == EventType.BATCH_STARTED:
             self._line(f"批处理开始：共 {data.get('total')} 个文件")
             if data.get("batch_file"):
                 self._line(f"批处理文件: {data.get('batch_file')}")
-        elif event.type == "batch_item_started":
+        elif event.type == EventType.BATCH_ITEM_STARTED:
             path = Path(str(data.get("input")))
             self._line(f"[批处理 {data.get('index')}/{data.get('total')}] 开始处理 {path.name}")
-        elif event.type == "batch_item_completed":
+        elif event.type == EventType.BATCH_ITEM_COMPLETED:
             self._line(f"[批处理完成] {Path(str(data.get('input'))).name}")
-        elif event.type == "batch_item_waiting":
+        elif event.type == EventType.BATCH_ITEM_WAITING:
             self._line(f"[批处理等待] {Path(str(data.get('input'))).name}")
             self._render_batch_recovery(data)
-        elif event.type == "batch_item_failed":
+        elif event.type == EventType.BATCH_ITEM_FAILED:
             self._line(f"[批处理失败] {Path(str(data.get('input'))).name}")
             if data.get("message"):
                 self._line(f"原因：{data.get('message')}")
             self._render_batch_recovery(data)
-        elif event.type == "batch_item_interrupted":
+        elif event.type == EventType.BATCH_ITEM_INTERRUPTED:
             self._line(f"[批处理中断] {Path(str(data.get('input'))).name}")
             if data.get("next_action"):
                 self._line(f"继续批处理：{data.get('next_action')}")
-        elif event.type == "batch_finished":
+        elif event.type == EventType.BATCH_FINISHED:
             self._line(
                 "批处理结束："
                 f"{data.get('completed')} 完成，"
@@ -451,9 +451,9 @@ class _HumanEventSink(_TrackedEventSink):
             )
             if data.get("next_action"):
                 self._line(f"继续批处理：{data.get('next_action')}")
-        elif event.type == "preview_started":
+        elif event.type == EventType.PREVIEW_STARTED:
             self._line("[进行中] 生成短片段预览")
-        elif event.type == "preview_completed":
+        elif event.type == EventType.PREVIEW_COMPLETED:
             self._line("[完成] 生成短片段预览")
 
     def _render_stage(self, event: Event) -> None:
@@ -462,9 +462,9 @@ class _HumanEventSink(_TrackedEventSink):
             return
         label = _STAGE_LABELS.get(stage, stage)
         status = event.data.get("status")
-        if event.type == "stage_started":
+        if event.type == EventType.STAGE_STARTED:
             self._line(f"[进行中] {label}")
-        elif event.type == "stage_failed":
+        elif event.type == EventType.STAGE_FAILED:
             self._line(f"[失败] {label}")
         elif status == "skipped":
             self._line(f"[跳过] {label}")
