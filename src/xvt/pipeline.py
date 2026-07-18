@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xvt.align import align_source_cues
+from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.burn import burn_subtitles, recommended_video_bitrate
 from xvt.config import (
     DEFAULT_ENGINE,
@@ -246,16 +247,8 @@ def _load_translation_response(response_file: str | Path, expected_ids: set[int]
 
 
 def _invalidate_rendered_artifacts(job: Job) -> None:
-    invalidated_kinds = {
-        "translated_subtitle_qa",
-        "translated_srt",
-        "bilingual_srt",
-        "bilingual_ass",
-        "burned_video",
-        "media_qa",
-        "preview_ass",
-        "preview_video",
-    }
+    # 失效集合由依赖图闭包推导：translated_cues 的全部下游产物。
+    invalidated_kinds = downstream_of(ArtifactKind.TRANSLATED_CUES)
     job.artifacts = [
         artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
     ]
@@ -271,10 +264,10 @@ def _invalidate_rendered_artifacts(job: Job) -> None:
 
 
 def _invalidate_preview_artifacts(job: Job) -> None:
+    # preview_ass 自身及其下游（preview_video）。
+    invalidated_kinds = downstream_of(ArtifactKind.PREVIEW_ASS) | {ArtifactKind.PREVIEW_ASS}
     job.artifacts = [
-        artifact
-        for artifact in job.artifacts
-        if artifact.kind not in {"preview_ass", "preview_video"}
+        artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
     ]
 
 
@@ -1433,21 +1426,21 @@ def resegment_translation(
             "items": report_items,
         },
     )
-    invalidated_kinds = {
-        "input_translation_subtitles",
-        "translation_mapping",
-        "translation_batches",
-        "translation_progress",
-        "translation_response",
-        "translated_cues",
-        "translated_subtitle_qa",
-        "translated_srt",
-        "bilingual_srt",
-        "bilingual_ass",
-        "burned_video",
-        "media_qa",
-        "preview_ass",
-        "preview_video",
+    # source_cues 的下游闭包，扣除本函数原位重建/维持现状的产物，并入被作废的用户输入。
+    invalidated_kinds = (
+        downstream_of(ArtifactKind.SOURCE_CUES)
+        - {
+            # source_srt/subtitle_qa 由本函数在下方原位重建（source_srt 写入 replacement，
+            # subtitle_qa 由后续 stage 重跑），不在此失效。
+            ArtifactKind.SOURCE_SRT,
+            ArtifactKind.SUBTITLE_QA,
+            # cue_retranslation_* 维持现状不失效（潜在改进留待后续单独评估）。
+            ArtifactKind.CUE_RETRANSLATION_BATCHES,
+            ArtifactKind.CUE_RETRANSLATION_RESPONSE,
+        }
+    ) | {
+        # input_translation_subtitles 是被 resegment 作废的用户输入而非派生产物，显式并入。
+        ArtifactKind.INPUT_TRANSLATION_SUBTITLES
     }
     replacement_artifacts = [
         Artifact("source_cues", str(source_output), _checksum(source_output)),
