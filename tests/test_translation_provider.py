@@ -96,6 +96,29 @@ class TranslationProviderTest(unittest.TestCase):
                 opener=lambda *_args, **_kwargs: Response(),
             )
 
+    def test_non_utf8_body_is_provider_response_error(self) -> None:
+        # P7g：HTTP 200 但响应体不是合法 UTF-8（真实 bytes 路径）。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b"\xff\xfe broken"
+
+        with self.assertRaisesRegex(ProviderResponseError, "non-UTF-8") as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+        self.assertEqual(raised.exception.category, "dependency_or_process")
+
     def test_mismatched_cue_ids_are_provider_response_error(self) -> None:
         # P7f：真实解析路径——模型返回了错误的 cue ID（不 mock 专用异常）。
         cue = Cue(1, 0, 1000, "Hello", source_language="en")

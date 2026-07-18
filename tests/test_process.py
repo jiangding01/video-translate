@@ -257,6 +257,26 @@ class ProcessTest(unittest.TestCase):
         self.assertIn("request failed", serialized)
         self.assertIn("redacted", serialized)
 
+    def test_event_redacts_multi_pair_cookies_quotes_and_userinfo(self) -> None:
+        # P7g：多 Cookie 对吞到行尾、引号包裹的值、字典形态 Header、
+        # 非 http(s) 协议的 URL userinfo 都必须脱敏。
+        cases = {
+            "multi": "Cookie: session=abc; csrf=secret2; theme=dark",
+            "quoted": 'headers sent: Authorization="Digest username=u, response=sig123"',
+            "dict": "{'Cookie': 'session=abc; csrf=secret3'}",
+            "userinfo": "connecting via socks5://user:pass123@proxy.example.com:1080",
+        }
+        for name, message in cases.items():
+            with self.subTest(name=name):
+                event = create_event(
+                    EventType.COMMAND_FAILED,
+                    error={"category": "dependency_or_process", "message": message},
+                )
+                serialized = event.to_json()
+                for secret in ("csrf=secret", "sig123", "pass123", "session=abc"):
+                    self.assertNotIn(secret, serialized)
+                self.assertIn("redacted", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()
