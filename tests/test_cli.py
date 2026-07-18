@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from xvt.batch import BatchResult
 from xvt.cli import main
+from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
@@ -87,7 +88,7 @@ class CliTest(unittest.TestCase):
             )
 
         events = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(return_code, 4)
+        self.assertEqual(return_code, 6)
         self.assertEqual(events[-1]["type"], "batch_finished")
         self.assertNotIn("cli_completed", {event["type"] for event in events})
         self.assertEqual(error_output.getvalue(), "")
@@ -131,7 +132,7 @@ class CliTest(unittest.TestCase):
         ):
             return_code = main(["batch", "/tmp/inputs", "--output", "/tmp/output"])
 
-        self.assertEqual(return_code, 4)
+        self.assertEqual(return_code, 6)
         self.assertIn("批处理文件: /tmp/batch.json", error_output.getvalue())
         self.assertIn("原因：subtitle QA failed", error_output.getvalue())
         self.assertIn("xvt continue /tmp/job.json", error_output.getvalue())
@@ -418,7 +419,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(status["recovery_plan"]["category"], "unrecoverable")
         self.assertNotIn("xvt continue", status["next_action"])
 
-    def test_verify_json_returns_workflow_exit_code_for_invalid_artifact(self) -> None:
+    def test_verify_json_returns_verify_failed_exit_code_for_invalid_artifact(self) -> None:
         output = StringIO()
         report = {"status": "fail", "artifacts": []}
         with (
@@ -427,7 +428,7 @@ class CliTest(unittest.TestCase):
         ):
             return_code = main(["verify", "/tmp/job.json", "--json"])
 
-        self.assertEqual(return_code, 4)
+        self.assertEqual(return_code, 5)
         self.assertEqual(json.loads(output.getvalue())["status"], "fail")
 
     def test_resume_prints_job_file(self) -> None:
@@ -952,6 +953,35 @@ class CliTest(unittest.TestCase):
         self.assertEqual(event["type"], "cli_failed")
         self.assertEqual(event["data"]["category"], "invalid_input")
         self.assertEqual(error_output.getvalue(), "error: bad input\n")
+
+    def _run_workflow_failure(self, error: Exception) -> tuple[int, dict]:
+        output = StringIO()
+        error_output = StringIO()
+        with (
+            patch("xvt.cli.run_workflow", side_effect=error),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp", "--events-jsonl"])
+        return return_code, json.loads(output.getvalue())
+
+    def test_user_input_error_maps_to_user_exit_code(self) -> None:
+        return_code, event = self._run_workflow_failure(UserInputError("missing config"))
+        self.assertEqual(return_code, 2)
+        self.assertEqual(event["type"], "cli_failed")
+        self.assertEqual(event["data"]["category"], "invalid_input")
+
+    def test_dependency_error_maps_to_dependency_exit_code(self) -> None:
+        return_code, event = self._run_workflow_failure(DependencyError("provider broke"))
+        self.assertEqual(return_code, 3)
+        self.assertEqual(event["type"], "cli_failed")
+        self.assertEqual(event["data"]["category"], "dependency_or_process")
+
+    def test_internal_error_maps_to_workflow_exit_code(self) -> None:
+        return_code, event = self._run_workflow_failure(InternalError("invariant broken"))
+        self.assertEqual(return_code, 4)
+        self.assertEqual(event["type"], "cli_failed")
+        self.assertEqual(event["data"]["category"], "workflow")
 
 
 if __name__ == "__main__":

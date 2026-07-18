@@ -318,6 +318,21 @@ uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 
 `run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
+## 退出码
+
+CLI 使用集中定义的退出码表达终态语义（见 `src/xvt/errors.py`）：
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 命令成功完成 |
+| 2 | 用户输入或配置错误，需修正后重试 |
+| 3 | 外部依赖或子进程故障（`doctor` 未通过、翻译提供方故障等） |
+| 4 | 内部工作流不变量被破坏，属于程序侧问题 |
+| 5 | `verify` 校验未通过，artifact checksum 不一致 |
+| 6 | 批处理整体完成但存在失败条目 |
+| 7 | 目标 Job 或 batch 已被占用（预留，尚未启用） |
+| 130 | 被用户中断（Ctrl-C） |
+
 ## 开发
 
 ```bash
