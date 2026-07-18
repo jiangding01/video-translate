@@ -292,6 +292,14 @@ media-qa.json
 
 为 Job 和 Batch 增加跨进程独占执行保护，完善 SIGINT/SIGTERM 取消、外部进程组清理和持久化中断状态。随后固定 JSONL 版本与路径安全边界，再开始桌面端可视化校对界面。界面只读取 Job、artifact、`batch.json` 和 JSONL 事件，不复制业务逻辑。
 
+真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常，后续需单独优化 CLI 阶段语义与完成摘要：
+
+- 下载平台字幕和下载源视频使用不同提示，避免重复显示“获取素材”。
+- 端到端任务不得先显示“跳过翻译/烧录”再实际执行；API 自动翻译准备批次时不得显示“等待用户输入”。
+- 区分源字幕 QA/渲染与译文字幕 QA/渲染，避免重复且含义不明的阶段名称。
+- 翻译重试显示原因、下一次尝试序号和等待时间。
+- 完成摘要按最终视频、字幕和 Job 分类，只默认展示用户交付物，并由 XVT 显示总耗时。
+
 ## 接手步骤
 
 1. 阅读 [AGENTS.md](AGENTS.md)、[README.md](README.md)、[架构说明](docs/ARCHITECTURE.md)、[路线图](ROADMAP.md) 和 [贡献指南](CONTRIBUTING.md)。
