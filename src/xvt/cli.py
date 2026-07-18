@@ -25,7 +25,7 @@ from xvt.config import (
 )
 from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
-from xvt.events import Event, EventSink, EventType, create_event
+from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import get_job_file, load_job
 from xvt.locking import batch_lock, job_lock
 from xvt.pipeline import (
@@ -1095,8 +1095,7 @@ def _execute(parsed: argparse.Namespace) -> int:
         interruption_event = create_event(
             EventType.CLI_FAILED,
             command=parsed.command,
-            category="interrupted",
-            message="interrupted by user",
+            **error_event_fields("interrupted", "interrupted by user"),
             **({"next_action": "rerun_preview"} if parsed.command == "preview" else {}),
             **(
                 {
@@ -1133,8 +1132,7 @@ def _execute(parsed: argparse.Namespace) -> int:
         failure_event = create_event(
             EventType.CLI_FAILED,
             command=parsed.command,
-            category=category,
-            message=str(error),
+            **error_event_fields(category, str(error)),
             **(
                 {"batch_file": sink.batch_file}
                 if isinstance(sink, _TrackedEventSink) and sink.batch_file
@@ -1142,7 +1140,7 @@ def _execute(parsed: argparse.Namespace) -> int:
             ),
             **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
-        safe_message = str(failure_event.data["message"])
+        safe_message = str(failure_event.data["error"]["message"])
         if getattr(parsed, "events_jsonl", False):
             _event_sink(parsed)(failure_event)
             print(f"error: {safe_message}", file=sys.stderr)

@@ -772,7 +772,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 130)
         self.assertEqual(events[-2]["type"], "stage_failed")
         self.assertEqual(events[-1]["type"], "cli_failed")
-        self.assertEqual(events[-1]["data"]["category"], "interrupted")
+        self.assertEqual(events[-1]["data"]["error"]["category"], "interrupted")
         self.assertEqual(events[-1]["data"]["recovery_plan"]["category"], "unrecoverable")
         self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
 
@@ -1037,7 +1037,7 @@ class CliTest(unittest.TestCase):
         event = json.loads(output.getvalue())
         self.assertEqual(return_code, 2)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "invalid_input")
+        self.assertEqual(event["data"]["error"]["category"], "invalid_input")
         self.assertEqual(error_output.getvalue(), "error: bad input\n")
 
     def _run_workflow_failure(self, error: Exception) -> tuple[int, dict]:
@@ -1055,19 +1055,19 @@ class CliTest(unittest.TestCase):
         return_code, event = self._run_workflow_failure(UserInputError("missing config"))
         self.assertEqual(return_code, 2)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "invalid_input")
+        self.assertEqual(event["data"]["error"]["category"], "invalid_input")
 
     def test_dependency_error_maps_to_dependency_exit_code(self) -> None:
         return_code, event = self._run_workflow_failure(DependencyError("provider broke"))
         self.assertEqual(return_code, 3)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "dependency_or_process")
+        self.assertEqual(event["data"]["error"]["category"], "dependency_or_process")
 
     def test_internal_error_maps_to_workflow_exit_code(self) -> None:
         return_code, event = self._run_workflow_failure(InternalError("invariant broken"))
         self.assertEqual(return_code, 4)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "workflow")
+        self.assertEqual(event["data"]["error"]["category"], "workflow")
 
 
 if __name__ == "__main__":

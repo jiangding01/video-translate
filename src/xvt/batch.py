@@ -250,6 +250,8 @@ def _mark_unfinished_item(
     item: dict[str, Any],
     *,
     status: str,
+    index: int,
+    total: int,
     event_sink: EventSink | None,
 ) -> None:
     item["status"] = status
@@ -266,6 +268,8 @@ def _mark_unfinished_item(
                 batch_file=str(batch_file),
                 input=item["input"],
                 job_file=item.get("job_file"),
+                index=index,
+                total=total,
                 recovery_plan=item.get("recovery_plan"),
             )
         )
@@ -310,6 +314,8 @@ def _process_item(
                         batch,
                         item,
                         status="failed",
+                        index=index,
+                        total=len(batch["items"]),
                         event_sink=event_sink,
                     )
                     return
@@ -335,6 +341,8 @@ def _process_item(
                     batch,
                     item,
                     status=status,
+                    index=index,
+                    total=len(batch["items"]),
                     event_sink=event_sink,
                 )
                 return

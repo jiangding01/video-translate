@@ -998,7 +998,7 @@ def _acquire_remote_job(
                 event_sink(
                     create_event(
                         EventType.REMOTE_SUBTITLES_SELECTED,
-                        job_id=job.id,
+                        **job_event_fields(job.id, get_job_file(job)),
                         language=selected_language,
                         automatic=manual_language is None,
                     )
@@ -1516,7 +1516,7 @@ def resegment_translation(
         event_sink(
             create_event(
                 EventType.TRANSLATION_RESEGMENTED,
-                job_id=job.id,
+                **job_event_fields(job.id, get_job_file(job)),
                 source_cue_count=len(source_cues),
                 resegmented_cue_count=len(resegmented),
                 report_path=str(report_output),
@@ -1670,7 +1670,7 @@ def run_translation(
             event_sink(
                 create_event(
                     EventType.TRANSLATION_FALLBACK,
-                    job_id=job.id,
+                    **job_event_fields(job.id, get_job_file(job)),
                     mode="agent",
                     reason=fallback_reason,
                     path=str(batches_path),
@@ -1708,7 +1708,7 @@ def run_translation(
         event_sink(
             create_event(
                 EventType.TRANSLATION_PROVIDER_SELECTED,
-                job_id=job.id,
+                **job_event_fields(job.id, get_job_file(job)),
                 provider=mode,
                 model=provider_config.model,
             )
@@ -1732,7 +1732,7 @@ def run_translation(
             event_sink(
                 create_event(
                     EventType.TRANSLATION_PROGRESS_RESET,
-                    job_id=job.id,
+                    **job_event_fields(job.id, get_job_file(job)),
                     reason="translation fingerprint changed",
                 )
             )
@@ -1747,7 +1747,11 @@ def run_translation(
                 continue
             if event_sink:
                 event_sink(
-                    create_event(EventType.TRANSLATION_BATCH_STARTED, job_id=job.id, batch=batch.id)
+                    create_event(
+                        EventType.TRANSLATION_BATCH_STARTED,
+                        **job_event_fields(job.id, get_job_file(job)),
+                        batch=batch.id,
+                    )
                 )
             for attempt in range(max_retries + 1):
                 try:
@@ -1773,7 +1777,7 @@ def run_translation(
                         event_sink(
                             create_event(
                                 EventType.TRANSLATION_BATCH_RETRYING,
-                                job_id=job.id,
+                                **job_event_fields(job.id, get_job_file(job)),
                                 batch=batch.id,
                                 attempt=attempt + 2,
                                 delay_seconds=delay,
@@ -1789,7 +1793,7 @@ def run_translation(
                         event_sink(
                             create_event(
                                 EventType.TRANSLATION_BATCH_RETRYING,
-                                job_id=job.id,
+                                **job_event_fields(job.id, get_job_file(job)),
                                 batch=batch.id,
                                 attempt=attempt + 2,
                                 delay_seconds=delay,
@@ -1814,7 +1818,9 @@ def run_translation(
             if event_sink:
                 event_sink(
                     create_event(
-                        EventType.TRANSLATION_BATCH_COMPLETED, job_id=job.id, batch=batch.id
+                        EventType.TRANSLATION_BATCH_COMPLETED,
+                        **job_event_fields(job.id, get_job_file(job)),
+                        batch=batch.id,
                     )
                 )
     except Exception as error:
@@ -2121,7 +2127,7 @@ def preview_translated_job(
         event_sink(
             create_event(
                 EventType.PREVIEW_COMPLETED,
-                job_id=job.id,
+                **job_event_fields(job.id, get_job_file(job)),
                 path=str(preview_path),
                 start_ms=start_ms,
                 duration_ms=end_ms - start_ms,
