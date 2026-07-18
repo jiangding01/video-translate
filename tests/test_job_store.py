@@ -44,6 +44,25 @@ class JobStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "schema version"):
                 load_job(path)
 
+    def test_malformed_current_schema_is_rejected_as_invalid_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "job.json"
+            path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Invalid job file: missing fields"):
+                load_job(path)
+
+    def test_invalid_artifact_types_are_rejected_as_invalid_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/video.mp4", directory)
+            job_file = get_job_file(job)
+            data = job.to_dict()
+            data["artifacts"] = [{"kind": "source_srt", "path": [], "checksum": None}]
+            job_file.write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "artifact kind and path"):
+                load_job(job_file)
+
 
 if __name__ == "__main__":
     unittest.main()

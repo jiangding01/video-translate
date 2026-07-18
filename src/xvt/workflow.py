@@ -193,7 +193,13 @@ def _current_artifacts(job: Job, *, waiting: bool = False) -> tuple[Path, ...]:
     kinds = (
         ("translation_batches",)
         if waiting
-        else ("translated_srt", "bilingual_srt", "bilingual_ass", "burned_video")
+        else (
+            "source_srt",
+            "translated_srt",
+            "bilingual_srt",
+            "bilingual_ass",
+            "burned_video",
+        )
     )
     return tuple(path for kind in kinds if (path := valid_artifact_path(job, kind)))
 
@@ -241,6 +247,7 @@ def run_workflow(
             emit_job_completed=not options.target_language,
         )
         job_file = get_job_file(job)
+        artifacts.extend(_current_artifacts(job))
 
         if options.translation_subtitles:
             artifacts.extend(
@@ -414,7 +421,12 @@ def continue_workflow(
         if config.get("burn"):
             burned = valid_artifact_path(job, "burned_video")
             expected_fingerprint = _burn_fingerprint(job, config)
-            if not burned or config.get("burn_fingerprint") != expected_fingerprint:
+            media_qa_succeeded = job.stages[StageName.MEDIA_QA].status is StageStatus.SUCCEEDED
+            if (
+                not burned
+                or not media_qa_succeeded
+                or config.get("burn_fingerprint") != expected_fingerprint
+            ):
                 burn_translated_job(
                     path,
                     media=str(config["burn_media"]) if config.get("burn_media") else None,

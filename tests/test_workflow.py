@@ -4,8 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.job_store import create_job, get_job_file, load_job, save_job
-from xvt.models import StageName, StageStatus
+from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import TranslationRunResult, apply_subtitle_translation
+from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 
@@ -167,7 +168,8 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(
-            {path.name for path in result.artifacts}, {"translated.srt", "bilingual.srt"}
+            {path.name for path in result.artifacts},
+            {"source.srt", "translated.srt", "bilingual.srt"},
         )
         self.assertNotIn("media_info", artifacts)
         self.assertIn("bilingual_srt", artifacts)
@@ -206,7 +208,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(
             {path.name for path in completed.artifacts},
-            {"translated.srt", "bilingual.srt"},
+            {"source.srt", "translated.srt", "bilingual.srt"},
         )
 
     def test_rejects_unknown_segmentation_preset(self) -> None:
@@ -358,6 +360,7 @@ class WorkflowTest(unittest.TestCase):
                     }
                 },
             )
+            job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
             save_job(job)
             with (
                 patch("xvt.workflow.valid_artifact_path") as valid,
@@ -373,6 +376,57 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         burn.assert_not_called()
+
+    def test_continue_retries_burn_when_media_qa_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {
+                    "workflow": {
+                        "target_language": "zh-CN",
+                        "burn": True,
+                        "burn_fingerprint": "current",
+                    }
+                },
+            )
+            job.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
+            save_job(job)
+            with (
+                patch("xvt.workflow.valid_artifact_path") as valid,
+                patch("xvt.workflow._burn_fingerprint", return_value="current"),
+                patch(
+                    "xvt.workflow.burn_translated_job",
+                    return_value=Path("/tmp/burned.mp4"),
+                ) as burn,
+                patch("xvt.workflow._record_burn_fingerprint"),
+            ):
+                valid.side_effect = lambda _job, kind: (
+                    Path(f"/tmp/{kind}")
+                    if kind in {"source_cues", "translated_cues", "burned_video"}
+                    else None
+                )
+                result = continue_workflow(get_job_file(job))
+
+        self.assertEqual(result.status, "completed")
+        burn.assert_called_once()
+
+    def test_source_only_workflow_reports_source_subtitle_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/video.mp4", directory)
+            source_srt = get_job_file(job).parent / "source.srt"
+            source_srt.write_text("source", encoding="utf-8")
+            job.artifacts.append(Artifact("source_srt", str(source_srt), file_checksum(source_srt)))
+            save_job(job)
+            events = []
+            with patch("xvt.workflow.run_transcription", return_value=job):
+                result = run_workflow(
+                    WorkflowOptions(input="/tmp/video.mp4", output=directory),
+                    event_sink=events.append,
+                )
+
+        self.assertEqual(result.artifacts, (source_srt,))
+        self.assertEqual(events[-1].data["artifacts"], [str(source_srt)])
 
     def test_continue_stops_at_failed_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

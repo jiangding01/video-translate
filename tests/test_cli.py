@@ -390,6 +390,20 @@ class CliTest(unittest.TestCase):
         self.assertEqual(status["recovery_plan"]["category"], "unrecoverable")
         self.assertIsNone(status["recovery_plan"]["primary_command"])
 
+    def test_status_rejects_malformed_job_without_traceback(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = Path(directory) / "job.json"
+            job_file.write_text('{"schema_version": 1}', encoding="utf-8")
+            with redirect_stdout(output), redirect_stderr(error_output):
+                return_code = main(["status", str(job_file), "--json"])
+
+        self.assertEqual(return_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("Invalid job file: missing fields", error_output.getvalue())
+        self.assertNotIn("Traceback", error_output.getvalue())
+
     def test_status_uses_persisted_workflow_goal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/input.mp4", directory)
