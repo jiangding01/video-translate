@@ -330,7 +330,7 @@ CLI 使用集中定义的退出码表达终态语义（见 `src/xvt/errors.py`�
 | 4 | 内部工作流不变量被破坏，属于程序侧问题 |
 | 5 | `verify` 校验未通过，artifact checksum 不一致 |
 | 6 | 批处理整体完成但存在失败条目 |
-| 7 | 目标 Job 或 batch 已被占用（预留，尚未启用） |
+| 7 | 目标 Job 或 batch 正被另一个 XVT 进程独占执行 |
 | 130 | 被用户中断（SIGINT / Ctrl-C） |
 | 143 | 被 SIGTERM 终止，中断状态已持久化 |
 

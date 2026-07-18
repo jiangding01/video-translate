@@ -45,3 +45,10 @@ class InternalError(XvtError):
 
     exit_code = ExitCode.WORKFLOW_ERROR
     category = "workflow"
+
+
+class JobLockedError(XvtError):
+    """目标 Job 或 batch 正被另一个 XVT 进程独占执行。"""
+
+    exit_code = ExitCode.LOCKED
+    category = "locked"

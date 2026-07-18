@@ -26,6 +26,7 @@
 - `xvt batch` 和 `xvt batch-continue`：固定目录输入清单，串行创建独立 Job，隔离单项失败，并通过原子 `batch.json` 汇总报告恢复未完成任务。
 - 外部命令以独立进程组执行：超时、取消或中断时清理全部子孙进程，不再遗留 ffmpeg/yt-dlp 孤儿进程；所有外部命令默认携带 120 秒静默超时兜底，并新增协作式取消入口（`CommandCancelled`）。
 - CLI 现在处理 SIGTERM：与 Ctrl-C 一样清理进程组、持久化中断的 stage 并生成恢复计划，退出码为 143；翻译批次循环和批处理条目在迭代边界响应取消。
+- Job 与 batch 独占执行：改写既有 Job 的子命令和 `batch-continue` 在入口取 flock 目录锁，第二个进程以退出码 7 立即失败并提示持有者 PID；进程崩溃时内核自动释放锁。
 
 ### Fixed
 

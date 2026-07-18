@@ -4,6 +4,7 @@ import shlex
 import signal
 import sys
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from time import monotonic
 from typing import TextIO
@@ -15,6 +16,7 @@ from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
 from xvt.events import Event, EventSink, EventType, create_event
 from xvt.job_store import get_job_file, load_job
+from xvt.locking import batch_lock, job_lock
 from xvt.pipeline import (
     apply_agent_translation,
     apply_cue_retranslation,
@@ -1020,6 +1022,34 @@ def _run_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+# 会写入既有 Job 的子命令：在 CLI 入口取 Job 目录锁，保证独占执行。
+# `run` 与 `batch` 每次创建全新 Job/batch 目录，创建路径无竞争；在途 `run` 与并发
+# `continue` 的窗口将在 run 统一为 continue 特例后由同一锁点收口。
+_JOB_MUTATING_COMMANDS = frozenset(
+    {
+        "continue",
+        "resume",
+        "translate",
+        "prepare-translation",
+        "apply-translation",
+        "import-translation",
+        "retranslate-cues",
+        "apply-cue-retranslation",
+        "resegment-translation",
+        "preview",
+        "burn",
+    }
+)
+
+
+def _execution_lock(parsed: argparse.Namespace):
+    if parsed.command in _JOB_MUTATING_COMMANDS:
+        return job_lock(parsed.job_file)
+    if parsed.command == "batch-continue":
+        return batch_lock(parsed.batch_file)
+    return nullcontext()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -1030,7 +1060,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parsed = parser.parse_args(arguments)
     install_signal_handlers()
     try:
-        return _run_command(parsed)
+        with _execution_lock(parsed):
+            return _run_command(parsed)
     except (KeyboardInterrupt, CommandCancelled):
         sink = _event_sink(parsed)
         tracked_sink = sink if isinstance(sink, _TrackedEventSink) else None

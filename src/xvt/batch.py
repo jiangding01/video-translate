@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
+from xvt.locking import job_lock
 from xvt.process import CommandCancelled, raise_if_cancelled
 from xvt.recovery import build_recovery_plan
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
@@ -337,10 +338,12 @@ def _process_item(
                     event_sink=event_sink,
                 )
                 return
-            workflow_result = continue_workflow(
-                job_file,
-                event_sink=_item_event_sink(batch_file, batch, item, event_sink),
-            )
+            # 锁序约定：CLI 已持有 batch 锁，这里再取单个 Job 的锁（先 batch 后 job）。
+            with job_lock(job_file):
+                workflow_result = continue_workflow(
+                    job_file,
+                    event_sink=_item_event_sink(batch_file, batch, item, event_sink),
+                )
         else:
             options = WorkflowOptions(
                 input=str(item["input"]),
