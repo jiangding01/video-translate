@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- 再加固事件脱敏（P7h）：敏感头命中后一律吞到行尾（不再解析引号/转义，堵住转义引号 Digest 泄漏）；URL userinfo 放宽为 @ 前一切（覆盖无用户名、无冒号形态）；事件 data 中命中敏感 key（Cookie/Authorization/api_key/password/token 等）的字典值整体清空，覆盖嵌套 Header 字典。
 - 加固事件自由文本脱敏（P7g）：Cookie 等敏感头的值改为吞到闭引号或行尾（覆盖多 Cookie 对、Digest 后续字段、字典形态 Header），并新增任意协议 URL userinfo 脱敏（socks5:// 等）；非 UTF-8 的 provider 响应体纳入 `ProviderResponseError` 边界；batch 条目取 Job 锁失败时不再于无锁状态下重读恢复计划。
 - 修复事件自由文本脱敏缺口：外部命令的原始 stderr/stdout 进入事件错误消息时，`Authorization`/`Proxy-Authorization`/`Cookie`/`Set-Cookie`/`X-Api-Key` 头与 `Bearer` 令牌现在会在事件边界统一脱敏（此前只脱敏 URL，凭据可能原样进入 JSONL）。
 - Job 锁提前到首次持久化之前：`create_job` 在写出 `job.json` 前即持有目录锁，消除「文件已出现、锁尚未取得」的并发窗口；batch 对已有 Job 的恢复分类与 artifact 校验同样改为先取 Job 锁再读取，避免按旧状态误判条目完成。

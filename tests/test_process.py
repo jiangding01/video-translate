@@ -277,6 +277,36 @@ class ProcessTest(unittest.TestCase):
                     self.assertNotIn(secret, serialized)
                 self.assertIn("redacted", serialized)
 
+    def test_event_redacts_escaped_quotes_partial_userinfo_and_nested_dicts(self) -> None:
+        # P7h：转义引号的 Digest Header、无用户名/无冒号的 userinfo、
+        # 真正的嵌套 Header 字典（敏感 key 整值清空）。
+        digest = create_event(
+            EventType.COMMAND_FAILED,
+            error={
+                "category": "dependency_or_process",
+                "message": 'Authorization="Digest username=\\"u\\", response=sig456"',
+            },
+        )
+        userinfo = create_event(
+            EventType.COMMAND_FAILED,
+            error={
+                "category": "dependency_or_process",
+                "message": "socks5://:pass456@proxy.example.com socks5://tokenonly@proxy.example.com",
+            },
+        )
+        nested = create_event(
+            EventType.COMMAND_FAILED,
+            headers={"Cookie": "session=abc; csrf=secret3", "X-Api-Key": "key999"},
+        )
+
+        self.assertNotIn("sig456", digest.to_json())
+        self.assertNotIn("pass456", userinfo.to_json())
+        self.assertNotIn("tokenonly", userinfo.to_json())
+        serialized_nested = nested.to_json()
+        for secret in ("session=abc", "secret3", "key999"):
+            self.assertNotIn(secret, serialized_nested)
+        self.assertIn("redacted", serialized_nested)
+
 
 if __name__ == "__main__":
     unittest.main()
