@@ -220,6 +220,120 @@ def _current_artifacts(job: Job, *, waiting: bool = False) -> tuple[Path, ...]:
     return tuple(path for kind in kinds if (path := valid_artifact_path(job, kind)))
 
 
+def _advance_workflow(
+    path: Path,
+    *,
+    config: dict[str, object] | None = None,
+    cookies_from_browser: str | None,
+    proxy: str | None,
+    event_sink: EventSink | None,
+) -> WorkflowResult:
+    """按持久化目标推进翻译与烧录，只补齐缺失或失效的产物。
+
+    run 首跑与 continue 续跑共用本函数：转写完成后的所有推进决策（Agent 等待、
+    译文回填、指纹感知的烧录复用）只有这一份实现。``config`` 为 None 时从
+    Job 读取持久化目标（continue 路径）；run 首跑直接传入刚构造的同一份配置。
+    """
+    job = load_job(path)
+    if config is None:
+        persisted = job.config.get("workflow")
+        if not isinstance(persisted, dict):
+            raise ValueError("job has no persisted workflow goal; use the atomic resume command")
+        config = persisted
+    target_language = config.get("target_language")
+    if target_language is not None and not isinstance(target_language, str):
+        raise ValueError("persisted workflow target_language is invalid")
+    policy = translation_policy_from_dict(config.get("translation_policy"))
+
+    if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:
+        raise RuntimeError("subtitle QA failed; inspect and repair subtitles before continuing")
+
+    if target_language and valid_artifact_path(job, "translated_cues") is None:
+        if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+            artifacts = _current_artifacts(job, waiting=True)
+            message = "translation requires Agent input"
+            if event_sink:
+                event_sink(
+                    create_event(
+                        EventType.WORKFLOW_WAITING,
+                        **job_event_fields(job.id, path),
+                        reason=message,
+                        artifacts=[str(item) for item in artifacts],
+                    )
+                )
+            return WorkflowResult("awaiting_input", path, artifacts, message)
+
+        translation_subtitles = config.get("translation_subtitles")
+        if translation_subtitles:
+            apply_subtitle_translation(
+                path,
+                str(translation_subtitles),
+                target_language=target_language,
+                event_sink=event_sink,
+            )
+        else:
+            translation = run_translation(
+                path,
+                target_language=target_language,
+                provider=str(config.get("provider", DEFAULT_PROVIDER)),
+                base_url=str(config["base_url"]) if config.get("base_url") else None,
+                model=str(config["model"]) if config.get("model") else None,
+                api_key_env=str(config.get("api_key_env", DEFAULT_API_KEY_ENV)),
+                batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
+                max_retries=int(config.get("max_retries", DEFAULT_MAX_RETRIES)),
+                timeout_seconds=float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
+                policy=policy,
+                event_sink=event_sink,
+            )
+            if translation.mode == "agent":
+                message = translation.fallback_reason or "translation requires Agent input"
+                if event_sink:
+                    event_sink(
+                        create_event(
+                            EventType.WORKFLOW_WAITING,
+                            **job_event_fields(job.id, path),
+                            reason=message,
+                            artifacts=[str(item) for item in translation.paths],
+                        )
+                    )
+                return WorkflowResult("awaiting_input", path, translation.paths, message)
+        job = load_job(path)
+
+    if config.get("burn"):
+        burned = valid_artifact_path(job, "burned_video")
+        expected_fingerprint = _burn_fingerprint(job, config)
+        media_qa_succeeded = job.stages[StageName.MEDIA_QA].status is StageStatus.SUCCEEDED
+        if (
+            not burned
+            or not media_qa_succeeded
+            or config.get("burn_fingerprint") != expected_fingerprint
+        ):
+            burn_translated_job(
+                path,
+                media=str(config["burn_media"]) if config.get("burn_media") else None,
+                output=str(config["burn_output"]) if config.get("burn_output") else None,
+                hardware_encoding=bool(config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)),
+                cookies_from_browser=cookies_from_browser or job.config.get("cookies_from_browser"),
+                proxy=proxy,
+                target_font=str(config["target_font"]) if config.get("target_font") else None,
+                source_font=str(config["source_font"]) if config.get("source_font") else None,
+                event_sink=event_sink,
+            )
+            _record_burn_fingerprint(path)
+            job = load_job(path)
+
+    artifacts = _current_artifacts(job)
+    if event_sink:
+        event_sink(
+            create_event(
+                EventType.WORKFLOW_COMPLETED,
+                **job_event_fields(job.id, path),
+                artifacts=[str(item) for item in artifacts],
+            )
+        )
+    return WorkflowResult("completed", path, artifacts)
+
+
 def run_workflow(
     options: WorkflowOptions,
     *,
@@ -242,7 +356,6 @@ def run_workflow(
 
     job_file: Path | None = None
     job_id: str | None = None
-    artifacts: list[Path] = []
     try:
         job = run_transcription(
             options.input,
@@ -265,70 +378,13 @@ def run_workflow(
         )
         job_file = get_job_file(job)
         job_id = job.id
-        artifacts.extend(_current_artifacts(job))
-
-        if options.translation_subtitles:
-            artifacts.extend(
-                apply_subtitle_translation(
-                    job_file,
-                    options.translation_subtitles,
-                    target_language=options.target_language or "",
-                    event_sink=event_sink,
-                )
-            )
-        elif options.target_language:
-            translation = run_translation(
-                job_file,
-                target_language=options.target_language,
-                provider=options.provider,
-                base_url=options.base_url,
-                model=options.model,
-                api_key_env=options.api_key_env,
-                batch_size=options.batch_size,
-                max_retries=options.max_retries,
-                timeout_seconds=options.timeout_seconds,
-                policy=policy,
-                event_sink=event_sink,
-            )
-            artifacts.extend(translation.paths)
-            if translation.mode == "agent":
-                message = translation.fallback_reason or "translation requires Agent input"
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.WORKFLOW_WAITING,
-                            **job_event_fields(job_id, job_file),
-                            reason=message,
-                            artifacts=[str(path) for path in artifacts],
-                        )
-                    )
-                return WorkflowResult("awaiting_input", job_file, tuple(artifacts), message)
-
-        if options.burn:
-            artifacts.append(
-                burn_translated_job(
-                    job_file,
-                    media=options.burn_media,
-                    output=options.burn_output,
-                    hardware_encoding=options.hardware_encoding,
-                    cookies_from_browser=options.cookies_from_browser,
-                    proxy=options.proxy,
-                    target_font=options.target_font,
-                    source_font=options.source_font,
-                    event_sink=event_sink,
-                )
-            )
-            _record_burn_fingerprint(job_file)
-
-        if event_sink:
-            event_sink(
-                create_event(
-                    EventType.WORKFLOW_COMPLETED,
-                    **job_event_fields(job_id, job_file),
-                    artifacts=[str(path) for path in artifacts],
-                )
-            )
-        return WorkflowResult("completed", job_file, tuple(artifacts))
+        return _advance_workflow(
+            job_file,
+            config=options.persisted_config(policy),
+            cookies_from_browser=options.cookies_from_browser,
+            proxy=options.proxy,
+            event_sink=event_sink,
+        )
     except Exception as error:
         if event_sink:
             event_sink(
@@ -353,10 +409,6 @@ def continue_workflow(
     config = job.config.get("workflow")
     if not isinstance(config, dict):
         raise ValueError("job has no persisted workflow goal; use the atomic resume command")
-    target_language = config.get("target_language")
-    if target_language is not None and not isinstance(target_language, str):
-        raise ValueError("persisted workflow target_language is invalid")
-    policy = translation_policy_from_dict(config.get("translation_policy"))
 
     if event_sink:
         event_sink(
@@ -386,98 +438,13 @@ def continue_workflow(
                 )
             else:
                 resume_job(path, event_sink=event_sink)
-            job = load_job(path)
 
-        if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:
-            raise RuntimeError("subtitle QA failed; inspect and repair subtitles before continuing")
-
-        if target_language and valid_artifact_path(job, "translated_cues") is None:
-            if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
-                artifacts = _current_artifacts(job, waiting=True)
-                message = "translation requires Agent input"
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.WORKFLOW_WAITING,
-                            **job_event_fields(job.id, path),
-                            reason=message,
-                            artifacts=[str(item) for item in artifacts],
-                        )
-                    )
-                return WorkflowResult("awaiting_input", path, artifacts, message)
-
-            translation_subtitles = config.get("translation_subtitles")
-            if translation_subtitles:
-                apply_subtitle_translation(
-                    path,
-                    str(translation_subtitles),
-                    target_language=target_language,
-                    event_sink=event_sink,
-                )
-            else:
-                translation = run_translation(
-                    path,
-                    target_language=target_language,
-                    provider=str(config.get("provider", DEFAULT_PROVIDER)),
-                    base_url=str(config["base_url"]) if config.get("base_url") else None,
-                    model=str(config["model"]) if config.get("model") else None,
-                    api_key_env=str(config.get("api_key_env", DEFAULT_API_KEY_ENV)),
-                    batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
-                    max_retries=int(config.get("max_retries", DEFAULT_MAX_RETRIES)),
-                    timeout_seconds=float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
-                    policy=policy,
-                    event_sink=event_sink,
-                )
-                if translation.mode == "agent":
-                    message = translation.fallback_reason or "translation requires Agent input"
-                    if event_sink:
-                        event_sink(
-                            create_event(
-                                EventType.WORKFLOW_WAITING,
-                                **job_event_fields(job.id, path),
-                                reason=message,
-                                artifacts=[str(item) for item in translation.paths],
-                            )
-                        )
-                    return WorkflowResult("awaiting_input", path, translation.paths, message)
-            job = load_job(path)
-
-        if config.get("burn"):
-            burned = valid_artifact_path(job, "burned_video")
-            expected_fingerprint = _burn_fingerprint(job, config)
-            media_qa_succeeded = job.stages[StageName.MEDIA_QA].status is StageStatus.SUCCEEDED
-            if (
-                not burned
-                or not media_qa_succeeded
-                or config.get("burn_fingerprint") != expected_fingerprint
-            ):
-                burn_translated_job(
-                    path,
-                    media=str(config["burn_media"]) if config.get("burn_media") else None,
-                    output=str(config["burn_output"]) if config.get("burn_output") else None,
-                    hardware_encoding=bool(
-                        config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)
-                    ),
-                    cookies_from_browser=cookies_from_browser
-                    or job.config.get("cookies_from_browser"),
-                    proxy=proxy,
-                    target_font=str(config["target_font"]) if config.get("target_font") else None,
-                    source_font=str(config["source_font"]) if config.get("source_font") else None,
-                    event_sink=event_sink,
-                )
-                _record_burn_fingerprint(path)
-                job = load_job(path)
-
-        artifacts = _current_artifacts(job)
-        if event_sink:
-            event_sink(
-                create_event(
-                    EventType.WORKFLOW_COMPLETED,
-                    **job_event_fields(job.id, path),
-                    artifacts=[str(item) for item in artifacts],
-                )
-            )
-        return WorkflowResult("completed", path, artifacts)
+        return _advance_workflow(
+            path,
+            cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
+            event_sink=event_sink,
+        )
     except Exception as error:
         if event_sink:
             event_sink(

@@ -16,6 +16,18 @@ class WorkflowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/video.mp4", directory)
             events = []
+            burned_path = Path(directory) / "burned.mp4"
+
+            def fake_burn(job_file, **_kwargs):
+                # 模拟真实烧录：写出成品并在 Job 上登记 checksum 有效的 artifact。
+                burned_path.write_bytes(b"video")
+                burned_job = load_job(job_file)
+                burned_job.artifacts.append(
+                    Artifact("burned_video", str(burned_path), file_checksum(burned_path))
+                )
+                save_job(burned_job)
+                return burned_path
+
             with (
                 patch("xvt.workflow.run_transcription", return_value=job) as transcribe,
                 patch(
@@ -27,7 +39,7 @@ class WorkflowTest(unittest.TestCase):
                 ) as translate,
                 patch(
                     "xvt.workflow.burn_translated_job",
-                    return_value=Path("/tmp/burned.mp4"),
+                    side_effect=fake_burn,
                 ) as burn,
             ):
                 result = run_workflow(
@@ -44,7 +56,7 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.job_file, get_job_file(job))
-        self.assertEqual(result.artifacts[-1], Path("/tmp/burned.mp4"))
+        self.assertEqual(result.artifacts[-1], burned_path)
         self.assertFalse(transcribe.call_args.kwargs["emit_job_completed"])
         workflow_config = transcribe.call_args.kwargs["workflow_config"]
         self.assertEqual(workflow_config["target_language"], "zh-CN")
