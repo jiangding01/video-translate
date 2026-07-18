@@ -80,6 +80,11 @@ def batch_lock(batch_file: str | Path) -> Iterator[None]:
 # （run_batch）调用 hold_* 把锁挂入最内层作用域。已持有的目标重复 hold 是
 # 无操作（防止 CLI 入口锁与创建点锁重入死锁——flock 对同进程新 fd 同样互斥）。
 # 没有活动作用域时 hold_* 静默跳过：库调用方自行负责互斥。
+#
+# 线程边界（桌面端前置决策）：_scopes/_held_targets 是进程级全局状态，仅对
+# 「单线程 CLI 进程」正确。桌面端第一阶段以独立 CLI 子进程驱动任务（既定共识），
+# 无需线程隔离；若未来改为同进程多线程调用 Python 内核，必须先把这两个全局
+# 迁移为 ContextVar 并补双线程测试，再放开进程内并发。
 
 _scopes: list[ExitStack] = []
 _held_targets: set[Path] = set()

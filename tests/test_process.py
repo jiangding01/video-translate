@@ -188,7 +188,7 @@ class ProcessTest(unittest.TestCase):
         event_command = events[0].data["command"]
         self.assertEqual(event_command[event_command.index("--proxy") + 1], "<redacted>")
         self.assertIn("--cookies=<redacted>", event_command)
-        self.assertIn("Authorization:<redacted>", event_command)
+        self.assertIn("Authorization: <redacted>", event_command)
         self.assertIn(
             "https://cdn.example.com/video.mp4?id=42&X-Amz-Signature=%3Credacted%3E",
             event_command,
@@ -209,7 +209,7 @@ class ProcessTest(unittest.TestCase):
         )
 
         event_command = events[0].data["command"]
-        self.assertIn("--add-header=Cookie:<redacted>", event_command)
+        self.assertIn("--add-header=Cookie: <redacted>", event_command)
         self.assertIn("https://<redacted>@proxy.example.com/path", event_command)
         self.assertNotIn("secret", json.dumps(events[0].data))
         self.assertNotIn("password", json.dumps(events[0].data))
@@ -232,6 +232,29 @@ class ProcessTest(unittest.TestCase):
         self.assertNotIn("password", serialized)
         self.assertNotIn("secret", serialized)
         self.assertIn("id=42", serialized)
+        self.assertIn("redacted", serialized)
+
+    def test_event_redacts_credentials_in_free_text_error_messages(self) -> None:
+        # P7f：外部命令的原始 stderr 会进入事件错误消息，自由文本中的鉴权头、
+        # Cookie 与 Bearer 令牌必须在事件序列化边界脱敏。
+        message = (
+            "request failed; sent headers: Authorization: Bearer sk-secret123, "
+            "Cookie: session=topsecret; other, x-api-key: abc999, "
+            "proxy-authorization: Basic cGFzcw=="
+        )
+        event = create_event(
+            EventType.COMMAND_FAILED,
+            command=["yt-dlp"],
+            exit_code=1,
+            error={"category": "dependency_or_process", "message": message},
+        )
+
+        serialized = event.to_json()
+        self.assertNotIn("sk-secret123", serialized)
+        self.assertNotIn("topsecret", serialized)
+        self.assertNotIn("abc999", serialized)
+        self.assertNotIn("cGFzcw", serialized)
+        self.assertIn("request failed", serialized)
         self.assertIn("redacted", serialized)
 
 

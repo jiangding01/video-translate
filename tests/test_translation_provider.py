@@ -74,6 +74,78 @@ class TranslationProviderTest(unittest.TestCase):
                 opener=opener,
             )
 
+    def test_non_json_body_is_provider_response_error(self) -> None:
+        # P7f：真实解析路径——HTTP 200 但响应体不是 JSON。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b"<html>gateway error</html>"
+
+        with self.assertRaisesRegex(ProviderResponseError, "non-JSON"):
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+
+    def test_mismatched_cue_ids_are_provider_response_error(self) -> None:
+        # P7f：真实解析路径——模型返回了错误的 cue ID（不 mock 专用异常）。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                payload = {
+                    "choices": [{"message": {"content": '{"items":[{"id":99,"text":"你好"}]}'}}]
+                }
+                return json.dumps(payload).encode()
+
+        with self.assertRaises(ProviderResponseError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+        self.assertEqual(raised.exception.category, "dependency_or_process")
+
+    def test_empty_translation_text_is_provider_response_error(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                payload = {
+                    "choices": [{"message": {"content": '{"items":[{"id":1,"text":"  "}]}'}}]
+                }
+                return json.dumps(payload).encode()
+
+        with self.assertRaises(ProviderResponseError):
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+
     def test_compatible_provider_parses_fenced_json(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")
         batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
