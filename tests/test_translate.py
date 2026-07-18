@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from xvt.errors import InternalError, UserInputError
 from xvt.models import Cue
 from xvt.translate import (
     GlossaryTerm,
@@ -52,10 +53,19 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual([item.id for item in batches[0].context_after], [3])
 
     def test_cue_retranslation_rejects_duplicate_source_ids(self) -> None:
-        with self.assertRaisesRegex(ValueError, "duplicate cue ids"):
+        with self.assertRaisesRegex(InternalError, "duplicate cue ids"):
             build_cue_retranslation_batches(
                 [self.cues[0], self.cues[0]],
                 (1,),
+                source_language="en",
+                target_language="zh-CN",
+            )
+
+    def test_cue_retranslation_rejects_missing_source_id_as_user_error(self) -> None:
+        with self.assertRaisesRegex(UserInputError, "do not contain ids"):
+            build_cue_retranslation_batches(
+                self.cues,
+                (99,),
                 source_language="en",
                 target_language="zh-CN",
             )

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from xvt.errors import InternalError, UserInputError
 from xvt.models import Cue
 from xvt.qa import character_limit, reading_speed_limit
 
@@ -187,9 +188,9 @@ def build_cue_retranslation_batches(
     context_size: int = 2,
 ) -> list[TranslationBatch]:
     if not cue_ids:
-        raise ValueError("at least one cue id is required")
+        raise UserInputError("at least one cue id is required")
     if len(set(cue_ids)) != len(cue_ids):
-        raise ValueError("cue ids must not contain duplicates")
+        raise UserInputError("cue ids must not contain duplicates")
 
     speed_limit = reading_speed_limit(target_language)
     line_limit = character_limit(target_language)
@@ -205,10 +206,10 @@ def build_cue_retranslation_batches(
     ]
     positions = {item.id: index for index, item in enumerate(items)}
     if len(positions) != len(items):
-        raise ValueError("source cues contains duplicate cue ids")
+        raise InternalError("source cues contains duplicate cue ids")
     missing = sorted(set(cue_ids) - positions.keys())
     if missing:
-        raise ValueError(f"source cues do not contain ids: {missing}")
+        raise UserInputError(f"source cues do not contain ids: {missing}")
 
     batches = []
     for batch_id, cue_id in enumerate(cue_ids, 1):

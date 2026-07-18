@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from xvt.errors import DependencyError, UserInputError
 from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, Cue
 from xvt.pipeline import run_translation
@@ -33,7 +34,44 @@ class TranslationProviderTest(unittest.TestCase):
 
         self.assertEqual(mode, "agent")
         self.assertIsNone(config)
-        self.assertIn("base URL", reason)
+        self.assertIsNotNone(reason)
+        self.assertIn("base URL", reason or "")
+
+    def test_explicit_provider_missing_configuration_is_user_error(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertRaisesRegex(UserInputError, "openai-compatible provider is missing"),
+        ):
+            resolve_provider(
+                "openai-compatible",
+                base_url=None,
+                model=None,
+                api_key_env="XVT_TRANSLATION_API_KEY",
+            )
+
+    def test_incompatible_response_is_dependency_error(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({"unexpected": True}).encode()
+
+        def opener(_request, **_kwargs):
+            return Response()
+
+        with self.assertRaisesRegex(DependencyError, "incompatible response"):
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
 
     def test_compatible_provider_parses_fenced_json(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")

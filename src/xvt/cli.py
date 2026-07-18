@@ -10,6 +10,7 @@ from typing import TextIO
 from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
 from xvt.doctor import run_doctor
+from xvt.errors import ExitCode, XvtError
 from xvt.events import Event, EventSink, create_event
 from xvt.job_store import get_job_file, load_job
 from xvt.pipeline import (
@@ -646,7 +647,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
             for check in report["checks"]:
                 print(f"{check['status'].upper():4} {check['name']}: {check['message']}")
             print(f"overall: {report['status']}")
-        return 0 if report["status"] == "pass" else 3
+        return ExitCode.OK if report["status"] == "pass" else ExitCode.DEPENDENCY_ERROR
 
     if arguments.command == "run":
         event_sink = _event_sink(arguments)
@@ -733,7 +734,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 _complete(arguments, batch_file=str(result.batch_file), status=result.status)
         else:
             _print_batch_result(result)
-        return 4 if result.status == "partial_failure" else 0
+        return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
 
     if arguments.command == "batch-continue":
         event_sink = _event_sink(arguments)
@@ -743,7 +744,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 _complete(arguments, batch_file=str(result.batch_file), status=result.status)
         else:
             _print_batch_result(result)
-        return 4 if result.status == "partial_failure" else 0
+        return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
 
     if arguments.command == "status":
         job = load_job(arguments.job_file)
@@ -774,7 +775,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
             for artifact in report["artifacts"]:
                 print(f"{artifact['status'].upper():4} {artifact['kind']}: {artifact['message']}")
             print(f"overall: {report['status']}")
-        return 0 if report["status"] == "pass" else 4
+        return ExitCode.OK if report["status"] == "pass" else ExitCode.VERIFY_FAILED
 
     if arguments.command == "resume":
         event_sink = _event_sink(arguments)
@@ -1062,14 +1063,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sink.report_preview_interruption()
             else:
                 sink.report_interruption(recovery_plan)
-        return 130
-    except (OSError, RuntimeError, ValueError) as error:
-        if isinstance(error, ValueError):
-            category, return_code = "invalid_input", 2
+        return ExitCode.INTERRUPTED
+    except (XvtError, OSError, RuntimeError, ValueError) as error:
+        if isinstance(error, XvtError):
+            category, return_code = error.category, error.exit_code
+        elif isinstance(error, ValueError):
+            category, return_code = "invalid_input", ExitCode.USER_ERROR
         elif isinstance(error, (CommandError, OSError)):
-            category, return_code = "dependency_or_process", 3
+            category, return_code = "dependency_or_process", ExitCode.DEPENDENCY_ERROR
         else:
-            category, return_code = "workflow", 4
+            category, return_code = "workflow", ExitCode.WORKFLOW_ERROR
         sink = getattr(parsed, "_event_sink_instance", None)
         recovery_plan = None
         if parsed.command != "preview" and sink:

@@ -7,6 +7,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from xvt.errors import DependencyError, UserInputError
 from xvt.translate import TranslationBatch, parse_translation_response
 
 TRANSLATION_PROMPT_VERSION = 2
@@ -61,7 +62,7 @@ def resolve_provider(
         detail = ", ".join(missing)
         if provider == "auto":
             return "agent", None, f"missing {detail}"
-        raise ValueError(f"openai-compatible provider is missing {detail}")
+        raise UserInputError(f"openai-compatible provider is missing {detail}")
 
     return (
         "openai-compatible",
@@ -84,7 +85,7 @@ def _response_items(content: str) -> list[dict[str, Any]]:
     data = json.loads(text)
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
-        raise ValueError("translation provider response must contain an items array")
+        raise DependencyError("translation provider response must contain an items array")
     return items
 
 
@@ -165,7 +166,7 @@ def translate_batch(
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
-        raise ValueError("translation provider returned an incompatible response") from error
+        raise DependencyError("translation provider returned an incompatible response") from error
     if not isinstance(content, str):
-        raise ValueError("translation provider response content must be text")
+        raise DependencyError("translation provider response content must be text")
     return parse_translation_response(batch, _response_items(content))
