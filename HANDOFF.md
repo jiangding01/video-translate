@@ -12,10 +12,10 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 207 个，全部通过 |
+| 自动化测试 | 213 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| Git | 当前分支为 `main`，跟踪 `origin/main`，`origin` 已关联 GitHub |
+| Git | 功能修改使用 `codex/` 开发分支，Review 通过后以 PR 合并 `main` |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 
@@ -75,6 +75,7 @@
 - 视频码率按分辨率选择，不再使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数。
 - 输出媒体会检查视频流、音频流、AAC 音频、分辨率和时长偏差。
 - 烧录派生指纹包含译文 checksum、媒体身份、编码方式和字体。`continue` 只复用 artifact 与指纹都有效的成品。
+- 烧录目标只有在 `burned_video` checksum、烧录指纹和媒体 QA 全部有效时才算完成；媒体 QA 失败会保留 Job 并提示重新烧录检查。
 - `preview` 可按 cue 或起始时间生成短片段预览；未显式覆盖时复用工作流保存的烧录媒体、字体和编码设置，不修改正式烧录 stage。
 - 预览生成 `preview.ass` 和 `preview.mp4` checksum artifact；译文局部重译或重新分段后旧预览会失效。
 - 预览输出不能覆盖源媒体、Job 文件或正式 artifact；路径别名和硬链接也会在写入前检查。
@@ -92,8 +93,10 @@
 - `--cookies-from-browser` 和 `--proxy` 同时作用于远程检查与下载，重试时可以重新显式提供。
 - `status`、普通失败输出和 Ctrl-C 共用结构化 `RecoveryPlan`，只复用 checksum 验证通过的 artifact。
 - 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
+- 当前 schema 的 Job 若缺少必填字段、stage 或字段类型错误，会作为可控的无效输入失败，不输出 Python traceback。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
 - JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。
+- `workflow_completed` 和 `cli_completed` 会列出 checksum 有效的用户产物；仅生成源字幕的任务也会返回 `source.srt`。
 - `batch` 会固定目录输入清单并串行创建独立 Job；单项失败不会阻断后续文件，`batch.json` 原子记录汇总状态和恢复计划。
 - `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。
 - `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
@@ -285,9 +288,9 @@ media-qa.json
 
 ## 后续任务规划
 
-### P1：可视化校对界面
+### P1：CLI 执行生命周期加固
 
-可视化校对界面使用 React 和 TypeScript，只读取 Job、artifact、`batch.json` 和 JSONL 事件。单机 CLI 稳定前，不引入服务端队列或多租户架构。
+为 Job 和 Batch 增加跨进程独占执行保护，完善 SIGINT/SIGTERM 取消、外部进程组清理和持久化中断状态。随后固定 JSONL 版本与路径安全边界，再开始桌面端可视化校对界面。界面只读取 Job、artifact、`batch.json` 和 JSONL 事件，不复制业务逻辑。
 
 ## 接手步骤
 

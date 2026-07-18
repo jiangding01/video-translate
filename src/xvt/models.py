@@ -101,23 +101,66 @@ class Job:
         if schema_version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported job schema version: {schema_version}")
 
-        stages = {
-            name: StageRecord(
-                status=StageStatus(record["status"]),
-                started_at=record.get("started_at"),
-                completed_at=record.get("completed_at"),
-                error=record.get("error"),
-            )
-            for name, record in data["stages"].items()
-        }
-        artifacts = [Artifact(**artifact) for artifact in data.get("artifacts", [])]
+        required_fields = ("id", "created_at", "updated_at", "input", "output_root", "stages")
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            raise ValueError(f"Invalid job file: missing fields: {', '.join(missing_fields)}")
+
+        string_fields = ("id", "created_at", "updated_at", "input", "output_root")
+        if any(not isinstance(data[field], str) for field in string_fields):
+            raise ValueError("Invalid job file: identity and path fields must be strings")
+
+        stages_data = data["stages"]
+        if not isinstance(stages_data, dict):
+            raise ValueError("Invalid job file: stages must be an object")
+        missing_stages = [stage.value for stage in StageName if stage.value not in stages_data]
+        if missing_stages:
+            raise ValueError(f"Invalid job file: missing stages: {', '.join(missing_stages)}")
+
+        config = data.get("config", {})
+        artifacts_data = data.get("artifacts", [])
+        if not isinstance(config, dict):
+            raise ValueError("Invalid job file: config must be an object")
+        if not isinstance(artifacts_data, list):
+            raise ValueError("Invalid job file: artifacts must be an array")
+
+        try:
+            stages: dict[str, StageRecord] = {}
+            for name, record in stages_data.items():
+                if not isinstance(name, str) or not isinstance(record, dict):
+                    raise TypeError("stage names must be strings and records must be objects")
+                for field in ("started_at", "completed_at", "error"):
+                    if record.get(field) is not None and not isinstance(record[field], str):
+                        raise TypeError(f"stage {field} must be a string or null")
+                stages[name] = StageRecord(
+                    status=StageStatus(record["status"]),
+                    started_at=record.get("started_at"),
+                    completed_at=record.get("completed_at"),
+                    error=record.get("error"),
+                )
+
+            artifacts: list[Artifact] = []
+            for artifact in artifacts_data:
+                if not isinstance(artifact, dict):
+                    raise TypeError("artifact records must be objects")
+                if not isinstance(artifact.get("kind"), str) or not isinstance(
+                    artifact.get("path"), str
+                ):
+                    raise TypeError("artifact kind and path must be strings")
+                checksum = artifact.get("checksum")
+                if checksum is not None and not isinstance(checksum, str):
+                    raise TypeError("artifact checksum must be a string or null")
+                artifacts.append(Artifact(**artifact))
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Invalid job file: {error}") from error
+
         return cls(
             id=data["id"],
             created_at=data["created_at"],
             updated_at=data["updated_at"],
             input=data["input"],
             output_root=data["output_root"],
-            config=data.get("config", {}),
+            config=config,
             stages=stages,
             artifacts=artifacts,
             schema_version=schema_version,

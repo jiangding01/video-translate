@@ -109,6 +109,23 @@ class RecoveryTest(unittest.TestCase):
         self.assertIsNone(plan.primary_command)
         self.assertEqual(plan.report_paths, (str(report),))
 
+    def test_recovery_plan_retries_burn_after_media_qa_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "translated_cues")
+            self._add_artifact(job, root, "burned_video")
+            job.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertIn("媒体 QA", plan.reason)
+
     def test_recovery_plan_describes_agent_translation_prerequisite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

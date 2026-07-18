@@ -201,10 +201,11 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         )
 
     if isinstance(workflow, dict) and workflow.get("burn"):
-        if "burned_video" not in valid_artifacts:
+        media_qa_status = job.stages[StageName.MEDIA_QA].status
+        if "burned_video" not in valid_artifacts or media_qa_status is not StageStatus.SUCCEEDED:
             return plan(
                 "retryable",
-                "字幕产物有效，可以继续未完成的烧录阶段。",
+                "烧录尚未通过媒体 QA，可以重新烧录并检查输出视频。",
                 primary_command=_job_command("continue", job_file),
             )
 
