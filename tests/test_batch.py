@@ -196,12 +196,16 @@ class BatchTest(unittest.TestCase):
             )
             source_srt.unlink()
 
-            resumed = continue_batch(completed.batch_file)
+            events: list = []
+            resumed = continue_batch(completed.batch_file, event_sink=events.append)
             updated = json.loads(completed.batch_file.read_text(encoding="utf-8"))
 
         self.assertEqual(resumed.status, "partial_failure")
         self.assertEqual(updated["items"][0]["status"], "failed")
         self.assertEqual(updated["items"][0]["recovery_plan"]["category"], "manual_fix")
+        failed = next(event for event in events if event.type == "batch_item_failed")
+        self.assertEqual(failed.data["index"], 1)
+        self.assertEqual(failed.data["total"], 1)
 
     def test_interruption_is_persisted_before_propagating(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -27,9 +27,10 @@
 - `xvt run --segmentation-preset` 支持 `conservative`、`balanced` 和 `compact` 三种 ASR 分段预设；选择会持久化到 Job 和端到端工作流，`resume` 可保持一致。
 - `xvt run source.srt` 支持 SRT、VTT、ASS、SSA 纯字幕 Job：保留用户时间轴，无需媒体即可翻译、QA、`continue` 和导出原文、译文、双语 SRT。
 - `xvt batch` 和 `xvt batch-continue`：固定目录输入清单，串行创建独立 Job，隔离单项失败，并通过原子 `batch.json` 汇总报告恢复未完成任务。
-- 外部命令以独立进程组执行：超时、取消或中断时清理全部子孙进程，不再遗留 ffmpeg/yt-dlp 孤儿进程；所有外部命令默认携带 120 秒静默超时兜底，并新增协作式取消入口（`CommandCancelled`）。
+- 外部命令以独立进程组执行：超时、取消或中断时清理全部子孙进程，不再遗留 ffmpeg/yt-dlp 孤儿进程；提供静默超时机制（默认不启用，由保证持续输出的调用方显式设置——yt-dlp 提取阶段等合法静默场景不受误杀），并新增协作式取消入口（`CommandCancelled`）。
+- CLI 改为命令级信号作用域：进入 `main()` 复位取消状态、退出恢复原信号处理器（同进程多次调用互不污染）；第二次 Ctrl-C/SIGTERM 不再产生裸 traceback，只保持取消状态直至清理完成。
 - CLI 现在处理 SIGTERM：与 Ctrl-C 一样清理进程组、持久化中断的 stage 并生成恢复计划，退出码为 143；翻译批次循环和批处理条目在迭代边界响应取消。
-- Job 与 batch 独占执行：改写既有 Job 的子命令和 `batch-continue` 在入口取 flock 目录锁，第二个进程以退出码 7 立即失败并提示持有者 PID；进程崩溃时内核自动释放锁。
+- Job 与 batch 全生命周期独占执行：flock 锁自资源首次持久化点持有至终态——既有 Job 子命令与 `batch-continue` 在 CLI 入口、在途 `run` 自 Job 创建起、`batch` 自 batch.json 写出前；第二个进程以退出码 7 立即失败并提示持有者 PID；进程崩溃时内核自动释放锁。含真实跨进程冲突测试。
 
 - stage 跳过决策收敛到 `stages.py` 计划表：入口在业务逻辑开始前一次性标记跳过项（先计划后执行），取代散落在各分支的逐个记账；中途失败时计划内的跳过状态已持久化。
 - run 首跑与 `continue` 续跑统一为同一推进函数：转写完成后的翻译、Agent 等待与烧录决策只有一份实现，首跑烧录同样走指纹感知路径；`workflow_completed` 与等待事件的 artifacts 统一为 checksum 有效的用户产物。
@@ -43,6 +44,8 @@
 - 损坏或字段不完整的当前版本 Job 现在返回可控的无效输入错误，不再泄漏 Python traceback。
 - 修复转写失败或缺少词级时间戳时可能误报完成进度的问题。
 - 修复预览未继承工作流烧录媒体、字体和编码设置，以及自定义输出可能覆盖 Job、源媒体或正式 artifact 的问题；预览中断现在提供独立重试提示。
+- 修复 `resegment-translation` 失效集合遗留 `cue_retranslation_batches`/`cue_retranslation_response`（P6a 为保持行为而排除）的问题：这两类 artifact 在重分段后引用的是废弃 cue id，虽然 `apply-cue-retranslation` 会因 `translated_cues` 已失效而拒绝执行、无正确性漏洞，但会以 checksum 有效的姿态污染 `status`、`verify` 和恢复计划的可复用产物清单；现按依赖图闭包一并失效（P7e）。
+- 修复 P7c 终审发现的 v1 事件信封失配：`cli.py` 的 `cli_failed` 顶层裸 `category`/`message` 改为嵌套 `error_event_fields` 信封；`pipeline.py` 中 `remote_subtitles_selected`、`translation_resegmented`、`translation_fallback`、`translation_progress_reset`、`translation_batch_started`、`translation_batch_retrying`（两处）、`translation_batch_completed`、`translation_provider_selected`、`preview_completed` 共 10 处补齐缺失的 `job_file`；`batch.py` 的 `_mark_unfinished_item` 补齐 `batch_item_failed`/`batch_item_waiting` 缺失的 `index`/`total`。`docs/EVENTS.md` 同步对账，新增载荷结构契约测试（`tests/test_events.py`）防止回归。
 
 ## [0.1.0] - 2026-07-15
 

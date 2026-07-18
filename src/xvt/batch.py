@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
-from xvt.locking import job_lock
+from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
 from xvt.process import CommandCancelled, raise_if_cancelled
 from xvt.recovery import build_recovery_plan
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
@@ -250,6 +250,8 @@ def _mark_unfinished_item(
     item: dict[str, Any],
     *,
     status: str,
+    index: int,
+    total: int,
     event_sink: EventSink | None,
 ) -> None:
     item["status"] = status
@@ -266,6 +268,8 @@ def _mark_unfinished_item(
                 batch_file=str(batch_file),
                 input=item["input"],
                 job_file=item.get("job_file"),
+                index=index,
+                total=total,
                 recovery_plan=item.get("recovery_plan"),
             )
         )
@@ -310,6 +314,8 @@ def _process_item(
                         batch,
                         item,
                         status="failed",
+                        index=index,
+                        total=len(batch["items"]),
                         event_sink=event_sink,
                     )
                     return
@@ -335,15 +341,18 @@ def _process_item(
                     batch,
                     item,
                     status=status,
+                    index=index,
+                    total=len(batch["items"]),
                     event_sink=event_sink,
                 )
                 return
-            # 锁序约定：CLI 已持有 batch 锁，这里再取单个 Job 的锁（先 batch 后 job）。
-            with job_lock(job_file):
-                workflow_result = continue_workflow(
-                    job_file,
-                    event_sink=_item_event_sink(batch_file, batch, item, event_sink),
-                )
+            # 锁序约定：batch 锁在外层作用域，这里把单个 Job 的锁挂到条目作用域
+            # （先 batch 后 job），条目结束即释放。
+            hold_job_lock(job_file)
+            workflow_result = continue_workflow(
+                job_file,
+                event_sink=_item_event_sink(batch_file, batch, item, event_sink),
+            )
         else:
             options = WorkflowOptions(
                 input=str(item["input"]),
@@ -444,7 +453,8 @@ def _process_batch(
     for index, item in enumerate(batch["items"], start=1):
         if not isinstance(item, dict):
             raise ValueError("batch item must be a JSON object")
-        _process_item(batch_file, batch, item, index=index, event_sink=event_sink)
+        with lock_scope():
+            _process_item(batch_file, batch, item, index=index, event_sink=event_sink)
 
     result = _result(batch_file, batch)
     batch["status"] = result.status
@@ -499,6 +509,8 @@ def run_batch(
     batch_directory = output_root / "batches" / batch_id
     batch_directory.mkdir(parents=True, exist_ok=False)
     batch_file = batch_directory / "batch.json"
+    # 从 batch.json 首次持久化前就持有 batch 锁，直至命令锁作用域结束。
+    hold_batch_lock(batch_file)
     now = utc_now()
     batch: dict[str, Any] = {
         "schema_version": BATCH_SCHEMA_VERSION,

@@ -27,7 +27,7 @@
 - **失败类事件的错误载荷统一为 `error: {category, message}`**：辅助函数 `error_event_fields(category, message)` 提供该形态。
 - 所有 URL、鉴权头、Cookie、签名查询参数在写入事件前统一脱敏。
 
-> `pipeline.py`、`workflow.py`、`batch.py`（P3b）与 `process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）均已全面对齐本文件描述的 v1 信封目标契约：全部 `create_event` 调用引用 `EventType` 枚举成员，携带错误信息的失败类事件统一使用 `error_event_fields` 信封。生产端 v1 迁移至此全量完成。
+> `pipeline.py`、`workflow.py`、`batch.py`（P3b）与 `process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）均已全面对齐本文件描述的 v1 信封目标契约：全部 `create_event` 调用引用 `EventType` 枚举成员，携带错误信息的失败类事件统一使用 `error_event_fields` 信封。经 P7c 对账修复 `cli.py`（`cli_failed` 顶层裸 `category`/`message` 改为嵌套 `error`）、`pipeline.py`（补齐 10 处遗漏的 `job_file`）、`batch.py`（`_mark_unfinished_item` 补齐 `index`/`total`）后，生产端 v1 迁移已核实全量完成，无已知残留失配。
 
 ---
 
@@ -157,6 +157,7 @@ yt-dlp 下载进度（`download.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `language` | string | 选中的字幕语言 |
 | `automatic` | bool | 是否为自动选择（无用户指定语言时为 `true`） |
 
@@ -168,6 +169,7 @@ yt-dlp 下载进度（`download.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `provider` | string | 提供方模式（如 `agent` 或兼容 API 名） |
 | `model` | string | 使用的模型名 |
 
@@ -175,6 +177,7 @@ yt-dlp 下载进度（`download.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `mode` | string | 回退后的模式（`agent`） |
 | `reason` | string | 回退原因 |
 | `path` | string | 生成的翻译批次文件路径 |
@@ -183,12 +186,14 @@ yt-dlp 下载进度（`download.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `reason` | string | 重置原因（如翻译指纹变化） |
 
 ### `translation_resegmented`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `source_cue_count` | int | 原始 cue 数量 |
 | `resegmented_cue_count` | int | 重新分段后 cue 数量 |
 | `report_path` | string | 重分段报告路径 |
@@ -197,12 +202,14 @@ yt-dlp 下载进度（`download.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 
 ### `translation_batch_retrying`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `attempt` | int | 即将进行的尝试序号 |
 | `delay_seconds` | number | 重试前等待秒数 |
@@ -212,6 +219,7 @@ yt-dlp 下载进度（`download.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 
 ## 烧录与预览
@@ -243,6 +251,7 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline.py`）。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `path` | string | 预览产物路径 |
 | `start_ms` | int | 预览起点毫秒 |
 | `duration_ms` | int | 预览时长毫秒 |
@@ -281,8 +290,8 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline.py`）。
 | `batch_file` | string | `batch.json` 路径 |
 | `input` | string | 该项输入路径 |
 | `job_file` | string? | 该项 Job 文件路径 |
-| `index` | int? | 当前项序号 |
-| `total` | int? | 批处理项总数 |
+| `index` | int | 当前项序号 |
+| `total` | int | 批处理项总数 |
 | `recovery_plan` | object? | 恢复计划（含 `reason`、`prerequisite_commands`、`primary_command` 等） |
 
 ### `batch_item_failed`
@@ -365,8 +374,7 @@ CLI 层最终结果（`cli.py`），写入 stdout。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `command` | string | 执行的子命令名 |
-| `category` | string | 失败类别（如 `interrupted`、错误类别） |
-| `message` | string | 失败信息 |
+| `error` | object | `{category, message}`，`category` 为失败类别（如 `interrupted`、`invalid_input`、`dependency_or_process`、`workflow` 等），`message` 为失败信息 |
 | `next_action` | string? | 建议的后续命令（预览、批处理等场景） |
 | `batch_file` | string? | 关联 `batch.json` 路径（批处理场景） |
 | `recovery_plan` | object? | 恢复计划 |

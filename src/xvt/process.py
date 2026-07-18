@@ -17,10 +17,10 @@ from xvt.cancellation import cancel_event as _global_cancel_event
 from xvt.cancellation import cancellation_requested
 from xvt.events import EventSink, EventType, create_event, error_event_fields
 
-# 所有外部命令的默认静默超时：连续无任何 stdout/stderr 输出超过该秒数即视为挂死。
-# ffmpeg（默认 stats 或 -progress pipe:1）、yt-dlp、ffprobe 的健康运行要么很快结束、
-# 要么持续产生输出，因此该兜底不会误伤长时间的合法烧录或转码。
-DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 120.0
+# 静默超时的建议值：仅供能保证持续输出的调用方（如带 -progress pipe:1 的烧录）
+# 显式传入。默认不启用——yt-dlp 提取阶段、慢网络输入等场景存在合法的长时间
+# 静默，无输出不等于挂死；挂死进程可由用户取消（SIGINT/SIGTERM）连同进程组清理。
+SUGGESTED_INACTIVITY_TIMEOUT_SECONDS = 120.0
 
 # 终止进程组时先发 SIGTERM 的宽限时间，超过后升级为 SIGKILL。
 _TERMINATE_GRACE_SECONDS = 2.0
@@ -250,7 +250,7 @@ def run_command(
     *,
     cwd: str | Path | None = None,
     timeout: float | None = None,
-    inactivity_timeout: float | None = DEFAULT_INACTIVITY_TIMEOUT_SECONDS,
+    inactivity_timeout: float | None = None,
     cancel: Event | None = None,
     event_sink: EventSink | None = None,
     line_callback: Callable[[str, str], None] | None = None,
@@ -258,8 +258,8 @@ def run_command(
     """以进程组方式执行外部命令，任何退出路径都保证清理全部子孙进程。
 
     - ``timeout``：整体硬超时；到期终止进程组并以退出码 124 报 ``CommandError``。
-    - ``inactivity_timeout``：静默超时，默认 120 秒；连续无输出即视为挂死，处理同上。
-      传 ``None`` 可禁用（仅限确认会长时间静默的命令）。
+    - ``inactivity_timeout``：静默超时，默认不启用；仅由能保证持续产生输出的
+      调用方显式设置，连续无输出超过该秒数视为挂死，处理同上。
     - ``cancel``：协作式取消事件；置位后终止进程组并抛 ``CommandCancelled``。
       默认监听全局取消事件（由 CLI 的 SIGINT/SIGTERM 处理器置位）。
     """

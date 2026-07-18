@@ -4,14 +4,13 @@ import shlex
 import signal
 import sys
 from collections.abc import Sequence
-from contextlib import nullcontext
 from pathlib import Path
 from time import monotonic
 from typing import TextIO
 
 from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
-from xvt.cancellation import install_signal_handlers, received_signal
+from xvt.cancellation import received_signal, signal_scope
 from xvt.config import (
     DEFAULT_API_KEY_ENV,
     DEFAULT_BATCH_SIZE,
@@ -25,9 +24,9 @@ from xvt.config import (
 )
 from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
-from xvt.events import Event, EventSink, EventType, create_event
+from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import get_job_file, load_job
-from xvt.locking import batch_lock, job_lock
+from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
 from xvt.pipeline import (
     apply_agent_translation,
     apply_cue_retranslation,
@@ -1057,12 +1056,13 @@ _JOB_MUTATING_COMMANDS = frozenset(
 )
 
 
-def _execution_lock(parsed: argparse.Namespace):
+def _hold_execution_locks(parsed: argparse.Namespace) -> None:
     if parsed.command in _JOB_MUTATING_COMMANDS:
-        return job_lock(parsed.job_file)
-    if parsed.command == "batch-continue":
-        return batch_lock(parsed.batch_file)
-    return nullcontext()
+        hold_job_lock(parsed.job_file)
+    elif parsed.command == "batch-continue":
+        hold_batch_lock(parsed.batch_file)
+    # `run` 与 `batch` 的锁在资源首次持久化点获取（pipeline.create_job 后 /
+    # run_batch 写出 batch.json 前），同样挂在本命令的锁作用域上直至终态。
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1073,10 +1073,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     parsed = parser.parse_args(arguments)
-    install_signal_handlers()
+    with signal_scope(), lock_scope():
+        return _execute(parsed)
+
+
+def _execute(parsed: argparse.Namespace) -> int:
     try:
-        with _execution_lock(parsed):
-            return _run_command(parsed)
+        _hold_execution_locks(parsed)
+        return _run_command(parsed)
     except (KeyboardInterrupt, CommandCancelled):
         sink = _event_sink(parsed)
         tracked_sink = sink if isinstance(sink, _TrackedEventSink) else None
@@ -1091,8 +1095,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         interruption_event = create_event(
             EventType.CLI_FAILED,
             command=parsed.command,
-            category="interrupted",
-            message="interrupted by user",
+            **error_event_fields("interrupted", "interrupted by user"),
             **({"next_action": "rerun_preview"} if parsed.command == "preview" else {}),
             **(
                 {
@@ -1129,8 +1132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         failure_event = create_event(
             EventType.CLI_FAILED,
             command=parsed.command,
-            category=category,
-            message=str(error),
+            **error_event_fields(category, str(error)),
             **(
                 {"batch_file": sink.batch_file}
                 if isinstance(sink, _TrackedEventSink) and sink.batch_file
@@ -1138,7 +1140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
-        safe_message = str(failure_event.data["message"])
+        safe_message = str(failure_event.data["error"]["message"])
         if getattr(parsed, "events_jsonl", False):
             _event_sink(parsed)(failure_event)
             print(f"error: {safe_message}", file=sys.stderr)

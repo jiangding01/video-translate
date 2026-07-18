@@ -7,6 +7,10 @@
 
 flock 锁绑定在打开的文件描述上而非进程上，因此进程崩溃或被 SIGKILL 时内核会
 自动释放锁，不会留下需要人工清理的陈旧锁。
+
+注意：锁 fd 不得泄漏给外部子进程——`process.py` 的 Popen 依赖 Python 默认的
+``close_fds=True`` 在子进程中关闭该 fd；若未来有代码放开 close_fds 或使用
+pass_fds，ffmpeg/yt-dlp 的孙进程可能在持锁进程退出后继续占有锁。
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from __future__ import annotations
 import fcntl
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from pathlib import Path
 
 from xvt.errors import JobLockedError
@@ -67,3 +71,48 @@ def batch_lock(batch_file: str | Path) -> Iterator[None]:
     lock_file = path.with_name(path.name + _BATCH_LOCK_SUFFIX)
     with _acquire(lock_file, description=f"Batch {path}"):
         yield
+
+
+# ---------------------------------------------------------------------------
+# 命令级锁作用域：让锁在「资源首次持久化点」获取、在作用域结束时统一释放。
+#
+# CLI 入口和 batch 逐项循环开启作用域；Job 创建点（pipeline）与 batch 创建点
+# （run_batch）调用 hold_* 把锁挂入最内层作用域。已持有的目标重复 hold 是
+# 无操作（防止 CLI 入口锁与创建点锁重入死锁——flock 对同进程新 fd 同样互斥）。
+# 没有活动作用域时 hold_* 静默跳过：库调用方自行负责互斥。
+
+_scopes: list[ExitStack] = []
+_held_targets: set[Path] = set()
+
+
+@contextmanager
+def lock_scope() -> Iterator[None]:
+    """开启一个锁作用域；作用域内 hold_* 取得的锁在退出时统一释放。可嵌套。"""
+    stack = ExitStack()
+    _scopes.append(stack)
+    try:
+        with stack:
+            yield
+    finally:
+        _scopes.remove(stack)
+
+
+def _hold(target: Path, lock_context: AbstractContextManager[None]) -> None:
+    if not _scopes or target in _held_targets:
+        return
+    stack = _scopes[-1]
+    stack.enter_context(lock_context)
+    _held_targets.add(target)
+    stack.callback(_held_targets.discard, target)
+
+
+def hold_job_lock(job_file: str | Path) -> None:
+    """从现在起持有 Job 锁直到最内层锁作用域结束（幂等）。"""
+    path = Path(job_file).expanduser().resolve()
+    _hold(path.parent / _JOB_LOCK_NAME, job_lock(path))
+
+
+def hold_batch_lock(batch_file: str | Path) -> None:
+    """从现在起持有 batch 锁直到最内层锁作用域结束（幂等）。"""
+    path = Path(batch_file).expanduser().resolve()
+    _hold(path.with_name(path.name + _BATCH_LOCK_SUFFIX), batch_lock(path))

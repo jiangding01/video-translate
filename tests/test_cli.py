@@ -699,6 +699,34 @@ class CliTest(unittest.TestCase):
             for sig, handler in original_handlers.items():
                 signal.signal(sig, handler)
 
+    def test_signal_scope_second_signal_does_not_raise(self) -> None:
+        # 双击 Ctrl-C：第一次抛 KeyboardInterrupt 进入清理，第二次只保持取消状态。
+        with cancellation.signal_scope():
+            with self.assertRaises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGINT)
+            self.assertTrue(cancellation.cancellation_requested())
+        self.assertFalse(cancellation.cancellation_requested())
+
+    def test_signal_scope_resets_stale_cancellation_state(self) -> None:
+        # 上一次调用遗留的取消状态不得影响下一次 main()：进入作用域即复位。
+        cancellation.cancel_event().set()
+        error_output = StringIO()
+        with (
+            patch("xvt.cli.run_workflow", side_effect=ValueError("bad input")),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 2)
+        self.assertNotIn(return_code, (130, 143))
+
+    def test_signal_scope_restores_previous_handlers(self) -> None:
+        sentinel = signal.getsignal(signal.SIGTERM)
+        with cancellation.signal_scope():
+            self.assertNotEqual(signal.getsignal(signal.SIGTERM), sentinel)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), sentinel)
+
     def test_command_cancelled_is_reported_as_interruption(self) -> None:
         error_output = StringIO()
         try:
@@ -744,7 +772,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 130)
         self.assertEqual(events[-2]["type"], "stage_failed")
         self.assertEqual(events[-1]["type"], "cli_failed")
-        self.assertEqual(events[-1]["data"]["category"], "interrupted")
+        self.assertEqual(events[-1]["data"]["error"]["category"], "interrupted")
         self.assertEqual(events[-1]["data"]["recovery_plan"]["category"], "unrecoverable")
         self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
 
@@ -1009,7 +1037,7 @@ class CliTest(unittest.TestCase):
         event = json.loads(output.getvalue())
         self.assertEqual(return_code, 2)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "invalid_input")
+        self.assertEqual(event["data"]["error"]["category"], "invalid_input")
         self.assertEqual(error_output.getvalue(), "error: bad input\n")
 
     def _run_workflow_failure(self, error: Exception) -> tuple[int, dict]:
@@ -1027,19 +1055,19 @@ class CliTest(unittest.TestCase):
         return_code, event = self._run_workflow_failure(UserInputError("missing config"))
         self.assertEqual(return_code, 2)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "invalid_input")
+        self.assertEqual(event["data"]["error"]["category"], "invalid_input")
 
     def test_dependency_error_maps_to_dependency_exit_code(self) -> None:
         return_code, event = self._run_workflow_failure(DependencyError("provider broke"))
         self.assertEqual(return_code, 3)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "dependency_or_process")
+        self.assertEqual(event["data"]["error"]["category"], "dependency_or_process")
 
     def test_internal_error_maps_to_workflow_exit_code(self) -> None:
         return_code, event = self._run_workflow_failure(InternalError("invariant broken"))
         self.assertEqual(return_code, 4)
         self.assertEqual(event["type"], "cli_failed")
-        self.assertEqual(event["data"]["category"], "workflow")
+        self.assertEqual(event["data"]["error"]["category"], "workflow")
 
 
 if __name__ == "__main__":

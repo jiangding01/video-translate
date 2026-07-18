@@ -30,6 +30,7 @@ from xvt.download import (
 )
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
+from xvt.locking import hold_job_lock
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.process import raise_if_cancelled, run_command
@@ -686,6 +687,8 @@ def run_local_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
+    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
+    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -798,6 +801,8 @@ def run_subtitle_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
+    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
+    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -883,6 +888,8 @@ def run_remote_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
+    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
+    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -998,7 +1005,7 @@ def _acquire_remote_job(
                 event_sink(
                     create_event(
                         EventType.REMOTE_SUBTITLES_SELECTED,
-                        job_id=job.id,
+                        **job_event_fields(job.id, get_job_file(job)),
                         language=selected_language,
                         automatic=manual_language is None,
                     )
@@ -1450,7 +1457,11 @@ def resegment_translation(
             "items": report_items,
         },
     )
-    # source_cues 的下游闭包，扣除本函数原位重建/维持现状的产物，并入被作废的用户输入。
+    # source_cues 的下游闭包，扣除本函数原位重建的产物，并入被作废的用户输入。
+    # cue_retranslation_batches/cue_retranslation_response 引用重分段前的废弃 cue id，
+    # 虽然 apply-cue-retranslation 会因 translated_cues 已失效而拒绝执行（无正确性漏洞），
+    # 但若不失效会以 checksum 有效的姿态污染 status/verify 与恢复计划的可复用产物清单
+    # （P7e：修正 P6a 遗留的「维持现状」排除项）。
     invalidated_kinds = (
         downstream_of(ArtifactKind.SOURCE_CUES)
         - {
@@ -1458,9 +1469,6 @@ def resegment_translation(
             # subtitle_qa 由后续 stage 重跑），不在此失效。
             ArtifactKind.SOURCE_SRT,
             ArtifactKind.SUBTITLE_QA,
-            # cue_retranslation_* 维持现状不失效（潜在改进留待后续单独评估）。
-            ArtifactKind.CUE_RETRANSLATION_BATCHES,
-            ArtifactKind.CUE_RETRANSLATION_RESPONSE,
         }
     ) | {
         # input_translation_subtitles 是被 resegment 作废的用户输入而非派生产物，显式并入。
@@ -1516,7 +1524,7 @@ def resegment_translation(
         event_sink(
             create_event(
                 EventType.TRANSLATION_RESEGMENTED,
-                job_id=job.id,
+                **job_event_fields(job.id, get_job_file(job)),
                 source_cue_count=len(source_cues),
                 resegmented_cue_count=len(resegmented),
                 report_path=str(report_output),
@@ -1670,7 +1678,7 @@ def run_translation(
             event_sink(
                 create_event(
                     EventType.TRANSLATION_FALLBACK,
-                    job_id=job.id,
+                    **job_event_fields(job.id, get_job_file(job)),
                     mode="agent",
                     reason=fallback_reason,
                     path=str(batches_path),
@@ -1708,7 +1716,7 @@ def run_translation(
         event_sink(
             create_event(
                 EventType.TRANSLATION_PROVIDER_SELECTED,
-                job_id=job.id,
+                **job_event_fields(job.id, get_job_file(job)),
                 provider=mode,
                 model=provider_config.model,
             )
@@ -1732,7 +1740,7 @@ def run_translation(
             event_sink(
                 create_event(
                     EventType.TRANSLATION_PROGRESS_RESET,
-                    job_id=job.id,
+                    **job_event_fields(job.id, get_job_file(job)),
                     reason="translation fingerprint changed",
                 )
             )
@@ -1747,7 +1755,11 @@ def run_translation(
                 continue
             if event_sink:
                 event_sink(
-                    create_event(EventType.TRANSLATION_BATCH_STARTED, job_id=job.id, batch=batch.id)
+                    create_event(
+                        EventType.TRANSLATION_BATCH_STARTED,
+                        **job_event_fields(job.id, get_job_file(job)),
+                        batch=batch.id,
+                    )
                 )
             for attempt in range(max_retries + 1):
                 try:
@@ -1773,7 +1785,7 @@ def run_translation(
                         event_sink(
                             create_event(
                                 EventType.TRANSLATION_BATCH_RETRYING,
-                                job_id=job.id,
+                                **job_event_fields(job.id, get_job_file(job)),
                                 batch=batch.id,
                                 attempt=attempt + 2,
                                 delay_seconds=delay,
@@ -1789,7 +1801,7 @@ def run_translation(
                         event_sink(
                             create_event(
                                 EventType.TRANSLATION_BATCH_RETRYING,
-                                job_id=job.id,
+                                **job_event_fields(job.id, get_job_file(job)),
                                 batch=batch.id,
                                 attempt=attempt + 2,
                                 delay_seconds=delay,
@@ -1814,7 +1826,9 @@ def run_translation(
             if event_sink:
                 event_sink(
                     create_event(
-                        EventType.TRANSLATION_BATCH_COMPLETED, job_id=job.id, batch=batch.id
+                        EventType.TRANSLATION_BATCH_COMPLETED,
+                        **job_event_fields(job.id, get_job_file(job)),
+                        batch=batch.id,
                     )
                 )
     except Exception as error:
@@ -2121,7 +2135,7 @@ def preview_translated_job(
         event_sink(
             create_event(
                 EventType.PREVIEW_COMPLETED,
-                job_id=job.id,
+                **job_event_fields(job.id, get_job_file(job)),
                 path=str(preview_path),
                 start_ms=start_ms,
                 duration_ms=end_ms - start_ms,
