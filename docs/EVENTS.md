@@ -27,7 +27,7 @@
 - **失败类事件的错误载荷统一为 `error: {category, message}`**：辅助函数 `error_event_fields(category, message)` 提供该形态。
 - 所有 URL、鉴权头、Cookie、签名查询参数在写入事件前统一脱敏。
 
-> 注意：生产端在 P3b/P3c 全面对齐信封前，个别事件仍是旧字段形态（例如 `job_started` 仅有 `job_id` + `job_file`，`workflow_failed` 使用 `error_type`，`batch_item_failed` 使用 `error_type` + `message`，`batch_error` 使用 `message`）。以本文件描述的目标契约为准；下文「当前形态」列如实标注生产端现状。
+> 注意：`pipeline.py`、`workflow.py`、`batch.py`（P3b）已全面对齐本文件描述的 v1 信封目标契约。`process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）尚未接入 `job_event_fields`/`error_event_fields`，下文「当前形态」列如实标注这些模块的现状。
 
 ---
 
@@ -38,7 +38,8 @@
 ### `workflow_started`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `job_file` | string? | 关联 Job 文件路径（`continue` 场景才有） |
+| `job_id` | string? | 关联 Job ID（Job 尚未创建时为 `null`） |
+| `job_file` | string? | 关联 Job 文件路径（Job 尚未创建时为 `null`） |
 | `continuation` | bool? | 是否为继续既有工作流（`continue` 场景为 `true`） |
 
 ### `workflow_planned`
@@ -49,6 +50,7 @@
 ### `workflow_waiting`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
+| `job_id` | string | 关联 Job ID |
 | `job_file` | string | 关联 Job 文件路径 |
 | `reason` | string | 等待原因（如需要人工翻译输入） |
 | `artifacts` | string[] | 相关产物路径列表 |
@@ -56,14 +58,16 @@
 ### `workflow_completed`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
+| `job_id` | string | 关联 Job ID |
 | `job_file` | string | 关联 Job 文件路径 |
 | `artifacts` | string[] | 产出的用户产物路径列表 |
 
 ### `workflow_failed`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
+| `job_id` | string? | 关联 Job ID（未创建 Job 时为 `null`） |
 | `job_file` | string? | 关联 Job 文件路径（未创建 Job 时为 `null`） |
-| `error_type` | string | 异常类型名（旧形态，目标契约应迁移为 `error:{category,message}`） |
+| `error` | object | `{category, message}`，`category` 为 `XvtError.category`（无该属性时默认 `"workflow"`） |
 
 ## Job 生命周期
 
@@ -90,14 +94,16 @@
 
 ## stage 推进
 
-stage 状态迁移（`pipeline.py`），由同一函数按状态派发四种类型。
+stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射表按状态派发四种类型。
 
 ### `stage_started` / `stage_waiting` / `stage_completed` / `stage_failed`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `stage` | string | stage 名（`StageName` 值） |
 | `status` | string | stage 状态（`StageStatus` 值） |
+| `error` | object? | 仅 `stage_failed` 且记录了失败信息时存在，`{category, message}` |
 
 ## artifact 登记
 
@@ -107,6 +113,7 @@ stage 状态迁移（`pipeline.py`），由同一函数按状态派发四种类�
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `kind` | string | 产物类型 |
 | `path` | string | 产物路径 |
 
@@ -114,6 +121,7 @@ stage 状态迁移（`pipeline.py`），由同一函数按状态派发四种类�
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
 | `kind` | string | 产物类型 |
 | `path` | string | 产物路径 |
 
@@ -285,8 +293,7 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline.py`）。
 | `job_file` | string? | 该项 Job 文件路径 |
 | `index` | int | 当前项序号 |
 | `total` | int | 批处理项总数 |
-| `error_type` | string? | 异常类型名（旧形态，目标契约应迁移为 `error:{category,message}`） |
-| `message` | string? | 失败信息（旧形态） |
+| `error` | object? | 异常路径下存在，`{category, message}`；恢复计划判定为不可恢复/需人工处理时可能缺省 |
 | `recovery_plan` | object? | 恢复计划 |
 
 ### `batch_item_interrupted`
@@ -317,9 +324,10 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline.py`）。
 | `message` | string | 脱敏后的消息文本 |
 
 ### `batch_error`
+内部辅助事件，仅用于复用 `create_event` 的脱敏逻辑生成 `item["error"]` 文本，不通过 `event_sink` 直接对外发送。
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `message` | string | 错误信息（旧形态，目标契约应迁移为 `error:{category,message}`） |
+| `error` | object | `{category, message}`，`message` 为脱敏后的错误信息 |
 
 ## 外部命令
 

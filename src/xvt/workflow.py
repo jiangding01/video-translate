@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from xvt.events import EventSink, create_event
+from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import (
@@ -142,6 +142,10 @@ class WorkflowResult:
     message: str | None = None
 
 
+def _error_category(error: Exception) -> str:
+    return getattr(error, "category", "workflow")
+
+
 def _artifact_checksum(job: Job, kind: str) -> str | None:
     artifact = next((item for item in job.artifacts if item.kind == kind), None)
     return artifact.checksum if artifact else None
@@ -221,10 +225,11 @@ def run_workflow(
     if options.burn:
         steps.append("burn")
     if event_sink:
-        event_sink(create_event("workflow_started"))
-        event_sink(create_event("workflow_planned", steps=steps))
+        event_sink(create_event(EventType.WORKFLOW_STARTED, **job_event_fields(None, None)))
+        event_sink(create_event(EventType.WORKFLOW_PLANNED, steps=steps))
 
     job_file: Path | None = None
+    job_id: str | None = None
     artifacts: list[Path] = []
     try:
         job = run_transcription(
@@ -247,6 +252,7 @@ def run_workflow(
             emit_job_completed=not options.target_language,
         )
         job_file = get_job_file(job)
+        job_id = job.id
         artifacts.extend(_current_artifacts(job))
 
         if options.translation_subtitles:
@@ -278,8 +284,8 @@ def run_workflow(
                 if event_sink:
                     event_sink(
                         create_event(
-                            "workflow_waiting",
-                            job_file=str(job_file),
+                            EventType.WORKFLOW_WAITING,
+                            **job_event_fields(job_id, job_file),
                             reason=message,
                             artifacts=[str(path) for path in artifacts],
                         )
@@ -305,8 +311,8 @@ def run_workflow(
         if event_sink:
             event_sink(
                 create_event(
-                    "workflow_completed",
-                    job_file=str(job_file),
+                    EventType.WORKFLOW_COMPLETED,
+                    **job_event_fields(job_id, job_file),
                     artifacts=[str(path) for path in artifacts],
                 )
             )
@@ -315,9 +321,9 @@ def run_workflow(
         if event_sink:
             event_sink(
                 create_event(
-                    "workflow_failed",
-                    job_file=str(job_file) if job_file else None,
-                    error_type=type(error).__name__,
+                    EventType.WORKFLOW_FAILED,
+                    **job_event_fields(job_id, job_file),
+                    **error_event_fields(_error_category(error), str(error)),
                 )
             )
         raise
@@ -341,7 +347,13 @@ def continue_workflow(
     policy = translation_policy_from_dict(config.get("translation_policy"))
 
     if event_sink:
-        event_sink(create_event("workflow_started", job_file=str(path), continuation=True))
+        event_sink(
+            create_event(
+                EventType.WORKFLOW_STARTED,
+                **job_event_fields(job.id, path),
+                continuation=True,
+            )
+        )
     try:
         if valid_artifact_path(job, "source_cues") is None:
             parsed_input = urlparse(job.input)
@@ -374,8 +386,8 @@ def continue_workflow(
                 if event_sink:
                     event_sink(
                         create_event(
-                            "workflow_waiting",
-                            job_file=str(path),
+                            EventType.WORKFLOW_WAITING,
+                            **job_event_fields(job.id, path),
                             reason=message,
                             artifacts=[str(item) for item in artifacts],
                         )
@@ -409,8 +421,8 @@ def continue_workflow(
                     if event_sink:
                         event_sink(
                             create_event(
-                                "workflow_waiting",
-                                job_file=str(path),
+                                EventType.WORKFLOW_WAITING,
+                                **job_event_fields(job.id, path),
                                 reason=message,
                                 artifacts=[str(item) for item in translation.paths],
                             )
@@ -446,8 +458,8 @@ def continue_workflow(
         if event_sink:
             event_sink(
                 create_event(
-                    "workflow_completed",
-                    job_file=str(path),
+                    EventType.WORKFLOW_COMPLETED,
+                    **job_event_fields(job.id, path),
                     artifacts=[str(item) for item in artifacts],
                 )
             )
@@ -456,9 +468,9 @@ def continue_workflow(
         if event_sink:
             event_sink(
                 create_event(
-                    "workflow_failed",
-                    job_file=str(path),
-                    error_type=type(error).__name__,
+                    EventType.WORKFLOW_FAILED,
+                    **job_event_fields(job.id, path),
+                    **error_event_fields(_error_category(error), str(error)),
                 )
             )
         raise

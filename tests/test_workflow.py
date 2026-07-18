@@ -59,8 +59,28 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy(style="natural"))
         burn.assert_called_once()
         self.assertEqual(events[0].type, "workflow_started")
+        self.assertIsNone(events[0].data["job_id"])
+        self.assertIsNone(events[0].data["job_file"])
         self.assertEqual(events[1].data["steps"], ["transcribe", "translate", "burn"])
         self.assertEqual(events[-1].type, "workflow_completed")
+        self.assertEqual(events[-1].data["job_id"], job.id)
+        self.assertEqual(events[-1].data["job_file"], str(get_job_file(job)))
+
+    def test_workflow_failed_uses_error_envelope(self) -> None:
+        events = []
+        with patch("xvt.workflow.run_transcription", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                run_workflow(
+                    WorkflowOptions(input="/tmp/video.mp4", output="/tmp/output"),
+                    event_sink=events.append,
+                )
+
+        failed = events[-1]
+        self.assertEqual(failed.type, "workflow_failed")
+        self.assertEqual(failed.data["error"], {"category": "workflow", "message": "boom"})
+        self.assertNotIn("error_type", failed.data)
+        self.assertIsNone(failed.data["job_id"])
+        self.assertIsNone(failed.data["job_file"])
 
     def test_agent_fallback_waits_and_does_not_burn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

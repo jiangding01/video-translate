@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from xvt.events import Event, EventSink, create_event
+from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
 from xvt.recovery import build_recovery_plan
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
@@ -238,6 +238,10 @@ def _item_event_sink(
     return sink
 
 
+def _error_category(error: Exception) -> str:
+    return getattr(error, "category", "workflow")
+
+
 def _mark_unfinished_item(
     batch_file: Path,
     batch: dict[str, Any],
@@ -249,7 +253,11 @@ def _mark_unfinished_item(
     item["status"] = status
     _write_batch(batch_file, batch)
     if event_sink:
-        event_type = "batch_item_waiting" if status == "awaiting_input" else "batch_item_failed"
+        event_type = (
+            EventType.BATCH_ITEM_WAITING
+            if status == "awaiting_input"
+            else EventType.BATCH_ITEM_FAILED
+        )
         event_sink(
             create_event(
                 event_type,
@@ -275,7 +283,7 @@ def _process_item(
     if event_sink:
         event_sink(
             create_event(
-                "batch_item_started",
+                EventType.BATCH_ITEM_STARTED,
                 batch_file=str(batch_file),
                 input=item["input"],
                 index=index,
@@ -307,7 +315,7 @@ def _process_item(
                 if event_sink:
                     event_sink(
                         create_event(
-                            "batch_item_completed",
+                            EventType.BATCH_ITEM_COMPLETED,
                             batch_file=str(batch_file),
                             input=item["input"],
                             job_file=item["job_file"],
@@ -345,7 +353,7 @@ def _process_item(
         item["job_file"] = str(workflow_result.job_file)
         item["status"] = workflow_result.status
         item["error"] = (
-            create_event("batch_message", message=workflow_result.message).data["message"]
+            create_event(EventType.BATCH_MESSAGE, message=workflow_result.message).data["message"]
             if workflow_result.message
             else None
         )
@@ -354,9 +362,9 @@ def _process_item(
         _write_batch(batch_file, batch)
         if event_sink:
             event_type = (
-                "batch_item_completed"
+                EventType.BATCH_ITEM_COMPLETED
                 if workflow_result.status == "completed"
-                else "batch_item_waiting"
+                else EventType.BATCH_ITEM_WAITING
             )
             event_sink(
                 create_event(
@@ -377,7 +385,7 @@ def _process_item(
         if event_sink:
             event_sink(
                 create_event(
-                    "batch_item_interrupted",
+                    EventType.BATCH_ITEM_INTERRUPTED,
                     batch_file=str(batch_file),
                     input=item["input"],
                     job_file=item.get("job_file"),
@@ -388,9 +396,10 @@ def _process_item(
             )
         raise
     except Exception as error:
-        sanitized = create_event("batch_error", message=str(error))
+        category = _error_category(error)
+        sanitized = create_event(EventType.BATCH_ERROR, **error_event_fields(category, str(error)))
         item["status"] = "failed"
-        item["error"] = sanitized.data["message"]
+        item["error"] = sanitized.data["error"]["message"]
         try:
             _record_recovery(item)
             _record_artifacts(item)
@@ -401,14 +410,13 @@ def _process_item(
         if event_sink:
             event_sink(
                 create_event(
-                    "batch_item_failed",
+                    EventType.BATCH_ITEM_FAILED,
                     batch_file=str(batch_file),
                     input=item["input"],
                     job_file=item.get("job_file"),
                     index=index,
                     total=len(batch["items"]),
-                    error_type=type(error).__name__,
-                    message=item["error"],
+                    **error_event_fields(category, item["error"]),
                     recovery_plan=item.get("recovery_plan"),
                 )
             )
@@ -423,7 +431,7 @@ def _process_batch(
     if event_sink:
         event_sink(
             create_event(
-                "batch_started",
+                EventType.BATCH_STARTED,
                 batch_file=str(batch_file),
                 total=len(batch["items"]),
             )
@@ -444,7 +452,7 @@ def _process_batch(
     if event_sink:
         event_sink(
             create_event(
-                "batch_finished",
+                EventType.BATCH_FINISHED,
                 batch_file=str(batch_file),
                 status=result.status,
                 total=result.total,

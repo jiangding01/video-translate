@@ -227,16 +227,25 @@ class BatchTest(unittest.TestCase):
             inputs = root / "inputs"
             output = root / "output"
             _write_subtitle(inputs / "source.srt")
+            events = []
 
             with patch(
                 "xvt.batch.run_workflow",
                 side_effect=ValueError("https://example.com/video?token=secret"),
             ):
-                result = run_batch(inputs, WorkflowOptions(input="", output=output))
+                result = run_batch(
+                    inputs, WorkflowOptions(input="", output=output), event_sink=events.append
+                )
             report = json.loads(result.batch_file.read_text(encoding="utf-8"))
 
         self.assertNotIn("secret", report["items"][0]["error"])
         self.assertIn("%3Credacted%3E", report["items"][0]["error"])
+        failed = next(event for event in events if event.type == "batch_item_failed")
+        self.assertNotIn("error_type", failed.data)
+        self.assertNotIn("message", failed.data)
+        self.assertEqual(failed.data["error"]["category"], "workflow")
+        self.assertNotIn("secret", failed.data["error"]["message"])
+        self.assertIn("%3Credacted%3E", failed.data["error"]["message"])
 
     def test_waiting_message_is_redacted_in_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
