@@ -13,6 +13,8 @@ from threading import Event, Thread
 from typing import TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from xvt.cancellation import cancel_event as _global_cancel_event
+from xvt.cancellation import cancellation_requested
 from xvt.events import EventSink, EventType, create_event, error_event_fields
 
 # 所有外部命令的默认静默超时：连续无任何 stdout/stderr 输出超过该秒数即视为挂死。
@@ -63,11 +65,22 @@ class CommandError(RuntimeError):
         super().__init__(f"Command failed with exit code {result.returncode}: {detail}")
 
 
-class CommandCancelled(Exception):
+class CommandCancelled(BaseException):
     """外部命令因协作式取消（SIGINT/SIGTERM 置位的 cancel 事件）被终止。
 
     不是命令失败：进程组已被清理，调用方应把当前 stage 持久化为中断状态后退出。
+    继承 ``BaseException``（参照 ``asyncio.CancelledError``），确保取消不会被
+    pipeline/batch 的 ``except Exception`` 失败隔离误吞。
     """
+
+
+def raise_if_cancelled() -> None:
+    """协作式取消检查点：全局取消事件已置位时抛出 ``CommandCancelled``。
+
+    供不经过 ``run_command`` 的长循环（翻译批次、批处理条目）在迭代边界调用。
+    """
+    if cancellation_requested():
+        raise CommandCancelled("cancelled by signal")
 
 
 def _terminate_process_group(process: subprocess.Popen[str]) -> None:
@@ -248,6 +261,7 @@ def run_command(
     - ``inactivity_timeout``：静默超时，默认 120 秒；连续无输出即视为挂死，处理同上。
       传 ``None`` 可禁用（仅限确认会长时间静默的命令）。
     - ``cancel``：协作式取消事件；置位后终止进程组并抛 ``CommandCancelled``。
+      默认监听全局取消事件（由 CLI 的 SIGINT/SIGTERM 处理器置位）。
     """
     command = tuple(str(arg) for arg in args)
     if not command:
@@ -264,7 +278,7 @@ def run_command(
             cwd=cwd,
             timeout=timeout,
             inactivity_timeout=inactivity_timeout,
-            cancel=cancel,
+            cancel=cancel if cancel is not None else _global_cancel_event(),
             line_callback=line_callback,
         )
     except FileNotFoundError as error:

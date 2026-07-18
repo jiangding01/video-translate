@@ -24,7 +24,7 @@ from xvt.events import EventSink, EventType, create_event, error_event_fields, j
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
-from xvt.process import run_command
+from xvt.process import raise_if_cancelled, run_command
 from xvt.qa import (
     check_subtitles,
     display_width,
@@ -411,6 +411,7 @@ def retranslate_cues(
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     try:
         for batch in batches:
+            raise_if_cancelled()
             for attempt in range(max_retries + 1):
                 try:
                     translated_batch = translate_batch(batch, provider_config)
@@ -1713,6 +1714,7 @@ def run_translation(
     progress_output = artifacts_directory / "translation-progress.json"
     try:
         for batch in batches:
+            raise_if_cancelled()
             batch_ids = {item.id for item in batch.items}
             if batch.id in completed_batches and batch_ids <= translations.keys():
                 continue

@@ -1,6 +1,7 @@
 import argparse
 import json
 import shlex
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import TextIO
 
 from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
+from xvt.cancellation import install_signal_handlers, received_signal
 from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
 from xvt.events import Event, EventSink, EventType, create_event
@@ -27,7 +29,7 @@ from xvt.pipeline import (
     retranslate_cues,
     run_translation,
 )
-from xvt.process import CommandError
+from xvt.process import CommandCancelled, CommandError
 from xvt.recovery import RecoveryPlan, build_recovery_plan, verify_job
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
@@ -1026,9 +1028,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     parsed = parser.parse_args(arguments)
+    install_signal_handlers()
     try:
         return _run_command(parsed)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, CommandCancelled):
         sink = _event_sink(parsed)
         tracked_sink = sink if isinstance(sink, _TrackedEventSink) else None
         if tracked_sink and tracked_sink.job_file and tracked_sink.current_stage:
@@ -1063,7 +1066,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sink.report_preview_interruption()
             else:
                 sink.report_interruption(recovery_plan)
-        return ExitCode.INTERRUPTED
+        return ExitCode.TERMINATED if received_signal() == signal.SIGTERM else ExitCode.INTERRUPTED
     except (XvtError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, XvtError):
             category, return_code = error.category, error.exit_code

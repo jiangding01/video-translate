@@ -5,8 +5,9 @@ import threading
 import time
 import unittest
 
+from xvt import cancellation
 from xvt.events import EventType, create_event
-from xvt.process import CommandCancelled, CommandError, run_command
+from xvt.process import CommandCancelled, CommandError, raise_if_cancelled, run_command
 
 
 def _assert_process_dead(test: unittest.TestCase, pid: int, timeout_seconds: float = 5.0) -> None:
@@ -136,6 +137,25 @@ class ProcessTest(unittest.TestCase):
         self.assertEqual(context.exception.result.returncode, 124)
         self.assertEqual(len(grandchild_pids), 1)
         _assert_process_dead(self, grandchild_pids[0])
+
+    def test_raise_if_cancelled_uses_global_cancel_event(self) -> None:
+        try:
+            raise_if_cancelled()
+            cancellation.cancel_event().set()
+            with self.assertRaises(CommandCancelled):
+                raise_if_cancelled()
+        finally:
+            cancellation.reset()
+
+    def test_run_command_listens_to_global_cancel_event_by_default(self) -> None:
+        started = time.monotonic()
+        try:
+            cancellation.cancel_event().set()
+            with self.assertRaises(CommandCancelled):
+                run_command([sys.executable, "-c", "import time; time.sleep(60)"])
+        finally:
+            cancellation.reset()
+        self.assertLess(time.monotonic() - started, 30)
 
     def test_run_command_raises_structured_error(self) -> None:
         with self.assertRaises(CommandError) as context:

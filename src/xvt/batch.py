@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
+from xvt.process import CommandCancelled, raise_if_cancelled
 from xvt.recovery import build_recovery_plan
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
@@ -292,6 +293,7 @@ def _process_item(
         )
 
     try:
+        raise_if_cancelled()
         job_file = item.get("job_file")
         if isinstance(job_file, str):
             category = _record_recovery(item)
@@ -377,7 +379,7 @@ def _process_item(
                     recovery_plan=item.get("recovery_plan"),
                 )
             )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, CommandCancelled):
         item["status"] = "interrupted"
         batch["status"] = "interrupted"
         batch["next_action"] = f"xvt batch-continue {shlex.quote(str(batch_file))}"

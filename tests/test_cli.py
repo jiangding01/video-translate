@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -6,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt import cancellation
 from xvt.batch import BatchResult
 from xvt.cli import main
 from xvt.errors import DependencyError, InternalError, UserInputError
@@ -13,6 +16,7 @@ from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import ResegmentationResult, TranslationRunResult
+from xvt.process import CommandCancelled
 from xvt.workflow import WorkflowResult
 
 
@@ -654,6 +658,60 @@ class CliTest(unittest.TestCase):
         self.assertIn("任务已中断", failure)
         self.assertIn("失败阶段：获取素材", failure)
         self.assertIn(f'xvt status "{job_file}"', failure)
+
+    def test_sigterm_returns_143_and_persists_interrupted_stage(self) -> None:
+        error_output = StringIO()
+        original_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                job = create_job("/tmp/input.mp4", directory)
+                job.stages[StageName.ACQUIRE].status = StageStatus.RUNNING
+                job_file = save_job(job)
+
+                def terminate_workflow(_options, *, event_sink):
+                    event_sink(
+                        create_event(
+                            EventType.JOB_STARTED,
+                            job_id=job.id,
+                            job_file=str(job_file),
+                            input=job.input,
+                        )
+                    )
+                    event_sink(
+                        create_event(EventType.STAGE_STARTED, stage="acquire", status="running")
+                    )
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    self.fail("signal handler should have raised before this line")
+
+                with (
+                    patch("xvt.cli.run_workflow", side_effect=terminate_workflow),
+                    redirect_stderr(error_output),
+                ):
+                    return_code = main(["run", job.input, "--output", directory])
+
+                interrupted = load_job(job_file)
+
+            self.assertEqual(return_code, 143)
+            self.assertEqual(interrupted.stages[StageName.ACQUIRE].status, StageStatus.FAILED)
+            self.assertEqual(interrupted.stages[StageName.ACQUIRE].error, "interrupted by user")
+        finally:
+            cancellation.reset()
+            for sig, handler in original_handlers.items():
+                signal.signal(sig, handler)
+
+    def test_command_cancelled_is_reported_as_interruption(self) -> None:
+        error_output = StringIO()
+        try:
+            with (
+                patch("xvt.cli.run_workflow", side_effect=CommandCancelled("cancelled")),
+                redirect_stderr(error_output),
+            ):
+                return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+            self.assertEqual(return_code, 130)
+            self.assertIn("任务已中断", error_output.getvalue())
+        finally:
+            cancellation.reset()
 
     def test_jsonl_keyboard_interrupt_ends_with_structured_failure(self) -> None:
         output = StringIO()
