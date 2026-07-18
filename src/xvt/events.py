@@ -91,17 +91,33 @@ _REDACTED = "<redacted>"
 _URL_PATTERN = re.compile(r"https?://[^\s\"']+")
 # 自由文本中的鉴权头与 Cookie：外部命令的原始 stderr/stdout（如 yt-dlp -v 回显的
 # 请求头）会进入 command_failed 等事件的错误消息，必须在事件边界整体脱敏。
-# 值的匹配宁可过度：带引号时吞到闭引号，否则吞到行尾——多 Cookie 对
-# （`session=a; csrf=b`）、Digest Authorization 的后续字段都一并覆盖，
-# 误伤同行尾随文本的代价远小于泄漏凭据。
+# 策略刻意选最钝的：命中敏感头名后一律吞到行尾，不解析引号或转义
+# （转义引号的 Digest Header 曾绕过精细匹配）——误伤同行尾随文本的代价
+# 远小于泄漏凭据。
 _SENSITIVE_HEADER_PATTERN = re.compile(
     r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)"
-    r"\s*(?:[:=]|\"\s*:|'\s*:)\s*(?:\"[^\"\n]*\"|'[^'\n]*'|[^\n]*)"
+    r"\s*(?:[:=]|\"\s*:|'\s*:)[^\n]*"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+")
-# 任意 scheme 的 URL userinfo（socks5://user:pass@...、ftp:// 等）：
-# _redact_url 只处理 http/https，这里兜底其余协议的裸凭据。
-_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@")
+# 任意 scheme 的 URL userinfo：@ 之前的一切（user:pass、:pass、仅 token）都视为
+# 凭据整体脱敏；_redact_url 只处理 http/https，这里兜底其余协议。
+_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+@")
+# 事件 data 中的敏感字典 key：值不做解析、整体替换。覆盖嵌套 Header 字典
+# （{"Cookie": ...}）与常见凭据字段名。
+_SENSITIVE_DATA_KEYS = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api_key",
+    "api-key",
+    "apikey",
+    "password",
+    "access_token",
+    "token",
+    "secret",
+}
 _SENSITIVE_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -163,7 +179,14 @@ def _redact_event_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_redact_event_value(item) for item in value)
     if isinstance(value, dict):
-        return {key: _redact_event_value(item) for key, item in value.items()}
+        return {
+            key: (
+                _REDACTED
+                if isinstance(key, str) and key.lower() in _SENSITIVE_DATA_KEYS
+                else _redact_event_value(item)
+            )
+            for key, item in value.items()
+        }
     return value
 
 
