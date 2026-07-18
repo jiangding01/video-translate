@@ -31,6 +31,8 @@
 - CLI 现在处理 SIGTERM：与 Ctrl-C 一样清理进程组、持久化中断的 stage 并生成恢复计划，退出码为 143；翻译批次循环和批处理条目在迭代边界响应取消。
 - Job 与 batch 独占执行：改写既有 Job 的子命令和 `batch-continue` 在入口取 flock 目录锁，第二个进程以退出码 7 立即失败并提示持有者 PID；进程崩溃时内核自动释放锁。
 
+- 翻译收尾统一为单一 `_finalize_translation`：局部重译、Agent/API 响应回填和导入译文字幕三条路径共用同一段「写译文 cue → 失效下游 → 译文 QA → 渲染」逻辑，消除三份重复骨架，无行为变化。
+
 ### Fixed
 
 - 修复媒体 QA 失败但 `burned_video` checksum 有效时，恢复计划、批处理或续跑可能错误宣告任务完成的问题。

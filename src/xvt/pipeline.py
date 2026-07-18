@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from math import ceil, isfinite
 from pathlib import Path
@@ -271,6 +272,60 @@ def _invalidate_preview_artifacts(job: Job) -> None:
     ]
 
 
+def _finalize_translation(
+    job: Job,
+    translated: list[Cue],
+    event_sink: EventSink | None,
+    *,
+    invalidate: Callable[[Job], None],
+) -> tuple[Path, ...]:
+    """翻译成功后的统一收尾：写译文 cue → 失效旧下游产物 → 译文 QA → 渲染。
+
+    三条译文回填路径（局部重译、Agent/API 响应、导入译文字幕）共用本函数，
+    保证 stage 记账、QA 参数与渲染行为完全一致；QA/渲染阶段的失败在此持久化。
+    """
+    current_stage = StageName.TRANSLATE
+    try:
+        artifacts_directory = get_job_directory(job) / "artifacts"
+        translated_cues_path = artifacts_directory / "translated-cues.json"
+        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
+        invalidate(job)
+        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+
+        current_stage = StageName.SUBTITLE_QA
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        media_data = _media_data(job)
+        report = check_subtitles(
+            translated,
+            media_duration_ms=_media_duration_ms(media_data),
+            video_width=media_data.get("width"),
+            video_height=media_data.get("height"),
+            require_translation=True,
+            required_terms=_required_glossary_terms(job),
+        )
+        qa_path = artifacts_directory / "qa-translated.json"
+        _write_json(qa_path, asdict(report))
+        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
+        _complete_qa_stage(job, report, event_sink)
+
+        current_stage = StageName.RENDER
+        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        paths = _render_translated_outputs(job, translated, media_data, event_sink)
+        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        return paths
+    except Exception as error:
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
+        raise
+
+
 def apply_cue_retranslation(
     job_file: str | Path,
     response_file: str | Path,
@@ -309,35 +364,6 @@ def apply_cue_retranslation(
             else cue
             for cue in translated_cues
         ]
-
-        artifacts_directory = get_job_directory(job) / "artifacts"
-        repaired_path = artifacts_directory / "translated-cues.json"
-        _write_json(repaired_path, [asdict(cue) for cue in repaired])
-        _add_artifact(job, "translated_cues", repaired_path, event_sink)
-        _invalidate_rendered_artifacts(job)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = _media_data(job)
-        report = check_subtitles(
-            repaired,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
-            require_translation=True,
-            required_terms=_required_glossary_terms(job),
-        )
-        qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
-
-        current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        paths = _render_translated_outputs(job, repaired, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        return paths
     except Exception as error:
         _set_stage(
             job,
@@ -348,6 +374,9 @@ def apply_cue_retranslation(
             error_category=_error_category(error),
         )
         raise
+    return _finalize_translation(
+        job, repaired, event_sink, invalidate=_invalidate_rendered_artifacts
+    )
 
 
 def retranslate_cues(
@@ -1845,35 +1874,6 @@ def apply_agent_translation(
                 raise ValueError(f"translation for cue {cue_id} is empty")
             translations[cue_id] = text.strip()
         translated = apply_translations(cues, translations, target_language=target_language)
-
-        artifacts_directory = get_job_directory(job) / "artifacts"
-        translated_cues_path = artifacts_directory / "translated-cues.json"
-        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
-        _invalidate_preview_artifacts(job)
-        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = _media_data(job)
-        report = check_subtitles(
-            translated,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
-            require_translation=True,
-            required_terms=_required_glossary_terms(job),
-        )
-        qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
-
-        current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        paths = _render_translated_outputs(job, translated, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        return paths
     except Exception as error:
         _set_stage(
             job,
@@ -1884,6 +1884,9 @@ def apply_agent_translation(
             error_category=_error_category(error),
         )
         raise
+    return _finalize_translation(
+        job, translated, event_sink, invalidate=_invalidate_preview_artifacts
+    )
 
 
 def apply_subtitle_translation(
@@ -1917,35 +1920,7 @@ def apply_subtitle_translation(
         mapping_path = artifacts_directory / "translation-mapping.json"
         _write_json(mapping_path, mapping_report)
         _add_artifact(job, "translation_mapping", mapping_path, event_sink)
-
-        translated_cues_path = artifacts_directory / "translated-cues.json"
-        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
-        _invalidate_preview_artifacts(job)
-        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
         job.config["target_language"] = target_language
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-
-        current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        media_data = _media_data(job)
-        report = check_subtitles(
-            translated,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
-            require_translation=True,
-            required_terms=_required_glossary_terms(job),
-        )
-        qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
-
-        current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        paths = _render_translated_outputs(job, translated, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        return paths
     except Exception as error:
         _set_stage(
             job,
@@ -1956,6 +1931,9 @@ def apply_subtitle_translation(
             error_category=_error_category(error),
         )
         raise
+    return _finalize_translation(
+        job, translated, event_sink, invalidate=_invalidate_preview_artifacts
+    )
 
 
 def preview_translated_job(
