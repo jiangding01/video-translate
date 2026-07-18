@@ -27,7 +27,8 @@
 - `xvt run --segmentation-preset` 支持 `conservative`、`balanced` 和 `compact` 三种 ASR 分段预设；选择会持久化到 Job 和端到端工作流，`resume` 可保持一致。
 - `xvt run source.srt` 支持 SRT、VTT、ASS、SSA 纯字幕 Job：保留用户时间轴，无需媒体即可翻译、QA、`continue` 和导出原文、译文、双语 SRT。
 - `xvt batch` 和 `xvt batch-continue`：固定目录输入清单，串行创建独立 Job，隔离单项失败，并通过原子 `batch.json` 汇总报告恢复未完成任务。
-- 外部命令以独立进程组执行：超时、取消或中断时清理全部子孙进程，不再遗留 ffmpeg/yt-dlp 孤儿进程；所有外部命令默认携带 120 秒静默超时兜底，并新增协作式取消入口（`CommandCancelled`）。
+- 外部命令以独立进程组执行：超时、取消或中断时清理全部子孙进程，不再遗留 ffmpeg/yt-dlp 孤儿进程；提供静默超时机制（默认不启用，由保证持续输出的调用方显式设置——yt-dlp 提取阶段等合法静默场景不受误杀），并新增协作式取消入口（`CommandCancelled`）。
+- CLI 改为命令级信号作用域：进入 `main()` 复位取消状态、退出恢复原信号处理器（同进程多次调用互不污染）；第二次 Ctrl-C/SIGTERM 不再产生裸 traceback，只保持取消状态直至清理完成。
 - CLI 现在处理 SIGTERM：与 Ctrl-C 一样清理进程组、持久化中断的 stage 并生成恢复计划，退出码为 143；翻译批次循环和批处理条目在迭代边界响应取消。
 - Job 与 batch 独占执行：改写既有 Job 的子命令和 `batch-continue` 在入口取 flock 目录锁，第二个进程以退出码 7 立即失败并提示持有者 PID；进程崩溃时内核自动释放锁。
 

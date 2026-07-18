@@ -11,7 +11,7 @@ from typing import TextIO
 
 from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
-from xvt.cancellation import install_signal_handlers, received_signal
+from xvt.cancellation import received_signal, signal_scope
 from xvt.config import (
     DEFAULT_API_KEY_ENV,
     DEFAULT_BATCH_SIZE,
@@ -1073,7 +1073,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     parsed = parser.parse_args(arguments)
-    install_signal_handlers()
+    with signal_scope():
+        return _execute(parsed)
+
+
+def _execute(parsed: argparse.Namespace) -> int:
     try:
         with _execution_lock(parsed):
             return _run_command(parsed)

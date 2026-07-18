@@ -7,6 +7,10 @@
 
 flock 锁绑定在打开的文件描述上而非进程上，因此进程崩溃或被 SIGKILL 时内核会
 自动释放锁，不会留下需要人工清理的陈旧锁。
+
+注意：锁 fd 不得泄漏给外部子进程——`process.py` 的 Popen 依赖 Python 默认的
+``close_fds=True`` 在子进程中关闭该 fd；若未来有代码放开 close_fds 或使用
+pass_fds，ffmpeg/yt-dlp 的孙进程可能在持锁进程退出后继续占有锁。
 """
 
 from __future__ import annotations

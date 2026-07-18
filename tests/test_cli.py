@@ -699,6 +699,34 @@ class CliTest(unittest.TestCase):
             for sig, handler in original_handlers.items():
                 signal.signal(sig, handler)
 
+    def test_signal_scope_second_signal_does_not_raise(self) -> None:
+        # 双击 Ctrl-C：第一次抛 KeyboardInterrupt 进入清理，第二次只保持取消状态。
+        with cancellation.signal_scope():
+            with self.assertRaises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGINT)
+            self.assertTrue(cancellation.cancellation_requested())
+        self.assertFalse(cancellation.cancellation_requested())
+
+    def test_signal_scope_resets_stale_cancellation_state(self) -> None:
+        # 上一次调用遗留的取消状态不得影响下一次 main()：进入作用域即复位。
+        cancellation.cancel_event().set()
+        error_output = StringIO()
+        with (
+            patch("xvt.cli.run_workflow", side_effect=ValueError("bad input")),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 2)
+        self.assertNotIn(return_code, (130, 143))
+
+    def test_signal_scope_restores_previous_handlers(self) -> None:
+        sentinel = signal.getsignal(signal.SIGTERM)
+        with cancellation.signal_scope():
+            self.assertNotEqual(signal.getsignal(signal.SIGTERM), sentinel)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), sentinel)
+
     def test_command_cancelled_is_reported_as_interruption(self) -> None:
         error_output = StringIO()
         try:
