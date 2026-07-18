@@ -30,6 +30,7 @@ from xvt.download import (
 )
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
+from xvt.locking import hold_job_lock
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.process import raise_if_cancelled, run_command
@@ -686,6 +687,8 @@ def run_local_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
+    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
+    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -798,6 +801,8 @@ def run_subtitle_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
+    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
+    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -883,6 +888,8 @@ def run_remote_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
+    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
+    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(

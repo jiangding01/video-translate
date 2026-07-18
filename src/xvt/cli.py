@@ -4,7 +4,6 @@ import shlex
 import signal
 import sys
 from collections.abc import Sequence
-from contextlib import nullcontext
 from pathlib import Path
 from time import monotonic
 from typing import TextIO
@@ -27,7 +26,7 @@ from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import get_job_file, load_job
-from xvt.locking import batch_lock, job_lock
+from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
 from xvt.pipeline import (
     apply_agent_translation,
     apply_cue_retranslation,
@@ -1057,12 +1056,13 @@ _JOB_MUTATING_COMMANDS = frozenset(
 )
 
 
-def _execution_lock(parsed: argparse.Namespace):
+def _hold_execution_locks(parsed: argparse.Namespace) -> None:
     if parsed.command in _JOB_MUTATING_COMMANDS:
-        return job_lock(parsed.job_file)
-    if parsed.command == "batch-continue":
-        return batch_lock(parsed.batch_file)
-    return nullcontext()
+        hold_job_lock(parsed.job_file)
+    elif parsed.command == "batch-continue":
+        hold_batch_lock(parsed.batch_file)
+    # `run` 与 `batch` 的锁在资源首次持久化点获取（pipeline.create_job 后 /
+    # run_batch 写出 batch.json 前），同样挂在本命令的锁作用域上直至终态。
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1073,14 +1073,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     parsed = parser.parse_args(arguments)
-    with signal_scope():
+    with signal_scope(), lock_scope():
         return _execute(parsed)
 
 
 def _execute(parsed: argparse.Namespace) -> int:
     try:
-        with _execution_lock(parsed):
-            return _run_command(parsed)
+        _hold_execution_locks(parsed)
+        return _run_command(parsed)
     except (KeyboardInterrupt, CommandCancelled):
         sink = _event_sink(parsed)
         tracked_sink = sink if isinstance(sink, _TrackedEventSink) else None
