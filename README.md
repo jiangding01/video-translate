@@ -1,5 +1,7 @@
 # XVT Video Translate
 
+[![CI](https://github.com/jiangding01/video-translate/actions/workflows/ci.yml/badge.svg)](https://github.com/jiangding01/video-translate/actions/workflows/ci.yml)
+
 XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它以稳定的时间轴为核心，支持本地媒体、已有字幕和 YouTube URL，输出 `SRT`、`ASS`，并可选烧录为新视频。
 
 ## 能力概览
