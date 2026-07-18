@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- 修复 P2 引入的翻译重试回归：结构性无效的 provider 响应（缺 `items`、报文不完整、内容非文本）改抛专用 `ProviderResponseError`，重新进入携带纠正提示词的纠错重试；重试耗尽后按依赖故障分类（退出码 3）。`TranslationProviderError` 一并归入 `DependencyError` 层次。
 - 修复媒体 QA 失败但 `burned_video` checksum 有效时，恢复计划、批处理或续跑可能错误宣告任务完成的问题。
 - 修复仅生成源字幕时 `workflow_completed` 和 `cli_completed` 没有返回 `source.srt` 的问题。
 - 损坏或字段不完整的当前版本 Job 现在返回可控的无效输入错误，不再泄漏 Python traceback。

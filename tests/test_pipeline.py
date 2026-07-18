@@ -24,11 +24,13 @@ from xvt.pipeline import (
     run_local_transcription,
     run_remote_transcription,
     run_subtitle_transcription,
+    run_translation,
 )
 from xvt.process import CommandResult
 from xvt.qa import check_subtitles, display_width, display_width_limit
 from xvt.recovery import file_checksum
 from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
+from xvt.translation_provider import ProviderResponseError
 
 
 class PipelineTest(unittest.TestCase):
@@ -1664,6 +1666,80 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertIn("output has no audio stream", report["issues"])
         self.assertIn("output dimensions differ from source video", report["issues"])
+
+    def test_malformed_provider_response_enters_correction_retry(self) -> None:
+        # 回归测试：结构性无效的 provider 响应（ProviderResponseError）必须进入
+        # 纠错重试分支，第二次请求携带纠正提示词后成功。
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, directory, language="en")
+
+            calls = []
+
+            def flaky_provider(batch, config, *, correction=None, **_kwargs):
+                calls.append(correction)
+                if len(calls) == 1:
+                    raise ProviderResponseError(
+                        "translation provider response must contain an items array"
+                    )
+                return {item.id: "你好，世界。" for item in batch.items}
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch("xvt.pipeline.translate_batch", side_effect=flaky_provider),
+            ):
+                result = run_translation(
+                    get_job_file(job),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=2,
+                )
+
+        self.assertEqual(result.mode, "openai-compatible")
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[0])
+        self.assertIn("previous response was invalid", calls[1] or "")
+
+    def test_malformed_provider_response_exhausts_retries_as_dependency_error(self) -> None:
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, directory, language="en")
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch(
+                    "xvt.pipeline.translate_batch",
+                    side_effect=ProviderResponseError("always malformed"),
+                ),
+                self.assertRaises(ProviderResponseError) as raised,
+            ):
+                run_translation(
+                    get_job_file(job),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=1,
+                )
+
+        self.assertEqual(raised.exception.category, "dependency_or_process")
+        self.assertEqual(int(raised.exception.exit_code), 3)
 
 
 if __name__ == "__main__":

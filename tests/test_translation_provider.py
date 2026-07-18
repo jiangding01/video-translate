@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from xvt.errors import DependencyError, UserInputError
+from xvt.errors import UserInputError
 from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, Cue
 from xvt.pipeline import run_translation
@@ -16,6 +16,7 @@ from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy, build_translation_batches
 from xvt.translation_provider import (
     CompatibleProviderConfig,
+    ProviderResponseError,
     TranslationProviderError,
     resolve_provider,
     translate_batch,
@@ -66,7 +67,7 @@ class TranslationProviderTest(unittest.TestCase):
         def opener(_request, **_kwargs):
             return Response()
 
-        with self.assertRaisesRegex(DependencyError, "incompatible response"):
+        with self.assertRaisesRegex(ProviderResponseError, "incompatible response"):
             translate_batch(
                 batch,
                 CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
