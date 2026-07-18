@@ -258,6 +258,31 @@ class BatchTest(unittest.TestCase):
         self.assertTrue(observed)
         self.assertTrue(all(observed), "recovery state was read without holding the job lock")
 
+    def test_locked_item_does_not_reread_recovery_state_without_lock(self) -> None:
+        # P7g：条目取 Job 锁失败（另一进程正在写入）时，失败记录路径不得在
+        # 无锁状态下重读恢复计划与 artifact——留待 batch-continue 在锁下重算。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            _write_subtitle(inputs / "source.srt")
+            completed = run_batch(inputs, WorkflowOptions(input="", output=root / "output"))
+            report = json.loads(completed.batch_file.read_text(encoding="utf-8"))
+            job_file = report["items"][0]["job_file"]
+
+            with (
+                job_lock(job_file),
+                patch("xvt.batch.build_recovery_plan") as plan_mock,
+                lock_scope(),
+            ):
+                resumed = continue_batch(completed.batch_file)
+            updated = json.loads(completed.batch_file.read_text(encoding="utf-8"))
+
+        plan_mock.assert_not_called()
+        self.assertEqual(resumed.status, "partial_failure")
+        self.assertEqual(updated["items"][0]["status"], "failed")
+        self.assertIsNone(updated["items"][0]["recovery_plan"])
+        self.assertIn("另一个 XVT 进程", updated["items"][0]["error"])
+
     def test_command_cancelled_is_persisted_as_interruption_not_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

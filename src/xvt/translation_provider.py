@@ -148,7 +148,7 @@ def translate_batch(
     try:
         response = (opener or urlopen)(request, timeout=config.timeout_seconds)
         with response:
-            body = response.read().decode("utf-8")
+            raw_body = response.read()
     except HTTPError as error:
         retry_after = None
         if error.headers:
@@ -173,6 +173,12 @@ def translate_batch(
             retryable=True,
         ) from error
 
+    try:
+        body = raw_body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProviderResponseError(
+            "translation provider returned a non-UTF-8 response body"
+        ) from error
     try:
         data = json.loads(body)
     except ValueError as error:

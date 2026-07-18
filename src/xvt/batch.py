@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from xvt.errors import JobLockedError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
@@ -414,12 +415,18 @@ def _process_item(
         sanitized = create_event(EventType.BATCH_ERROR, **error_event_fields(category, str(error)))
         item["status"] = "failed"
         item["error"] = sanitized.data["error"]["message"]
-        try:
-            _record_recovery(item)
-            _record_artifacts(item)
-        except (OSError, RuntimeError, ValueError):
+        if isinstance(error, JobLockedError):
+            # 取锁失败说明另一进程正在写入该 Job：此刻读取恢复状态既无锁保护
+            # 又必然过期，不重读，留待 batch-continue 在锁下重新计算。
             item["recovery_plan"] = None
             item["artifacts"] = []
+        else:
+            try:
+                _record_recovery(item)
+                _record_artifacts(item)
+            except (OSError, RuntimeError, ValueError):
+                item["recovery_plan"] = None
+                item["artifacts"] = []
         _write_batch(batch_file, batch)
         if event_sink:
             event_sink(
