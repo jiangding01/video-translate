@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -78,6 +80,42 @@ class Transcript:
     language_probability: float | None = None
 
 
+def _known_fields(cls: type) -> set[str]:
+    """Return the set of declared field names for a dataclass."""
+
+    return {f.name for f in dataclasses.fields(cls)}
+
+
+_STAGE_RECORD_FIELDS = _known_fields(StageRecord)
+_ARTIFACT_FIELDS = _known_fields(Artifact)
+
+
+_MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+"""Job schema migration chain, keyed by the source ``schema_version``.
+
+When to add an entry
+    Only when a *structural* change is made to the job dict that older
+    parsing code cannot tolerate (a field is renamed, removed, repurposed,
+    or a previously optional field becomes required with new semantics) and
+    ``SCHEMA_VERSION`` is bumped as a result. Purely additive changes (new
+    optional fields on ``Job``, ``Artifact``, or stage records) are already
+    forward compatible: unknown fields are filtered out and ignored by
+    ``Job.from_dict``, so no migration or version bump is needed for those.
+
+Migration function contract
+    - Registered under the *source* version, e.g. ``_MIGRATIONS[0]`` maps a
+      version-0 job dict to its version-1 shape.
+    - Must be a pure function: ``(dict) -> dict``. Do not mutate the input
+      dict in place; return a new (or copied) dict.
+    - Must set the returned dict's ``schema_version`` field to the next
+      version number (the one right after the source version).
+    - ``Job.from_dict`` applies migrations repeatedly, one version at a
+      time, until the dict reaches ``SCHEMA_VERSION`` or no further
+      migration is registered for the current version. In the latter case,
+      the existing "Unsupported job schema version" error is raised.
+"""
+
+
 @dataclass(slots=True)
 class Job:
     id: str
@@ -98,6 +136,9 @@ class Job:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Job:
         schema_version = data.get("schema_version")
+        while schema_version != SCHEMA_VERSION and schema_version in _MIGRATIONS:
+            data = _MIGRATIONS[schema_version](data)
+            schema_version = data.get("schema_version")
         if schema_version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported job schema version: {schema_version}")
 
@@ -132,12 +173,11 @@ class Job:
                 for field in ("started_at", "completed_at", "error"):
                     if record.get(field) is not None and not isinstance(record[field], str):
                         raise TypeError(f"stage {field} must be a string or null")
-                stages[name] = StageRecord(
-                    status=StageStatus(record["status"]),
-                    started_at=record.get("started_at"),
-                    completed_at=record.get("completed_at"),
-                    error=record.get("error"),
-                )
+                # Filter to known fields so unknown fields from newer schema
+                # versions are silently ignored instead of raising TypeError.
+                known_record = {k: v for k, v in record.items() if k in _STAGE_RECORD_FIELDS}
+                known_record["status"] = StageStatus(record["status"])
+                stages[name] = StageRecord(**known_record)
 
             artifacts: list[Artifact] = []
             for artifact in artifacts_data:
@@ -150,7 +190,10 @@ class Job:
                 checksum = artifact.get("checksum")
                 if checksum is not None and not isinstance(checksum, str):
                     raise TypeError("artifact checksum must be a string or null")
-                artifacts.append(Artifact(**artifact))
+                # Filter to known fields so unknown fields from newer schema
+                # versions are silently ignored instead of raising TypeError.
+                known_artifact = {k: v for k, v in artifact.items() if k in _ARTIFACT_FIELDS}
+                artifacts.append(Artifact(**known_artifact))
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"Invalid job file: {error}") from error
 
