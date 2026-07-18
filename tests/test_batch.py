@@ -6,8 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.batch import continue_batch, discover_batch_inputs, run_batch
+from xvt.errors import JobLockedError
+from xvt.locking import job_lock, lock_scope
 from xvt.pipeline import apply_subtitle_translation
 from xvt.process import CommandCancelled
+from xvt.recovery import build_recovery_plan
 from xvt.workflow import WorkflowOptions, WorkflowResult
 
 
@@ -225,6 +228,35 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(report["status"], "interrupted")
         self.assertEqual(report["summary"]["failed"], 1)
         self.assertIn("xvt batch-continue", report["next_action"])
+
+    def test_batch_reads_recovery_state_under_job_lock(self) -> None:
+        # P7f：batch 对已有 Job 的恢复分类与 artifact 校验必须发生在 Job 锁之下，
+        # 否则并发命令可在读取与执行之间改动 Job，导致按旧状态误判条目完成。
+        observed: list[bool] = []
+        original_plan = build_recovery_plan
+
+        def guarded(job_file, *args, **kwargs):
+            try:
+                with job_lock(job_file):
+                    observed.append(False)
+            except JobLockedError:
+                observed.append(True)
+            return original_plan(job_file, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            _write_subtitle(inputs / "source.srt")
+            completed = run_batch(inputs, WorkflowOptions(input="", output=root / "output"))
+
+            with (
+                lock_scope(),
+                patch("xvt.batch.build_recovery_plan", side_effect=guarded),
+            ):
+                continue_batch(completed.batch_file)
+
+        self.assertTrue(observed)
+        self.assertTrue(all(observed), "recovery state was read without holding the job lock")
 
     def test_command_cancelled_is_persisted_as_interruption_not_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

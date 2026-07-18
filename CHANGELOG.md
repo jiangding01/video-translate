@@ -38,6 +38,10 @@
 
 ### Fixed
 
+- 修复事件自由文本脱敏缺口：外部命令的原始 stderr/stdout 进入事件错误消息时，`Authorization`/`Proxy-Authorization`/`Cookie`/`Set-Cookie`/`X-Api-Key` 头与 `Bearer` 令牌现在会在事件边界统一脱敏（此前只脱敏 URL，凭据可能原样进入 JSONL）。
+- Job 锁提前到首次持久化之前：`create_job` 在写出 `job.json` 前即持有目录锁，消除「文件已出现、锁尚未取得」的并发窗口；batch 对已有 Job 的恢复分类与 artifact 校验同样改为先取 Job 锁再读取，避免按旧状态误判条目完成。
+- provider 响应解析边界统一包装为 `ProviderResponseError`：HTTP 200 非 JSON 响应体、模型输出 JSON 语法错误、cue ID 缺失/重复/多余、译文为空等结构性错误在纠错重试耗尽后按依赖故障退出码 3 分类，不再被误报为用户输入错误退出码 2。
+- 重分段后旧 `subtitle_qa` 报告一并失效：它派生自 source cue 且不会被立即重建，此前以 checksum 有效姿态残留，污染 `status`/`verify` 与恢复复用清单。
 - 修复 P2 引入的翻译重试回归：结构性无效的 provider 响应（缺 `items`、报文不完整、内容非文本）改抛专用 `ProviderResponseError`，重新进入携带纠正提示词的纠错重试；重试耗尽后按依赖故障分类（退出码 3）。`TranslationProviderError` 一并归入 `DependencyError` 层次。
 - 修复媒体 QA 失败但 `burned_video` checksum 有效时，恢复计划、批处理或续跑可能错误宣告任务完成的问题。
 - 修复仅生成源字幕时 `workflow_completed` 和 `cli_completed` 没有返回 `source.srt` 的问题。

@@ -301,6 +301,9 @@ def _process_item(
         raise_if_cancelled()
         job_file = item.get("job_file")
         if isinstance(job_file, str):
+            # 先取 Job 锁再读取恢复状态与 artifact（锁序先 batch 后 job）：
+            # 避免并发命令在读取与执行之间改动 Job，导致按旧状态误判条目已完成。
+            hold_job_lock(job_file)
             category = _record_recovery(item)
             _record_artifacts(item)
             if category == "complete":
@@ -346,9 +349,6 @@ def _process_item(
                     event_sink=event_sink,
                 )
                 return
-            # 锁序约定：batch 锁在外层作用域，这里把单个 Job 的锁挂到条目作用域
-            # （先 batch 后 job），条目结束即释放。
-            hold_job_lock(job_file)
             workflow_result = continue_workflow(
                 job_file,
                 event_sink=_item_event_sink(batch_file, batch, item, event_sink),

@@ -89,6 +89,13 @@ class EventType(StrEnum):
 
 _REDACTED = "<redacted>"
 _URL_PATTERN = re.compile(r"https?://[^\s\"']+")
+# 自由文本中的鉴权头与 Cookie：外部命令的原始 stderr/stdout（如 yt-dlp -v 回显的
+# 请求头）会进入 command_failed 等事件的错误消息，必须在事件边界整体脱敏。
+_SENSITIVE_HEADER_PATTERN = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)"
+    r"\s*[:=]\s*[^\s;,\"']+(?:[ \t]+[^\s;,\"']+)?"
+)
+_BEARER_PATTERN = re.compile(r"(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+")
 _SENSITIVE_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -136,9 +143,14 @@ def _redact_url(value: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
 
 
+def _redact_free_text(value: str) -> str:
+    value = _SENSITIVE_HEADER_PATTERN.sub(lambda match: f"{match.group(1)}: {_REDACTED}", value)
+    return _BEARER_PATTERN.sub(f"Bearer {_REDACTED}", value)
+
+
 def _redact_event_value(value: Any) -> Any:
     if isinstance(value, str):
-        return _URL_PATTERN.sub(lambda match: _redact_url(match.group()), value)
+        return _redact_free_text(_URL_PATTERN.sub(lambda match: _redact_url(match.group()), value))
     if isinstance(value, list):
         return [_redact_event_value(item) for item in value]
     if isinstance(value, tuple):

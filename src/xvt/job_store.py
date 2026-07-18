@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from xvt.locking import hold_job_lock
 from xvt.models import Job
 
 
@@ -37,6 +38,9 @@ def create_job(
         output_root=str(root),
         config=dict(config or {}),
     )
+    # 在首次持久化之前就持有 Job 目录锁（挂在当前命令锁作用域上，无作用域时跳过），
+    # 保证 job.json 出现在磁盘上的那一刻起任务已被独占，并发 continue 无窗口可乘。
+    hold_job_lock(get_job_file(job))
     save_job(job)
     return job
 

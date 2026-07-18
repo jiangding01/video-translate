@@ -30,7 +30,6 @@ from xvt.download import (
 )
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
-from xvt.locking import hold_job_lock
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.process import raise_if_cancelled, run_command
@@ -687,8 +686,6 @@ def run_local_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
-    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
-    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -801,8 +798,6 @@ def run_subtitle_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
-    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
-    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -888,8 +883,6 @@ def run_remote_transcription(
             **({"workflow": dict(workflow_config)} if workflow_config else {}),
         },
     )
-    # 从 Job 首次持久化前就持有目录锁，直至命令锁作用域结束（全生命周期独占）。
-    hold_job_lock(get_job_file(job))
     if event_sink:
         event_sink(
             create_event(
@@ -1465,10 +1458,9 @@ def resegment_translation(
     invalidated_kinds = (
         downstream_of(ArtifactKind.SOURCE_CUES)
         - {
-            # source_srt/subtitle_qa 由本函数在下方原位重建（source_srt 写入 replacement，
-            # subtitle_qa 由后续 stage 重跑），不在此失效。
+            # source_srt 由本函数在下方立即以新内容原位重建，不在此失效；
+            # subtitle_qa 只重置 stage、不立即重建，旧报告引用废弃 cue 必须失效（P7f）。
             ArtifactKind.SOURCE_SRT,
-            ArtifactKind.SUBTITLE_QA,
         }
     ) | {
         # input_translation_subtitles 是被 resegment 作废的用户输入而非派生产物，显式并入。

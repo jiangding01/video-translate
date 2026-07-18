@@ -45,6 +45,9 @@ LEGACY_RESEGMENT_INVALIDATION = {
     # 现状而将其排除在失效集合外，现按依赖图闭包一并失效。
     "cue_retranslation_batches",
     "cue_retranslation_response",
+    # P7f：subtitle_qa 派生自 source_cues，resegment 只重置 stage、不立即重建
+    # 报告，旧 QA 引用废弃 cue 必须一并失效（source_srt 因立即原位重建仍排除）。
+    "subtitle_qa",
 }
 
 
@@ -93,13 +96,7 @@ def test_preview_invalidation_matches_legacy() -> None:
 def test_resegment_invalidation_matches_legacy() -> None:
     computed = {
         kind.value
-        for kind in (
-            downstream_of(ArtifactKind.SOURCE_CUES)
-            - {
-                ArtifactKind.SOURCE_SRT,
-                ArtifactKind.SUBTITLE_QA,
-            }
-        )
+        for kind in (downstream_of(ArtifactKind.SOURCE_CUES) - {ArtifactKind.SOURCE_SRT})
         | {ArtifactKind.INPUT_TRANSLATION_SUBTITLES}
     }
     assert computed == LEGACY_RESEGMENT_INVALIDATION

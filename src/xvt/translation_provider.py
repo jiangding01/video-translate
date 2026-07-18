@@ -148,7 +148,7 @@ def translate_batch(
     try:
         response = (opener or urlopen)(request, timeout=config.timeout_seconds)
         with response:
-            data = json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
     except HTTPError as error:
         retry_after = None
         if error.headers:
@@ -174,6 +174,11 @@ def translate_batch(
         ) from error
 
     try:
+        data = json.loads(body)
+    except ValueError as error:
+        raise ProviderResponseError("translation provider returned a non-JSON response") from error
+
+    try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
         raise ProviderResponseError(
@@ -181,4 +186,12 @@ def translate_batch(
         ) from error
     if not isinstance(content, str):
         raise ProviderResponseError("translation provider response content must be text")
-    return parse_translation_response(batch, _response_items(content))
+    # 解析边界统一包装：模型输出的 JSON 语法错误、cue ID 缺失/重复/多余、译文为空等
+    # 都属于「结构性无效响应」——进入纠错重试，耗尽后按依赖故障分类（exit 3），
+    # 而不是被顶层兜底误报为用户输入错误（exit 2）。
+    try:
+        return parse_translation_response(batch, _response_items(content))
+    except ProviderResponseError:
+        raise
+    except ValueError as error:
+        raise ProviderResponseError(f"translation provider response is invalid: {error}") from error

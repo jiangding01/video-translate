@@ -61,6 +61,31 @@ class LockingTest(unittest.TestCase):
         continue_mock.assert_not_called()
         self.assertIn("另一个 XVT 进程", error_output.getvalue())
 
+    def test_job_lock_is_held_before_first_persistence(self) -> None:
+        # P7f：job.json 首次落盘时锁必须已被占用——create_job 在 save_job 之前取锁，
+        # 并发 continue 在文件出现的瞬间就无法抢占。
+        from xvt import job_store
+
+        observations: list[bool] = []
+        original_save = job_store.save_job
+
+        def guarded_save(job):
+            try:
+                with job_lock(job_store.get_job_file(job)):
+                    observations.append(False)
+            except JobLockedError:
+                observations.append(True)
+            return original_save(job)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                lock_scope(),
+                patch("xvt.job_store.save_job", side_effect=guarded_save),
+            ):
+                create_job("/tmp/input.mp4", directory)
+
+        self.assertEqual(observations, [True])
+
     def test_run_holds_job_lock_from_creation_until_scope_ends(self) -> None:
         # run 全生命周期锁：Job 创建后锁立即被持有，直到命令锁作用域结束。
         with tempfile.TemporaryDirectory() as directory:

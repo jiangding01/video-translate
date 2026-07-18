@@ -388,6 +388,8 @@ class PipelineTest(unittest.TestCase):
             )
             cue_retranslation_batches_path = artifacts / "cue-retranslation-batches.json"
             cue_retranslation_batches_path.write_text("{}", encoding="utf-8")
+            subtitle_qa_path = artifacts / "qa.json"
+            subtitle_qa_path.write_text("{}", encoding="utf-8")
             cue_retranslation_response_path = artifacts / "cue-retranslation-response.json"
             cue_retranslation_response_path.write_text("{}", encoding="utf-8")
             job.artifacts.extend(
@@ -397,6 +399,7 @@ class PipelineTest(unittest.TestCase):
                         "translated_cues", str(translated_path), file_checksum(translated_path)
                     ),
                     Artifact("media_info", str(media_path), file_checksum(media_path)),
+                    Artifact("subtitle_qa", str(subtitle_qa_path), file_checksum(subtitle_qa_path)),
                     Artifact(
                         "cue_retranslation_batches",
                         str(cue_retranslation_batches_path),
@@ -418,6 +421,8 @@ class PipelineTest(unittest.TestCase):
             artifact_kinds = {artifact.kind for artifact in updated.artifacts}
             self.assertNotIn("cue_retranslation_batches", artifact_kinds)
             self.assertNotIn("cue_retranslation_response", artifact_kinds)
+            # P7f：旧 subtitle_qa 引用重分段前的 cue，不得以有效产物姿态残留。
+            self.assertNotIn("subtitle_qa", artifact_kinds)
 
     def test_resegment_translation_rejects_imported_source_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
