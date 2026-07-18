@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-07-17
+更新时间：2026-07-18
 
 ## 当前快照
 
@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 187 个，全部通过 |
+| 自动化测试 | 207 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | Git | 当前分支为 `main`，跟踪 `origin/main`，`origin` 已关联 GitHub |
@@ -94,6 +94,8 @@
 - 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
 - JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。
+- `batch` 会固定目录输入清单并串行创建独立 Job；单项失败不会阻断后续文件，`batch.json` 原子记录汇总状态和恢复计划。
+- `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。
 - `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
 - 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
 
@@ -107,9 +109,10 @@
 | 本地音频 | ASR 和字幕输出；烧录时必须增加 `--burn-media` |
 | YouTube URL | 按参数选择平台字幕或 Whisper |
 | YouTube URL + 人工字幕请求 | 优先下载人工字幕，缺失时按配置回退自动字幕或 ASR |
+| 本地目录 | `batch` 按稳定顺序创建独立 Job，失败隔离并生成可恢复汇总报告 |
 | 已有 Job | `status` 查看下一步，`verify` 校验，`resume` 恢复转写，`continue` 完成端到端目标 |
 
-当前不支持脱离媒体文件的纯字幕 Job。一个 Job 也不能同时生成多个目标语言。
+纯字幕文件可以直接创建 Job；一个 Job 仍然只能生成一个目标语言。
 
 ## 端到端工作流
 
@@ -184,6 +187,8 @@ uv run --no-sync xvt verify "/path/to/job.json" --json
 uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt preview "/path/to/job.json" --cue 18 --duration 15
+uv run --no-sync xvt batch "/path/to/input-directory" --output "/absolute/output"
+uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 ```
 
 Agent 翻译回填：
@@ -256,6 +261,8 @@ media-qa.json
 
 `job.config.workflow` 保存目标语言、请求产物、翻译提供方、模型、API Key 环境变量名、分段预设、烧录参数和派生指纹。它不保存 API Key 或代理凭据。
 
+批处理使用独立的 `batch.json` schema v1，不改变 Job schema。报告位于 `output/batches/<batch-id>/batch.json`，保存固定输入清单、共享工作流参数、每项 Job 文件、产物、状态、脱敏错误和恢复计划。批处理不复制媒体或字幕算法。
+
 ## 关键设计决定
 
 1. CLI 是唯一业务内核。Skill 和未来 App 都只做调用与展示。
@@ -266,19 +273,21 @@ media-qa.json
 6. 平台字幕和用户字幕属于可跳过 ASR 的输入，不是 ASR 结果的附属品。
 7. Agent 降级是明确的等待状态。缺少 API 配置时不能假装端到端任务已经完成。
 8. 硬件编码回退只识别编码器错误。字幕文件、路径或滤镜错误必须原样失败。
+9. 批处理只做串行编排；每个输入仍由独立 Job 和原有恢复计划负责状态与产物正确性。
 
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- 不支持目录批处理、任务队列、远程执行或多租户 Web 服务。
+- 目录批处理当前串行执行，不支持后台队列、目录监控或每项不同参数；请求烧录时目录只能包含视频，音频和纯字幕输入必须拆成不烧录的独立批次。
+- 不支持远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
 - `continue` 只适用于带 `job.config.workflow` 的端到端 Job。旧 Job 继续使用原子命令。
 
 ## 后续任务规划
 
-### P1：批处理和 GUI
+### P1：可视化校对界面
 
-目录批处理和可视化校对应分开实现。GUI 使用 React 和 TypeScript，只读取 Job、artifact 和 JSONL 事件。单机 CLI 稳定前，不引入服务端队列或多租户架构。
+可视化校对界面使用 React 和 TypeScript，只读取 Job、artifact、`batch.json` 和 JSONL 事件。单机 CLI 稳定前，不引入服务端队列或多租户架构。
 
 ## 接手步骤
 

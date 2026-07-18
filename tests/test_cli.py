@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.batch import BatchResult
 from xvt.cli import main
 from xvt.events import create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
@@ -15,6 +16,238 @@ from xvt.workflow import WorkflowResult
 
 
 class CliTest(unittest.TestCase):
+    def test_batch_forwards_shared_workflow_options(self) -> None:
+        output = StringIO()
+        result = BatchResult("completed", Path("/tmp/batch.json"), 2, 2, 0, 0)
+        with (
+            patch("xvt.cli.run_batch", return_value=result) as run,
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "batch",
+                    "/tmp/inputs",
+                    "--output",
+                    "/tmp/output",
+                    "--recursive",
+                    "--target-language",
+                    "zh-CN",
+                    "--provider",
+                    "agent",
+                    "--segmentation-preset",
+                    "compact",
+                    "--burn",
+                    "--software",
+                ]
+            )
+
+        options = run.call_args.args[1]
+        self.assertEqual(return_code, 0)
+        self.assertTrue(run.call_args.kwargs["recursive"])
+        self.assertEqual(options.target_language, "zh-CN")
+        self.assertEqual(options.provider, "agent")
+        self.assertEqual(options.segmentation_preset, "compact")
+        self.assertTrue(options.burn)
+        self.assertFalse(options.hardware_encoding)
+        self.assertIn("/tmp/batch.json", output.getvalue())
+
+    def test_batch_partial_failure_returns_nonzero_without_cli_completed(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        result = BatchResult("partial_failure", Path("/tmp/batch.json"), 2, 1, 0, 1)
+
+        def run_with_failure(_directory, _options, *, recursive, event_sink):
+            self.assertFalse(recursive)
+            event_sink(
+                create_event(
+                    "batch_finished",
+                    batch_file="/tmp/batch.json",
+                    status="partial_failure",
+                    total=2,
+                    completed=1,
+                    awaiting_input=0,
+                    failed=1,
+                )
+            )
+            return result
+
+        with (
+            patch("xvt.cli.run_batch", side_effect=run_with_failure),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(
+                [
+                    "batch",
+                    "/tmp/inputs",
+                    "--output",
+                    "/tmp/output",
+                    "--events-jsonl",
+                ]
+            )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(return_code, 4)
+        self.assertEqual(events[-1]["type"], "batch_finished")
+        self.assertNotIn("cli_completed", {event["type"] for event in events})
+        self.assertEqual(error_output.getvalue(), "")
+
+    def test_batch_human_failure_shows_report_and_recovery_command(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        result = BatchResult("partial_failure", Path("/tmp/batch.json"), 1, 0, 0, 1)
+
+        def run_with_failure(_directory, _options, *, recursive, event_sink):
+            self.assertFalse(recursive)
+            event_sink(create_event("batch_started", batch_file="/tmp/batch.json", total=1))
+            event_sink(
+                create_event(
+                    "batch_item_failed",
+                    input="/tmp/source.srt",
+                    message="subtitle QA failed",
+                    recovery_plan={
+                        "reason": "需要修复字幕",
+                        "prerequisite_commands": [],
+                        "primary_command": "xvt continue /tmp/job.json",
+                    },
+                )
+            )
+            event_sink(
+                create_event(
+                    "batch_finished",
+                    status="partial_failure",
+                    completed=0,
+                    awaiting_input=0,
+                    failed=1,
+                    next_action="xvt batch-continue /tmp/batch.json",
+                )
+            )
+            return result
+
+        with (
+            patch("xvt.cli.run_batch", side_effect=run_with_failure),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["batch", "/tmp/inputs", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 4)
+        self.assertIn("批处理文件: /tmp/batch.json", error_output.getvalue())
+        self.assertIn("原因：subtitle QA failed", error_output.getvalue())
+        self.assertIn("xvt continue /tmp/job.json", error_output.getvalue())
+        self.assertIn("xvt batch-continue /tmp/batch.json", error_output.getvalue())
+        self.assertIn("/tmp/batch.json", output.getvalue())
+
+    def test_batch_completed_jsonl_has_terminal_cli_event(self) -> None:
+        output = StringIO()
+        result = BatchResult("completed", Path("/tmp/batch.json"), 1, 1, 0, 0)
+        with (
+            patch("xvt.cli.run_batch", return_value=result),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "batch",
+                    "/tmp/inputs",
+                    "--output",
+                    "/tmp/output",
+                    "--events-jsonl",
+                ]
+            )
+
+        event = json.loads(output.getvalue())
+        self.assertEqual(return_code, 0)
+        self.assertEqual(event["type"], "cli_completed")
+        self.assertEqual(event["data"]["batch_file"], "/tmp/batch.json")
+
+    def test_batch_awaiting_input_jsonl_does_not_claim_cli_completed(self) -> None:
+        output = StringIO()
+        result = BatchResult("awaiting_input", Path("/tmp/batch.json"), 1, 0, 1, 0)
+
+        def run_waiting(_directory, _options, *, recursive, event_sink):
+            self.assertFalse(recursive)
+            event_sink(
+                create_event(
+                    "batch_finished",
+                    batch_file="/tmp/batch.json",
+                    status="awaiting_input",
+                    total=1,
+                    completed=0,
+                    awaiting_input=1,
+                    failed=0,
+                )
+            )
+            return result
+
+        with (
+            patch("xvt.cli.run_batch", side_effect=run_waiting),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "batch",
+                    "/tmp/inputs",
+                    "--output",
+                    "/tmp/output",
+                    "--events-jsonl",
+                ]
+            )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(return_code, 0)
+        self.assertEqual(events[-1]["type"], "batch_finished")
+        self.assertNotIn("cli_completed", {event["type"] for event in events})
+
+    def test_batch_continue_forwards_manifest(self) -> None:
+        output = StringIO()
+        result = BatchResult("awaiting_input", Path("/tmp/batch.json"), 2, 1, 1, 0)
+        with (
+            patch("xvt.cli.continue_batch", return_value=result) as resume,
+            redirect_stdout(output),
+        ):
+            return_code = main(["batch-continue", "/tmp/batch.json"])
+
+        self.assertEqual(return_code, 0)
+        resume.assert_called_once()
+        self.assertEqual(resume.call_args.args[0], "/tmp/batch.json")
+        self.assertIn("1 awaiting input", output.getvalue())
+        self.assertIn("xvt batch-continue", output.getvalue())
+
+    def test_batch_interrupt_before_job_creation_shows_batch_recovery(self) -> None:
+        error_output = StringIO()
+
+        def interrupt(_directory, _options, *, recursive, event_sink):
+            self.assertFalse(recursive)
+            event_sink(create_event("batch_started", batch_file="/tmp/batch.json", total=1))
+            raise KeyboardInterrupt
+
+        with (
+            patch("xvt.cli.run_batch", side_effect=interrupt),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["batch", "/tmp/inputs", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 130)
+        self.assertIn("批处理文件: /tmp/batch.json", error_output.getvalue())
+        self.assertIn("xvt batch-continue /tmp/batch.json", error_output.getvalue())
+        self.assertNotIn("任务尚未创建", error_output.getvalue())
+
+    def test_batch_continue_early_failure_keeps_manifest_path(self) -> None:
+        error_output = StringIO()
+        with (
+            patch("xvt.cli.continue_batch", side_effect=ValueError("invalid batch file")),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["batch-continue", "/tmp/batch.json"])
+
+        self.assertEqual(return_code, 2)
+        self.assertIn(
+            f"批处理文件: {Path('/tmp/batch.json').resolve()}",
+            error_output.getvalue(),
+        )
+        self.assertIn("请修正批处理文件或路径", error_output.getvalue())
+        self.assertNotIn("任务尚未创建", error_output.getvalue())
+
     def test_preview_forwards_clip_and_render_options(self) -> None:
         output = StringIO()
         with (
