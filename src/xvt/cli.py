@@ -12,6 +12,17 @@ from typing import TextIO
 from xvt import __version__
 from xvt.batch import BatchResult, continue_batch, run_batch
 from xvt.cancellation import install_signal_handlers, received_signal
+from xvt.config import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_ENGINE,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
+    DEFAULT_PROVIDER,
+    DEFAULT_SEGMENTATION_PRESET,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TRANSLATION_STYLE,
+)
 from xvt.doctor import run_doctor
 from xvt.errors import ExitCode, XvtError
 from xvt.events import Event, EventSink, EventType, create_event
@@ -56,11 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Transcribe media or import source subtitles")
     run_parser.add_argument("input")
     run_parser.add_argument("--output", required=True)
-    run_parser.add_argument("--engine", choices=["mlx", "faster"], default="mlx")
+    run_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
     run_parser.add_argument("--language")
     run_parser.add_argument("--subtitles")
     run_parser.add_argument("--align-subtitles", action="store_true")
-    run_parser.add_argument("--min-alignment-confidence", type=float, default=0.55)
+    run_parser.add_argument(
+        "--min-alignment-confidence", type=float, default=DEFAULT_MIN_ALIGNMENT_CONFIDENCE
+    )
     run_parser.add_argument("--allow-low-confidence-alignment", action="store_true")
     run_parser.add_argument("--cookies-from-browser")
     run_parser.add_argument("--proxy")
@@ -72,24 +85,24 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     run_parser.add_argument("--base-url")
     run_parser.add_argument("--model")
-    run_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    run_parser.add_argument("--batch-size", type=int, default=40)
-    run_parser.add_argument("--max-retries", type=int, default=2)
-    run_parser.add_argument("--timeout-seconds", type=float, default=60)
+    run_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    run_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    run_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    run_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     run_parser.add_argument("--glossary")
     run_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     run_parser.add_argument(
         "--segmentation-preset",
         choices=sorted(SEGMENTATION_PRESETS),
-        default="balanced",
+        default=DEFAULT_SEGMENTATION_PRESET,
     )
     run_parser.add_argument("--burn", action="store_true")
     run_parser.add_argument("--burn-media")
@@ -105,30 +118,30 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("input_directory")
     batch_parser.add_argument("--output", required=True)
     batch_parser.add_argument("--recursive", action="store_true")
-    batch_parser.add_argument("--engine", choices=["mlx", "faster"], default="mlx")
+    batch_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
     batch_parser.add_argument("--language")
     batch_parser.add_argument("--target-language")
     batch_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     batch_parser.add_argument("--base-url")
     batch_parser.add_argument("--model")
-    batch_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    batch_parser.add_argument("--batch-size", type=int, default=40)
-    batch_parser.add_argument("--max-retries", type=int, default=2)
-    batch_parser.add_argument("--timeout-seconds", type=float, default=60)
+    batch_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    batch_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    batch_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    batch_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     batch_parser.add_argument("--glossary")
     batch_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     batch_parser.add_argument(
         "--segmentation-preset",
         choices=sorted(SEGMENTATION_PRESETS),
-        default="balanced",
+        default=DEFAULT_SEGMENTATION_PRESET,
     )
     batch_parser.add_argument("--burn", action="store_true")
     batch_parser.add_argument("--software", action="store_true")
@@ -169,12 +182,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("job_file")
     prepare_parser.add_argument("--source-language", required=True)
     prepare_parser.add_argument("--target-language", required=True)
-    prepare_parser.add_argument("--batch-size", type=int, default=40)
+    prepare_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     prepare_parser.add_argument("--glossary")
     prepare_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     prepare_parser.add_argument("--events-jsonl", action="store_true")
 
@@ -205,19 +218,19 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     translate_parser.add_argument("--base-url")
     translate_parser.add_argument("--model")
-    translate_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    translate_parser.add_argument("--batch-size", type=int, default=40)
-    translate_parser.add_argument("--max-retries", type=int, default=2)
-    translate_parser.add_argument("--timeout-seconds", type=float, default=60)
+    translate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    translate_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    translate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    translate_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     translate_parser.add_argument("--glossary")
     translate_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default="faithful",
+        default=DEFAULT_TRANSLATION_STYLE,
     )
     translate_parser.add_argument("--events-jsonl", action="store_true")
 
@@ -240,13 +253,15 @@ def build_parser() -> argparse.ArgumentParser:
     retranslate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
-        default="auto",
+        default=DEFAULT_PROVIDER,
     )
     retranslate_parser.add_argument("--base-url")
     retranslate_parser.add_argument("--model")
-    retranslate_parser.add_argument("--api-key-env", default="XVT_TRANSLATION_API_KEY")
-    retranslate_parser.add_argument("--max-retries", type=int, default=2)
-    retranslate_parser.add_argument("--timeout-seconds", type=float, default=60)
+    retranslate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    retranslate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    retranslate_parser.add_argument(
+        "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS
+    )
     retranslate_parser.add_argument("--events-jsonl", action="store_true")
 
     apply_retranslation_parser = subparsers.add_parser(

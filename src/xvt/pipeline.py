@@ -13,6 +13,12 @@ from urllib.parse import urlparse
 
 from xvt.align import align_source_cues
 from xvt.burn import burn_subtitles, recommended_video_bitrate
+from xvt.config import (
+    DEFAULT_ENGINE,
+    DEFAULT_HARDWARE_ENCODING,
+    DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
+    DEFAULT_SEGMENTATION_PRESET,
+)
 from xvt.download import (
     RemoteMediaInfo,
     download_remote_media,
@@ -569,7 +575,7 @@ def _process_acquired_media(
             cues = segment_transcript(
                 transcript,
                 segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", "balanced"))
+                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
                 ),
                 media_duration_ms=media_info.duration_ms,
             )
@@ -1052,7 +1058,7 @@ def resume_remote_transcription(
         job,
         source,
         media_info,
-        engine=str(job.config.get("engine", "mlx")),
+        engine=str(job.config.get("engine", DEFAULT_ENGINE)),
         language=(
             None
             if job.config.get("source_language") == "auto"
@@ -1060,7 +1066,9 @@ def resume_remote_transcription(
         ),
         subtitles=subtitles,
         align_subtitles=bool(job.config.get("align_subtitles")),
-        minimum_alignment_confidence=float(job.config.get("minimum_alignment_confidence", 0.55)),
+        minimum_alignment_confidence=float(
+            job.config.get("minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE)
+        ),
         allow_low_confidence_alignment=bool(
             job.config.get("allow_low_confidence_alignment", False)
         ),
@@ -1236,7 +1244,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         language = job.config.get("source_language")
         transcript = transcribe_audio(
             audio_path,
-            engine=job.config.get("engine", "mlx"),
+            engine=job.config.get("engine", DEFAULT_ENGINE),
             language=None if language == "auto" else language,
             event_sink=event_sink,
             total_ms=media_info.duration_ms,
@@ -1260,7 +1268,9 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         alignment_path = get_job_directory(job) / "artifacts" / "alignment.json"
         _write_json(alignment_path, asdict(alignment))
         _add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
-        minimum_confidence = float(job.config.get("minimum_alignment_confidence", 0.55))
+        minimum_confidence = float(
+            job.config.get("minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE)
+        )
         if (
             not job.config.get("allow_low_confidence_alignment", False)
             and alignment.confidence < minimum_confidence
@@ -1281,7 +1291,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             cues = segment_transcript(
                 transcript,
                 segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", "balanced"))
+                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
                 ),
                 media_duration_ms=media_info.duration_ms,
             )
@@ -1991,7 +2001,9 @@ def preview_translated_job(
     workflow_config = job.config.get("workflow")
     workflow_config = workflow_config if isinstance(workflow_config, dict) else {}
     if hardware_encoding is None:
-        hardware_encoding = bool(workflow_config.get("hardware_encoding", True))
+        hardware_encoding = bool(
+            workflow_config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)
+        )
     if target_font is None and isinstance(workflow_config.get("target_font"), str):
         target_font = workflow_config["target_font"]
     if source_font is None and isinstance(workflow_config.get("source_font"), str):

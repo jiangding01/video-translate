@@ -6,6 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from xvt.config import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_ENGINE,
+    DEFAULT_HARDWARE_ENCODING,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
+    DEFAULT_PROVIDER,
+    DEFAULT_SEGMENTATION_PRESET,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TRANSLATION_STYLE,
+)
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
@@ -27,11 +39,11 @@ from xvt.translate import TranslationPolicy, load_translation_policy, translatio
 class WorkflowOptions:
     input: str
     output: str | Path
-    engine: str = "mlx"
+    engine: str = DEFAULT_ENGINE
     language: str | None = None
     subtitles: str | Path | None = None
     align_subtitles: bool = False
-    minimum_alignment_confidence: float = 0.55
+    minimum_alignment_confidence: float = DEFAULT_MIN_ALIGNMENT_CONFIDENCE
     allow_low_confidence_alignment: bool = False
     cookies_from_browser: str | None = None
     proxy: str | None = None
@@ -40,20 +52,20 @@ class WorkflowOptions:
     allow_auto_subtitles: bool = False
     translation_subtitles: str | Path | None = None
     target_language: str | None = None
-    provider: str = "auto"
+    provider: str = DEFAULT_PROVIDER
     base_url: str | None = None
     model: str | None = None
-    api_key_env: str = "XVT_TRANSLATION_API_KEY"
-    batch_size: int = 40
-    max_retries: int = 2
-    timeout_seconds: float = 60
+    api_key_env: str = DEFAULT_API_KEY_ENV
+    batch_size: int = DEFAULT_BATCH_SIZE
+    max_retries: int = DEFAULT_MAX_RETRIES
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     glossary: str | Path | None = None
-    translation_style: str = "faithful"
-    segmentation_preset: str = "balanced"
+    translation_style: str = DEFAULT_TRANSLATION_STYLE
+    segmentation_preset: str = DEFAULT_SEGMENTATION_PRESET
     burn: bool = False
     burn_media: str | Path | None = None
     burn_output: str | Path | None = None
-    hardware_encoding: bool = True
+    hardware_encoding: bool = DEFAULT_HARDWARE_ENCODING
     target_font: str | None = None
     source_font: str | None = None
 
@@ -173,7 +185,7 @@ def _burn_fingerprint(job: Job, config: dict[str, object]) -> str | None:
     payload = {
         "translated_cues_checksum": translated_checksum,
         "media": media_identity,
-        "hardware_encoding": config.get("hardware_encoding", True),
+        "hardware_encoding": config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING),
         "target_font": config.get("target_font"),
         "source_font": config.get("source_font"),
     }
@@ -406,13 +418,13 @@ def continue_workflow(
                 translation = run_translation(
                     path,
                     target_language=target_language,
-                    provider=str(config.get("provider", "auto")),
+                    provider=str(config.get("provider", DEFAULT_PROVIDER)),
                     base_url=str(config["base_url"]) if config.get("base_url") else None,
                     model=str(config["model"]) if config.get("model") else None,
-                    api_key_env=str(config.get("api_key_env", "XVT_TRANSLATION_API_KEY")),
-                    batch_size=int(config.get("batch_size", 40)),
-                    max_retries=int(config.get("max_retries", 2)),
-                    timeout_seconds=float(config.get("timeout_seconds", 60)),
+                    api_key_env=str(config.get("api_key_env", DEFAULT_API_KEY_ENV)),
+                    batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
+                    max_retries=int(config.get("max_retries", DEFAULT_MAX_RETRIES)),
+                    timeout_seconds=float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
                     policy=policy,
                     event_sink=event_sink,
                 )
@@ -443,7 +455,9 @@ def continue_workflow(
                     path,
                     media=str(config["burn_media"]) if config.get("burn_media") else None,
                     output=str(config["burn_output"]) if config.get("burn_output") else None,
-                    hardware_encoding=bool(config.get("hardware_encoding", True)),
+                    hardware_encoding=bool(
+                        config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)
+                    ),
                     cookies_from_browser=cookies_from_browser
                     or job.config.get("cookies_from_browser"),
                     proxy=proxy,

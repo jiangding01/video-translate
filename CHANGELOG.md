@@ -6,6 +6,7 @@
 
 ### Changed
 
+- workflow 配置默认值收敛到单一来源（`src/xvt/config.py`）：新增纯常量模块集中定义 `DEFAULT_ENGINE`、`DEFAULT_SEGMENTATION_PRESET`、`DEFAULT_PROVIDER`、`DEFAULT_BATCH_SIZE`、`DEFAULT_MAX_RETRIES`、`DEFAULT_TIMEOUT_SECONDS`、`DEFAULT_API_KEY_ENV`、`DEFAULT_TRANSLATION_STYLE`、`DEFAULT_MIN_ALIGNMENT_CONFIDENCE`、`DEFAULT_HARDWARE_ENCODING`；`cli.py` 各子命令参数默认值、`WorkflowOptions` 字段默认值以及 `pipeline.py`/`workflow.py` 读取持久化 config 的手写兜底改引常量。纯内部收敛，无行为或数值变化。
 - 集中定义错误模型与退出码（`src/xvt/errors.py`）：新增 `ExitCode` 枚举和 `XvtError` 领域异常层次（`UserInputError`、`DependencyError`、`InternalError`）；顶层异常映射优先识别领域异常并沿用其退出码与 category，旧的按 Python 异常类型兜底映射保持不变。
 - **Breaking**：拆分冲突的退出码语义。`verify` 校验未通过由 `4` 改为 `5`（VERIFY_FAILED），`batch`/`batch-continue` 存在失败条目由 `4` 改为 `6`（PARTIAL_FAILURE）；`doctor` 未通过仍为 `3`，中断仍为 `130`。依赖脚本请同步更新退出码判断。
 
