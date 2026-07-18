@@ -345,6 +345,80 @@ class PipelineTest(unittest.TestCase):
                 StageStatus.FAILED,
             )
 
+    def test_resegment_translation_invalidates_cue_retranslation_artifacts(self) -> None:
+        # P7e: cue_retranslation_batches/cue_retranslation_response 引用重分段前的
+        # 废弃 cue id，重分段后必须失效，不能以 checksum 有效的姿态残留在
+        # job.artifacts 中污染 status/verify/恢复计划的可复用产物清单。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            words = [
+                Word(("" if index == 0 else " ") + token, index * 500, index * 500 + 400, 0.9)
+                for index, token in enumerate(("This", "subtitle", "needs", "splitting"))
+            ]
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 2000, "This subtitle needs splitting", words=words))]),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        asdict(
+                            Cue(
+                                1,
+                                0,
+                                2000,
+                                "This subtitle needs splitting",
+                                target_text="长" * 19,
+                                target_language="zh-CN",
+                            )
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(
+                json.dumps({"duration_ms": 2000, "width": 1920, "height": 1080}),
+                encoding="utf-8",
+            )
+            cue_retranslation_batches_path = artifacts / "cue-retranslation-batches.json"
+            cue_retranslation_batches_path.write_text("{}", encoding="utf-8")
+            cue_retranslation_response_path = artifacts / "cue-retranslation-response.json"
+            cue_retranslation_response_path.write_text("{}", encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                    Artifact(
+                        "translated_cues", str(translated_path), file_checksum(translated_path)
+                    ),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                    Artifact(
+                        "cue_retranslation_batches",
+                        str(cue_retranslation_batches_path),
+                        file_checksum(cue_retranslation_batches_path),
+                    ),
+                    Artifact(
+                        "cue_retranslation_response",
+                        str(cue_retranslation_response_path),
+                        file_checksum(cue_retranslation_response_path),
+                    ),
+                ]
+            )
+            job_file = save_job(job)
+
+            result = resegment_translation(job_file)
+
+            self.assertTrue(result.changed)
+            updated = load_job(job_file)
+            artifact_kinds = {artifact.kind for artifact in updated.artifacts}
+            self.assertNotIn("cue_retranslation_batches", artifact_kinds)
+            self.assertNotIn("cue_retranslation_response", artifact_kinds)
+
     def test_resegment_translation_rejects_imported_source_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1457,7 +1457,11 @@ def resegment_translation(
             "items": report_items,
         },
     )
-    # source_cues 的下游闭包，扣除本函数原位重建/维持现状的产物，并入被作废的用户输入。
+    # source_cues 的下游闭包，扣除本函数原位重建的产物，并入被作废的用户输入。
+    # cue_retranslation_batches/cue_retranslation_response 引用重分段前的废弃 cue id，
+    # 虽然 apply-cue-retranslation 会因 translated_cues 已失效而拒绝执行（无正确性漏洞），
+    # 但若不失效会以 checksum 有效的姿态污染 status/verify 与恢复计划的可复用产物清单
+    # （P7e：修正 P6a 遗留的「维持现状」排除项）。
     invalidated_kinds = (
         downstream_of(ArtifactKind.SOURCE_CUES)
         - {
@@ -1465,9 +1469,6 @@ def resegment_translation(
             # subtitle_qa 由后续 stage 重跑），不在此失效。
             ArtifactKind.SOURCE_SRT,
             ArtifactKind.SUBTITLE_QA,
-            # cue_retranslation_* 维持现状不失效（潜在改进留待后续单独评估）。
-            ArtifactKind.CUE_RETRANSLATION_BATCHES,
-            ArtifactKind.CUE_RETRANSLATION_RESPONSE,
         }
     ) | {
         # input_translation_subtitles 是被 resegment 作废的用户输入而非派生产物，显式并入。

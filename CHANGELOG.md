@@ -44,6 +44,7 @@
 - 损坏或字段不完整的当前版本 Job 现在返回可控的无效输入错误，不再泄漏 Python traceback。
 - 修复转写失败或缺少词级时间戳时可能误报完成进度的问题。
 - 修复预览未继承工作流烧录媒体、字体和编码设置，以及自定义输出可能覆盖 Job、源媒体或正式 artifact 的问题；预览中断现在提供独立重试提示。
+- 修复 `resegment-translation` 失效集合遗留 `cue_retranslation_batches`/`cue_retranslation_response`（P6a 为保持行为而排除）的问题：这两类 artifact 在重分段后引用的是废弃 cue id，虽然 `apply-cue-retranslation` 会因 `translated_cues` 已失效而拒绝执行、无正确性漏洞，但会以 checksum 有效的姿态污染 `status`、`verify` 和恢复计划的可复用产物清单；现按依赖图闭包一并失效（P7e）。
 - 修复 P7c 终审发现的 v1 事件信封失配：`cli.py` 的 `cli_failed` 顶层裸 `category`/`message` 改为嵌套 `error_event_fields` 信封；`pipeline.py` 中 `remote_subtitles_selected`、`translation_resegmented`、`translation_fallback`、`translation_progress_reset`、`translation_batch_started`、`translation_batch_retrying`（两处）、`translation_batch_completed`、`translation_provider_selected`、`preview_completed` 共 10 处补齐缺失的 `job_file`；`batch.py` 的 `_mark_unfinished_item` 补齐 `batch_item_failed`/`batch_item_waiting` 缺失的 `index`/`total`。`docs/EVENTS.md` 同步对账，新增载荷结构契约测试（`tests/test_events.py`）防止回归。
 
 ## [0.1.0] - 2026-07-15

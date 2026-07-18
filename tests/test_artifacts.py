@@ -40,6 +40,11 @@ LEGACY_RESEGMENT_INVALIDATION = {
     "media_qa",
     "preview_ass",
     "preview_video",
+    # P7e：有意行为修正，非「维持现状」基线。cue_retranslation_batches/
+    # cue_retranslation_response 引用重分段前的废弃 cue id，此前 P6a 为保持
+    # 现状而将其排除在失效集合外，现按依赖图闭包一并失效。
+    "cue_retranslation_batches",
+    "cue_retranslation_response",
 }
 
 
@@ -93,8 +98,6 @@ def test_resegment_invalidation_matches_legacy() -> None:
             - {
                 ArtifactKind.SOURCE_SRT,
                 ArtifactKind.SUBTITLE_QA,
-                ArtifactKind.CUE_RETRANSLATION_BATCHES,
-                ArtifactKind.CUE_RETRANSLATION_RESPONSE,
             }
         )
         | {ArtifactKind.INPUT_TRANSLATION_SUBTITLES}
