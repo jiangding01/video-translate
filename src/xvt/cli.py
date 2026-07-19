@@ -387,6 +387,14 @@ class _JsonlEventSink(_TrackedEventSink):
         self.stream.flush()
 
 
+def _format_batch_position(data: dict[str, object]) -> str:
+    batch = data.get("batch")
+    batch_total = data.get("batch_total")
+    if isinstance(batch_total, int) and batch_total > 0:
+        return f"{batch}/{batch_total}"
+    return f"{batch}"
+
+
 class _HumanEventSink(_TrackedEventSink):
     def __init__(self, job_file: str | None = None, stream: TextIO | None = None) -> None:
         super().__init__(job_file)
@@ -438,9 +446,9 @@ class _HumanEventSink(_TrackedEventSink):
         elif event.type == EventType.TRANSCRIPTION_PROGRESS:
             self._render_transcription(data)
         elif event.type == EventType.TRANSLATION_BATCH_STARTED:
-            self._line(f"[进行中] 翻译字幕（批次 {data.get('batch')}）")
+            self._line(f"[进行中] 翻译字幕（批次 {_format_batch_position(data)}）")
         elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
-            self._line(f"[重试] 翻译字幕（批次 {data.get('batch')}）")
+            self._line(f"[重试] 翻译字幕（批次 {_format_batch_position(data)}）")
         elif event.type == EventType.WORKFLOW_WAITING:
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
         elif event.type == EventType.WORKFLOW_COMPLETED:

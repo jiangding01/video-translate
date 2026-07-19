@@ -206,6 +206,27 @@ class EventPayloadContractTest(unittest.TestCase):
                 status="failed",
                 **error_event_fields("workflow", "boom"),
             ),
+            EventType.TRANSLATION_BATCH_STARTED: create_event(
+                EventType.TRANSLATION_BATCH_STARTED,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                batch=1,
+                batch_total=3,
+            ),
+            EventType.TRANSLATION_BATCH_RETRYING: create_event(
+                EventType.TRANSLATION_BATCH_RETRYING,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                batch=1,
+                batch_total=3,
+                attempt=2,
+                delay_seconds=1.5,
+                reason="provider temporarily unavailable",
+            ),
+            EventType.TRANSLATION_BATCH_COMPLETED: create_event(
+                EventType.TRANSLATION_BATCH_COMPLETED,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                batch=1,
+                batch_total=3,
+            ),
             EventType.CLI_FAILED: create_event(
                 EventType.CLI_FAILED,
                 command="run",

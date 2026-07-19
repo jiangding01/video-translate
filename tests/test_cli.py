@@ -555,6 +555,29 @@ class CliTest(unittest.TestCase):
                     eta_seconds=41,
                 )
             )
+            event_sink(
+                create_event(
+                    EventType.TRANSLATION_BATCH_STARTED,
+                    batch=2,
+                    batch_total=5,
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.TRANSLATION_BATCH_RETRYING,
+                    batch=2,
+                    batch_total=5,
+                    attempt=2,
+                    delay_seconds=1.0,
+                    reason="provider temporarily unavailable",
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.TRANSLATION_BATCH_STARTED,
+                    batch=3,
+                )
+            )
             event_sink(create_event(EventType.STAGE_COMPLETED, stage="acquire", status="succeeded"))
             event_sink(create_event(EventType.WORKFLOW_COMPLETED, job_file=str(result.job_file)))
             return result
@@ -573,6 +596,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("任务文件: /tmp/job.json", progress)
         self.assertIn("[进行中] 下载源视频  42%  2.0 MB/s  剩余 00:15", progress)
         self.assertIn("[进行中] 转写音频  42%  03:30/08:20  剩余 00:41", progress)
+        self.assertIn("[进行中] 翻译字幕（批次 2/5）", progress)
+        self.assertIn("[重试] 翻译字幕（批次 2/5）", progress)
+        # 缺少 batch_total 的旧事件流回退为仅显示批次 ID。
+        self.assertIn("[进行中] 翻译字幕（批次 3）", progress)
         self.assertIn("任务处理完成", progress)
 
     def test_run_failure_shows_job_and_safe_status_command(self) -> None:

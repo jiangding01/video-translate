@@ -1913,6 +1913,7 @@ class PipelineTest(unittest.TestCase):
                     )
                 return {item.id: "你好，世界。" for item in batch.items}
 
+            events = []
             with (
                 patch.dict(os.environ, provider_env, clear=False),
                 patch("xvt.pipeline.translate_batch", side_effect=flaky_provider),
@@ -1922,12 +1923,34 @@ class PipelineTest(unittest.TestCase):
                     target_language="zh-CN",
                     provider="openai-compatible",
                     max_retries=2,
+                    event_sink=events.append,
                 )
 
         self.assertEqual(result.mode, "openai-compatible")
         self.assertEqual(len(calls), 2)
         self.assertIsNone(calls[0])
         self.assertIn("previous response was invalid", calls[1] or "")
+
+        batch_events = [
+            event
+            for event in events
+            if event.type
+            in {
+                "translation_batch_started",
+                "translation_batch_retrying",
+                "translation_batch_completed",
+            }
+        ]
+        self.assertEqual(
+            {event.type for event in batch_events},
+            {
+                "translation_batch_started",
+                "translation_batch_retrying",
+                "translation_batch_completed",
+            },
+        )
+        for event in batch_events:
+            self.assertEqual(event.data["batch_total"], 1)
 
     def test_malformed_provider_response_exhausts_retries_as_dependency_error(self) -> None:
         provider_env = {
