@@ -13,6 +13,8 @@
 
 ### Added
 
+- `xvt continue --acknowledge-subtitle-review`：人工确认 `needs_review` 的字幕 QA 报告后继续翻译与烧录（导入字幕折叠后超宽等场景）。确认绑定字幕 checksum 与具体 review 问题集合、字幕变化或新问题自动失效、error 级永不放行；放行以 `subtitle_review_acknowledged` 事件与 config 记录留痕，原始 QA 报告保持不变。
+
 - Job schema 前向兼容与迁移链骨架：`Artifact` 和 stage record 解析改为按已知字段过滤构造，未知字段静默忽略，避免旧版本 CLI 读取新版本 `job.json` 时因新增字段崩溃；新增模块级 `_MIGRATIONS` 迁移链骨架（当前为空），供未来结构性 schema 变更登记逐版本迁移函数。
 - JSONL 事件协议 v1 地基：新增 `EVENT_PROTOCOL_VERSION` 与 `EventType` 枚举作为全部事件类型的单一事实来源，事件信封新增 `v` 版本字段，消费端改引枚举成员；新增 `job_event_fields` / `error_event_fields` 信封辅助函数，并以 `docs/EVENTS.md` 记录协议版本、兼容性承诺和全部事件字段契约。
 - 生产端 v1 事件迁移全量完成（P3b/P3c）：`pipeline.py`、`workflow.py`、`batch.py`、`process.py`、`download.py`、`transcribe.py`、`burn.py` 的全部 `create_event` 调用改引 `EventType` 枚举成员，`command_failed` 统一接入 `error_event_fields` 错误信封；`create_event` 签名收紧为仅接受 `EventType`，删除裸字符串兼容分支；新增测试扫描源码防止裸字符串调用回归。

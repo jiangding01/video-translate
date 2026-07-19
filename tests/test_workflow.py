@@ -265,7 +265,7 @@ class WorkflowTest(unittest.TestCase):
             with patch("xvt.workflow.valid_artifact_path") as valid:
                 valid.side_effect = lambda _job, kind: (
                     Path("/tmp/source-cues.json")
-                    if kind == "source_cues"
+                    if kind in {"source_cues", "source_srt"}
                     else (
                         Path("/tmp/translation-batches.json")
                         if kind == "translation_batches"
@@ -298,7 +298,7 @@ class WorkflowTest(unittest.TestCase):
                 patch(
                     "xvt.workflow.valid_artifact_path",
                     side_effect=lambda _job, kind: (
-                        Path("/tmp/source-cues.json") if kind == "source_cues" else None
+                        Path("/tmp/source-cues.json") if kind in {"source_cues", "source_srt"} else None
                     ),
                 ),
                 patch(
@@ -331,7 +331,7 @@ class WorkflowTest(unittest.TestCase):
                 patch(
                     "xvt.workflow.valid_artifact_path",
                     side_effect=lambda _job, kind: (
-                        Path("/tmp/source-cues.json") if kind == "source_cues" else None
+                        Path("/tmp/source-cues.json") if kind in {"source_cues", "source_srt"} else None
                     ),
                 ),
                 patch(
@@ -371,7 +371,7 @@ class WorkflowTest(unittest.TestCase):
             ):
                 valid.side_effect = lambda _job, kind: (
                     Path(f"/tmp/{kind}.json")
-                    if kind in {"source_cues", "translated_cues"}
+                    if kind in {"source_cues", "source_srt", "translated_cues"}
                     else None
                 )
                 result = continue_workflow(get_job_file(job))
@@ -401,7 +401,7 @@ class WorkflowTest(unittest.TestCase):
             ):
                 valid.side_effect = lambda _job, kind: (
                     Path(f"/tmp/{kind}")
-                    if kind in {"source_cues", "translated_cues", "burned_video"}
+                    if kind in {"source_cues", "source_srt", "translated_cues", "burned_video"}
                     else None
                 )
                 result = continue_workflow(get_job_file(job))
@@ -435,7 +435,7 @@ class WorkflowTest(unittest.TestCase):
             ):
                 valid.side_effect = lambda _job, kind: (
                     Path(f"/tmp/{kind}")
-                    if kind in {"source_cues", "translated_cues", "burned_video"}
+                    if kind in {"source_cues", "source_srt", "translated_cues", "burned_video"}
                     else None
                 )
                 result = continue_workflow(get_job_file(job))

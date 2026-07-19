@@ -125,6 +125,17 @@ stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射�
 | `kind` | string | 产物类型 |
 | `path` | string | 产物路径 |
 
+### `subtitle_review_acknowledged`
+
+用户显式确认 `needs_review` 的字幕 QA 报告（`continue --acknowledge-subtitle-review`），或工作流复用仍然有效的既有确认记录放行同一批 review 问题。原始 QA 报告不会被改写；界面应据此显示「用户已确认风险」而非「QA 自然通过」。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
+| `review_count` | int | 被确认的 review 级问题数量 |
+| `source` | string | `user_flag`（本次显式确认）或 `stored_acknowledgment`（复用既有确认） |
+
 ## 下载
 
 yt-dlp 下载进度（`download.py`）。

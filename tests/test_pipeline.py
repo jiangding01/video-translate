@@ -1746,6 +1746,147 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("output has no audio stream", report["issues"])
         self.assertIn("output dimensions differ from source video", report["issues"])
 
+    def _make_review_blocked_subtitle_workflow(self, root: Path) -> Path:
+        """构造一个因源字幕折叠后超宽而被 needs_review 阻断的端到端字幕 Job。"""
+        from xvt.workflow import WorkflowOptions, run_workflow
+
+        source = root / "source.srt"
+        wide_line = "word " * 16  # 折叠后约 80 显示单位，超过 72 触发 review
+        source.write_text(
+            f"1\n00:00:00,000 --> 00:00:20,000\n{wide_line.strip()}\n",
+            encoding="utf-8",
+        )
+        translated = root / "translated.srt"
+        translated.write_text(
+            "1\n00:00:00,000 --> 00:00:20,000\n你好。\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "needs_review"):
+            run_workflow(
+                WorkflowOptions(
+                    input=str(source),
+                    output=root / "output",
+                    language="en",
+                    target_language="zh-CN",
+                    translation_subtitles=translated,
+                )
+            )
+        job_file = next((root / "output" / "jobs").glob("*/job.json"))
+        return job_file
+
+    def test_continue_without_acknowledgment_stays_blocked(self) -> None:
+        from xvt.workflow import continue_workflow
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._make_review_blocked_subtitle_workflow(Path(directory))
+            with self.assertRaisesRegex(RuntimeError, "needs_review"):
+                continue_workflow(job_file)
+
+    def test_acknowledged_continue_completes_both_qa_gates(self) -> None:
+        from xvt.pipeline import acknowledge_subtitle_review
+        from xvt.workflow import continue_workflow
+
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._make_review_blocked_subtitle_workflow(Path(directory))
+            acknowledge_subtitle_review(job_file, event_sink=events.append)
+            with patch("xvt.workflow.resume_remote_transcription") as remote:
+                result = continue_workflow(job_file, event_sink=events.append)
+
+            self.assertEqual(result.status, "completed")
+            remote.assert_not_called()
+            updated = load_job(job_file)
+            kinds = {artifact.kind for artifact in updated.artifacts}
+            self.assertIn("source_srt", kinds)
+            self.assertIn("bilingual_srt", kinds)
+
+        acknowledged = [event for event in events if event.type == "subtitle_review_acknowledged"]
+        # 一次显式确认 + 两道 QA 门（源字幕 QA 与译文 QA）各一次复用放行。
+        self.assertEqual(acknowledged[0].data["source"], "user_flag")
+        self.assertGreaterEqual(len(acknowledged), 3)
+        self.assertTrue(
+            all(event.data["source"] == "stored_acknowledgment" for event in acknowledged[1:])
+        )
+
+    def test_acknowledge_rejects_error_level_reports(self) -> None:
+        from xvt.errors import UserInputError
+        from xvt.pipeline import acknowledge_subtitle_review
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.srt", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            qa_path = artifacts / "qa.json"
+            qa_path.write_text(
+                json.dumps(
+                    {
+                        "status": "needs_review",
+                        "cue_count": 1,
+                        "issues": [
+                            {"code": "line_too_wide", "severity": "review", "cue_id": 1},
+                            {"code": "cue_overlap", "severity": "error", "cue_id": 2},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts.append(Artifact("subtitle_qa", str(qa_path), file_checksum(qa_path)))
+            job_file = save_job(job)
+
+            with self.assertRaisesRegex(UserInputError, "cannot be acknowledged"):
+                acknowledge_subtitle_review(job_file)
+
+    def test_acknowledgment_invalidated_when_subtitles_change(self) -> None:
+        from xvt.pipeline import _acknowledged_review_issues
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.srt", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text("[]", encoding="utf-8")
+            job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
+            job.config["subtitle_review_acknowledgment"] = {
+                "source_cues_checksum": file_checksum(cues_path),
+                "acknowledged_issues": [["line_too_wide", 1]],
+            }
+            self.assertEqual(_acknowledged_review_issues(job), {("display_width", 1)})
+
+            # 字幕内容变化（checksum 改变）后确认失效。
+            cues_path.write_text("[{}]", encoding="utf-8")
+            job.artifacts[-1] = Artifact("source_cues", str(cues_path), file_checksum(cues_path))
+            self.assertIsNone(_acknowledged_review_issues(job))
+
+    def test_new_review_issue_blocks_despite_acknowledgment(self) -> None:
+        from xvt.pipeline import _complete_qa_stage
+        from xvt.qa import SubtitleIssue, SubtitleQaReport
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.srt", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text("[]", encoding="utf-8")
+            job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
+            job.config["subtitle_review_acknowledgment"] = {
+                "source_cues_checksum": file_checksum(cues_path),
+                "acknowledged_issues": [["line_too_wide", 1]],
+            }
+            save_job(job)
+            report = SubtitleQaReport(
+                status="needs_review",
+                cue_count=2,
+                issues=(
+                    SubtitleIssue("line_too_wide", "review", 1, "acknowledged"),
+                    SubtitleIssue("line_too_wide", "review", 2, "new problem"),
+                ),
+            )
+            with self.assertRaisesRegex(RuntimeError, "needs_review"):
+                _complete_qa_stage(job, report, None)
+
     def test_malformed_provider_response_enters_correction_retry(self) -> None:
         # 回归测试：结构性无效的 provider 响应（ProviderResponseError）必须进入
         # 纠错重试分支，第二次请求携带纠正提示词后成功。
