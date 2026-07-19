@@ -387,6 +387,14 @@ class _JsonlEventSink(_TrackedEventSink):
         self.stream.flush()
 
 
+# 重试原因的契约字符串是英文（docs/EVENTS.md），仅在人类可读渲染层映射为中文；
+# 未知原因回退显示契约原文。
+_TRANSLATION_RETRY_REASON_LABELS = {
+    "provider temporarily unavailable": "翻译服务暂时不可用",
+    "invalid provider response": "翻译服务响应无效",
+}
+
+
 def _format_batch_position(data: dict[str, object]) -> str:
     batch = data.get("batch")
     batch_total = data.get("batch_total")
@@ -449,7 +457,8 @@ class _HumanEventSink(_TrackedEventSink):
             self._line(f"[进行中] 翻译字幕（批次 {_format_batch_position(data)}）")
         elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
             reason = data.get("reason")
-            reason_suffix = f"，原因：{reason}" if reason else ""
+            reason_label = _TRANSLATION_RETRY_REASON_LABELS.get(str(reason), reason)
+            reason_suffix = f"，原因：{reason_label}" if reason else ""
             self._line(f"[重试] 翻译字幕（批次 {_format_batch_position(data)}{reason_suffix}）")
         elif event.type == EventType.WORKFLOW_WAITING:
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
