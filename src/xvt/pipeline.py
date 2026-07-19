@@ -1869,6 +1869,7 @@ def run_translation(
 
     artifacts_directory = get_job_directory(job) / "artifacts"
     progress_output = artifacts_directory / "translation-progress.json"
+    batch_total = len(batches)
     try:
         for batch in batches:
             raise_if_cancelled()
@@ -1881,6 +1882,7 @@ def run_translation(
                         EventType.TRANSLATION_BATCH_STARTED,
                         **job_event_fields(job.id, get_job_file(job)),
                         batch=batch.id,
+                        batch_total=batch_total,
                     )
                 )
             for attempt in range(max_retries + 1):
@@ -1909,6 +1911,7 @@ def run_translation(
                                 EventType.TRANSLATION_BATCH_RETRYING,
                                 **job_event_fields(job.id, get_job_file(job)),
                                 batch=batch.id,
+                                batch_total=batch_total,
                                 attempt=attempt + 2,
                                 delay_seconds=delay,
                                 reason="provider temporarily unavailable",
@@ -1925,6 +1928,7 @@ def run_translation(
                                 EventType.TRANSLATION_BATCH_RETRYING,
                                 **job_event_fields(job.id, get_job_file(job)),
                                 batch=batch.id,
+                                batch_total=batch_total,
                                 attempt=attempt + 2,
                                 delay_seconds=delay,
                                 reason="invalid provider response",
@@ -1951,6 +1955,7 @@ def run_translation(
                         EventType.TRANSLATION_BATCH_COMPLETED,
                         **job_event_fields(job.id, get_job_file(job)),
                         batch=batch.id,
+                        batch_total=batch_total,
                     )
                 )
     except Exception as error:

@@ -215,6 +215,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
+| `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
 
 ### `translation_batch_retrying`
 | 字段 | 类型 | 含义 |
@@ -222,6 +223,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
+| `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
 | `attempt` | int | 即将进行的尝试序号 |
 | `delay_seconds` | number | 重试前等待秒数 |
 | `reason` | string | 重试原因 |
@@ -232,6 +234,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
+| `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
 
 ## 烧录与预览
 
