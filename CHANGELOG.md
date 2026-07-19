@@ -13,7 +13,7 @@
 
 ### Added
 
-- 翻译进度可预估：`translation_batch_started` / `translation_batch_retrying` / `translation_batch_completed` 事件新增可选字段 `batch_total`（批次总数，v1 兼容性变更不升协议版本）；CLI 人类可读输出的翻译批次行改为「批次 N/总数」，旧事件流缺少该字段时回退为仅显示批次 ID。
+- 翻译进度可预估：`translation_batch_started` / `translation_batch_retrying` / `translation_batch_completed` 事件新增可选字段 `batch_total`（批次总数，v1 兼容性变更不升协议版本）；CLI 人类可读输出的翻译批次行改为「批次 N/总数」，重试行同时显示事件里已有的 `reason` 字段；旧事件流缺少 `batch_total` 时回退为仅显示批次 ID。
 - `xvt continue --acknowledge-subtitle-review`：人工确认 `needs_review` 的字幕 QA 报告后继续翻译与烧录（导入字幕折叠后超宽等场景）。确认绑定字幕 checksum 与具体 review 问题集合、字幕变化或新问题自动失效、error 级永不放行；放行以 `subtitle_review_acknowledged` 事件与 config 记录留痕，原始 QA 报告保持不变。
 
 - Job schema 前向兼容与迁移链骨架：`Artifact` 和 stage record 解析改为按已知字段过滤构造，未知字段静默忽略，避免旧版本 CLI 读取新版本 `job.json` 时因新增字段崩溃；新增模块级 `_MIGRATIONS` 迁移链骨架（当前为空），供未来结构性 schema 变更登记逐版本迁移函数。

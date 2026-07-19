@@ -597,7 +597,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("[进行中] 下载源视频  42%  2.0 MB/s  剩余 00:15", progress)
         self.assertIn("[进行中] 转写音频  42%  03:30/08:20  剩余 00:41", progress)
         self.assertIn("[进行中] 翻译字幕（批次 2/5）", progress)
-        self.assertIn("[重试] 翻译字幕（批次 2/5）", progress)
+        self.assertIn(
+            "[重试] 翻译字幕（批次 2/5，原因：provider temporarily unavailable）", progress
+        )
         # 缺少 batch_total 的旧事件流回退为仅显示批次 ID。
         self.assertIn("[进行中] 翻译字幕（批次 3）", progress)
         self.assertIn("任务处理完成", progress)
