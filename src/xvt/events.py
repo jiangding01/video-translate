@@ -44,6 +44,9 @@ class EventType(StrEnum):
     ARTIFACT_CREATED = "artifact_created"
     ARTIFACT_INVALIDATED = "artifact_invalidated"
 
+    # 字幕 QA 人工确认
+    SUBTITLE_REVIEW_ACKNOWLEDGED = "subtitle_review_acknowledged"
+
     # 下载
     DOWNLOAD_PROGRESS = "download_progress"
 

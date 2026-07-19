@@ -419,7 +419,12 @@ def continue_workflow(
             )
         )
     try:
-        if valid_artifact_path(job, "source_cues") is None:
+        # source_srt 缺失说明转写腿在 QA/渲染处中断（例如 QA needs_review 后
+        # 被人工确认放行）：与缺 source_cues 一样先补齐转写腿再推进。
+        if (
+            valid_artifact_path(job, "source_cues") is None
+            or valid_artifact_path(job, "source_srt") is None
+        ):
             parsed_input = urlparse(job.input)
             media_info = valid_artifact_path(job, "media_info")
             transcription_checkpoint = valid_artifact_path(

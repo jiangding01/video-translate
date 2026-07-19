@@ -28,6 +28,7 @@ from xvt.events import Event, EventSink, EventType, create_event, error_event_fi
 from xvt.job_store import get_job_file, load_job
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
 from xvt.pipeline import (
+    acknowledge_subtitle_review,
     apply_agent_translation,
     apply_cue_retranslation,
     apply_subtitle_translation,
@@ -172,6 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
     continue_parser.add_argument("job_file")
     continue_parser.add_argument("--cookies-from-browser")
     continue_parser.add_argument("--proxy")
+    continue_parser.add_argument(
+        "--acknowledge-subtitle-review",
+        action="store_true",
+        help="Acknowledge the current needs_review subtitle QA report and proceed",
+    )
     continue_parser.add_argument("--events-jsonl", action="store_true")
 
     prepare_parser = subparsers.add_parser(
@@ -806,6 +812,10 @@ def _run_command(arguments: argparse.Namespace) -> int:
 
     if arguments.command == "continue":
         event_sink = _event_sink(arguments)
+        if arguments.acknowledge_subtitle_review:
+            report_path = acknowledge_subtitle_review(arguments.job_file, event_sink=event_sink)
+            if not arguments.events_jsonl:
+                print(f"已确认字幕 QA 复核报告: {report_path}", file=sys.stderr)
         result = continue_workflow(
             arguments.job_file,
             cookies_from_browser=arguments.cookies_from_browser,
