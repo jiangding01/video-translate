@@ -298,7 +298,9 @@ class WorkflowTest(unittest.TestCase):
                 patch(
                     "xvt.workflow.valid_artifact_path",
                     side_effect=lambda _job, kind: (
-                        Path("/tmp/source-cues.json") if kind in {"source_cues", "source_srt"} else None
+                        Path("/tmp/source-cues.json")
+                        if kind in {"source_cues", "source_srt"}
+                        else None
                     ),
                 ),
                 patch(
@@ -331,7 +333,9 @@ class WorkflowTest(unittest.TestCase):
                 patch(
                     "xvt.workflow.valid_artifact_path",
                     side_effect=lambda _job, kind: (
-                        Path("/tmp/source-cues.json") if kind in {"source_cues", "source_srt"} else None
+                        Path("/tmp/source-cues.json")
+                        if kind in {"source_cues", "source_srt"}
+                        else None
                     ),
                 ),
                 patch(
