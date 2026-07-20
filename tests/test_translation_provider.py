@@ -312,8 +312,8 @@ class TranslationProviderTest(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, environment, clear=True),
-                patch("xvt.pipeline.translate_batch", side_effect=translate),
-                patch("xvt.pipeline.time.sleep") as sleep,
+                patch("xvt.pipeline.translation.translate_batch", side_effect=translate),
+                patch("xvt.pipeline.translation.time.sleep") as sleep,
             ):
                 result = run_translation(
                     job_file,
@@ -365,7 +365,7 @@ class TranslationProviderTest(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, environment, clear=True),
-                patch("xvt.pipeline.translate_batch", side_effect=first_attempt),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=first_attempt),
                 self.assertRaisesRegex(RuntimeError, "temporary failure"),
             ):
                 run_translation(job_file, target_language="zh-CN", batch_size=1, max_retries=0)
@@ -378,7 +378,7 @@ class TranslationProviderTest(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, environment, clear=True),
-                patch("xvt.pipeline.translate_batch", side_effect=second_attempt),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=second_attempt),
             ):
                 result = run_translation(
                     job_file,
@@ -427,7 +427,7 @@ class TranslationProviderTest(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, environment, clear=True),
-                patch("xvt.pipeline.translate_batch", side_effect=translate),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=translate),
             ):
                 run_translation(job_file, target_language="zh-CN")
                 run_translation(job_file, target_language="ja")
