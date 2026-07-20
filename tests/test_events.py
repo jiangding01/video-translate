@@ -122,7 +122,7 @@ class EventProtocolTest(unittest.TestCase):
         调用应为零个，直接断言不存在比断言可解析更强，能防止未来再次引入裸字符串。
         """
         offending: list[str] = []
-        for source in sorted(_SRC_DIR.glob("*.py")):
+        for source in sorted(_SRC_DIR.rglob("*.py")):
             if source.name == "events.py":
                 continue
             text = source.read_text()
@@ -289,7 +289,7 @@ class EventPayloadContractTest(unittest.TestCase):
         防止 P7c 修复的失配（cli.py 顶层 category/message）再次出现。
         """
         offending: list[str] = []
-        for source in sorted(_SRC_DIR.glob("*.py")):
+        for source in sorted(_SRC_DIR.rglob("*.py")):
             if source.name == "events.py":
                 continue
             offending.extend(_find_bare_error_kwargs(source))

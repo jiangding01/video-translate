@@ -38,7 +38,7 @@ class ConfigDefaultsTest(unittest.TestCase):
         # 手写 "balanced"，并确认 config.py 存在单一来源。
         counts = {
             path.name: len(re.findall(r'"balanced"', path.read_text(encoding="utf-8")))
-            for path in _SRC_DIR.glob("*.py")
+            for path in _SRC_DIR.rglob("*.py")
         }
         self.assertEqual(counts.get("config.py"), 1)
         self.assertEqual(counts.get("cli.py", 0), 0)

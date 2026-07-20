@@ -1838,7 +1838,7 @@ class PipelineTest(unittest.TestCase):
                 acknowledge_subtitle_review(job_file)
 
     def test_acknowledgment_invalidated_when_subtitles_change(self) -> None:
-        from xvt.pipeline import _acknowledged_review_issues
+        from xvt.pipeline.review import _acknowledged_review_issues
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1860,7 +1860,7 @@ class PipelineTest(unittest.TestCase):
             self.assertIsNone(_acknowledged_review_issues(job))
 
     def test_new_review_issue_blocks_despite_acknowledgment(self) -> None:
-        from xvt.pipeline import _complete_qa_stage
+        from xvt.pipeline.review import _complete_qa_stage
         from xvt.qa import SubtitleIssue, SubtitleQaReport
 
         with tempfile.TemporaryDirectory() as directory:
