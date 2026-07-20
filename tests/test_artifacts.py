@@ -59,7 +59,7 @@ def _kinds_used_in_source() -> set[str]:
         re.compile(r'Artifact\(\s*"([^"]+)"'),
     )
     used: set[str] = set()
-    for path in SRC_DIR.glob("*.py"):
+    for path in SRC_DIR.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         for pattern in patterns:
             used.update(pattern.findall(text))
