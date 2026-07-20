@@ -6,6 +6,8 @@
 
 ### Changed
 
+- `pipeline.py`（2385 行单体）拆分为 `src/xvt/pipeline/` 包，纯搬移、零行为变化：`common`（共享记账与失效 helper）、`review`（QA 确认通道）、`transcription`（转写与恢复主链）、`translation`（翻译主链与统一收尾）、`retranslate`（局部重译）、`resegment`（语义重分段）、`burnin`（预览与烧录），`__init__` 仅保留 re-export 门面与 `__all__` 公共 API 清单；依赖方向无环（`common ← review ← {transcription, translation}`，`retranslate ← translation`，`resegment`/`burnin` 仅依赖 `common`）。测试同簇拆分为 `test_pipeline_{transcription,translation,retranslate,resegment,burnin}.py`，全部 mock patch 目标随调用点迁移到对应子模块命名空间；三处源码扫描守卫测试（artifact kind 覆盖、config 默认值、事件裸字符串/信封）改为递归扫描以覆盖包内子模块。
+
 - artifact 依赖图与失效闭包收敛到单一来源（`src/xvt/artifacts.py`）：新增 `ArtifactKind` 枚举登记全部产物种类、`DERIVES_FROM` 依赖边表和 `downstream_of` 传递闭包函数；`pipeline.py` 中 `_invalidate_rendered_artifacts`、`_invalidate_preview_artifacts` 和 `resegment_translation` 的三处失效集合改由闭包推导，不再各自维护硬编码集合。新增测试将三处历史集合钉为基线并校验依赖图无环，行为与现状完全一致。
 - workflow 配置默认值收敛到单一来源（`src/xvt/config.py`）：新增纯常量模块集中定义 `DEFAULT_ENGINE`、`DEFAULT_SEGMENTATION_PRESET`、`DEFAULT_PROVIDER`、`DEFAULT_BATCH_SIZE`、`DEFAULT_MAX_RETRIES`、`DEFAULT_TIMEOUT_SECONDS`、`DEFAULT_API_KEY_ENV`、`DEFAULT_TRANSLATION_STYLE`、`DEFAULT_MIN_ALIGNMENT_CONFIDENCE`、`DEFAULT_HARDWARE_ENCODING`；`cli.py` 各子命令参数默认值、`WorkflowOptions` 字段默认值以及 `pipeline.py`/`workflow.py` 读取持久化 config 的手写兜底改引常量。纯内部收敛，无行为或数值变化。
 - 集中定义错误模型与退出码（`src/xvt/errors.py`）：新增 `ExitCode` 枚举和 `XvtError` 领域异常层次（`UserInputError`、`DependencyError`、`InternalError`）；顶层异常映射优先识别领域异常并沿用其退出码与 category，旧的按 Python 异常类型兜底映射保持不变。
