@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-07-18
+更新时间：2026-07-20
 
 ## 当前快照
 
@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 251 个，全部通过 |
+| 自动化测试 | 279 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -289,16 +289,16 @@ media-qa.json
 
 ## 后续任务规划
 
-### P1：CLI 执行生命周期加固
+### P1：CLI 阶段语义与完成摘要打磨
 
-为 Job 和 Batch 增加跨进程独占执行保护，完善 SIGINT/SIGTERM 取消、外部进程组清理和持久化中断状态。随后固定 JSONL 版本与路径安全边界，再开始桌面端可视化校对界面。界面只读取 Job、artifact、`batch.json` 和 JSONL 事件，不复制业务逻辑。
+CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消、进程组清理、持久化中断状态）与 JSONL 事件协议 v1 均已完成，详见 [路线图](ROADMAP.md) 和 [CHANGELOG](CHANGELOG.md)。Job/artifact 路径安全边界和输出覆盖策略仍待固定，之后再开始桌面端可视化校对界面。界面只读取 Job、artifact、`batch.json` 和 JSONL 事件，不复制业务逻辑。
 
 真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常，后续需单独优化 CLI 阶段语义与完成摘要：
 
 - 下载平台字幕和下载源视频使用不同提示，避免重复显示“获取素材”。
 - 端到端任务不得先显示“跳过翻译/烧录”再实际执行；API 自动翻译准备批次时不得显示“等待用户输入”。
 - 区分源字幕 QA/渲染与译文字幕 QA/渲染，避免重复且含义不明的阶段名称。
-- 翻译重试显示原因、下一次尝试序号和等待时间。
+- 翻译重试的人类可读输出补齐下一次尝试序号和等待时间（事件已携带 `attempt` 与 `delay_seconds`；批次总数与重试原因显示已完成）。
 - 完成摘要按最终视频、字幕和 Job 分类，只默认展示用户交付物，并由 XVT 显示总耗时。
 
 ## 接手步骤
