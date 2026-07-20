@@ -26,7 +26,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/cli.py` | 参数定义、命令路由、普通输出和 JSONL 终态 |
 | `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复 |
 | `src/xvt/workflow.py` | 端到端目标编排、`continue`、Agent 等待和烧录派生指纹 |
-| `src/xvt/pipeline.py` | stage 推进、artifact 登记、转写、翻译、QA、渲染和烧录主流程 |
+| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 确认通道）、`transcription`（转写与恢复）、`translation`（翻译与收尾）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
 | `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |
@@ -44,7 +44,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
 | `tests/` | 与源码模块对应的单元和流程测试 |
 
-`workflow.py` 只负责编排，不应复制 `pipeline.py` 的媒体或字幕算法。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。
+`workflow.py` 只负责编排，不应复制 `pipeline` 包的媒体或字幕算法。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。`pipeline` 包内依赖方向保持无环：`common ← review ← {transcription, translation}`，`retranslate` 依赖 `translation`，`resegment` 与 `burnin` 只依赖 `common`；新增子模块时不得引入反向依赖，公共入口一律经 `__init__` re-export。
 
 ## CLI 语义
 
