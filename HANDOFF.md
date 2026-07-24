@@ -8,19 +8,18 @@
 | --- | --- |
 | 包名 | `xvt-video-translate` |
 | CLI | `xvt` |
-| 版本 | `0.1.0` |
+| 版本 | `0.1.1` |
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
-| Job schema | v1 |
+| Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
 | 自动化测试 | 300 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
 | Git | 功能修改使用 `codex/` 开发分支，Review 通过后以 PR 合并 `main` |
-| 在研分支 | `codex/cli-default-path`（#47）：CLI 默认路径收口 |
-| 默认 CLI 路径 | `run` → `status` → `continue` |
+| 默认 CLI 路径 | `run` → `status` → `continue`（批处理 `batch` / `batch-continue`） |
 
-当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status`，再 `xvt continue` 按持久化目标补齐。烧录指纹登记为 `burn_fingerprint` artifact。
+当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status` 查看 `recovery_plan` / `advance_steps`，再 `xvt continue` 按持久化目标补齐。翻译与烧录推进与 status 共用 `plan_advance_steps`。烧录指纹登记为 `burn_fingerprint` artifact。
 
 ## 项目背景
 
@@ -77,7 +76,7 @@
 - 默认优先硬件编码，只在明确的硬件编码器错误时回退 libx264。
 - 视频码率按分辨率选择，不再使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数。
 - 输出媒体会检查视频流、音频流、AAC 音频、分辨率和时长偏差。
-- 烧录派生指纹包含译文 checksum、媒体身份、编码方式和字体；成功后写入 `burn_fingerprint` artifact（`burn-fingerprint.json`），旧 Job 仍可读 `workflow.burn_fingerprint`。`continue` 只复用成品、指纹与媒体 QA 均有效时的结果。
+- 烧录派生指纹包含译文 checksum、媒体身份、编码方式和字体；成功后写入 checksum 保护的 `burn_fingerprint` artifact（`burn-fingerprint.json`）。旧 Job 若仅有 `workflow.burn_fingerprint` 仍可读取。`continue` 只复用成品、指纹与媒体 QA 均有效时的结果。
 - 烧录目标只有在 `burned_video` checksum、烧录指纹和媒体 QA 全部有效时才算完成；指纹失效或媒体 QA 失败会通过 `status`/`continue` 提示重新烧录。
 - `preview` 可按 cue 或起始时间生成短片段预览；未显式覆盖时复用工作流保存的烧录媒体、字体和编码设置，不修改正式烧录 stage。
 - 预览生成 `preview.ass` 和 `preview.mp4` checksum artifact；译文局部重译或重新分段后旧预览会失效。
@@ -95,6 +94,7 @@
 - 远程端到端 Job 在检查或下载阶段失败后，可以通过 `continue` 在同一个 Job 中重试；checksum 有效的远程元数据、字幕和媒体会被复用。
 - `--cookies-from-browser` 和 `--proxy` 同时作用于远程检查与下载，重试时可以重新显式提供。
 - `status`、普通失败输出和 Ctrl-C 共用结构化 `RecoveryPlan`，只复用 checksum 验证通过的 artifact。
+- 端到端 Job 的恢复计划通过 `plan_advance_steps` 与 `continue` 对齐，并暴露 `advance_steps`（人类可读 `steps:` 行与 JSON `recovery_plan`）。
 - 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
 - 当前 schema 的 Job 若缺少必填字段、stage 或字段类型错误，会作为可控的无效输入失败，不输出 Python traceback。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
@@ -185,12 +185,14 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
   --burn
 ```
 
-恢复和诊断：
+恢复和诊断（优先 `status` → `continue`）：
 
 ```bash
 uv run --no-sync xvt status "/path/to/job.json"
-uv run --no-sync xvt verify "/path/to/job.json" --json
+uv run --no-sync xvt status "/path/to/job.json" --json   # recovery_plan.advance_steps
 uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
+uv run --no-sync xvt verify "/path/to/job.json" --json
+# advanced：仅转写 checkpoint
 uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt preview "/path/to/job.json" --cue 18 --duration 15
 uv run --no-sync xvt batch "/path/to/input-directory" --output "/absolute/output"

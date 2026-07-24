@@ -60,6 +60,7 @@ flowchart LR
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
 | `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式、分辨率自适应码率与安全的 FFmpeg 参数构造 |
 | `events.py` / `process.py` | 结构化事件、敏感命令参数脱敏与流式外部进程执行 |
+| `recovery.py` | artifact checksum 校验、`RecoveryPlan`（含 `advance_steps`）、与 `plan_advance_steps` 对齐的恢复建议 |
 
 ## Job 与 Artifact
 

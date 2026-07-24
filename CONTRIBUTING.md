@@ -39,4 +39,4 @@ uv run --no-sync pytest -q
 
 ## 首次发布建议
 
-首次发布前，确认 `main` 已包含可运行代码和配套文档，再创建首个 `v0.1.0` 标签。发布前再次运行 `doctor`、静态检查和完整测试。
+确认 `main` 已包含可运行代码和配套文档后，按 semver 打标签（当前开发版本见 `pyproject.toml` / `CHANGELOG.md`）。发布前再次运行 `doctor`、静态检查和完整测试。

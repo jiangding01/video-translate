@@ -4,8 +4,13 @@
 
 ## [Unreleased]
 
+（无待发布条目。）
+
+## [0.1.1] - 2026-07-24
+
 ### Changed
 
+- 版本号 `0.1.0` → `0.1.1`（文档与包元数据同步；无 Job schema / 事件协议破坏性变更）。
 - CLI 默认路径收口：`xvt --help` 增加 recommended path epilog；`run` / `status` / `continue` 文案强调日常导航；`resume`、`translate`、`burn`、`preview`、重分段/局部重译等标为 `[advanced]`（不改命令语义）。README 与 AGENTS 同步「run → status → continue」。
 
 - 烧录派生指纹迁到 artifact：新增 `burn_fingerprint` kind 与 `burn-fingerprint.json`，依赖图挂在 `burned_video` 下；`_record_burn_fingerprint` 写 artifact 并清除 `workflow.burn_fingerprint` 旁路；`_burn_satisfied` / recovery 优先读 checksum 有效的 artifact，旧 Job 仍回退 workflow 字段；`clear_burn_fingerprint` 同时移除 artifact 登记与历史键。
