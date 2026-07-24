@@ -24,6 +24,7 @@ from xvt.qa import display_width, display_width_review_limit, target_overflow_cu
 from xvt.recovery import valid_artifact_path
 from xvt.segment import split_cue_by_parts
 from xvt.subtitles import normalize_display_text, save_subtitles
+from xvt.workflow_config import clear_burn_fingerprint, get_workflow_config
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +44,8 @@ def resegment_translation(
         raise ValueError(
             "re-segmentation requires ASR word timestamps; subtitle-only jobs are unsupported"
         )
-    workflow = job.config.get("workflow")
-    if isinstance(workflow, dict) and workflow.get("translation_subtitles"):
+    workflow = get_workflow_config(job)
+    if workflow is not None and workflow.translation_subtitles:
         raise ValueError(
             "cannot re-segment a workflow using an imported translation subtitle file; "
             "provide a new translation for the re-segmented source cues"
@@ -159,8 +160,7 @@ def resegment_translation(
         if artifact.kind not in invalidated_kinds | replacement_kinds
     ]
     job.artifacts.extend(replacement_artifacts)
-    if isinstance(workflow, dict):
-        workflow.pop("burn_fingerprint", None)
+    clear_burn_fingerprint(job)
     for stage in (
         StageName.TRANSLATE,
         StageName.SUBTITLE_QA,

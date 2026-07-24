@@ -6,6 +6,8 @@
 
 ### Changed
 
+- 端到端 `job.config["workflow"]` 收敛为类型化 `WorkflowConfig`（`src/xvt/workflow_config.py`）：`from_dict`/`to_dict` 校验已知字段类型与默认值；未知顶层字段进入 `extras` 并在写回时保留，避免指纹更新抹掉新版本扩展；`requested_outputs` 保留未知输出名以维持前向兼容。`WorkflowOptions.persisted_config` 返回结构体，落盘边界仍序列化为既有 JSON 形状。`workflow`、`recovery`、`pipeline` 与 CLI 提示统一经 `get_workflow_config` / `require_workflow_config` / `resolve_target_language` / `clear_burn_fingerprint` 读写，消除对 dict 袋的散落 `config.get` 与目标语言双处解析。纯内部收敛，旧 Job 可继续加载；已知字段类型错误在边界显式失败。
+
 - `pipeline.py`（2385 行单体）拆分为 `src/xvt/pipeline/` 包，纯搬移、零行为变化：`common`（共享记账与失效 helper）、`review`（QA 确认通道）、`transcription`（转写与恢复主链）、`translation`（翻译主链与统一收尾）、`retranslate`（局部重译）、`resegment`（语义重分段）、`burnin`（预览与烧录），`__init__` 仅保留 re-export 门面与 `__all__` 公共 API 清单；依赖方向无环（`common ← review ← {transcription, translation}`，`retranslate ← translation`，`resegment`/`burnin` 仅依赖 `common`）。测试同簇拆分为 `test_pipeline_{transcription,translation,retranslate,resegment,burnin}.py`，全部 mock patch 目标随调用点迁移到对应子模块命名空间；三处源码扫描守卫测试（artifact kind 覆盖、config 默认值、事件裸字符串/信封）改为递归扫描以覆盖包内子模块。
 
 - artifact 依赖图与失效闭包收敛到单一来源（`src/xvt/artifacts.py`）：新增 `ArtifactKind` 枚举登记全部产物种类、`DERIVES_FROM` 依赖边表和 `downstream_of` 传递闭包函数；`pipeline.py` 中 `_invalidate_rendered_artifacts`、`_invalidate_preview_artifacts` 和 `resegment_translation` 的三处失效集合改由闭包推导，不再各自维护硬编码集合。新增测试将三处历史集合钉为基线并校验依赖图无环，行为与现状完全一致。

@@ -46,6 +46,7 @@ from xvt.process import CommandCancelled, CommandError
 from xvt.recovery import RecoveryPlan, build_recovery_plan, verify_job
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
+from xvt.workflow_config import get_workflow_config, resolve_target_language
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -953,11 +954,11 @@ def _run_command(arguments: argparse.Namespace) -> int:
             print(f"已重切源字幕: {result.source_cues_path}")
             print(f"审计报告: {result.report_path}")
             job = load_job(arguments.job_file)
-            if isinstance(job.config.get("workflow"), dict):
+            if get_workflow_config(job) is not None:
                 print(f'继续重翻译: xvt continue "{arguments.job_file}"')
             else:
-                target_language = job.config.get("target_language")
-                if isinstance(target_language, str) and target_language:
+                target_language = resolve_target_language(job)
+                if target_language:
                     print(
                         f'重新翻译: xvt translate "{arguments.job_file}" '
                         f"--target-language {target_language}"
@@ -998,8 +999,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 )
             else:
                 job = load_job(arguments.job_file)
-                workflow = job.config.get("workflow")
-                if isinstance(workflow, dict) and workflow.get("burn"):
+                workflow = get_workflow_config(job)
+                if workflow is not None and workflow.burn:
                     print(f'继续烧录: xvt continue "{arguments.job_file}"')
         return 0
 
@@ -1018,8 +1019,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
             for path in paths:
                 print(path)
             job = load_job(arguments.job_file)
-            workflow = job.config.get("workflow")
-            if isinstance(workflow, dict) and workflow.get("burn"):
+            workflow = get_workflow_config(job)
+            if workflow is not None and workflow.burn:
                 print(f'继续烧录: xvt continue "{arguments.job_file}"')
         return 0
 

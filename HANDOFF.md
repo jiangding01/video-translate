@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-07-20
+更新时间：2026-07-24
 
 ## 当前快照
 
@@ -12,11 +12,12 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1 |
-| 自动化测试 | 279 个，全部通过 |
+| 自动化测试 | 288 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
 | Git | 功能修改使用 `codex/` 开发分支，Review 通过后以 PR 合并 `main` |
+| 在研分支 | `codex/typed-workflow-config`：类型化 `WorkflowConfig`（P0） |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程已经收敛到 `xvt run`，中断后由 `xvt continue` 根据持久化目标补齐剩余步骤。
 

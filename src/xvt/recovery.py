@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
+from xvt.workflow_config import get_workflow_config, resolve_target_language
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,14 +104,8 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             **data,
         )
 
-    workflow = job.config.get("workflow")
-    target_language = None
-    if isinstance(workflow, dict):
-        value = workflow.get("target_language")
-        target_language = value if isinstance(value, str) and value else None
-    if target_language is None:
-        value = job.config.get("target_language")
-        target_language = value if isinstance(value, str) and value else None
+    workflow = get_workflow_config(job)
+    target_language = resolve_target_language(job)
 
     source_cues = valid_artifacts.get("source_cues")
     subtitle_resumable = (
@@ -121,14 +116,14 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
     )
     if source_cues is None:
         if subtitle_resumable:
-            command = "continue" if isinstance(workflow, dict) else "resume"
+            command = "continue" if workflow is not None else "resume"
             return plan(
                 "retryable",
                 "存在 checksum 有效的源字幕，可以重新生成字幕产物。",
                 primary_command=_job_command(command, job_file),
             )
         if resumable:
-            command = "continue" if isinstance(workflow, dict) else "resume"
+            command = "continue" if workflow is not None else "resume"
             return plan(
                 "retryable",
                 "存在 checksum 有效的转写 checkpoint，可以从断点继续。",
@@ -136,7 +131,7 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             )
         parsed_input = urlparse(job.input)
         if (
-            isinstance(workflow, dict)
+            workflow is not None
             and parsed_input.scheme in {"http", "https"}
             and parsed_input.hostname
         ):
@@ -172,9 +167,7 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             "--target-language",
             target,
         )
-        continue_command = (
-            _job_command("continue", job_file) if isinstance(workflow, dict) else None
-        )
+        continue_command = _job_command("continue", job_file) if workflow is not None else None
         return plan(
             "awaiting_input",
             "任务正在等待翻译结果回填。",
@@ -183,7 +176,7 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         )
 
     if target_language and "translated_cues" not in valid_artifacts:
-        if isinstance(workflow, dict):
+        if workflow is not None:
             return plan(
                 "retryable",
                 "源字幕有效，可以继续未完成的翻译阶段。",
@@ -200,7 +193,7 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             ),
         )
 
-    if isinstance(workflow, dict) and workflow.get("burn"):
+    if workflow is not None and workflow.burn:
         media_qa_status = job.stages[StageName.MEDIA_QA].status
         if "burned_video" not in valid_artifacts or media_qa_status is not StageStatus.SUCCEEDED:
             return plan(
