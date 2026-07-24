@@ -413,7 +413,9 @@ def _advance_workflow(
     译文回填、指纹感知的烧录复用）只有这一份实现。``config`` 为 None 时从
     Job 读取持久化目标（continue 路径）；run 首跑直接传入刚构造的同一份配置。
 
-    决策顺序：Goals → plan_advance_steps → 逐步执行；中途 Agent 等待则返回。
+    满足度判定与 ``plan_advance_steps`` 共用 ``workflow_goals`` /
+    ``_translation_satisfied`` / ``_burn_satisfied``。翻译成功后必须重新判定烧录
+    （译文 checksum 变化会使旧指纹失效）；因此执行路径不会「冻结」入口时刻的 plan。
     """
     job = load_job(path)
     if config is None:
@@ -423,8 +425,12 @@ def _advance_workflow(
     if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:
         raise RuntimeError("subtitle QA failed; inspect and repair subtitles before continuing")
 
-    steps = plan_advance_steps(job, config)
-    if steps and steps[0] == "await_agent_translation":
+    # 与 plan_advance_steps 一致：Agent 等待是终态快照，不得继续烧录。
+    if (
+        goals.needs_translation
+        and not _translation_satisfied(job)
+        and job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+    ):
         return _emit_waiting(
             job=job,
             path=path,
@@ -439,6 +445,7 @@ def _advance_workflow(
             return waiting
         job = load_job(path)
 
+    # 翻译副作用之后重新判定：不可使用入口处缓存的 plan 步骤表。
     if goals.needs_burn and not _burn_satisfied(job, config):
         _ensure_burn(
             path,
