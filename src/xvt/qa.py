@@ -227,12 +227,19 @@ def check_subtitles(
                 )
             )
         if cue.timing_confidence is not None and cue.timing_confidence < 0.5:
+            # ASR 分段置信度偏低很常见，降为 warning 避免端到端几乎必卡确认；
+            # 对齐/用户导入字幕的低置信度仍需人工复核。
+            asr_derived = cue.provenance in {"asr", "asr_resegmented"}
             issues.append(
                 SubtitleIssue(
                     "low_timing_confidence",
-                    "review",
+                    "warning" if asr_derived else "review",
                     cue.id,
-                    "timeline requires manual review",
+                    (
+                        "ASR timing confidence is below 0.5"
+                        if asr_derived
+                        else "timeline requires manual review"
+                    ),
                 )
             )
         if "trimmed trailing repeated ASR output with unreliable timestamps" in cue.warnings:

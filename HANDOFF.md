@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 310 个，全部通过 |
+| 自动化测试 | 312 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -67,6 +67,7 @@
 - 输出 `source.srt`、`translated.srt`、`bilingual.srt` 和 `bilingual.ass`。
 - 双语字幕固定为译文一行、原文一行。每种语言内部的原始换行会被折叠。
 - 16:9 横版英文在 64 个显示单位以内通过，65 到 72 为警告，超过 72 需要复核。窄画幅会收紧限制，中文限制更严格。
+- ASR / `asr_resegmented` 的 `low_timing_confidence` 为 warning；对齐或用户导入字幕的低置信度仍为 review，需确认后继续。
 - ASS 使用独立的中英文字体和字号。macOS 默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`。
 - 字幕 QA 失败或进入 `needs_review` 时，工作流停止，不允许继续烧录。
 
@@ -305,7 +306,7 @@ CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消
 - ~~区分源字幕 QA/渲染与译文字幕 QA/渲染；`needs_review` 在 status 中勿仅显示为 `failed`（P1-7）。~~ 已完成（展示层区分，stage 枚举未扩展）。
 - ~~翻译重试的人类可读输出补齐下一次尝试序号和等待时间。~~ 已完成。
 - ~~完成摘要按最终视频、字幕和 Job 分类，并由 XVT 显示总耗时。~~ 已完成。
-- ASR 阅读速度 warning 过多导致几乎必卡确认（E2E P2）；源/译文 QA 可能需确认两次。
+- ~~ASR 低 timing confidence / 确认摩擦（E2E P2）。~~ 已完成：ASR 派生 cue 的 `low_timing_confidence` 降为 warning；对齐与用户导入仍 review；硬溢出仍需确认。
 - Job/artifact 路径安全边界和输出覆盖策略仍待固定。
 
 ## 接手步骤

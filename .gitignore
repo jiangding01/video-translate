@@ -12,3 +12,5 @@ dist/
 !.env.example
 jobs/
 output/
+
+.xvt-e2e-test/
