@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from email.message import Message
+from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -276,7 +277,79 @@ class TranslationProviderTest(unittest.TestCase):
 
         self.assertFalse(raised.exception.retryable)
 
-    def test_pipeline_retries_rate_limit_with_correction(self) -> None:
+    def test_provider_does_not_retry_non_retryable_http_errors(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 400, "bad request", Message(), None)
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertFalse(raised.exception.retryable)
+
+    def test_provider_classifies_remote_disconnect_as_retryable(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(_request, **_kwargs):
+            raise RemoteDisconnected("remote closed connection without response")
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertIn("connection failed", str(raised.exception))
+
+    def test_provider_classifies_response_read_connection_reset_as_retryable(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                raise ConnectionResetError("connection reset by peer")
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+
+        self.assertTrue(raised.exception.retryable)
+
+    def test_provider_does_not_retry_non_connection_os_errors(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(_request, **_kwargs):
+            raise PermissionError("local permission denied")
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertFalse(raised.exception.retryable)
+
+    def test_pipeline_retries_rate_limit_without_correction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
@@ -307,7 +380,9 @@ class TranslationProviderTest(unittest.TestCase):
             def translate(_batch, _config, *, correction=None):
                 corrections.append(correction)
                 if len(corrections) == 1:
-                    raise TranslationProviderError("rate limited", retryable=True, retry_after=3)
+                    raise TranslationProviderError(
+                        "rate limited", retryable=True, retry_after=86400
+                    )
                 return {1: "你好"}
 
             with (
@@ -321,9 +396,8 @@ class TranslationProviderTest(unittest.TestCase):
                     max_retries=1,
                 )
 
-        sleep.assert_called_once_with(3)
-        self.assertEqual(corrections[0], None)
-        self.assertIsNotNone(corrections[1])
+        sleep.assert_called_once_with(30)
+        self.assertEqual(corrections, [None, None])
         self.assertTrue(any(path.name == "translated.srt" for path in result.paths))
 
     def test_translation_resumes_from_completed_batch(self) -> None:
@@ -357,7 +431,8 @@ class TranslationProviderTest(unittest.TestCase):
             }
             first_calls = []
 
-            def first_attempt(batch, _config):
+            def first_attempt(batch, _config, *, correction=None):
+                self.assertIsNone(correction)
                 first_calls.append(batch.id)
                 if batch.id == 2:
                     raise RuntimeError("temporary failure")
@@ -372,7 +447,8 @@ class TranslationProviderTest(unittest.TestCase):
 
             second_calls = []
 
-            def second_attempt(batch, _config):
+            def second_attempt(batch, _config, *, correction=None):
+                self.assertIsNone(correction)
                 second_calls.append(batch.id)
                 return {2: "世界"}
 
@@ -420,7 +496,8 @@ class TranslationProviderTest(unittest.TestCase):
             }
             calls = []
 
-            def translate(batch, _config):
+            def translate(batch, _config, *, correction=None):
+                self.assertIsNone(correction)
                 calls.append((batch.target_language, batch.policy.style))
                 text = "你好" if batch.target_language == "zh-CN" else "こんにちは"
                 return {1: text}

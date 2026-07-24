@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from xvt.config import DEFAULT_MAX_RETRIES
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -35,6 +37,7 @@ from xvt.recovery import valid_artifact_path
 from xvt.render import save_bilingual_ass
 from xvt.subtitles import load_subtitles, save_subtitles
 from xvt.translate import (
+    TranslationBatch,
     TranslationPolicy,
     apply_translations,
     build_translation_batches,
@@ -44,10 +47,16 @@ from xvt.translate import (
 )
 from xvt.translation_provider import (
     TRANSLATION_PROMPT_VERSION,
+    CompatibleProviderConfig,
     ProviderResponseError,
     TranslationProviderError,
     resolve_provider,
     translate_batch,
+)
+
+_RESPONSE_CORRECTION = (
+    "The previous response was invalid. Return every requested id "
+    "exactly once with non-empty translated text."
 )
 
 
@@ -56,6 +65,51 @@ class TranslationRunResult:
     mode: str
     paths: tuple[Path, ...]
     fallback_reason: str | None = None
+
+
+def _translate_batch_with_retries(
+    batch: TranslationBatch,
+    provider_config: CompatibleProviderConfig,
+    *,
+    max_retries: int,
+    on_retry: Callable[[int, float, str], None] | None = None,
+) -> dict[int, str]:
+    transport_retries = 0
+    response_retries = 0
+    request_attempt = 1
+    correction: str | None = None
+    while True:
+        raise_if_cancelled()
+        try:
+            return translate_batch(batch, provider_config, correction=correction)
+        except TranslationProviderError as error:
+            if not error.retryable or transport_retries >= max_retries:
+                raise
+            delay = 30 if transport_retries >= 5 else 2**transport_retries
+            if (
+                error.retry_after is not None
+                and math.isfinite(error.retry_after)
+                and error.retry_after >= 0
+            ):
+                delay = min(error.retry_after, 30)
+            transport_retries += 1
+            request_attempt += 1
+            correction = None
+            if on_retry:
+                on_retry(request_attempt, delay, "provider temporarily unavailable")
+            time.sleep(delay)
+            raise_if_cancelled()
+        except ProviderResponseError:
+            if response_retries >= 1:
+                raise
+            delay = 0.5
+            response_retries += 1
+            request_attempt += 1
+            correction = _RESPONSE_CORRECTION
+            if on_retry:
+                on_retry(request_attempt, delay, "invalid provider response")
+            time.sleep(delay)
+            raise_if_cancelled()
 
 
 def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
@@ -293,7 +347,7 @@ def run_translation(
     model: str | None = None,
     api_key_env: str = "XVT_TRANSLATION_API_KEY",
     batch_size: int = 40,
-    max_retries: int = 2,
+    max_retries: int = DEFAULT_MAX_RETRIES,
     timeout_seconds: float = 60,
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
@@ -418,56 +472,27 @@ def run_translation(
                         batch_total=batch_total,
                     )
                 )
-            for attempt in range(max_retries + 1):
-                try:
-                    if attempt == 0:
-                        translated_batch = translate_batch(batch, provider_config)
-                    else:
-                        translated_batch = translate_batch(
-                            batch,
-                            provider_config,
-                            correction=(
-                                "The previous response was invalid. Return every requested id "
-                                "exactly once with non-empty translated text."
-                            ),
+
+            def emit_retry(attempt: int, delay: float, reason: str) -> None:
+                if event_sink:
+                    event_sink(
+                        create_event(
+                            EventType.TRANSLATION_BATCH_RETRYING,
+                            **job_event_fields(job.id, get_job_file(job)),
+                            batch=batch.id,
+                            batch_total=batch_total,
+                            attempt=attempt,
+                            delay_seconds=delay,
+                            reason=reason,
                         )
-                    break
-                except TranslationProviderError as error:
-                    if not error.retryable or attempt >= max_retries:
-                        raise
-                    delay = (
-                        error.retry_after if error.retry_after is not None else min(2**attempt, 30)
                     )
-                    if event_sink:
-                        event_sink(
-                            create_event(
-                                EventType.TRANSLATION_BATCH_RETRYING,
-                                **job_event_fields(job.id, get_job_file(job)),
-                                batch=batch.id,
-                                batch_total=batch_total,
-                                attempt=attempt + 2,
-                                delay_seconds=delay,
-                                reason="provider temporarily unavailable",
-                            )
-                        )
-                    time.sleep(delay)
-                except (ValueError, ProviderResponseError):
-                    if attempt >= max_retries:
-                        raise
-                    delay = min(0.5 * (2**attempt), 4)
-                    if event_sink:
-                        event_sink(
-                            create_event(
-                                EventType.TRANSLATION_BATCH_RETRYING,
-                                **job_event_fields(job.id, get_job_file(job)),
-                                batch=batch.id,
-                                batch_total=batch_total,
-                                attempt=attempt + 2,
-                                delay_seconds=delay,
-                                reason="invalid provider response",
-                            )
-                        )
-                    time.sleep(delay)
+
+            translated_batch = _translate_batch_with_retries(
+                batch,
+                provider_config,
+                max_retries=max_retries,
+                on_retry=emit_retry,
+            )
             translations.update(translated_batch)
             completed_batches.add(batch.id)
             _write_json(
