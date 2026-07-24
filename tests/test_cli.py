@@ -382,6 +382,20 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(json.loads(output.getvalue())["duration_ms"], 1000)
 
+    def test_root_help_describes_default_path_and_advanced_commands(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        with redirect_stdout(output), redirect_stderr(error_output):
+            with self.assertRaises(SystemExit) as raised:
+                main(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        help_text = output.getvalue() + error_output.getvalue()
+        self.assertIn("run → status → continue", help_text)
+        self.assertIn("recommended path:", help_text)
+        self.assertIn("[advanced]", help_text)
+        self.assertIn("resume ≠ continue", help_text)
+
     def test_status_reads_job_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/input.mp4", directory)

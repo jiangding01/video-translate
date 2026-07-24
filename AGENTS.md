@@ -49,14 +49,17 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 
 ## CLI 语义
 
+默认用户路径是 **`run` → `status` → `continue`**（批处理为 `batch` / `batch-continue`）。`status` 输出 `recovery_plan` 与 `advance_steps`，是中断后的导航入口。
+
 - `xvt run` 创建新 Job。没有 `--target-language` 时停在源字幕；提供目标语言后继续翻译；同时提供 `--burn` 时继续烧录。
 - `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。
+- `xvt status JOB` 展示 stage 与下一步命令（优先看这里，不要猜 resume/continue）。
 - `xvt continue JOB` 读取 `job.config.workflow`，补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。
-- `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue。
-- `xvt translate JOB` 是独立翻译入口。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
+- `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
+- `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
 - Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先运行 `apply-translation` 或 `import-translation`，再运行 `continue`。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。
-- `xvt burn JOB` 是独立烧录入口。本地纯音频 Job 必须通过 `--media` 提供视频。
+- `xvt burn JOB` 是独立烧录入口（advanced）。本地纯音频 Job 必须通过 `--media` 提供视频。烧录成功后登记 `burn_fingerprint` artifact。
 
 不要把 `resume` 和 `continue` 合并。前者恢复转写状态，后者完成用户最初请求的端到端目标。
 

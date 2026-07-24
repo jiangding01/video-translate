@@ -48,16 +48,43 @@ from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 from xvt.workflow_config import get_workflow_config, resolve_target_language
 
+_CLI_EPILOG = """\
+recommended path:
+  xvt run INPUT --output DIR [--target-language LANG] [--burn]
+  xvt status JOB.json
+  xvt continue JOB.json
+
+when status says awaiting Agent input:
+  xvt apply-translation JOB.json RESPONSE --target-language LANG
+  xvt continue JOB.json
+
+batch:
+  xvt batch DIR --output DIR [--target-language LANG]
+  xvt batch-continue BATCH.json
+
+Core commands: run, status, continue, batch, batch-continue, doctor, verify.
+Commands marked [advanced] are atomic repair tools; prefer status → continue
+for end-to-end jobs (resume ≠ continue).
+"""
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xvt",
-        description="Local-first video transcription and subtitle translation",
+        description=(
+            "Local-first video transcription and subtitle translation. "
+            "Default path: run → status → continue."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_CLI_EPILOG,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    inspect_parser = subparsers.add_parser("inspect", help="Inspect local media or a remote URL")
+    inspect_parser = subparsers.add_parser(
+        "inspect",
+        help="[advanced] Inspect local media or a remote URL",
+    )
     inspect_parser.add_argument("input")
     inspect_parser.add_argument("--json", action="store_true")
 
@@ -65,7 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--output")
     doctor_parser.add_argument("--json", action="store_true")
 
-    run_parser = subparsers.add_parser("run", help="Transcribe media or import source subtitles")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Create a job and run the end-to-end workflow (transcribe / translate / burn)",
+    )
     run_parser.add_argument("input")
     run_parser.add_argument("--output", required=True)
     run_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
@@ -156,20 +186,30 @@ def build_parser() -> argparse.ArgumentParser:
     batch_continue_parser.add_argument("batch_file")
     batch_continue_parser.add_argument("--events-jsonl", action="store_true")
 
-    status_parser = subparsers.add_parser("status", help="Read a persisted job file")
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show job stages and the next recovery command (primary navigation)",
+    )
     status_parser.add_argument("job_file")
     status_parser.add_argument("--json", action="store_true")
 
-    verify_parser = subparsers.add_parser("verify", help="Verify persisted job artifacts")
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help="Recompute artifact checksums and report integrity",
+    )
     verify_parser.add_argument("job_file")
     verify_parser.add_argument("--json", action="store_true")
 
-    resume_parser = subparsers.add_parser("resume", help="Resume from valid job checkpoints")
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="[advanced] Resume transcription checkpoints only (not end-to-end goals)",
+    )
     resume_parser.add_argument("job_file")
     resume_parser.add_argument("--events-jsonl", action="store_true")
 
     continue_parser = subparsers.add_parser(
-        "continue", help="Continue a persisted end-to-end workflow goal"
+        "continue",
+        help="Finish a persisted end-to-end goal (translation / burn); use after status",
     )
     continue_parser.add_argument("job_file")
     continue_parser.add_argument("--cookies-from-browser")
@@ -183,7 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     prepare_parser = subparsers.add_parser(
         "prepare-translation",
-        help="Create deterministic translation batches for an agent",
+        help="[advanced] Create deterministic translation batches for an agent",
     )
     prepare_parser.add_argument("job_file")
     prepare_parser.add_argument("--source-language", required=True)
@@ -199,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_parser = subparsers.add_parser(
         "apply-translation",
-        help="Validate translated cue IDs and export translated subtitles",
+        help="Apply Agent translation JSON, then run continue (needed after awaiting_input)",
     )
     apply_parser.add_argument("job_file")
     apply_parser.add_argument("response_file")
@@ -208,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     import_translation_parser = subparsers.add_parser(
         "import-translation",
-        help="Merge an existing translated subtitle file onto source cue timing",
+        help="[advanced] Merge an existing translated subtitle file onto source cue timing",
     )
     import_translation_parser.add_argument("job_file")
     import_translation_parser.add_argument("subtitle_file")
@@ -217,7 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     translate_parser = subparsers.add_parser(
         "translate",
-        help="Translate a job with a compatible API or prepare Agent batches",
+        help="[advanced] Atomic translate entry (prefer run/continue for end-to-end jobs)",
     )
     translate_parser.add_argument("job_file")
     translate_parser.add_argument("--target-language", required=True)
@@ -242,14 +282,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     resegment_parser = subparsers.add_parser(
         "resegment-translation",
-        help="Re-segment overflowing ASR cues and invalidate their translations",
+        help="[advanced] Re-segment overflowing ASR cues and invalidate their translations",
     )
     resegment_parser.add_argument("job_file")
     resegment_parser.add_argument("--events-jsonl", action="store_true")
 
     retranslate_parser = subparsers.add_parser(
         "retranslate-cues",
-        help="Re-translate selected cues without changing their timing",
+        help="[advanced] Re-translate selected cues without changing their timing",
     )
     retranslate_parser.add_argument("job_file")
     retranslate_parser.add_argument(
@@ -272,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_retranslation_parser = subparsers.add_parser(
         "apply-cue-retranslation",
-        help="Apply selected cue translations and re-run subtitle QA",
+        help="[advanced] Apply selected cue translations and re-run subtitle QA",
     )
     apply_retranslation_parser.add_argument("job_file")
     apply_retranslation_parser.add_argument("response_file")
@@ -284,7 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     preview_parser = subparsers.add_parser(
         "preview",
-        help="Render a short bilingual preview without changing the workflow goal",
+        help="[advanced] Render a short bilingual preview without changing the workflow goal",
     )
     preview_parser.add_argument("job_file")
     preview_position = preview_parser.add_mutually_exclusive_group()
@@ -298,7 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser.add_argument("--source-font")
     preview_parser.add_argument("--events-jsonl", action="store_true")
 
-    burn_parser = subparsers.add_parser("burn", help="Burn bilingual ASS into a video")
+    burn_parser = subparsers.add_parser(
+        "burn",
+        help="[advanced] Atomic burn entry (prefer run/continue --burn for end-to-end jobs)",
+    )
     burn_parser.add_argument("job_file")
     burn_parser.add_argument("--media")
     burn_parser.add_argument("--output")
@@ -811,6 +854,9 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 print(f"before: {command}")
             if plan.primary_command:
                 print(f"next: {plan.primary_command}")
+            elif plan.category in {"manual_fix", "awaiting_input"}:
+                # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
+                print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
         return 0
 
     if arguments.command == "verify":

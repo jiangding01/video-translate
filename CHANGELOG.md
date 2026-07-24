@@ -6,6 +6,8 @@
 
 ### Changed
 
+- CLI 默认路径收口：`xvt --help` 增加 recommended path epilog；`run` / `status` / `continue` 文案强调日常导航；`resume`、`translate`、`burn`、`preview`、重分段/局部重译等标为 `[advanced]`（不改命令语义）。README 与 AGENTS 同步「run → status → continue」。
+
 - 烧录派生指纹迁到 artifact：新增 `burn_fingerprint` kind 与 `burn-fingerprint.json`，依赖图挂在 `burned_video` 下；`_record_burn_fingerprint` 写 artifact 并清除 `workflow.burn_fingerprint` 旁路；`_burn_satisfied` / recovery 优先读 checksum 有效的 artifact，旧 Job 仍回退 workflow 字段；`clear_burn_fingerprint` 同时移除 artifact 登记与历史键。
 
 - `status` / recovery 与 continue 共用推进判定：端到端 Job 在源字幕就绪且字幕 QA 未失败时，通过 `plan_advance_steps` 生成恢复建议；`RecoveryPlan` 新增 `advance_steps`（JSON `recovery_plan` 与人类可读 `steps:` 行），烧录路径补上「派生指纹失效」可续跑。原子 Job（无 `config.workflow`）仍走独立 `translate` / `apply-translation` 入口。
