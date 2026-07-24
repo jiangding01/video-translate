@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shlex
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -31,6 +32,17 @@ class RecoveryPlan:
         data = asdict(self)
         data["status_command"] = f"xvt status {shlex.quote(self.job_file)}"
         return data
+
+
+@dataclass(frozen=True, slots=True)
+class SubtitleQaFailureGuidance:
+    """字幕 QA 阻断时的用户面引导（status / continue 共用）。"""
+
+    reason: str
+    message: str
+    report_paths: tuple[str, ...]
+    primary_command: str | None
+    is_needs_review: bool
 
 
 def file_checksum(path: Path) -> str:
@@ -70,6 +82,79 @@ def valid_artifact_path(job: Job, kind: str) -> Path | None:
 def _job_command(command: str, job_file: Path, *arguments: str) -> str:
     parts = ["xvt", command, shlex.quote(str(job_file)), *arguments]
     return " ".join(parts)
+
+
+def _load_qa_report(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _qa_report_has_errors(report: dict[str, Any]) -> bool:
+    if report.get("status") == "failed":
+        return True
+    issues = report.get("issues")
+    if not isinstance(issues, list):
+        return False
+    return any(isinstance(issue, dict) and issue.get("severity") == "error" for issue in issues)
+
+
+def subtitle_qa_failure_guidance(
+    job: Job,
+    job_file: str | Path | None = None,
+) -> SubtitleQaFailureGuidance | None:
+    """当 ``subtitle_qa`` stage 为 failed 时返回恢复引导；否则返回 None。
+
+    ``needs_review``（且无 error 级问题）指向 ``continue --acknowledge-subtitle-review``；
+    error 级失败仍要求修复字幕，不提供 acknowledge 命令。
+    """
+    if job.stages[StageName.SUBTITLE_QA].status is not StageStatus.FAILED:
+        return None
+
+    resolved = (
+        Path(job_file).expanduser().resolve()
+        if job_file is not None
+        else get_job_file(job).resolve()
+    )
+    report_paths: list[str] = []
+    blocking: dict[str, Any] | None = None
+    for kind in ("translated_subtitle_qa", "subtitle_qa"):
+        path = valid_artifact_path(job, kind)
+        if path is None:
+            continue
+        report_paths.append(str(path))
+        if blocking is None:
+            blocking = _load_qa_report(path)
+
+    if blocking is not None and not _qa_report_has_errors(blocking):
+        if blocking.get("status") == "needs_review":
+            command = _job_command(
+                "continue",
+                resolved,
+                "--acknowledge-subtitle-review",
+            )
+            reason = (
+                "字幕 QA 需要人工确认（needs_review）。"
+                "请查看报告后运行确认命令继续；确认不会改写原始 QA 报告。"
+            )
+            return SubtitleQaFailureGuidance(
+                reason=reason,
+                message=f"{reason} 下一步：{command}",
+                report_paths=tuple(report_paths),
+                primary_command=command,
+                is_needs_review=True,
+            )
+
+    reason = "字幕 QA 未通过，需要检查报告并修复字幕后再继续。"
+    return SubtitleQaFailureGuidance(
+        reason=reason,
+        message=reason,
+        report_paths=tuple(report_paths),
+        primary_command=None,
+        is_needs_review=False,
+    )
 
 
 def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
@@ -150,15 +235,13 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
 
     qa_failed = job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED
     if qa_failed:
-        reports = tuple(
-            str(valid_artifacts[kind])
-            for kind in ("translated_subtitle_qa", "subtitle_qa")
-            if kind in valid_artifacts
-        )
+        guidance = subtitle_qa_failure_guidance(job, job_file)
+        assert guidance is not None
         return plan(
             "manual_fix",
-            "字幕 QA 未通过，需要检查报告并修复字幕后再继续。",
-            report_paths=reports,
+            guidance.reason,
+            primary_command=guidance.primary_command,
+            report_paths=guidance.report_paths,
         )
 
     # 端到端 Job：翻译/烧录剩余步骤与 continue 共用 plan_advance_steps。
@@ -250,6 +333,8 @@ def _recovery_for_workflow(
 
     if "translate" in steps or "import_translation" in steps:
         reason = "源字幕有效，可以继续未完成的翻译阶段。"
+    elif "render" in steps:
+        reason = "译文 cue 已就绪，可以补齐字幕渲染产物后继续。"
     elif "burn" in steps:
         reason = _burn_recovery_reason(job, valid_artifacts)
     else:

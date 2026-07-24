@@ -80,7 +80,13 @@ def _complete_qa_stage(
             _set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
             return
     if report.status in {"failed", "needs_review"}:
-        message = f"subtitle QA {report.status}; inspect the QA artifact"
+        if report.status == "needs_review":
+            message = (
+                "subtitle QA needs_review; inspect the QA artifact, then run "
+                "xvt continue <job> --acknowledge-subtitle-review"
+            )
+        else:
+            message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
         _set_stage(
             job,
             StageName.SUBTITLE_QA,
