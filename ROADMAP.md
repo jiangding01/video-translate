@@ -5,7 +5,8 @@
 ## 近期
 
 - ~~完成 CLI 执行生命周期加固：Job/Batch 独占执行、SIGINT/SIGTERM 取消、外部进程组清理和持久化中断状态。~~ 已完成：flock 全生命周期独占锁（Job/batch 自首次持久化持有至终态，含在途 `run` 与 batch 创建期）、进程组清理、命令级信号作用域（SIGTERM 143、二次信号幂等）、协作式取消，均有跨进程测试覆盖。
-- ~~固定桌面端消费的 JSONL 协议版本。~~ 已完成：`EventType` 枚举 + `v=1` 信封 + `docs/EVENTS.md` 契约。Job/artifact 路径安全边界和输出覆盖策略仍待固定。
+- ~~固定桌面端消费的 JSONL 协议版本。~~ 已完成：`EventType` 枚举 + `v=1` 信封 + `docs/EVENTS.md` 契约。
+- ~~Job/artifact 路径安全边界和输出覆盖策略。~~ 已完成：`xvt.paths` 统一校验；烧录/预览可导出到 Job 外，但不得覆盖源媒体、`job.json` 与其他已登记 artifact（同 kind 可重写；含 hardlink/`samefile`）。
 - 上述可靠性门槛通过后，增加可视化校对界面，消费 CLI 的 JSONL 事件和 `job.json`，不复制媒体处理逻辑。
 
 ## 中期

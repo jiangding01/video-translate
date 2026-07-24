@@ -8,9 +8,10 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.errors import UserInputError
 from xvt.job_store import create_job, load_job, save_job
 from xvt.media import MediaInfo
-from xvt.models import Artifact, Cue
+from xvt.models import Artifact, Cue, StageStatus
 from xvt.pipeline import burn_translated_job, preview_translated_job
 from xvt.recovery import file_checksum
 
@@ -188,14 +189,14 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             preview_ass_text = (artifacts / "preview.ass").read_text(encoding="utf-8")
             with (
                 patch("xvt.pipeline.burnin.probe_media", return_value=source_info),
-                self.assertRaisesRegex(ValueError, "existing artifact"),
+                self.assertRaisesRegex(UserInputError, "existing artifact"),
             ):
                 preview_translated_job(job_file, output=burned_path)
             media_alias = root / "media-alias.mp4"
             os.link(burn_media, media_alias)
             with (
                 patch("xvt.pipeline.burnin.probe_media", return_value=source_info),
-                self.assertRaisesRegex(ValueError, "source media"),
+                self.assertRaisesRegex(UserInputError, "source media"),
             ):
                 preview_translated_job(job_file, output=media_alias)
 
@@ -311,6 +312,144 @@ class BurnPreviewPipelineTest(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertIn("output has no audio stream", report["issues"])
         self.assertIn("output dimensions differ from source video", report["issues"])
+
+    def _burn_ready_job(self, root: Path, media: Path):
+        job = create_job(str(media), root)
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir()
+        translated_path = artifacts / "translated-cues.json"
+        translated_path.write_text(
+            json.dumps(
+                [
+                    asdict(
+                        Cue(
+                            1,
+                            0,
+                            1000,
+                            "Hello",
+                            target_text="你好",
+                            source_language="en",
+                            target_language="zh-CN",
+                        )
+                    )
+                ]
+            ),
+            encoding="utf-8",
+        )
+        job.artifacts.append(
+            Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
+        )
+        save_job(job)
+        return job, artifacts
+
+    def test_burn_rejects_output_overwriting_source_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, _artifacts = self._burn_ready_job(root, media)
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            with (
+                patch("xvt.pipeline.burnin.probe_media", return_value=input_info),
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(UserInputError, "source media"),
+            ):
+                burn_translated_job(root / "jobs" / job.id / "job.json", output=media)
+            burn.assert_not_called()
+            persisted = load_job(root / "jobs" / job.id / "job.json")
+            self.assertEqual(persisted.stages["render"].status, StageStatus.PENDING)
+            self.assertEqual(persisted.stages["burn"].status, StageStatus.PENDING)
+
+    def test_burn_rejects_hardlink_output_to_source_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, _artifacts = self._burn_ready_job(root, media)
+            media_alias = root / "media-alias.mp4"
+            os.link(media, media_alias)
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            with (
+                patch("xvt.pipeline.burnin.probe_media", return_value=input_info),
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(UserInputError, "source media"),
+            ):
+                burn_translated_job(root / "jobs" / job.id / "job.json", output=media_alias)
+            burn.assert_not_called()
+
+    def test_burn_rejects_output_overwriting_job_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, _artifacts = self._burn_ready_job(root, media)
+            job_file = root / "jobs" / job.id / "job.json"
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            with (
+                patch("xvt.pipeline.burnin.probe_media", return_value=input_info),
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(UserInputError, "job file"),
+            ):
+                burn_translated_job(job_file, output=job_file)
+            burn.assert_not_called()
+
+    def test_burn_rejects_output_overwriting_existing_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            source_srt = artifacts / "source.srt"
+            source_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+            job.artifacts.append(Artifact("source_srt", str(source_srt), file_checksum(source_srt)))
+            save_job(job)
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            with (
+                patch("xvt.pipeline.burnin.probe_media", return_value=input_info),
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(UserInputError, "existing artifact"),
+            ):
+                burn_translated_job(root / "jobs" / job.id / "job.json", output=source_srt)
+            burn.assert_not_called()
+
+    def test_burn_allows_rewriting_same_burned_video_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            burned = artifacts / "burned.mp4"
+            burned.write_bytes(b"old")
+            job.artifacts.append(Artifact("burned_video", str(burned), file_checksum(burned)))
+            save_job(job)
+            input_info = MediaInfo(
+                str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            output_info = MediaInfo(
+                str(burned), 2000, 10, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+
+            def burn(_media, _subtitles, output, **_kwargs):
+                Path(output).write_bytes(b"new")
+                return Path(output)
+
+            with (
+                patch("xvt.pipeline.burnin.probe_media", side_effect=[input_info, output_info]),
+                patch("xvt.pipeline.burnin.burn_subtitles", side_effect=burn),
+            ):
+                result = burn_translated_job(root / "jobs" / job.id / "job.json", output=burned)
+
+            self.assertEqual(result.read_bytes(), b"new")
+            persisted = load_job(root / "jobs" / job.id / "job.json")
+            self.assertEqual(persisted.stages["media_qa"].status, StageStatus.SUCCEEDED)
 
 
 if __name__ == "__main__":
