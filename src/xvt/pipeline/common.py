@@ -79,6 +79,7 @@ def _set_stage(
     *,
     error: str | None = None,
     error_category: str = "workflow",
+    extras: dict[str, Any] | None = None,
 ) -> None:
     record = job.stages[stage]
     now = utc_now()
@@ -99,6 +100,11 @@ def _set_stage(
         }
         if status == StageStatus.FAILED and error is not None:
             payload.update(error_event_fields(error_category, error))
+        if extras:
+            # 不允许覆盖 stage 信封核心字段，避免调用方误伤事件契约。
+            for key, value in extras.items():
+                if key not in {"job_id", "job_file", "stage", "status", "error"}:
+                    payload[key] = value
         event_sink(create_event(event_type, **payload))
 
 

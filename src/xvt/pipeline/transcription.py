@@ -181,7 +181,13 @@ def _process_acquired_media(
         _add_artifact(job, "source_cues", cues_path, event_sink)
 
         current_stage = StageName.SUBTITLE_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "source"},
+        )
         report = check_subtitles(
             cues,
             media_duration_ms=media_info.duration_ms,
@@ -194,19 +200,26 @@ def _process_acquired_media(
         _complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "source"},
+        )
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
         _add_artifact(job, "source_srt", subtitle_path, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
     except Exception as error:
-        _set_stage(
-            job,
-            current_stage,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=_error_category(error),
-        )
+        if job.stages[current_stage].status is not StageStatus.FAILED:
+            _set_stage(
+                job,
+                current_stage,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=_error_category(error),
+            )
         raise
 
     if event_sink and emit_job_completed:
@@ -311,7 +324,13 @@ def _finish_subtitle_job(
 
     current_stage = StageName.SUBTITLE_QA
     try:
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "source"},
+        )
         report = check_subtitles(cues)
         qa_path = artifacts_directory / "qa.json"
         _write_json(qa_path, asdict(report))
@@ -319,7 +338,13 @@ def _finish_subtitle_job(
         _complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "source"},
+        )
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
         _add_artifact(job, "source_srt", subtitle_path, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
@@ -549,7 +574,13 @@ def _acquire_remote_job(
             )
         selected_language = manual_language or automatic_language
         if selected_language:
-            _set_stage(job, StageName.ACQUIRE, StageStatus.RUNNING, event_sink)
+            _set_stage(
+                job,
+                StageName.ACQUIRE,
+                StageStatus.RUNNING,
+                event_sink,
+                extras={"detail": "subtitles"},
+            )
             selected_subtitles = download_remote_subtitles(
                 url,
                 get_job_directory(job) / "input" / "subtitles",
@@ -578,7 +609,13 @@ def _acquire_remote_job(
     if source is None and download_for_burn:
         source = valid_artifact_path(job, "downloaded_media")
     if needs_audio or download_for_burn:
-        _set_stage(job, StageName.ACQUIRE, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            StageName.ACQUIRE,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "media"},
+        )
         if source is None:
             source = download_remote_media(
                 url,
@@ -753,7 +790,13 @@ def _finish_resumed_source(
     _write_json(cues_path, [asdict(cue) for cue in cues])
     _add_artifact(job, "source_cues", cues_path, event_sink)
 
-    _set_stage(job, StageName.SUBTITLE_QA, StageStatus.RUNNING, event_sink)
+    _set_stage(
+        job,
+        StageName.SUBTITLE_QA,
+        StageStatus.RUNNING,
+        event_sink,
+        extras={"detail": "source"},
+    )
     report = check_subtitles(
         cues,
         media_duration_ms=media_info.duration_ms,
@@ -765,7 +808,13 @@ def _finish_resumed_source(
     _add_artifact(job, "subtitle_qa", qa_path, event_sink)
     _complete_qa_stage(job, report, event_sink)
 
-    _set_stage(job, StageName.RENDER, StageStatus.RUNNING, event_sink)
+    _set_stage(
+        job,
+        StageName.RENDER,
+        StageStatus.RUNNING,
+        event_sink,
+        extras={"detail": "source"},
+    )
     subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
     _add_artifact(job, "source_srt", subtitle_path, event_sink)
     _set_stage(job, StageName.RENDER, StageStatus.SUCCEEDED, event_sink)

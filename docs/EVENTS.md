@@ -103,6 +103,7 @@ stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射�
 | `job_file` | string | Job 文件路径 |
 | `stage` | string | stage 名（`StageName` 值） |
 | `status` | string | stage 状态（`StageStatus` 值） |
+| `detail` | string? | 可选人类可读细分，如 `acquire` 的 `subtitles`/`media`，或 QA/渲染的 `source`/`translated` |
 | `error` | object? | 仅 `stage_failed` 且记录了失败信息时存在，`{category, message}` |
 
 ## artifact 登记

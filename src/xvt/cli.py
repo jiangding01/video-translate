@@ -27,6 +27,7 @@ from xvt.errors import ExitCode, XvtError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import get_job_file, load_job
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
+from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import (
     acknowledge_subtitle_review,
     apply_agent_translation,
@@ -43,7 +44,12 @@ from xvt.pipeline import (
     run_translation,
 )
 from xvt.process import CommandCancelled, CommandError
-from xvt.recovery import RecoveryPlan, build_recovery_plan, verify_job
+from xvt.recovery import (
+    RecoveryPlan,
+    build_recovery_plan,
+    subtitle_qa_failure_guidance,
+    verify_job,
+)
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 from xvt.workflow_config import get_workflow_config, resolve_target_language
@@ -373,6 +379,47 @@ _STAGE_LABELS = {
     "media_qa": "检查输出视频",
 }
 
+# 转写入口会提前标记为 skipped、稍后由 workflow 再激活；人类进度不必逐条刷出。
+_SILENT_PLAN_SKIPS = frozenset({"translate", "burn", "media_qa"})
+
+_VIDEO_ARTIFACT_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov"}
+_SUBTITLE_ARTIFACT_SUFFIXES = {".srt", ".ass", ".vtt"}
+
+
+def _stage_display_label(
+    stage: str,
+    *,
+    detail: object = None,
+    translated_context: bool = False,
+) -> str:
+    if stage == "acquire":
+        if detail == "subtitles":
+            return "下载平台字幕"
+        if detail == "media":
+            return "下载源视频"
+        return "获取素材"
+    if stage == "subtitle_qa":
+        if detail == "translated" or (detail is None and translated_context):
+            return "检查译文字幕"
+        if detail == "source":
+            return "检查源字幕"
+        return "检查字幕"
+    if stage == "render":
+        if detail == "translated" or (detail is None and translated_context):
+            return "生成译文字幕文件"
+        if detail == "source":
+            return "生成源字幕文件"
+        return "生成字幕文件"
+    return _STAGE_LABELS.get(stage, stage)
+
+
+def _format_stage_status_for_display(job: Job, stage_name: str, status: StageStatus) -> str:
+    if stage_name == StageName.SUBTITLE_QA.value and status is StageStatus.FAILED:
+        guidance = subtitle_qa_failure_guidance(job)
+        if guidance is not None and guidance.is_needs_review:
+            return "needs_review"
+    return status.value
+
 
 def _format_duration(seconds: object) -> str | None:
     try:
@@ -454,6 +501,10 @@ class _HumanEventSink(_TrackedEventSink):
         self.is_tty = self.stream.isatty()
         self._progress_active = False
         self._last_progress_at: dict[str, float] = {}
+        self._pending_skips: list[str] = []
+        self._last_failed_stage: str | None = None
+        self._workflow_started_at: float | None = None
+        self._seen_translation = False
 
     def _clear_progress(self) -> None:
         if self.is_tty and self._progress_active:
@@ -477,10 +528,18 @@ class _HumanEventSink(_TrackedEventSink):
         else:
             self._line(message)
 
+    def _flush_pending_skips(self) -> None:
+        if not self._pending_skips:
+            return
+        labels = list(dict.fromkeys(self._pending_skips))
+        self._pending_skips.clear()
+        self._line(f"[跳过] {'、'.join(labels)}")
+
     def __call__(self, event: Event) -> None:
         self._track(event)
         data = event.data
         if event.type == EventType.WORKFLOW_STARTED:
+            self._workflow_started_at = monotonic()
             message = "XVT 正在继续任务" if data.get("continuation") else "XVT 开始处理任务"
             self._line(message)
         elif event.type in {EventType.JOB_STARTED, EventType.JOB_RESUMED}:
@@ -498,16 +557,37 @@ class _HumanEventSink(_TrackedEventSink):
         elif event.type == EventType.TRANSCRIPTION_PROGRESS:
             self._render_transcription(data)
         elif event.type == EventType.TRANSLATION_BATCH_STARTED:
+            self._seen_translation = True
+            self._flush_pending_skips()
+            self._last_failed_stage = None
             self._line(f"[进行中] 翻译字幕（批次 {_format_batch_position(data)}）")
         elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
+            self._seen_translation = True
+            self._flush_pending_skips()
             reason = data.get("reason")
             reason_label = _TRANSLATION_RETRY_REASON_LABELS.get(str(reason), reason)
-            reason_suffix = f"，原因：{reason_label}" if reason else ""
-            self._line(f"[重试] 翻译字幕（批次 {_format_batch_position(data)}{reason_suffix}）")
+            parts = [f"批次 {_format_batch_position(data)}"]
+            attempt = data.get("attempt")
+            if isinstance(attempt, int) and attempt > 0:
+                parts.append(f"第 {attempt} 次尝试")
+            delay = data.get("delay_seconds")
+            if isinstance(delay, int | float) and delay > 0:
+                parts.append(f"等待 {delay:g}s")
+            if reason_label:
+                parts.append(f"原因：{reason_label}")
+            self._line(f"[重试] 翻译字幕（{'，'.join(parts)}）")
         elif event.type == EventType.WORKFLOW_WAITING:
+            self._flush_pending_skips()
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
         elif event.type == EventType.WORKFLOW_COMPLETED:
-            self._line("任务处理完成")
+            self._flush_pending_skips()
+            elapsed = None
+            if self._workflow_started_at is not None:
+                elapsed = _format_duration(monotonic() - self._workflow_started_at)
+            if elapsed:
+                self._line(f"任务处理完成（耗时 {elapsed}）")
+            else:
+                self._line("任务处理完成")
         elif event.type == EventType.BATCH_STARTED:
             self._line(f"批处理开始：共 {data.get('total')} 个文件")
             if data.get("batch_file"):
@@ -547,17 +627,35 @@ class _HumanEventSink(_TrackedEventSink):
         stage = event.data.get("stage")
         if not isinstance(stage, str):
             return
-        label = _STAGE_LABELS.get(stage, stage)
         status = event.data.get("status")
+        detail = event.data.get("detail")
+        if stage == "translate" and status in {"running", "succeeded", "awaiting_input"}:
+            self._seen_translation = True
+        label = _stage_display_label(
+            stage,
+            detail=detail,
+            translated_context=self._seen_translation,
+        )
+
+        if status == "skipped":
+            if stage in _SILENT_PLAN_SKIPS:
+                return
+            self._pending_skips.append(label)
+            return
+
+        self._flush_pending_skips()
         if event.type == EventType.STAGE_STARTED:
+            self._last_failed_stage = None
             self._line(f"[进行中] {label}")
         elif event.type == EventType.STAGE_FAILED:
+            if self._last_failed_stage == stage:
+                return
+            self._last_failed_stage = stage
             self._line(f"[失败] {label}")
-        elif status == "skipped":
-            self._line(f"[跳过] {label}")
         elif status == "awaiting_input":
             self._line(f"[等待] {label}")
         else:
+            self._last_failed_stage = None
             self._line(f"[完成] {label}")
 
     def _render_batch_recovery(self, data: dict[str, object]) -> None:
@@ -636,9 +734,10 @@ class _HumanEventSink(_TrackedEventSink):
 
     def report_failure(self, message: str, plan: RecoveryPlan | None = None) -> None:
         self._clear_progress()
+        self._flush_pending_skips()
         self._line(f"任务失败：{message}")
         if self.current_stage:
-            self._line(f"失败阶段：{_STAGE_LABELS.get(self.current_stage, self.current_stage)}")
+            self._line(f"失败阶段：{_stage_display_label(self.current_stage)}")
         if self.job_file:
             self._line(f"任务文件: {self.job_file}")
             self._render_recovery(plan)
@@ -650,9 +749,10 @@ class _HumanEventSink(_TrackedEventSink):
 
     def report_interruption(self, plan: RecoveryPlan | None = None) -> None:
         self._clear_progress()
+        self._flush_pending_skips()
         self._line("任务已中断")
         if self.current_stage:
-            self._line(f"失败阶段：{_STAGE_LABELS.get(self.current_stage, self.current_stage)}")
+            self._line(f"失败阶段：{_stage_display_label(self.current_stage)}")
         if self.job_file:
             self._line(f"任务文件: {self.job_file}")
             self._render_recovery(plan)
@@ -715,6 +815,46 @@ def _print_batch_result(result: BatchResult) -> None:
     )
     if result.status != "completed":
         print(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
+
+
+def _print_workflow_result(result: object) -> None:
+    """stdout 交付物摘要：Job → 视频 → 字幕 → 其他，避免扁平路径列表难读。"""
+
+    job_file = getattr(result, "job_file", None)
+    artifacts = tuple(getattr(result, "artifacts", ()) or ())
+    message = getattr(result, "message", None)
+    status = getattr(result, "status", None)
+    if job_file is not None:
+        print(job_file)
+    videos: list[Path] = []
+    subtitles: list[Path] = []
+    others: list[Path] = []
+    for item in artifacts:
+        path = Path(item)
+        suffix = path.suffix.lower()
+        name = path.name.lower()
+        if "preview" in name:
+            continue
+        if suffix in _VIDEO_ARTIFACT_SUFFIXES:
+            videos.append(path)
+        elif suffix in _SUBTITLE_ARTIFACT_SUFFIXES:
+            subtitles.append(path)
+        else:
+            others.append(path)
+    if videos:
+        print("视频:")
+        for path in videos:
+            print(f"  {path}")
+    if subtitles:
+        print("字幕:")
+        for path in subtitles:
+            print(f"  {path}")
+    if others:
+        print("其他:")
+        for path in others:
+            print(f"  {path}")
+    if status == "awaiting_input" and message:
+        print(f"translation is awaiting input: {message}")
 
 
 def _run_command(arguments: argparse.Namespace) -> int:
@@ -781,11 +921,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 artifacts=[str(path) for path in result.artifacts],
             )
         elif not arguments.events_jsonl:
-            print(result.job_file)
-            for path in result.artifacts:
-                print(path)
-            if result.status == "awaiting_input":
-                print(f"translation is awaiting input: {result.message}")
+            _print_workflow_result(result)
         return 0
 
     if arguments.command == "batch":
@@ -843,7 +979,10 @@ def _run_command(arguments: argparse.Namespace) -> int:
             data["recovery_plan"] = plan.to_dict()
             _print_json(data)
         else:
-            stages = ", ".join(f"{name}={record.status}" for name, record in job.stages.items())
+            stages = ", ".join(
+                f"{name}={_format_stage_status_for_display(job, name, record.status)}"
+                for name, record in job.stages.items()
+            )
             print(f"{job.id}: {stages}")
             print(f"recovery: {plan.category} - {plan.reason}")
             if plan.advance_steps:
@@ -897,11 +1036,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 artifacts=[str(path) for path in result.artifacts],
             )
         elif not arguments.events_jsonl:
-            print(result.job_file)
-            for path in result.artifacts:
-                print(path)
-            if result.status == "awaiting_input":
-                print(f"translation is awaiting input: {result.message}")
+            _print_workflow_result(result)
         return 0
 
     if arguments.command == "prepare-translation":
