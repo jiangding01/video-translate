@@ -27,6 +27,7 @@ from xvt.job_store import get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Word
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
+from xvt.workflow_config import clear_burn_fingerprint
 
 
 def inspect_input(input_value: str) -> dict[str, Any]:
@@ -165,9 +166,7 @@ def _invalidate_rendered_artifacts(job: Job) -> None:
     job.artifacts = [
         artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
     ]
-    workflow = job.config.get("workflow")
-    if isinstance(workflow, dict):
-        workflow.pop("burn_fingerprint", None)
+    clear_burn_fingerprint(job)
     for stage in (StageName.SUBTITLE_QA, StageName.RENDER, StageName.BURN, StageName.MEDIA_QA):
         record = job.stages[stage]
         record.status = StageStatus.PENDING

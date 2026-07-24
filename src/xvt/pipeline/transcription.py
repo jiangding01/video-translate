@@ -51,6 +51,7 @@ from xvt.stages import (
 )
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS, load_subtitles, save_subtitles
 from xvt.transcribe import transcribe_audio
+from xvt.workflow_config import get_workflow_config
 
 
 def _process_acquired_media(
@@ -569,8 +570,8 @@ def _acquire_remote_job(
                     )
                 )
 
-    workflow = job.config.get("workflow")
-    download_for_burn = bool(isinstance(workflow, dict) and workflow.get("burn"))
+    workflow = get_workflow_config(job)
+    download_for_burn = bool(workflow is not None and workflow.burn)
     needs_audio = not selected_subtitles or bool(job.config.get("align_subtitles"))
     needs_audio = needs_audio or remote_info.duration_ms <= 0
     source = valid_artifact_path(job, "source_video" if download_for_burn else "downloaded_media")

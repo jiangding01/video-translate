@@ -30,6 +30,7 @@ from xvt.pipeline.common import (
 )
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
+from xvt.workflow_config import get_workflow_config
 
 
 def preview_translated_job(
@@ -65,21 +66,22 @@ def preview_translated_job(
     if qa_data.get("status") not in {"pass", "warning"}:
         raise RuntimeError("translated subtitle QA must pass before preview")
 
-    workflow_config = job.config.get("workflow")
-    workflow_config = workflow_config if isinstance(workflow_config, dict) else {}
+    workflow_config = get_workflow_config(job)
     if hardware_encoding is None:
-        hardware_encoding = bool(
-            workflow_config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)
+        hardware_encoding = (
+            workflow_config.hardware_encoding
+            if workflow_config is not None
+            else DEFAULT_HARDWARE_ENCODING
         )
-    if target_font is None and isinstance(workflow_config.get("target_font"), str):
-        target_font = workflow_config["target_font"]
-    if source_font is None and isinstance(workflow_config.get("source_font"), str):
-        source_font = workflow_config["source_font"]
+    if target_font is None and workflow_config is not None:
+        target_font = workflow_config.target_font
+    if source_font is None and workflow_config is not None:
+        source_font = workflow_config.source_font
 
-    configured_media = workflow_config.get("burn_media")
+    configured_media = workflow_config.burn_media if workflow_config is not None else None
     if media is not None:
         media_path = Path(media).expanduser()
-    elif isinstance(configured_media, str) and configured_media:
+    elif configured_media:
         media_path = Path(configured_media).expanduser()
     else:
         parsed = urlparse(job.input)

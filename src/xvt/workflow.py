@@ -32,7 +32,16 @@ from xvt.pipeline import (
 )
 from xvt.recovery import valid_artifact_path
 from xvt.segment import SEGMENTATION_PRESETS
-from xvt.translate import TranslationPolicy, load_translation_policy, translation_policy_from_dict
+from xvt.translate import TranslationPolicy, load_translation_policy
+from xvt.workflow_config import WorkflowConfig, require_workflow_config
+
+
+def _translation_policy(config: WorkflowConfig) -> TranslationPolicy:
+    """缺失策略快照时与历史行为一致，回退为默认 TranslationPolicy。"""
+
+    if config.translation_policy is not None:
+        return config.translation_policy
+    return TranslationPolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,40 +119,40 @@ class WorkflowOptions:
         if self.segmentation_preset not in SEGMENTATION_PRESETS:
             raise ValueError("--segmentation-preset must be conservative, balanced, or compact")
 
-    def persisted_config(self, policy: TranslationPolicy | None = None) -> dict[str, object]:
-        requested_outputs = []
+    def persisted_config(self, policy: TranslationPolicy | None = None) -> WorkflowConfig:
+        requested_outputs: list[str] = []
         if self.target_language:
             requested_outputs.extend(["translated_subtitles", "bilingual_subtitles"])
         if self.burn:
             requested_outputs.append("burned_video")
-        return {
-            "target_language": self.target_language,
-            "requested_outputs": requested_outputs,
-            "translation_subtitles": (
+        return WorkflowConfig(
+            target_language=self.target_language,
+            requested_outputs=tuple(requested_outputs),
+            translation_subtitles=(
                 str(Path(self.translation_subtitles).expanduser().resolve())
                 if self.translation_subtitles
                 else None
             ),
-            "provider": self.provider,
-            "base_url": self.base_url,
-            "model": self.model,
-            "api_key_env": self.api_key_env,
-            "batch_size": self.batch_size,
-            "max_retries": self.max_retries,
-            "timeout_seconds": self.timeout_seconds,
-            "translation_policy": policy.to_dict() if policy else None,
-            "segmentation_preset": self.segmentation_preset,
-            "burn": self.burn,
-            "burn_media": (
+            provider=self.provider,
+            base_url=self.base_url,
+            model=self.model,
+            api_key_env=self.api_key_env,
+            batch_size=self.batch_size,
+            max_retries=self.max_retries,
+            timeout_seconds=self.timeout_seconds,
+            translation_policy=policy,
+            segmentation_preset=self.segmentation_preset,
+            burn=self.burn,
+            burn_media=(
                 str(Path(self.burn_media).expanduser().resolve()) if self.burn_media else None
             ),
-            "burn_output": (
+            burn_output=(
                 str(Path(self.burn_output).expanduser().resolve()) if self.burn_output else None
             ),
-            "hardware_encoding": self.hardware_encoding,
-            "target_font": self.target_font,
-            "source_font": self.source_font,
-        }
+            hardware_encoding=self.hardware_encoding,
+            target_font=self.target_font,
+            source_font=self.source_font,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,12 +172,12 @@ def _artifact_checksum(job: Job, kind: str) -> str | None:
     return artifact.checksum if artifact else None
 
 
-def _burn_fingerprint(job: Job, config: dict[str, object]) -> str | None:
+def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
     translated_checksum = _artifact_checksum(job, "translated_cues")
     if not translated_checksum:
         return None
 
-    media_value = config.get("burn_media") or job.input
+    media_value = config.burn_media or job.input
     parsed = urlparse(str(media_value))
     if parsed.scheme in {"http", "https"} and parsed.hostname:
         media_identity: object = _artifact_checksum(job, "source_video") or str(media_value)
@@ -185,9 +194,9 @@ def _burn_fingerprint(job: Job, config: dict[str, object]) -> str | None:
     payload = {
         "translated_cues_checksum": translated_checksum,
         "media": media_identity,
-        "hardware_encoding": config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING),
-        "target_font": config.get("target_font"),
-        "source_font": config.get("source_font"),
+        "hardware_encoding": config.hardware_encoding,
+        "target_font": config.target_font,
+        "source_font": config.source_font,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -196,13 +205,19 @@ def _burn_fingerprint(job: Job, config: dict[str, object]) -> str | None:
 
 def _record_burn_fingerprint(job_file: Path) -> None:
     job = load_job(job_file)
-    config = job.config.get("workflow")
-    if not isinstance(config, dict):
+    try:
+        config = require_workflow_config(job)
+    except ValueError:
         return
     fingerprint = _burn_fingerprint(job, config)
-    if fingerprint:
-        config["burn_fingerprint"] = fingerprint
-        save_job(job)
+    if not fingerprint:
+        return
+    # 只写入指纹键，保留 workflow 上其余字段（含未知扩展）的原有形状。
+    raw = job.config.get("workflow")
+    if not isinstance(raw, dict):
+        return
+    raw["burn_fingerprint"] = fingerprint
+    save_job(job)
 
 
 def _current_artifacts(job: Job, *, waiting: bool = False) -> tuple[Path, ...]:
@@ -223,7 +238,7 @@ def _current_artifacts(job: Job, *, waiting: bool = False) -> tuple[Path, ...]:
 def _advance_workflow(
     path: Path,
     *,
-    config: dict[str, object] | None = None,
+    config: WorkflowConfig | None = None,
     cookies_from_browser: str | None,
     proxy: str | None,
     event_sink: EventSink | None,
@@ -236,14 +251,9 @@ def _advance_workflow(
     """
     job = load_job(path)
     if config is None:
-        persisted = job.config.get("workflow")
-        if not isinstance(persisted, dict):
-            raise ValueError("job has no persisted workflow goal; use the atomic resume command")
-        config = persisted
-    target_language = config.get("target_language")
-    if target_language is not None and not isinstance(target_language, str):
-        raise ValueError("persisted workflow target_language is invalid")
-    policy = translation_policy_from_dict(config.get("translation_policy"))
+        config = require_workflow_config(job)
+    target_language = config.target_language
+    policy = _translation_policy(config)
 
     if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:
         raise RuntimeError("subtitle QA failed; inspect and repair subtitles before continuing")
@@ -263,11 +273,10 @@ def _advance_workflow(
                 )
             return WorkflowResult("awaiting_input", path, artifacts, message)
 
-        translation_subtitles = config.get("translation_subtitles")
-        if translation_subtitles:
+        if config.translation_subtitles:
             apply_subtitle_translation(
                 path,
-                str(translation_subtitles),
+                config.translation_subtitles,
                 target_language=target_language,
                 event_sink=event_sink,
             )
@@ -275,13 +284,13 @@ def _advance_workflow(
             translation = run_translation(
                 path,
                 target_language=target_language,
-                provider=str(config.get("provider", DEFAULT_PROVIDER)),
-                base_url=str(config["base_url"]) if config.get("base_url") else None,
-                model=str(config["model"]) if config.get("model") else None,
-                api_key_env=str(config.get("api_key_env", DEFAULT_API_KEY_ENV)),
-                batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
-                max_retries=int(config.get("max_retries", DEFAULT_MAX_RETRIES)),
-                timeout_seconds=float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
+                provider=config.provider,
+                base_url=config.base_url,
+                model=config.model,
+                api_key_env=config.api_key_env,
+                batch_size=config.batch_size,
+                max_retries=config.max_retries,
+                timeout_seconds=config.timeout_seconds,
                 policy=policy,
                 event_sink=event_sink,
             )
@@ -299,24 +308,20 @@ def _advance_workflow(
                 return WorkflowResult("awaiting_input", path, translation.paths, message)
         job = load_job(path)
 
-    if config.get("burn"):
+    if config.burn:
         burned = valid_artifact_path(job, "burned_video")
         expected_fingerprint = _burn_fingerprint(job, config)
         media_qa_succeeded = job.stages[StageName.MEDIA_QA].status is StageStatus.SUCCEEDED
-        if (
-            not burned
-            or not media_qa_succeeded
-            or config.get("burn_fingerprint") != expected_fingerprint
-        ):
+        if not burned or not media_qa_succeeded or config.burn_fingerprint != expected_fingerprint:
             burn_translated_job(
                 path,
-                media=str(config["burn_media"]) if config.get("burn_media") else None,
-                output=str(config["burn_output"]) if config.get("burn_output") else None,
-                hardware_encoding=bool(config.get("hardware_encoding", DEFAULT_HARDWARE_ENCODING)),
+                media=config.burn_media,
+                output=config.burn_output,
+                hardware_encoding=config.hardware_encoding,
                 cookies_from_browser=cookies_from_browser or job.config.get("cookies_from_browser"),
                 proxy=proxy,
-                target_font=str(config["target_font"]) if config.get("target_font") else None,
-                source_font=str(config["source_font"]) if config.get("source_font") else None,
+                target_font=config.target_font,
+                source_font=config.source_font,
                 event_sink=event_sink,
             )
             _record_burn_fingerprint(path)
@@ -356,6 +361,7 @@ def run_workflow(
 
     job_file: Path | None = None
     job_id: str | None = None
+    workflow_config = options.persisted_config(policy)
     try:
         job = run_transcription(
             options.input,
@@ -372,7 +378,7 @@ def run_workflow(
             youtube_subtitles=options.youtube_subtitles,
             subtitle_language=options.subtitle_language,
             allow_auto_subtitles=options.allow_auto_subtitles,
-            workflow_config=options.persisted_config(policy),
+            workflow_config=workflow_config.to_dict(),
             event_sink=event_sink,
             emit_job_completed=not options.target_language,
         )
@@ -380,7 +386,7 @@ def run_workflow(
         job_id = job.id
         return _advance_workflow(
             job_file,
-            config=options.persisted_config(policy),
+            config=workflow_config,
             cookies_from_browser=options.cookies_from_browser,
             proxy=options.proxy,
             event_sink=event_sink,
@@ -406,9 +412,7 @@ def continue_workflow(
 ) -> WorkflowResult:
     path = Path(job_file).expanduser().resolve()
     job = load_job(path)
-    config = job.config.get("workflow")
-    if not isinstance(config, dict):
-        raise ValueError("job has no persisted workflow goal; use the atomic resume command")
+    require_workflow_config(job)
 
     if event_sink:
         event_sink(

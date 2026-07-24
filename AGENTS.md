@@ -26,6 +26,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/cli.py` | 参数定义、命令路由、普通输出和 JSONL 终态 |
 | `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复 |
 | `src/xvt/workflow.py` | 端到端目标编排、`continue`、Agent 等待和烧录派生指纹 |
+| `src/xvt/workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与读写边界 |
 | `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 确认通道）、`transcription`（转写与恢复）、`translation`（翻译与收尾）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
