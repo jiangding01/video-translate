@@ -24,13 +24,14 @@ from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
     apply_subtitle_translation,
     burn_translated_job,
+    complete_translated_outputs,
     is_subtitle_input,
     resume_job,
     resume_remote_transcription,
     run_transcription,
     run_translation,
 )
-from xvt.recovery import file_checksum, valid_artifact_path
+from xvt.recovery import file_checksum, subtitle_qa_failure_guidance, valid_artifact_path
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.translate import TranslationPolicy, load_translation_policy
 from xvt.workflow_config import (
@@ -289,7 +290,13 @@ def workflow_goals(config: WorkflowConfig) -> WorkflowGoals:
 
 
 def _translation_satisfied(job: Job) -> bool:
-    return valid_artifact_path(job, "translated_cues") is not None
+    """译文目标完成：cue 与用户可见的译文字幕文件均 checksum 有效。"""
+
+    return (
+        valid_artifact_path(job, "translated_cues") is not None
+        and valid_artifact_path(job, "translated_srt") is not None
+        and valid_artifact_path(job, "bilingual_srt") is not None
+    )
 
 
 def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
@@ -307,7 +314,8 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
 
     返回值为有序步骤名：
     - ``await_agent_translation``：已进入 Agent 等待，调用方应停止并提示回填
-    - ``import_translation`` / ``translate``：补齐译文
+    - ``import_translation`` / ``translate``：补齐译文 cue
+    - ``render``：已有译文 cue，补齐 SRT/ASS 渲染产物
     - ``burn``：补齐或重做烧录
 
     空元组表示翻译/烧录目标已满足（转写腿由 continue 在进入本函数前处理）。
@@ -316,9 +324,12 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
     goals = workflow_goals(config)
     steps: list[str] = []
     if goals.needs_translation and not _translation_satisfied(job):
-        if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+        if valid_artifact_path(job, "translated_cues") is not None:
+            steps.append("render")
+        elif job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
             return ("await_agent_translation",)
-        steps.append("import_translation" if config.translation_subtitles else "translate")
+        else:
+            steps.append("import_translation" if config.translation_subtitles else "translate")
     if goals.needs_burn and not _burn_satisfied(job, config):
         steps.append("burn")
     return tuple(steps)
@@ -367,6 +378,12 @@ def _ensure_translation(
     target_language = config.target_language
     if not target_language:
         return None
+
+    # cues 已落盘但缺 SRT：只补 QA+渲染，禁止再次调用翻译 API。
+    if valid_artifact_path(job, "translated_cues") is not None:
+        complete_translated_outputs(path, event_sink=event_sink)
+        return None
+
     if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
         return _emit_waiting(
             job=job,
@@ -455,14 +472,16 @@ def _advance_workflow(
         config = require_workflow_config(job)
     goals = workflow_goals(config)
 
-    if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:
-        raise RuntimeError("subtitle QA failed; inspect and repair subtitles before continuing")
+    guidance = subtitle_qa_failure_guidance(job, path)
+    if guidance is not None:
+        raise RuntimeError(guidance.message)
 
     # 与 plan_advance_steps 一致：Agent 等待是终态快照，不得继续烧录。
     if (
         goals.needs_translation
         and not _translation_satisfied(job)
         and job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+        and valid_artifact_path(job, "translated_cues") is None
     ):
         return _emit_waiting(
             job=job,

@@ -102,8 +102,43 @@ def _finalize_translation(
         invalidate(job)
         _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+    except Exception as error:
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=_error_category(error),
+        )
+        raise
+    # QA/渲染失败由 _qa_and_render_translation 记账，勿回写 TRANSLATE=failed。
+    return _qa_and_render_translation(job, translated, event_sink)
 
-        current_stage = StageName.SUBTITLE_QA
+
+def complete_translated_outputs(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, ...]:
+    """从已有 ``translated_cues`` 补跑译文 QA 与渲染，不调用翻译 API、不重写 cue。
+
+    用于 ``needs_review`` 确认后的 continue：cues 已落盘但 SRT/ASS 尚未写出的断点。
+    """
+    job = load_job(job_file)
+    translated = _load_cues(_artifact_path(job, "translated_cues"))
+    return _qa_and_render_translation(job, translated, event_sink)
+
+
+def _qa_and_render_translation(
+    job: Job,
+    translated: list[Cue],
+    event_sink: EventSink | None,
+) -> tuple[Path, ...]:
+    """译文 QA → 渲染；失败时持久化当前 stage。"""
+    current_stage = StageName.SUBTITLE_QA
+    try:
+        artifacts_directory = get_job_directory(job) / "artifacts"
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
         media_data = _media_data(job)
         report = check_subtitles(

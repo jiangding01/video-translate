@@ -386,7 +386,14 @@ class WorkflowTest(unittest.TestCase):
             ):
                 valid.side_effect = lambda _job, kind: (
                     Path(f"/tmp/{kind}.json")
-                    if kind in {"source_cues", "source_srt", "translated_cues"}
+                    if kind
+                    in {
+                        "source_cues",
+                        "source_srt",
+                        "translated_cues",
+                        "translated_srt",
+                        "bilingual_srt",
+                    }
                     else None
                 )
                 result = continue_workflow(get_job_file(job))
@@ -416,7 +423,15 @@ class WorkflowTest(unittest.TestCase):
             ):
                 valid.side_effect = lambda _job, kind: (
                     Path(f"/tmp/{kind}")
-                    if kind in {"source_cues", "source_srt", "translated_cues", "burned_video"}
+                    if kind
+                    in {
+                        "source_cues",
+                        "source_srt",
+                        "translated_cues",
+                        "translated_srt",
+                        "bilingual_srt",
+                        "burned_video",
+                    }
                     else None
                 )
                 result = continue_workflow(get_job_file(job))
@@ -450,13 +465,126 @@ class WorkflowTest(unittest.TestCase):
             ):
                 valid.side_effect = lambda _job, kind: (
                     Path(f"/tmp/{kind}")
-                    if kind in {"source_cues", "source_srt", "translated_cues", "burned_video"}
+                    if kind
+                    in {
+                        "source_cues",
+                        "source_srt",
+                        "translated_cues",
+                        "translated_srt",
+                        "bilingual_srt",
+                        "burned_video",
+                    }
                     else None
                 )
                 result = continue_workflow(get_job_file(job))
 
         self.assertEqual(result.status, "completed")
         burn.assert_called_once()
+
+    def test_continue_renders_srt_from_cues_after_review_without_retranslating(self) -> None:
+        """译文 QA needs_review 阻断后：acknowledge + continue 必须写出 SRT，且不重打翻译 API。"""
+        import json
+        from dataclasses import asdict
+
+        from xvt.models import Cue
+        from xvt.pipeline import acknowledge_subtitle_review
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = create_job(
+                str(source),
+                root,
+                {
+                    "input_kind": "subtitle",
+                    "workflow": {"target_language": "zh-CN", "burn": False},
+                },
+            )
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir(parents=True)
+
+            source_cue = Cue(1, 0, 2000, "Hello world.", source_language="en")
+            translated_cue = Cue(
+                1,
+                0,
+                2000,
+                "Hello world.",
+                "你好世界。",
+                source_language="en",
+                target_language="zh-CN",
+            )
+            source_cues_path = artifacts / "source-cues.json"
+            translated_cues_path = artifacts / "translated-cues.json"
+            source_srt_path = artifacts / "source.srt"
+            qa_path = artifacts / "qa-translated.json"
+            source_cues_path.write_text(
+                json.dumps([asdict(source_cue)], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            translated_cues_path.write_text(
+                json.dumps([asdict(translated_cue)], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            source_srt_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            qa_path.write_text(
+                json.dumps(
+                    {
+                        "status": "needs_review",
+                        "cue_count": 1,
+                        "issues": [
+                            {
+                                "code": "bilingual_overflow_risk",
+                                "severity": "review",
+                                "cue_id": 1,
+                                "message": "wide",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_cues_path), file_checksum(source_cues_path)),
+                    Artifact(
+                        "translated_cues",
+                        str(translated_cues_path),
+                        file_checksum(translated_cues_path),
+                    ),
+                    Artifact("source_srt", str(source_srt_path), file_checksum(source_srt_path)),
+                    Artifact(
+                        "translated_subtitle_qa",
+                        str(qa_path),
+                        file_checksum(qa_path),
+                    ),
+                ]
+            )
+            job.stages[StageName.TRANSLATE].status = StageStatus.SUCCEEDED
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+            job.stages[StageName.SUBTITLE_QA].error = "subtitle QA needs_review"
+            job_file = save_job(job)
+
+            acknowledge_subtitle_review(job_file)
+            with (
+                patch("xvt.workflow.run_translation") as translate,
+                patch("xvt.workflow.resume_remote_transcription") as remote,
+            ):
+                result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            translate.assert_not_called()
+            remote.assert_not_called()
+            updated = load_job(job_file)
+            kinds = {artifact.kind for artifact in updated.artifacts}
+            self.assertIn("translated_srt", kinds)
+            self.assertIn("bilingual_srt", kinds)
+            self.assertEqual(updated.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+            self.assertTrue((artifacts / "translated.srt").is_file())
+            self.assertTrue((artifacts / "bilingual.srt").is_file())
 
     def test_source_only_workflow_reports_source_subtitle_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -490,11 +618,13 @@ class WorkflowTest(unittest.TestCase):
                     return_value=Path("/tmp/source-cues.json"),
                 ),
                 patch("xvt.workflow.run_translation") as translate,
+                patch("xvt.workflow.complete_translated_outputs") as complete,
             ):
-                with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                with self.assertRaisesRegex(RuntimeError, "字幕 QA"):
                     continue_workflow(get_job_file(job))
 
         translate.assert_not_called()
+        complete.assert_not_called()
 
     def test_continue_retries_early_remote_acquisition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -657,13 +787,38 @@ class WorkflowPlannerTest(unittest.TestCase):
                     "xvt.workflow.valid_artifact_path",
                     side_effect=lambda _job, kind: (
                         Path(f"/tmp/{kind}")
-                        if kind in {"translated_cues", "burned_video"}
+                        if kind
+                        in {
+                            "translated_cues",
+                            "translated_srt",
+                            "bilingual_srt",
+                            "burned_video",
+                        }
                         else None
                     ),
                 ),
                 patch("xvt.workflow._burn_fingerprint", return_value="fp"),
             ):
                 self.assertEqual(plan_advance_steps(job, config), ())
+
+    def test_plan_advance_steps_render_when_cues_exist_without_srt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {"workflow": {"target_language": "zh-CN", "burn": True}},
+            )
+            save_job(job)
+            with patch(
+                "xvt.workflow.valid_artifact_path",
+                side_effect=lambda _job, kind: (
+                    Path(f"/tmp/{kind}") if kind == "translated_cues" else None
+                ),
+            ):
+                self.assertEqual(
+                    plan_advance_steps(job, WorkflowConfig(target_language="zh-CN", burn=True)),
+                    ("render", "burn"),
+                )
 
     def test_plan_advance_steps_import_translation_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

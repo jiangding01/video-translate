@@ -30,6 +30,7 @@ from xvt.pipeline.translation import (
     TranslationRunResult,
     apply_agent_translation,
     apply_subtitle_translation,
+    complete_translated_outputs,
     prepare_agent_translation,
     run_translation,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "apply_cue_retranslation",
     "apply_subtitle_translation",
     "burn_translated_job",
+    "complete_translated_outputs",
     "inspect_input",
     "interrupt_running_stage",
     "is_subtitle_input",

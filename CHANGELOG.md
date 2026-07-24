@@ -4,7 +4,10 @@
 
 ## [Unreleased]
 
-（无待发布条目。）
+### Fixed
+
+- 译文 QA `needs_review` 确认后续跑不再漏写 `translated.srt` / `bilingual.srt`：翻译满足度要求 cue 与两份 SRT 均有效；已有 `translated_cues` 时经 `complete_translated_outputs` 只补 QA+渲染，不重打翻译 API。`plan_advance_steps` 新增 `render` 步骤。
+- `needs_review` 恢复引导：`status` / recovery / `continue` 入口闸区分 review 与 error；review 给出 `xvt continue JOB --acknowledge-subtitle-review`，不再笼统要求「修字幕」。
 
 ## [0.1.1] - 2026-07-24
 
