@@ -622,12 +622,159 @@ class CliTest(unittest.TestCase):
         self.assertIn("[进行中] 转写音频  42%  03:30/08:20  剩余 00:41", progress)
         self.assertIn("[进行中] 翻译字幕（批次 2/5）", progress)
         # 已知重试原因在渲染层映射为中文，契约字符串本身保持英文。
-        self.assertIn("[重试] 翻译字幕（批次 2/5，原因：翻译服务暂时不可用）", progress)
+        self.assertIn(
+            "[重试] 翻译字幕（批次 2/5，第 2 次尝试，等待 1s，原因：翻译服务暂时不可用）",
+            progress,
+        )
         # 缺少 batch_total 的旧事件流回退为仅显示批次 ID。
         self.assertIn("[进行中] 翻译字幕（批次 3）", progress)
         # 未知重试原因回退显示契约原文。
-        self.assertIn("[重试] 翻译字幕（批次 3/5，原因：something unexpected）", progress)
+        self.assertIn(
+            "[重试] 翻译字幕（批次 3/5，第 2 次尝试，等待 1s，原因：something unexpected）",
+            progress,
+        )
         self.assertIn("任务处理完成", progress)
+
+    def test_human_progress_coalesces_skips_and_dedupes_failures(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        result = WorkflowResult(
+            "completed",
+            Path("/tmp/job.json"),
+            (Path("/tmp/source.srt"), Path("/tmp/burned.mp4")),
+        )
+
+        def run_with_skips(_options, *, event_sink):
+            event_sink(create_event(EventType.WORKFLOW_STARTED))
+            for stage in ("import_subtitles", "align", "translate", "burn", "media_qa"):
+                event_sink(create_event(EventType.STAGE_COMPLETED, stage=stage, status="skipped"))
+            event_sink(
+                create_event(
+                    EventType.STAGE_STARTED,
+                    stage="normalize_audio",
+                    status="running",
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.STAGE_COMPLETED,
+                    stage="normalize_audio",
+                    status="succeeded",
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.STAGE_STARTED,
+                    stage="subtitle_qa",
+                    status="running",
+                    detail="source",
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.STAGE_FAILED,
+                    stage="subtitle_qa",
+                    status="failed",
+                    detail="source",
+                    message="needs_review",
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.STAGE_FAILED,
+                    stage="subtitle_qa",
+                    status="failed",
+                    detail="source",
+                    message="needs_review",
+                )
+            )
+            return result
+
+        with (
+            patch("xvt.cli.run_workflow", side_effect=run_with_skips),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 0)
+        progress = error_output.getvalue()
+        self.assertIn("[跳过] 导入源字幕、对齐字幕", progress)
+        self.assertNotIn("[跳过] 翻译字幕", progress)
+        self.assertNotIn("[跳过] 烧录视频", progress)
+        self.assertEqual(progress.count("[失败] 检查源字幕"), 1)
+        self.assertIn("视频:", output.getvalue())
+        self.assertIn("字幕:", output.getvalue())
+        self.assertIn("/tmp/burned.mp4", output.getvalue())
+        self.assertIn("/tmp/source.srt", output.getvalue())
+
+    def test_workflow_result_lists_non_media_artifacts_under_other(self) -> None:
+        output = StringIO()
+        error_output = StringIO()
+        result = WorkflowResult(
+            "awaiting_input",
+            Path("/tmp/job.json"),
+            (Path("/tmp/translation-batches.json"),),
+            "translation requires Agent input",
+        )
+
+        def run_waiting(_options, *, event_sink):
+            event_sink(create_event(EventType.WORKFLOW_STARTED))
+            event_sink(create_event(EventType.WORKFLOW_WAITING, reason="needs agent"))
+            return result
+
+        with (
+            patch("xvt.cli.run_workflow", side_effect=run_waiting),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 0)
+        text = output.getvalue()
+        self.assertIn("其他:", text)
+        self.assertIn("/tmp/translation-batches.json", text)
+        self.assertIn("translation is awaiting input", text)
+
+    def test_status_displays_needs_review_instead_of_failed(self) -> None:
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": False}
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir(parents=True)
+            cues = artifacts / "source-cues.json"
+            cues.write_text("[]", encoding="utf-8")
+            qa = artifacts / "qa.json"
+            qa.write_text(
+                json.dumps(
+                    {
+                        "status": "needs_review",
+                        "issues": [{"code": "line_too_wide", "severity": "review", "cue_id": 1}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            from xvt.models import Artifact
+            from xvt.recovery import file_checksum
+
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues), file_checksum(cues)),
+                    Artifact("subtitle_qa", str(qa), file_checksum(qa)),
+                ]
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+            job_file = save_job(job)
+            with redirect_stdout(output):
+                return_code = main(["status", str(job_file)])
+
+        self.assertEqual(return_code, 0)
+        text = output.getvalue()
+        self.assertIn("subtitle_qa=needs_review", text)
+        self.assertNotIn("subtitle_qa=failed", text)
+        self.assertIn("--acknowledge-subtitle-review", text)
 
     def test_run_failure_shows_job_and_safe_status_command(self) -> None:
         output = StringIO()

@@ -139,7 +139,13 @@ def _qa_and_render_translation(
     current_stage = StageName.SUBTITLE_QA
     try:
         artifacts_directory = get_job_directory(job) / "artifacts"
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "translated"},
+        )
         media_data = _media_data(job)
         report = check_subtitles(
             translated,
@@ -155,19 +161,26 @@ def _qa_and_render_translation(
         _complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        _set_stage(
+            job,
+            current_stage,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "translated"},
+        )
         paths = _render_translated_outputs(job, translated, media_data, event_sink)
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         return paths
     except Exception as error:
-        _set_stage(
-            job,
-            current_stage,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=_error_category(error),
-        )
+        if job.stages[current_stage].status is not StageStatus.FAILED:
+            _set_stage(
+                job,
+                current_stage,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=_error_category(error),
+            )
         raise
 
 
@@ -227,6 +240,7 @@ def prepare_agent_translation(
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
     translation_style: str = "faithful",
+    await_input: bool = True,
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
@@ -255,7 +269,8 @@ def prepare_agent_translation(
         _add_artifact(job, "translation_batches", output_path, event_sink)
         job.config["target_language"] = target_language
         job.config["translation_policy"] = resolved_policy.to_dict()
-        _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
+        if await_input:
+            _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return output_path
     except Exception as error:
         _set_stage(
@@ -303,12 +318,14 @@ def run_translation(
         api_key_env=api_key_env,
         timeout_seconds=timeout_seconds,
     )
+    # API 路径准备批次时不得进入 awaiting_input，避免人类可读进度误报「等待」。
     batches_path = prepare_agent_translation(
         job_file,
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
         policy=resolved_policy,
+        await_input=(mode == "agent"),
         event_sink=event_sink,
     )
     if mode == "agent":
