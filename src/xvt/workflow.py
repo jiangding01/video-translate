@@ -19,8 +19,8 @@ from xvt.config import (
     DEFAULT_TRANSLATION_STYLE,
 )
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
-from xvt.job_store import get_job_file, load_job, save_job
-from xvt.models import Job, StageName, StageStatus
+from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
+from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
     apply_subtitle_translation,
     burn_translated_job,
@@ -30,10 +30,15 @@ from xvt.pipeline import (
     run_transcription,
     run_translation,
 )
-from xvt.recovery import valid_artifact_path
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.translate import TranslationPolicy, load_translation_policy
-from xvt.workflow_config import WorkflowConfig, require_workflow_config
+from xvt.workflow_config import (
+    WorkflowConfig,
+    clear_burn_fingerprint,
+    get_workflow_config,
+    require_workflow_config,
+)
 
 
 def _translation_policy(config: WorkflowConfig) -> TranslationPolicy:
@@ -203,7 +208,28 @@ def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
     ).hexdigest()
 
 
+def _stored_burn_fingerprint(job: Job) -> str | None:
+    """读取已登记的烧录指纹：优先 checksum 有效的 artifact，回退旧 workflow 字段。"""
+
+    path = valid_artifact_path(job, "burn_fingerprint")
+    if path is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        value = data.get("fingerprint")
+        return value if isinstance(value, str) and value else None
+    config = get_workflow_config(job)
+    if config is not None and config.burn_fingerprint:
+        return config.burn_fingerprint
+    return None
+
+
 def _record_burn_fingerprint(job_file: Path) -> None:
+    """将派生指纹登记为 ``burn_fingerprint`` artifact，并清除历史 workflow 旁路字段。"""
+
     job = load_job(job_file)
     try:
         config = require_workflow_config(job)
@@ -212,11 +238,18 @@ def _record_burn_fingerprint(job_file: Path) -> None:
     fingerprint = _burn_fingerprint(job, config)
     if not fingerprint:
         return
-    # 只写入指纹键，保留 workflow 上其余字段（含未知扩展）的原有形状。
-    raw = job.config.get("workflow")
-    if not isinstance(raw, dict):
-        return
-    raw["burn_fingerprint"] = fingerprint
+    artifacts_directory = get_job_directory(job) / "artifacts"
+    artifacts_directory.mkdir(parents=True, exist_ok=True)
+    path = artifacts_directory / "burn-fingerprint.json"
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps({"fingerprint": fingerprint}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    # 先清旧 artifact / workflow 旁路，再登记新文件，避免双写漂移。
+    clear_burn_fingerprint(job)
+    job.artifacts.append(Artifact("burn_fingerprint", str(path), file_checksum(path)))
     save_job(job)
 
 
@@ -266,7 +299,7 @@ def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
         return False
     if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
         return False
-    return config.burn_fingerprint == _burn_fingerprint(job, config)
+    return _stored_burn_fingerprint(job) == _burn_fingerprint(job, config)
 
 
 def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:

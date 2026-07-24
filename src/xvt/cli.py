@@ -854,7 +854,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 print(f"before: {command}")
             if plan.primary_command:
                 print(f"next: {plan.primary_command}")
-            else:
+            elif plan.category in {"manual_fix", "awaiting_input"}:
+                # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
                 print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
         return 0
 
