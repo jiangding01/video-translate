@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from urllib.parse import urlparse
 
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
-from xvt.workflow_config import get_workflow_config, resolve_target_language
+from xvt.workflow_config import WorkflowConfig, get_workflow_config, resolve_target_language
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,8 @@ class RecoveryPlan:
     primary_command: str | None = None
     prerequisite_commands: tuple[str, ...] = ()
     report_paths: tuple[str, ...] = ()
+    # 与 workflow.plan_advance_steps 对齐的剩余推进步骤（端到端 Job 有值；原子 Job 为空）。
+    advance_steps: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -158,6 +161,17 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             report_paths=reports,
         )
 
+    # 端到端 Job：翻译/烧录剩余步骤与 continue 共用 plan_advance_steps。
+    if workflow is not None:
+        return _recovery_for_workflow(
+            job,
+            job_file=job_file,
+            workflow=workflow,
+            valid_artifacts=valid_artifacts,
+            plan=plan,
+        )
+
+    # 原子 Job（无 workflow 目标）：保持独立 translate / apply 入口。
     if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
         target = target_language or "LANGUAGE"
         apply_command = _job_command(
@@ -167,21 +181,14 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             "--target-language",
             target,
         )
-        continue_command = _job_command("continue", job_file) if workflow is not None else None
         return plan(
             "awaiting_input",
             "任务正在等待翻译结果回填。",
-            primary_command=continue_command,
+            primary_command=None,
             prerequisite_commands=(apply_command,),
         )
 
     if target_language and "translated_cues" not in valid_artifacts:
-        if workflow is not None:
-            return plan(
-                "retryable",
-                "源字幕有效，可以继续未完成的翻译阶段。",
-                primary_command=_job_command("continue", job_file),
-            )
         return plan(
             "retryable",
             "源字幕有效，可以重新执行翻译阶段。",
@@ -193,20 +200,76 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             ),
         )
 
-    if workflow is not None and workflow.burn:
-        media_qa_status = job.stages[StageName.MEDIA_QA].status
-        if "burned_video" not in valid_artifacts or media_qa_status is not StageStatus.SUCCEEDED:
-            return plan(
-                "retryable",
-                "烧录尚未通过媒体 QA，可以重新烧录并检查输出视频。",
-                primary_command=_job_command("continue", job_file),
-            )
-
     return plan(
         "complete",
         "当前目标已完成，可以校验已有产物。",
         primary_command=_job_command("verify", job_file),
     )
+
+
+def _recovery_for_workflow(
+    job: Job,
+    *,
+    job_file: Path,
+    workflow: WorkflowConfig,
+    valid_artifacts: dict[str, Path],
+    plan: Callable[..., RecoveryPlan],
+) -> RecoveryPlan:
+    """按 ``plan_advance_steps`` 生成端到端 Job 的恢复建议。
+
+    延迟导入 ``xvt.workflow``，避免 ``workflow → recovery → workflow`` 循环导入。
+    """
+
+    from xvt.workflow import plan_advance_steps
+
+    steps = plan_advance_steps(job, workflow)
+    if not steps:
+        return plan(
+            "complete",
+            "当前目标已完成，可以校验已有产物。",
+            primary_command=_job_command("verify", job_file),
+            advance_steps=(),
+        )
+
+    if steps[0] == "await_agent_translation":
+        target = workflow.target_language or "LANGUAGE"
+        apply_command = _job_command(
+            "apply-translation",
+            job_file,
+            "RESPONSE",
+            "--target-language",
+            target,
+        )
+        return plan(
+            "awaiting_input",
+            "任务正在等待翻译结果回填。",
+            primary_command=_job_command("continue", job_file),
+            prerequisite_commands=(apply_command,),
+            advance_steps=steps,
+        )
+
+    if "translate" in steps or "import_translation" in steps:
+        reason = "源字幕有效，可以继续未完成的翻译阶段。"
+    elif "burn" in steps:
+        reason = _burn_recovery_reason(job, valid_artifacts)
+    else:
+        reason = "存在未完成的工作流步骤，可以继续。"
+
+    return plan(
+        "retryable",
+        reason,
+        primary_command=_job_command("continue", job_file),
+        advance_steps=steps,
+    )
+
+
+def _burn_recovery_reason(job: Job, valid_artifacts: dict[str, Path]) -> str:
+    """烧录未完成时的人类可读原因；媒体 QA 文案与历史 status 输出保持一致。"""
+
+    media_qa_status = job.stages[StageName.MEDIA_QA].status
+    if "burned_video" not in valid_artifacts or media_qa_status is not StageStatus.SUCCEEDED:
+        return "烧录尚未通过媒体 QA，可以重新烧录并检查输出视频。"
+    return "烧录派生指纹已失效，可以重新烧录并检查输出视频。"
 
 
 def verify_job(job_file: str | Path) -> dict[str, Any]:

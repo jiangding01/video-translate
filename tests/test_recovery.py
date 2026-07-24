@@ -125,6 +125,29 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(plan.category, "retryable")
         self.assertIn("continue", plan.primary_command or "")
         self.assertIn("媒体 QA", plan.reason)
+        self.assertEqual(plan.advance_steps, ("burn",))
+
+    def test_recovery_plan_retries_burn_when_fingerprint_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {
+                "target_language": "zh-CN",
+                "burn": True,
+                "burn_fingerprint": "stale-fingerprint",
+            }
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "translated_cues")
+            self._add_artifact(job, root, "burned_video")
+            job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertIn("指纹", plan.reason)
+        self.assertEqual(plan.advance_steps, ("burn",))
 
     def test_recovery_plan_describes_agent_translation_prerequisite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -140,6 +163,22 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(plan.category, "awaiting_input")
         self.assertIn("apply-translation", plan.prerequisite_commands[0])
         self.assertIn("continue", plan.primary_command or "")
+        self.assertEqual(plan.advance_steps, ("await_agent_translation",))
+
+    def test_recovery_plan_workflow_translate_exposes_advance_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
+            self._add_artifact(job, root, "source_cues")
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertEqual(plan.advance_steps, ("translate", "burn"))
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertIn("翻译", plan.reason)
 
     def test_recovery_plan_resumes_from_valid_transcription_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
