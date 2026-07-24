@@ -9,6 +9,9 @@ _SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt"
 
 
 class ConfigDefaultsTest(unittest.TestCase):
+    def test_default_max_retries_is_four(self) -> None:
+        self.assertEqual(config.DEFAULT_MAX_RETRIES, 4)
+
     def test_workflow_options_defaults_match_config_constants(self) -> None:
         options = WorkflowOptions(input="/tmp/video.mp4", output="/tmp/out")
         self.assertEqual(options.engine, config.DEFAULT_ENGINE)

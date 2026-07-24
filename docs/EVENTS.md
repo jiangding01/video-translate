@@ -225,9 +225,11 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
-| `attempt` | int | 即将进行的尝试序号 |
-| `delay_seconds` | number | 重试前等待秒数 |
-| `reason` | string | 重试原因 |
+| `attempt` | int | 当前批次即将进行的请求序号；传输重试与结构纠错共用连续序号 |
+| `delay_seconds` | number | 重试前等待秒数；生产端当前限制在 0 到 30 秒 |
+| `reason` | string | 重试原因；当前生产端使用 `provider temporarily unavailable` 或 `invalid provider response` |
+
+传输重试和结构纠错使用独立预算。默认传输故障最多重试 4 次，结构性无效响应固定最多纠错 1 次；因此 `attempt` 只表示可见请求顺序，不表示任一预算的剩余次数。
 
 ### `translation_batch_completed`
 | 字段 | 类型 | 含义 |

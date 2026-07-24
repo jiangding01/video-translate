@@ -20,7 +20,7 @@ from xvt.pipeline import (
     run_translation,
 )
 from xvt.process import CommandResult
-from xvt.translation_provider import ProviderResponseError
+from xvt.translation_provider import ProviderResponseError, TranslationProviderError
 
 
 class TranslationPipelineTest(unittest.TestCase):
@@ -305,6 +305,100 @@ class TranslationPipelineTest(unittest.TestCase):
         for event in batch_events:
             self.assertEqual(event.data["batch_total"], 1)
 
+    def test_transport_and_response_retries_use_independent_budgets(self) -> None:
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, directory, language="en")
+            corrections = []
+
+            def flaky_provider(batch, config, *, correction=None, **_kwargs):
+                corrections.append(correction)
+                if len(corrections) == 1:
+                    raise TranslationProviderError("disconnected", retryable=True)
+                if len(corrections) == 2:
+                    raise ProviderResponseError("invalid response")
+                if len(corrections) == 3:
+                    raise TranslationProviderError("disconnected", retryable=True)
+                return {item.id: "你好，世界。" for item in batch.items}
+
+            events = []
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=flaky_provider),
+                patch("xvt.pipeline.translation.time.sleep") as sleep,
+            ):
+                run_translation(
+                    get_job_file(job),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=2,
+                    event_sink=events.append,
+                )
+
+        self.assertIsNone(corrections[0])
+        self.assertIsNone(corrections[1])
+        self.assertIn("previous response was invalid", corrections[2] or "")
+        self.assertIsNone(corrections[3])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 0.5, 2])
+        retry_events = [event for event in events if event.type == "translation_batch_retrying"]
+        self.assertEqual([event.data["attempt"] for event in retry_events], [2, 3, 4])
+        self.assertEqual(
+            [event.data["reason"] for event in retry_events],
+            [
+                "provider temporarily unavailable",
+                "invalid provider response",
+                "provider temporarily unavailable",
+            ],
+        )
+
+    def test_transport_backoff_caps_before_large_exponent(self) -> None:
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, directory, language="en")
+            calls = 0
+
+            def unavailable_then_success(batch, config, *, correction=None, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls <= 6:
+                    raise TranslationProviderError("disconnected", retryable=True)
+                return {item.id: "你好，世界。" for item in batch.items}
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    side_effect=unavailable_then_success,
+                ),
+                patch("xvt.pipeline.translation.time.sleep") as sleep,
+            ):
+                run_translation(
+                    get_job_file(job),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=6,
+                )
+
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4, 8, 16, 30])
+
     def test_malformed_provider_response_exhausts_retries_as_dependency_error(self) -> None:
         provider_env = {
             "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
@@ -324,18 +418,19 @@ class TranslationPipelineTest(unittest.TestCase):
                 patch(
                     "xvt.pipeline.translation.translate_batch",
                     side_effect=ProviderResponseError("always malformed"),
-                ),
+                ) as provider_call,
                 self.assertRaises(ProviderResponseError) as raised,
             ):
                 run_translation(
                     get_job_file(job),
                     target_language="zh-CN",
                     provider="openai-compatible",
-                    max_retries=1,
+                    max_retries=4,
                 )
 
         self.assertEqual(raised.exception.category, "dependency_or_process")
         self.assertEqual(int(raised.exception.exit_code), 3)
+        self.assertEqual(provider_call.call_count, 2)
 
 
 if __name__ == "__main__":

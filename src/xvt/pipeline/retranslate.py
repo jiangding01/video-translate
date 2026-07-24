@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 from pathlib import Path
 
-from xvt.events import EventSink
-from xvt.job_store import get_job_directory, load_job
+from xvt.config import DEFAULT_MAX_RETRIES
+from xvt.events import EventSink, EventType, create_event, job_event_fields
+from xvt.job_store import get_job_directory, get_job_file, load_job
 from xvt.models import StageName, StageStatus
 from xvt.pipeline.common import (
     _add_artifact,
@@ -26,6 +26,7 @@ from xvt.pipeline.translation import (
     TranslationRunResult,
     _finalize_translation,
     _load_translation_response,
+    _translate_batch_with_retries,
 )
 from xvt.process import raise_if_cancelled
 from xvt.translate import (
@@ -33,10 +34,7 @@ from xvt.translate import (
     translation_policy_from_dict,
 )
 from xvt.translation_provider import (
-    ProviderResponseError,
-    TranslationProviderError,
     resolve_provider,
-    translate_batch,
 )
 
 
@@ -102,7 +100,7 @@ def retranslate_cues(
     base_url: str | None = None,
     model: str | None = None,
     api_key_env: str = "XVT_TRANSLATION_API_KEY",
-    max_retries: int = 2,
+    max_retries: int = DEFAULT_MAX_RETRIES,
     timeout_seconds: float = 60,
     event_sink: EventSink | None = None,
 ) -> TranslationRunResult:
@@ -151,23 +149,31 @@ def retranslate_cues(
 
     translations = {}
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
+    batch_total = len(batches)
     try:
         for batch in batches:
             raise_if_cancelled()
-            for attempt in range(max_retries + 1):
-                try:
-                    translated_batch = translate_batch(batch, provider_config)
-                    break
-                except TranslationProviderError as error:
-                    if not error.retryable or attempt >= max_retries:
-                        raise
-                    time.sleep(
-                        error.retry_after if error.retry_after is not None else min(2**attempt, 30)
+
+            def emit_retry(attempt: int, delay: float, reason: str) -> None:
+                if event_sink:
+                    event_sink(
+                        create_event(
+                            EventType.TRANSLATION_BATCH_RETRYING,
+                            **job_event_fields(job.id, get_job_file(job)),
+                            batch=batch.id,
+                            batch_total=batch_total,
+                            attempt=attempt,
+                            delay_seconds=delay,
+                            reason=reason,
+                        )
                     )
-                except (ValueError, ProviderResponseError):
-                    if attempt >= max_retries:
-                        raise
-                    time.sleep(min(0.5 * (2**attempt), 4))
+
+            translated_batch = _translate_batch_with_retries(
+                batch,
+                provider_config,
+                max_retries=max_retries,
+                on_retry=emit_retry,
+            )
             translations.update(translated_batch)
     except Exception as error:
         _set_stage(

@@ -172,6 +172,11 @@ def translate_batch(
             "translation provider request timed out",
             retryable=True,
         ) from error
+    except OSError as error:
+        raise TranslationProviderError(
+            f"translation provider connection failed: {error}",
+            retryable=isinstance(error, ConnectionError),
+        ) from error
 
     try:
         body = raw_body.decode("utf-8")
