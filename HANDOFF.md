@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先打磨 CLI，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 304 个，全部通过 |
+| 自动化测试 | 307 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -299,7 +299,7 @@ CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消
 
 真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常，后续需单独优化 CLI 阶段语义与完成摘要：
 
-- YouTube 下载格式回退 / 403 引导（E2E P0-3）。
+- ~~YouTube 下载格式回退 / 403 引导（E2E P0-3）。~~ 已完成：格式串 `bv*+ba/b/18/best`；HTTP 403 提示 `continue` / 更新 yt-dlp / `--cookies-from-browser`。
 - 下载平台字幕和下载源视频使用不同提示，避免重复显示“获取素材”。
 - 端到端任务不得先显示“跳过翻译/烧录”再实际执行；API 自动翻译准备批次时不得显示“等待用户输入”。
 - 区分源字幕 QA/渲染与译文字幕 QA/渲染，避免重复且含义不明的阶段名称；`needs_review` 在 status 中勿仅显示为 `failed`（P1-7）。

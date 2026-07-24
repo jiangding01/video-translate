@@ -4,13 +4,17 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlparse
 
+from xvt.errors import DependencyError
 from xvt.events import EventSink, EventType, create_event
-from xvt.process import CommandResult, run_command
+from xvt.process import CommandError, CommandResult, run_command
 
 CommandRunner = Callable[..., CommandResult]
+
+# 视频格式回退链：优先分离流合并，再试渐进式 360p(18)，最后任意 best。
+VIDEO_FORMAT_SELECTOR = "bv*+ba/b/18/best"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +43,33 @@ def parse_remote_info(data: dict[str, Any]) -> RemoteMediaInfo:
         subtitle_languages=tuple(sorted((data.get("subtitles") or {}).keys())),
         automatic_subtitle_languages=tuple(sorted((data.get("automatic_captions") or {}).keys())),
     )
+
+
+def _command_output_detail(error: CommandError) -> str:
+    return error.result.stderr.strip() or error.result.stdout.strip() or str(error)
+
+
+def _looks_like_http_403(text: str) -> bool:
+    lowered = text.casefold()
+    return (
+        "http error 403" in lowered
+        or "error code: 403" in lowered
+        or " 403: forbidden" in lowered
+        or "status code 403" in lowered
+    )
+
+
+def _reraise_media_download_failure(error: CommandError) -> NoReturn:
+    """将 yt-dlp 媒体下载失败转为更可操作的错误；非 403 原样抛出。"""
+
+    detail = _command_output_detail(error)
+    if _looks_like_http_403(detail):
+        raise DependencyError(
+            "yt-dlp 下载失败（HTTP 403）。可对同一 Job 运行 xvt continue 重试；"
+            "仍失败时请更新 yt-dlp，或显式传入 --cookies-from-browser。"
+            f" 原始错误：{detail}"
+        ) from error
+    raise error
 
 
 def inspect_remote(
@@ -167,7 +198,7 @@ def download_remote_media(
     if audio_only:
         command.extend(["-f", "bestaudio/best"])
     else:
-        command.extend(["-f", "bv*+ba/b", "--merge-output-format", "mp4"])
+        command.extend(["-f", VIDEO_FORMAT_SELECTOR, "--merge-output-format", "mp4"])
     if cookies_from_browser:
         command.extend(["--cookies-from-browser", cookies_from_browser])
     if proxy:
@@ -206,7 +237,10 @@ def download_remote_media(
             )
 
         runner_kwargs["line_callback"] = handle_line
-    result = runner(command, **runner_kwargs)
+    try:
+        result = runner(command, **runner_kwargs)
+    except CommandError as error:
+        _reraise_media_download_failure(error)
     output_lines = [
         line.strip()
         for line in result.stdout.splitlines()

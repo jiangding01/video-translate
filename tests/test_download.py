@@ -3,12 +3,14 @@ import unittest
 from pathlib import Path
 
 from xvt.download import (
+    VIDEO_FORMAT_SELECTOR,
     download_remote_media,
     download_remote_subtitles,
     inspect_remote,
     select_subtitle_language,
 )
-from xvt.process import CommandResult
+from xvt.errors import DependencyError
+from xvt.process import CommandError, CommandResult
 
 
 class DownloadTest(unittest.TestCase):
@@ -81,6 +83,67 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(result, downloaded.resolve())
         self.assertIn("bestaudio/best", calls[0])
         self.assertNotIn("--cookies-from-browser", calls[0])
+
+    def test_video_download_uses_format_fallback_chain(self) -> None:
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded = root / "source.mp4"
+
+            def runner(args):
+                calls.append(args)
+                downloaded.write_bytes(b"video")
+                return CommandResult(tuple(args), 0, f"{downloaded}\n", "")
+
+            download_remote_media("https://youtu.be/abc", root, runner=runner)
+
+        self.assertEqual(VIDEO_FORMAT_SELECTOR, "bv*+ba/b/18/best")
+        format_index = calls[0].index("-f")
+        self.assertEqual(calls[0][format_index + 1], VIDEO_FORMAT_SELECTOR)
+        self.assertIn("--merge-output-format", calls[0])
+        self.assertIn("mp4", calls[0])
+
+    def test_http_403_guides_continue_and_cookies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def runner(args):
+                raise CommandError(
+                    CommandResult(
+                        tuple(args),
+                        1,
+                        "",
+                        "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+                    )
+                )
+
+            with self.assertRaisesRegex(DependencyError, "HTTP 403") as raised:
+                download_remote_media("https://youtu.be/abc", root, runner=runner)
+
+        message = str(raised.exception)
+        self.assertIn("continue", message)
+        self.assertIn("--cookies-from-browser", message)
+        self.assertIn("yt-dlp", message)
+
+    def test_non_403_command_errors_are_not_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def runner(args):
+                raise CommandError(
+                    CommandResult(
+                        tuple(args),
+                        1,
+                        "",
+                        "ERROR: Unsupported URL: https://example.invalid",
+                    )
+                )
+
+            with self.assertRaises(CommandError) as raised:
+                download_remote_media("https://youtu.be/abc", root, runner=runner)
+
+        self.assertIn("Unsupported URL", str(raised.exception))
+        self.assertNotIsInstance(raised.exception, DependencyError)
 
     def test_cookies_and_proxy_require_explicit_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
