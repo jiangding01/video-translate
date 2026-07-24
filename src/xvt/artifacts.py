@@ -40,6 +40,7 @@ class ArtifactKind(StrEnum):
     BILINGUAL_SRT = "bilingual_srt"
     BILINGUAL_ASS = "bilingual_ass"
     BURNED_VIDEO = "burned_video"
+    BURN_FINGERPRINT = "burn_fingerprint"
     MEDIA_QA = "media_qa"
     PREVIEW_ASS = "preview_ass"
     PREVIEW_VIDEO = "preview_video"
@@ -105,6 +106,8 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.BILINGUAL_SRT: frozenset({ArtifactKind.TRANSLATED_CUES}),
     ArtifactKind.BILINGUAL_ASS: frozenset({ArtifactKind.TRANSLATED_CUES}),
     ArtifactKind.BURNED_VIDEO: frozenset({ArtifactKind.BILINGUAL_ASS}),
+    # 烧录成功后登记的派生指纹；失效随 burned_video 传递闭包。
+    ArtifactKind.BURN_FINGERPRINT: frozenset({ArtifactKind.BURNED_VIDEO}),
     ArtifactKind.MEDIA_QA: frozenset({ArtifactKind.BURNED_VIDEO}),
     # 预览链。
     ArtifactKind.PREVIEW_ASS: frozenset({ArtifactKind.TRANSLATED_CUES}),
