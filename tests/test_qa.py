@@ -37,8 +37,35 @@ class SubtitleQaTest(unittest.TestCase):
             {"overlap", "missing_translation"},
         )
 
-    def test_low_confidence_requires_review(self) -> None:
-        cues = [Cue(1, 0, 2000, "Hello", timing_confidence=0.2)]
+    def test_asr_low_confidence_is_warning(self) -> None:
+        cues = [Cue(1, 0, 2000, "Hello", timing_confidence=0.2, provenance="asr")]
+
+        report = check_subtitles(cues)
+
+        self.assertEqual(report.status, "warning")
+        self.assertEqual(report.issues[0].code, "low_timing_confidence")
+        self.assertEqual(report.issues[0].severity, "warning")
+
+    def test_aligned_low_confidence_requires_review(self) -> None:
+        cues = [Cue(1, 0, 2000, "Hello", timing_confidence=0.2, provenance="aligned")]
+
+        report = check_subtitles(cues)
+
+        self.assertEqual(report.status, "needs_review")
+        self.assertEqual(report.issues[0].code, "low_timing_confidence")
+        self.assertEqual(report.issues[0].severity, "review")
+
+    def test_user_source_low_confidence_requires_review(self) -> None:
+        cues = [
+            Cue(
+                1,
+                0,
+                2000,
+                "Hello",
+                timing_confidence=0.0,
+                provenance="user_source_subtitle",
+            )
+        ]
 
         report = check_subtitles(cues)
 

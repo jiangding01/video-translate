@@ -11,6 +11,7 @@
 
 ### Changed
 
+- ASR / `asr_resegmented` 来源的 `low_timing_confidence` 由 `review` 降为 `warning`，避免端到端几乎必卡人工确认；`aligned` 与用户导入字幕仍为 `review`。硬显示超限（`line_too_wide` / `bilingual_overflow_risk`）与跨门 display_width 确认族映射不变。
 - YouTube/远程视频下载格式选择改为 `bv*+ba/b/18/best`（分离流失败时可回退渐进式 360p 与 best）；HTTP 403 时给出可操作提示（`continue` 重试、更新 yt-dlp、显式 `--cookies-from-browser`），仍不默认读取浏览器 Cookie。
 - CLI 人类可读进度打磨：计划性跳过（translate/burn/media_qa）不再逐条刷屏，其余跳过合并为一行；同一 stage 连续失败去重；`acquire` / 源·译文 QA·渲染标签区分；翻译重试行显示尝试序号与等待秒数；API 翻译准备批次不再误报「等待」；`status` 将可确认的 QA 显示为 `needs_review`；完成摘要按视频/字幕/其他分类，并显示总耗时。stage 事件可选 `detail` 字段见 `docs/EVENTS.md`。
 

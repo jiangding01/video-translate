@@ -212,10 +212,11 @@ class TranscriptionPipelineTest(unittest.TestCase):
             media_info = MediaInfo(
                 str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
             )
+            # 硬显示超限触发 review（ASR 低 timing confidence 仅为 warning，不再阻断）。
             transcript = Transcript(
                 language="en",
                 engine="mlx",
-                words=(Word("Uncertain.", 0, 1000, 0.1),),
+                words=(Word(("Wide " * 20).strip() + ".", 0, 2000, 0.9),),
             )
             with (
                 patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
@@ -230,6 +231,7 @@ class TranscriptionPipelineTest(unittest.TestCase):
             self.assertEqual(data["stages"]["subtitle_qa"]["status"], "failed")
             qa = json.loads((job_file.parent / "artifacts" / "qa.json").read_text())
             self.assertEqual(qa["status"], "needs_review")
+            self.assertIn("line_too_wide", {issue["code"] for issue in qa["issues"]})
 
     def test_resume_reuses_normalized_audio_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
