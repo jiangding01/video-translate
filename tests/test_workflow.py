@@ -10,6 +10,9 @@ from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import (
     WorkflowOptions,
+    _burn_satisfied,
+    _record_burn_fingerprint,
+    _stored_burn_fingerprint,
     continue_workflow,
     plan_advance_steps,
     planned_run_steps,
@@ -511,6 +514,79 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         resume_remote.assert_called_once()
         resume.assert_not_called()
+
+
+class BurnFingerprintArtifactTest(unittest.TestCase):
+    def test_record_writes_artifact_and_clears_workflow_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / "video.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), directory)
+            job.config["workflow"] = {
+                "target_language": "zh-CN",
+                "burn": True,
+                "burn_fingerprint": "legacy-should-be-cleared",
+                "hardware_encoding": True,
+            }
+            cues = Path(directory) / "translated-cues.json"
+            cues.write_text("[]", encoding="utf-8")
+            job.artifacts.append(Artifact("translated_cues", str(cues), file_checksum(cues)))
+            job_file = save_job(job)
+
+            _record_burn_fingerprint(job_file)
+            job = load_job(job_file)
+
+            self.assertIsNone(job.config["workflow"].get("burn_fingerprint"))
+            stored = _stored_burn_fingerprint(job)
+            self.assertIsNotNone(stored)
+            self.assertTrue(any(item.kind == "burn_fingerprint" for item in job.artifacts))
+            path = next(item.path for item in job.artifacts if item.kind == "burn_fingerprint")
+            self.assertTrue(Path(path).is_file())
+
+    def test_stored_fingerprint_falls_back_to_workflow_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/video.mp4", directory)
+            job.config["workflow"] = {
+                "target_language": "zh-CN",
+                "burn": True,
+                "burn_fingerprint": "legacy-fp",
+            }
+            save_job(job)
+            self.assertEqual(_stored_burn_fingerprint(job), "legacy-fp")
+
+    def test_burn_satisfied_uses_stored_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / "video.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), directory)
+            job.config["workflow"] = {
+                "target_language": "zh-CN",
+                "burn": True,
+                "hardware_encoding": True,
+            }
+            cues = Path(directory) / "translated-cues.json"
+            cues.write_text("[]", encoding="utf-8")
+            burned = Path(directory) / "burned.mp4"
+            burned.write_bytes(b"out")
+            job.artifacts.extend(
+                [
+                    Artifact("translated_cues", str(cues), file_checksum(cues)),
+                    Artifact("burned_video", str(burned), file_checksum(burned)),
+                ]
+            )
+            job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+            job_file = save_job(job)
+            _record_burn_fingerprint(job_file)
+            job = load_job(job_file)
+            config = WorkflowConfig.from_dict(job.config["workflow"])
+
+            self.assertTrue(_burn_satisfied(job, config))
+            # 破坏指纹文件内容但保留登记 → checksum 失效 → 视为未满足。
+            fingerprint_path = Path(
+                next(item.path for item in job.artifacts if item.kind == "burn_fingerprint")
+            )
+            fingerprint_path.write_text('{"fingerprint": "tampered"}\n', encoding="utf-8")
+            self.assertFalse(_burn_satisfied(job, config))
 
 
 class WorkflowPlannerTest(unittest.TestCase):

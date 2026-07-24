@@ -1,7 +1,10 @@
 import tempfile
 import unittest
+from pathlib import Path
 
 from xvt.job_store import create_job, save_job
+from xvt.models import Artifact
+from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import WorkflowOptions
 from xvt.workflow_config import (
@@ -65,9 +68,15 @@ class WorkflowConfigTest(unittest.TestCase):
         data_with = WorkflowConfig(target_language="zh-CN", burn_fingerprint="fp").to_dict()
         self.assertEqual(data_with["burn_fingerprint"], "fp")
 
-    def test_fingerprint_clear_is_key_local_and_preserves_shape(self) -> None:
+    def test_fingerprint_clear_removes_artifact_and_legacy_workflow_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/video.mp4", directory)
+            root = Path(directory)
+            fingerprint_path = root / "burn-fingerprint.json"
+            fingerprint_path.write_text('{"fingerprint": "old"}\n', encoding="utf-8")
+            job.artifacts.append(
+                Artifact("burn_fingerprint", str(fingerprint_path), file_checksum(fingerprint_path))
+            )
             # 模拟历史 Job：字段不全 + 带未知扩展。
             job.config["workflow"] = {
                 "target_language": "zh-CN",
@@ -85,6 +94,7 @@ class WorkflowConfigTest(unittest.TestCase):
                     "future_flag": True,
                 },
             )
+            self.assertFalse(any(item.kind == "burn_fingerprint" for item in job.artifacts))
             self.assertFalse(clear_burn_fingerprint(job))
 
     def test_from_dict_rejects_invalid_types(self) -> None:

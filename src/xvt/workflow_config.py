@@ -200,18 +200,22 @@ def set_workflow_config(job: Job, config: WorkflowConfig) -> None:
 
 
 def clear_burn_fingerprint(job: Job) -> bool:
-    """清除烧录派生指纹。
+    """清除烧录派生指纹（artifact 登记 + 历史 workflow 键）。
 
-    只删除 ``burn_fingerprint`` 键，不整表重写 workflow，避免：
-    1. 把缺省字段展开进历史 Job；
-    2. 在仅清指纹路径上对损坏字段做严格校验而阻断重译/重分段。
+    - 新路径：移除 ``burn_fingerprint`` artifact 登记（文件可残留，不参与恢复）。
+    - 旧路径：只删除 ``workflow.burn_fingerprint`` 键，不整表重写 workflow。
     """
 
+    changed = False
+    kept = [artifact for artifact in job.artifacts if artifact.kind != "burn_fingerprint"]
+    if len(kept) != len(job.artifacts):
+        job.artifacts = kept
+        changed = True
     raw = job.config.get("workflow")
-    if not isinstance(raw, dict) or "burn_fingerprint" not in raw:
-        return False
-    raw.pop("burn_fingerprint", None)
-    return True
+    if isinstance(raw, dict) and "burn_fingerprint" in raw:
+        raw.pop("burn_fingerprint", None)
+        changed = True
+    return changed
 
 
 def resolve_target_language(job: Job) -> str | None:
