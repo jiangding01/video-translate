@@ -43,6 +43,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/qa.py` | 时间轴、文本完整性和显示宽度检查 |
 | `src/xvt/render.py` | 双语 ASS 样式和平台字体选择 |
 | `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
+| `src/xvt/paths.py` | 烧录/预览输出绝对路径与覆盖保护（源媒体、job 文件、已登记 artifact） |
 | `src/xvt/events.py` | JSONL 事件和通用 URL 脱敏 |
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
 | `tests/` | 与源码模块对应的单元和流程测试 |

@@ -15,10 +15,12 @@ from urllib.parse import urlparse
 from xvt.burn import burn_subtitles, recommended_video_bitrate
 from xvt.config import DEFAULT_HARDWARE_ENCODING
 from xvt.download import download_remote_media
+from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job
 from xvt.media import probe_media
 from xvt.models import StageName, StageStatus
+from xvt.paths import assert_safe_output, protected_job_paths, resolve_absolute_output
 from xvt.pipeline.common import (
     _add_artifact,
     _artifact_path,
@@ -142,39 +144,22 @@ def preview_translated_job(
     if not preview_cues:
         raise ValueError("preview range contains no translated subtitle cues")
 
-    output_path = (
-        Path(output).expanduser()
-        if output is not None
-        else get_job_directory(job) / "artifacts" / "preview.mp4"
-    )
-    if not output_path.is_absolute():
-        raise ValueError("preview output path must be absolute")
     artifacts_directory = get_job_directory(job) / "artifacts"
     ass_path = artifacts_directory / "preview.ass"
-    output_resolved = output_path.resolve()
-    protected_paths = [
-        media_path,
-        get_job_file(job),
-        ass_path,
-        *(
-            Path(artifact.path).expanduser()
-            for artifact in job.artifacts
-            if artifact.kind != "preview_video"
+    output_path = resolve_absolute_output(
+        output if output is not None else artifacts_directory / "preview.mp4",
+        label="preview output",
+    )
+    assert_safe_output(
+        output_path,
+        protected=protected_job_paths(
+            job,
+            media_path,
+            writing_kind="preview_video",
+            extra=(ass_path,),
         ),
-    ]
-    for protected_path in protected_paths:
-        protected_resolved = protected_path.resolve()
-        same_file = output_resolved == protected_resolved
-        if not same_file and output_path.exists() and protected_path.exists():
-            try:
-                same_file = output_path.samefile(protected_path)
-            except OSError:
-                same_file = False
-        if same_file:
-            raise ValueError(
-                "preview output must not overwrite the source media, job file, "
-                "or an existing artifact"
-            )
+        label="preview output",
+    )
     _invalidate_preview_artifacts(job)
     if event_sink:
         event_sink(
@@ -275,10 +260,28 @@ def burn_translated_job(
             raise ValueError("burn-in requires a video stream with known dimensions")
 
         translated = _load_cues(_artifact_path(job, "translated_cues"))
+        # 路径校验放在 RENDER/BURN 记账之前，避免错误输出先留下半成品 stage 状态。
+        artifacts_directory = get_job_directory(job) / "artifacts"
+        ass_path = artifacts_directory / "bilingual.ass"
+        output_path = resolve_absolute_output(
+            output if output else artifacts_directory / "burned.mp4",
+            label="burn output",
+        )
+        assert_safe_output(
+            output_path,
+            protected=protected_job_paths(
+                job,
+                media_path,
+                writing_kind="burned_video",
+                extra=(ass_path,),
+            ),
+            label="burn output",
+        )
+
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
         ass_path = save_bilingual_ass(
             translated,
-            get_job_directory(job) / "artifacts" / "bilingual.ass",
+            ass_path,
             video_width=media_info.width,
             video_height=media_info.height,
             options=AssStyleOptions(target_font=target_font, source_font=source_font),
@@ -288,11 +291,6 @@ def burn_translated_job(
 
         current_stage = StageName.BURN
         _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        output_path = (
-            Path(output).expanduser()
-            if output
-            else get_job_directory(job) / "artifacts" / "burned.mp4"
-        )
         burned_path = burn_subtitles(
             media_path,
             ass_path,
@@ -335,6 +333,9 @@ def burn_translated_job(
             raise RuntimeError("burned video failed media QA")
         _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         return burned_path
+    except UserInputError:
+        # 输出路径冲突属于用户输入错误，不把当前 stage 记成 failed。
+        raise
     except Exception as error:
         _set_stage(
             job,
