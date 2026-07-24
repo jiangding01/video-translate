@@ -22,6 +22,32 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 时间轴只由 ASR 或源字幕决定。翻译阶段只能替换文本，不能改动 cue ID 或时间码。
 
+## 默认命令路径
+
+日常优先记住三条命令；中断后先看 `status`，再执行它提示的下一步：
+
+```text
+xvt run INPUT --output DIR [--target-language LANG] [--burn]
+xvt status JOB.json
+xvt continue JOB.json
+```
+
+Agent 等待输入时：
+
+```text
+xvt apply-translation JOB.json RESPONSE --target-language LANG
+xvt continue JOB.json
+```
+
+目录批处理：
+
+```text
+xvt batch DIR --output DIR ...
+xvt batch-continue BATCH.json
+```
+
+`resume`、`translate`、`burn`、`preview`、`resegment-translation` 等是**原子/修复**入口（`xvt --help` 中标为 `[advanced]`）。端到端 Job 不要用 `resume` 代替 `continue`：前者只恢复转写 checkpoint，后者完成 `job.config.workflow` 里的目标。
+
 ## 环境要求
 
 - Python 3.11+

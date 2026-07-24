@@ -6,6 +6,8 @@
 
 ### Changed
 
+- CLI 默认路径收口：`xvt --help` 增加 recommended path epilog；`run` / `status` / `continue` 文案强调日常导航；`resume`、`translate`、`burn`、`preview`、重分段/局部重译等标为 `[advanced]`（不改命令语义）。README 与 AGENTS 同步「run → status → continue」。
+
 - `status` / recovery 与 continue 共用推进判定：端到端 Job 在源字幕就绪且字幕 QA 未失败时，通过 `plan_advance_steps` 生成恢复建议；`RecoveryPlan` 新增 `advance_steps`（JSON `recovery_plan` 与人类可读 `steps:` 行），烧录路径补上「派生指纹失效」可续跑。原子 Job（无 `config.workflow`）仍走独立 `translate` / `apply-translation` 入口。
 
 - 端到端推进抽出 Goals 与可测试计划：`workflow_goals` / `plan_advance_steps` 用与执行路径相同的满足度判定（`translated_cues`、烧录指纹与媒体 QA）列出剩余步骤（`translate` / `import_translation` / `await_agent_translation` / `burn`）；`_advance_workflow` 在 Agent 等待、翻译、烧录上复用同一套判定，并在翻译副作用后重新检查烧录是否仍需执行。`planned_run_steps` 统一 `run` 首跑的 `WORKFLOW_PLANNED` 步骤列表。行为与原先 imperative 分支一致（仍以 `target_language` / `burn` 为权威目标）。
