@@ -103,7 +103,17 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
 ## Recover interrupted jobs
 
-Run `uv run --no-sync xvt verify "/path/to/job.json" --json` before recovery. Use `xvt continue "/path/to/job.json" --events-jsonl` for a persisted end-to-end goal; it can retry remote inspection or acquisition in the same Job, resume API batches, and retry missing translation or burn outputs. Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. Translation waiting states still require `apply-translation` or `import-translation` before `continue`. Keep `xvt resume` for transcription checkpoints only. Never bypass a missing-file or checksum-mismatch result.
+Default recovery path for end-to-end Jobs:
+
+```bash
+uv run --no-sync xvt status "/path/to/job.json"
+# or: uv run --no-sync xvt status "/path/to/job.json" --json
+uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
+```
+
+Read `status` first: it prints `recovery` category/reason, optional `steps:` (`advance_steps` aligned with `continue`), and `next` / `before` commands. Do not guess between `resume` and `continue`.
+
+Optionally run `uv run --no-sync xvt verify "/path/to/job.json" --json` when integrity is in doubt. `continue` can retry remote inspection or acquisition in the same Job, resume API batches, and retry missing translation or burn outputs (including stale burn fingerprints). Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. Translation waiting states still require `apply-translation` or `import-translation` before `continue`. Keep `xvt resume` for transcription checkpoints only (advanced). Prefer `run`/`continue` over atomic `translate`/`burn` for end-to-end goals. Never bypass a missing-file or checksum-mismatch result.
 
 For a directory batch, use `uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl`. Read each incomplete item's `recovery_plan` before claiming the batch is recoverable: retryable Jobs continue automatically, Agent waits still require translation application, and manual or unrecoverable items remain blocked. Completed items are skipped only when their Job recovery plan confirms checksum-valid outputs.
 
