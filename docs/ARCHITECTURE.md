@@ -104,7 +104,7 @@ Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`fai
 
 artifact 依赖图与失效闭包的单一来源是 `src/xvt/artifacts.py`：`ArtifactKind` 登记全部产物种类，`DERIVES_FROM` 记录下游到直接上游的派生边，`pipeline` 包中重译、重新分段和预览的失效集合都由 `downstream_of` 的传递闭包推导，而不再各自维护硬编码集合。
 
-Job schema 演进策略：给 `Job`、`Artifact` 或 stage record 新增可选字段属于前向兼容变更，不需要提升 `schema_version`——`Job.from_dict` 按各 dataclass 已知字段过滤后构造，未知字段会被静默忽略，旧版本 CLI 读取新版本写出的 `job.json` 不会因未知字段崩溃。只有结构性变更（字段重命名、删除或语义变化）才提升 `SCHEMA_VERSION`，并需要在 `models.py` 的 `_MIGRATIONS` 中登记对应源版本号到下一版本的纯函数迁移；`from_dict` 会沿迁移链逐级升级，无迁移路径的未知版本仍报 `Unsupported job schema version` 错误。
+Job schema 演进策略：给 `Job`、`Artifact` 或 stage record 新增可选字段属于前向兼容变更，不需要提升 `schema_version`。`Job.from_dict` 按各 dataclass 已知字段过滤后构造，未知字段会被静默忽略，旧版本 CLI 读取新版本写出的 `job.json` 不会因未知字段崩溃。只有结构性变更（字段重命名、删除或语义变化）才提升 `SCHEMA_VERSION`，并需要在 `models.py` 的 `_MIGRATIONS` 中登记对应源版本号到下一版本的纯函数迁移；`from_dict` 会沿迁移链逐级升级，无迁移路径的未知版本仍报 `Unsupported job schema version` 错误。
 
 Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，由 `WorkflowConfig` 在内存中结构化表示：入口 `WorkflowOptions.persisted_config` 构造类型化对象，写入 Job 时 `to_dict`，读取时 `from_dict`（未知字段忽略，错误类型在边界失败）。`resolve_target_language` 优先读 workflow，再回退原子 `translate` 写入的顶层 `config.target_language`。转写完成后的翻译与烧录推进共用 `workflow_goals`、译文/烧录满足度判定：译文满足要求 `translated_cues` 与 `translated_srt` / `bilingual_srt` 均 checksum 有效；`plan_advance_steps` 列出剩余步骤（含已有 cue 时的 `render`）；`_advance_workflow` 按同一套判定执行，缺 SRT 时经 `complete_translated_outputs` 只补 QA+渲染且不重打翻译 API，并在翻译完成后重新检查烧录指纹；`build_recovery_plan` 对端到端 Job 复用该计划写入 `RecoveryPlan.advance_steps` 与下一步命令，使 `status` 与 `continue` 决策一致。字幕 QA `needs_review`（无 error 级问题）时 recovery / continue 引导 `continue --acknowledge-subtitle-review`。Agent 等待使推进提前返回且不进入烧录。原子转写和端到端工作流都会持久化 `segmentation_preset`，恢复时以保存值重新构造 ASR cue；缺失该字段的旧 Job 按 `balanced` 处理。原子翻译命令和端到端工作流都会持久化解析后的术语表与风格；端到端配置保存策略快照而不保存源文件路径，因此 `continue` 能复现首次运行的策略。策略进入 API 翻译指纹，批次只携带命中自身源 cue 的术语。译文 QA 会把源 cue 已命中但译文缺失目标词的情况标记为 `glossary_violation` 错误。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
 
@@ -126,6 +126,18 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
 - 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。纯字幕 Job 没有媒体时长或画幅，只跳过这两类媒体相关检查，保留其余时间轴、文本、术语和阅读速度校验。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
 
+## 下一阶段已批准架构
+
+在可视化校对界面之前，项目先实现 [字幕质量与自适应源字幕技术方案](SUBTITLE_QUALITY_PLAN.md)。方案保持现有边界：
+
+- 不新增 Job stage，不升级 Job schema；源字幕选择复用转写腿，润色和语义校对作为 `translate` / `subtitle_qa` 的可恢复子步骤，通过 artifact、现有 stage 状态和事件 `detail` 细分。
+- YouTube 人工字幕可靠时保留快速路径；自动字幕在翻译/烧录任务中只作为参考，最终时间轴由 ASR 词级分段提供；用户本地字幕仍默认保留。
+- 翻译以确定性语义组为上下文，模型只返回既有 cue ID 的文本；润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
+- 所有模型调用逐批保存 checkpoint；语义问题与确定性 QA 问题使用独立报告和人工确认通道。
+- 新配置和 artifact 采用向后兼容的可选加法，旧 Job 缺少质量配置时保持当前单遍翻译行为。
+
+完整的输入矩阵、CLI 计划、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准。在对应 PR 合并前，这些内容不是当前 CLI 能力。
+
 ## 安全边界
 
 - 外部命令始终以参数数组执行，不经过 shell 字符串拼接。
@@ -146,5 +158,6 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 
 1. 已完成保守、平衡和紧凑分段预设。
 2. 已完成串行目录批处理、独立 Job、失败恢复和汇总报告。
-3. 下一步实现可视化校对界面，只消费 JSONL 事件、`job.json` 和 `batch.json`，不复制业务逻辑。
-4. 单机 CLI 和界面稳定后，再评估队列、远程执行和 Web 服务。
+3. 下一步按 [字幕质量与自适应源字幕技术方案](SUBTITLE_QUALITY_PLAN.md) 完成提供方可靠性、源字幕自适应、语义组翻译、润色和语义 QA。
+4. 字幕质量闭环通过真实 E2E 后，实现只消费 JSONL 事件、`job.json` 和 `batch.json` 的可视化校对界面。
+5. 单机 CLI 和界面稳定后，再评估队列、远程执行和 Web 服务。

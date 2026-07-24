@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-07-24
+更新时间：2026-07-25
 
 ## 当前快照
 
@@ -10,7 +10,7 @@
 | CLI | `xvt` |
 | 版本 | `0.1.1` |
 | Python | 3.11 及以上 |
-| 当前主线 | 先打磨 CLI，再评估 App |
+| 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
 | 自动化测试 | 321 个，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
@@ -287,6 +287,8 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
+- 当前 API 翻译仍是单遍逐 cue 回填，没有独立的上下文润色和语义校对；长句跨 cue 时可能出现中文拼接生硬或术语识别错误。
+- 当前 YouTube 平台字幕一旦选中便跳过 ASR；平台字幕存在滚动重叠、越界或错误断句时，QA 会阻断，但尚不能在原 Job 中自动切换到 ASR 重建源字幕。
 - 目录批处理当前串行执行，不支持后台队列、目录监控或每项不同参数；请求烧录时目录只能包含视频，音频和纯字幕输入必须拆成不烧录的独立批次。
 - 不支持远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
@@ -294,9 +296,17 @@ media-qa.json
 
 ## 后续任务规划
 
-### P1：CLI 阶段语义与完成摘要打磨
+### Q1-Q6：字幕质量与自适应源字幕
 
-CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消、进程组清理、持久化中断状态）与 JSONL 事件协议 v1 均已完成，详见 [路线图](ROADMAP.md) 和 [CHANGELOG](CHANGELOG.md)。真实 E2E 暴露的 P0（缺 `translated.srt`/`bilingual.srt`、`needs_review` 恢复不提示 acknowledge）已在本轮修复。Job/artifact 路径安全与输出覆盖策略已固定（见 `xvt.paths`），之后可开始桌面端可视化校对界面。界面只读取 Job、artifact、`batch.json` 和 JSONL 事件，不复制业务逻辑。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。实施顺序固定为：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复润色 → 语义校对与一次修复。全部阶段继续使用 `codex/` 开发分支串行 PR，前一项合并后再开始下一项。
+
+关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
+
+下一项从 **Q1：翻译传输可靠性** 开始，重点修复 `RemoteDisconnected` 等未进入 retryable 分类的问题，并在增加多遍模型调用之前固定断点和重试边界。
+
+### 已完成：CLI 阶段语义与完成摘要打磨
+
+CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消、进程组清理、持久化中断状态）与 JSONL 事件协议 v1 均已完成，详见 [路线图](ROADMAP.md) 和 [CHANGELOG](CHANGELOG.md)。真实 E2E 暴露的 P0（缺 `translated.srt`/`bilingual.srt`、`needs_review` 恢复不提示 acknowledge）已在本轮修复。Job/artifact 路径安全与输出覆盖策略已固定（见 `xvt.paths`）。这些能力已经满足未来界面消费要求，但在开发界面前先完成字幕质量闭环。
 
 真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常，后续需单独优化 CLI 阶段语义与完成摘要：
 
