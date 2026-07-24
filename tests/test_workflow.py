@@ -8,7 +8,15 @@ from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import TranslationRunResult, apply_subtitle_translation
 from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy
-from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
+from xvt.workflow import (
+    WorkflowOptions,
+    continue_workflow,
+    plan_advance_steps,
+    planned_run_steps,
+    run_workflow,
+    workflow_goals,
+)
+from xvt.workflow_config import WorkflowConfig
 
 
 class WorkflowTest(unittest.TestCase):
@@ -503,6 +511,119 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         resume_remote.assert_called_once()
         resume.assert_not_called()
+
+
+class WorkflowPlannerTest(unittest.TestCase):
+    def test_workflow_goals_from_config_flags(self) -> None:
+        goals = workflow_goals(
+            WorkflowConfig(target_language="zh-CN", burn=True, requested_outputs=("burned_video",))
+        )
+        self.assertTrue(goals.needs_translation)
+        self.assertTrue(goals.needs_burn)
+        goals_source_only = workflow_goals(WorkflowConfig())
+        self.assertFalse(goals_source_only.needs_translation)
+        self.assertFalse(goals_source_only.needs_burn)
+
+    def test_plan_advance_steps_orders_translate_then_burn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {"workflow": {"target_language": "zh-CN", "burn": True}},
+            )
+            save_job(job)
+            with patch(
+                "xvt.workflow.valid_artifact_path",
+                return_value=None,
+            ):
+                self.assertEqual(
+                    plan_advance_steps(job, WorkflowConfig(target_language="zh-CN", burn=True)),
+                    ("translate", "burn"),
+                )
+
+    def test_plan_advance_steps_awaits_agent_without_burn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {"workflow": {"target_language": "zh-CN", "burn": True}},
+            )
+            job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+            save_job(job)
+            with patch("xvt.workflow.valid_artifact_path", return_value=None):
+                self.assertEqual(
+                    plan_advance_steps(job, WorkflowConfig(target_language="zh-CN", burn=True)),
+                    ("await_agent_translation",),
+                )
+
+    def test_plan_advance_steps_skips_satisfied_burn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {
+                    "workflow": {
+                        "target_language": "zh-CN",
+                        "burn": True,
+                        "burn_fingerprint": "fp",
+                    }
+                },
+            )
+            job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+            save_job(job)
+            config = WorkflowConfig(
+                target_language="zh-CN",
+                burn=True,
+                burn_fingerprint="fp",
+            )
+            with (
+                patch(
+                    "xvt.workflow.valid_artifact_path",
+                    side_effect=lambda _job, kind: (
+                        Path(f"/tmp/{kind}")
+                        if kind in {"translated_cues", "burned_video"}
+                        else None
+                    ),
+                ),
+                patch("xvt.workflow._burn_fingerprint", return_value="fp"),
+            ):
+                self.assertEqual(plan_advance_steps(job, config), ())
+
+    def test_plan_advance_steps_import_translation_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/video.mp4", directory)
+            save_job(job)
+            config = WorkflowConfig(
+                target_language="zh-CN",
+                translation_subtitles="/tmp/translated.srt",
+                burn=False,
+            )
+            with patch("xvt.workflow.valid_artifact_path", return_value=None):
+                self.assertEqual(plan_advance_steps(job, config), ("import_translation",))
+
+    def test_planned_run_steps_matches_event_contract(self) -> None:
+        self.assertEqual(
+            planned_run_steps(
+                WorkflowOptions(
+                    input="/tmp/video.mp4",
+                    output="/tmp/out",
+                    target_language="zh-CN",
+                    burn=True,
+                )
+            ),
+            ["transcribe", "translate", "burn"],
+        )
+        self.assertEqual(
+            planned_run_steps(
+                WorkflowOptions(
+                    input="/tmp/source.srt",
+                    output="/tmp/out",
+                    target_language="zh-CN",
+                    translation_subtitles="/tmp/zh.srt",
+                )
+            ),
+            ["import_subtitles", "import_translation"],
+        )
 
 
 if __name__ == "__main__":

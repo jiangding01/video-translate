@@ -235,6 +235,170 @@ def _current_artifacts(job: Job, *, waiting: bool = False) -> tuple[Path, ...]:
     return tuple(path for kind in kinds if (path := valid_artifact_path(job, kind)))
 
 
+@dataclass(frozen=True, slots=True)
+class WorkflowGoals:
+    """端到端推进的用户目标（从 WorkflowConfig 派生）。
+
+    权威字段仍是 ``target_language`` / ``burn``，与历史 Job 和 continue 语义一致。
+    ``requested_outputs`` 目前是与这两项同步写入的派生清单，供文档与未来 planner
+    消费；决策不单独依赖它，避免无语言却要求译文的不一致状态。
+    """
+
+    needs_translation: bool
+    needs_burn: bool
+
+
+def workflow_goals(config: WorkflowConfig) -> WorkflowGoals:
+    return WorkflowGoals(
+        needs_translation=bool(config.target_language),
+        needs_burn=bool(config.burn),
+    )
+
+
+def _translation_satisfied(job: Job) -> bool:
+    return valid_artifact_path(job, "translated_cues") is not None
+
+
+def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
+    """烧录目标完成：成品 checksum 有效、媒体 QA 通过、派生指纹匹配。"""
+
+    if valid_artifact_path(job, "burned_video") is None:
+        return False
+    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
+        return False
+    return config.burn_fingerprint == _burn_fingerprint(job, config)
+
+
+def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
+    """根据当前 Job 与持久化目标，列出仍需执行的推进步骤。
+
+    返回值为有序步骤名：
+    - ``await_agent_translation``：已进入 Agent 等待，调用方应停止并提示回填
+    - ``import_translation`` / ``translate``：补齐译文
+    - ``burn``：补齐或重做烧录
+
+    空元组表示翻译/烧录目标已满足（转写腿由 continue 在进入本函数前处理）。
+    """
+
+    goals = workflow_goals(config)
+    steps: list[str] = []
+    if goals.needs_translation and not _translation_satisfied(job):
+        if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+            return ("await_agent_translation",)
+        steps.append("import_translation" if config.translation_subtitles else "translate")
+    if goals.needs_burn and not _burn_satisfied(job, config):
+        steps.append("burn")
+    return tuple(steps)
+
+
+def planned_run_steps(options: WorkflowOptions) -> list[str]:
+    """``xvt run`` 首跑的完整计划（含转写腿），用于 WORKFLOW_PLANNED 事件。"""
+
+    steps = ["import_subtitles" if is_subtitle_input(options.input) else "transcribe"]
+    if options.target_language:
+        steps.append("import_translation" if options.translation_subtitles else "translate")
+    if options.burn:
+        steps.append("burn")
+    return steps
+
+
+def _emit_waiting(
+    *,
+    job: Job,
+    path: Path,
+    message: str,
+    artifacts: tuple[Path, ...],
+    event_sink: EventSink | None,
+) -> WorkflowResult:
+    if event_sink:
+        event_sink(
+            create_event(
+                EventType.WORKFLOW_WAITING,
+                **job_event_fields(job.id, path),
+                reason=message,
+                artifacts=[str(item) for item in artifacts],
+            )
+        )
+    return WorkflowResult("awaiting_input", path, artifacts, message)
+
+
+def _ensure_translation(
+    path: Path,
+    job: Job,
+    config: WorkflowConfig,
+    *,
+    event_sink: EventSink | None,
+) -> WorkflowResult | None:
+    """补齐译文。返回 WorkflowResult 表示应停止（Agent 等待）；None 表示已推进。"""
+
+    target_language = config.target_language
+    if not target_language:
+        return None
+    if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+        return _emit_waiting(
+            job=job,
+            path=path,
+            message="translation requires Agent input",
+            artifacts=_current_artifacts(job, waiting=True),
+            event_sink=event_sink,
+        )
+
+    if config.translation_subtitles:
+        apply_subtitle_translation(
+            path,
+            config.translation_subtitles,
+            target_language=target_language,
+            event_sink=event_sink,
+        )
+        return None
+
+    translation = run_translation(
+        path,
+        target_language=target_language,
+        provider=config.provider,
+        base_url=config.base_url,
+        model=config.model,
+        api_key_env=config.api_key_env,
+        batch_size=config.batch_size,
+        max_retries=config.max_retries,
+        timeout_seconds=config.timeout_seconds,
+        policy=_translation_policy(config),
+        event_sink=event_sink,
+    )
+    if translation.mode == "agent":
+        return _emit_waiting(
+            job=job,
+            path=path,
+            message=translation.fallback_reason or "translation requires Agent input",
+            artifacts=translation.paths,
+            event_sink=event_sink,
+        )
+    return None
+
+
+def _ensure_burn(
+    path: Path,
+    job: Job,
+    config: WorkflowConfig,
+    *,
+    cookies_from_browser: str | None,
+    proxy: str | None,
+    event_sink: EventSink | None,
+) -> None:
+    burn_translated_job(
+        path,
+        media=config.burn_media,
+        output=config.burn_output,
+        hardware_encoding=config.hardware_encoding,
+        cookies_from_browser=cookies_from_browser or job.config.get("cookies_from_browser"),
+        proxy=proxy,
+        target_font=config.target_font,
+        source_font=config.source_font,
+        event_sink=event_sink,
+    )
+    _record_burn_fingerprint(path)
+
+
 def _advance_workflow(
     path: Path,
     *,
@@ -248,84 +412,43 @@ def _advance_workflow(
     run 首跑与 continue 续跑共用本函数：转写完成后的所有推进决策（Agent 等待、
     译文回填、指纹感知的烧录复用）只有这一份实现。``config`` 为 None 时从
     Job 读取持久化目标（continue 路径）；run 首跑直接传入刚构造的同一份配置。
+
+    决策顺序：Goals → plan_advance_steps → 逐步执行；中途 Agent 等待则返回。
     """
     job = load_job(path)
     if config is None:
         config = require_workflow_config(job)
-    target_language = config.target_language
-    policy = _translation_policy(config)
+    goals = workflow_goals(config)
 
     if job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED:
         raise RuntimeError("subtitle QA failed; inspect and repair subtitles before continuing")
 
-    if target_language and valid_artifact_path(job, "translated_cues") is None:
-        if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
-            artifacts = _current_artifacts(job, waiting=True)
-            message = "translation requires Agent input"
-            if event_sink:
-                event_sink(
-                    create_event(
-                        EventType.WORKFLOW_WAITING,
-                        **job_event_fields(job.id, path),
-                        reason=message,
-                        artifacts=[str(item) for item in artifacts],
-                    )
-                )
-            return WorkflowResult("awaiting_input", path, artifacts, message)
+    steps = plan_advance_steps(job, config)
+    if steps and steps[0] == "await_agent_translation":
+        return _emit_waiting(
+            job=job,
+            path=path,
+            message="translation requires Agent input",
+            artifacts=_current_artifacts(job, waiting=True),
+            event_sink=event_sink,
+        )
 
-        if config.translation_subtitles:
-            apply_subtitle_translation(
-                path,
-                config.translation_subtitles,
-                target_language=target_language,
-                event_sink=event_sink,
-            )
-        else:
-            translation = run_translation(
-                path,
-                target_language=target_language,
-                provider=config.provider,
-                base_url=config.base_url,
-                model=config.model,
-                api_key_env=config.api_key_env,
-                batch_size=config.batch_size,
-                max_retries=config.max_retries,
-                timeout_seconds=config.timeout_seconds,
-                policy=policy,
-                event_sink=event_sink,
-            )
-            if translation.mode == "agent":
-                message = translation.fallback_reason or "translation requires Agent input"
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.WORKFLOW_WAITING,
-                            **job_event_fields(job.id, path),
-                            reason=message,
-                            artifacts=[str(item) for item in translation.paths],
-                        )
-                    )
-                return WorkflowResult("awaiting_input", path, translation.paths, message)
+    if goals.needs_translation and not _translation_satisfied(job):
+        waiting = _ensure_translation(path, job, config, event_sink=event_sink)
+        if waiting is not None:
+            return waiting
         job = load_job(path)
 
-    if config.burn:
-        burned = valid_artifact_path(job, "burned_video")
-        expected_fingerprint = _burn_fingerprint(job, config)
-        media_qa_succeeded = job.stages[StageName.MEDIA_QA].status is StageStatus.SUCCEEDED
-        if not burned or not media_qa_succeeded or config.burn_fingerprint != expected_fingerprint:
-            burn_translated_job(
-                path,
-                media=config.burn_media,
-                output=config.burn_output,
-                hardware_encoding=config.hardware_encoding,
-                cookies_from_browser=cookies_from_browser or job.config.get("cookies_from_browser"),
-                proxy=proxy,
-                target_font=config.target_font,
-                source_font=config.source_font,
-                event_sink=event_sink,
-            )
-            _record_burn_fingerprint(path)
-            job = load_job(path)
+    if goals.needs_burn and not _burn_satisfied(job, config):
+        _ensure_burn(
+            path,
+            job,
+            config,
+            cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
+            event_sink=event_sink,
+        )
+        job = load_job(path)
 
     artifacts = _current_artifacts(job)
     if event_sink:
@@ -350,11 +473,7 @@ def run_workflow(
         if options.target_language and not options.translation_subtitles
         else None
     )
-    steps = ["import_subtitles"] if is_subtitle_input(options.input) else ["transcribe"]
-    if options.target_language:
-        steps.append("import_translation" if options.translation_subtitles else "translate")
-    if options.burn:
-        steps.append("burn")
+    steps = planned_run_steps(options)
     if event_sink:
         event_sink(create_event(EventType.WORKFLOW_STARTED, **job_event_fields(None, None)))
         event_sink(create_event(EventType.WORKFLOW_PLANNED, steps=steps))
