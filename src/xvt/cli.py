@@ -803,6 +803,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
             stages = ", ".join(f"{name}={record.status}" for name, record in job.stages.items())
             print(f"{job.id}: {stages}")
             print(f"recovery: {plan.category} - {plan.reason}")
+            if plan.advance_steps:
+                print(f"steps: {', '.join(plan.advance_steps)}")
             for path in plan.report_paths:
                 print(f"report: {path}")
             for command in plan.prerequisite_commands:

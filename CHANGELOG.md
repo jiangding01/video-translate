@@ -6,6 +6,8 @@
 
 ### Changed
 
+- `status` / recovery 与 continue 共用推进判定：端到端 Job 在源字幕就绪且字幕 QA 未失败时，通过 `plan_advance_steps` 生成恢复建议；`RecoveryPlan` 新增 `advance_steps`（JSON `recovery_plan` 与人类可读 `steps:` 行），烧录路径补上「派生指纹失效」可续跑。原子 Job（无 `config.workflow`）仍走独立 `translate` / `apply-translation` 入口。
+
 - 端到端推进抽出 Goals 与可测试计划：`workflow_goals` / `plan_advance_steps` 用与执行路径相同的满足度判定（`translated_cues`、烧录指纹与媒体 QA）列出剩余步骤（`translate` / `import_translation` / `await_agent_translation` / `burn`）；`_advance_workflow` 在 Agent 等待、翻译、烧录上复用同一套判定，并在翻译副作用后重新检查烧录是否仍需执行。`planned_run_steps` 统一 `run` 首跑的 `WORKFLOW_PLANNED` 步骤列表。行为与原先 imperative 分支一致（仍以 `target_language` / `burn` 为权威目标）。
 
 - 端到端 `job.config["workflow"]` 收敛为类型化 `WorkflowConfig`（`src/xvt/workflow_config.py`）：`from_dict`/`to_dict` 校验已知字段类型与默认值；未知顶层字段进入 `extras` 并在写回时保留，避免指纹更新抹掉新版本扩展；`requested_outputs` 保留未知输出名以维持前向兼容。`WorkflowOptions.persisted_config` 返回结构体，落盘边界仍序列化为既有 JSON 形状。`workflow`、`recovery`、`pipeline` 与 CLI 提示统一经 `get_workflow_config` / `require_workflow_config` / `resolve_target_language` / `clear_burn_fingerprint` 读写，消除对 dict 袋的散落 `config.get` 与目标语言双处解析。纯内部收敛，旧 Job 可继续加载；已知字段类型错误在边界显式失败。
