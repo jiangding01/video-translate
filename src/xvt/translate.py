@@ -14,6 +14,10 @@ from xvt.segment import BREAK_BEFORE, SENTENCE_END, SOFT_BREAK
 TRANSLATION_STYLES = frozenset({"faithful", "natural", "concise"})
 SEMANTIC_GROUPING_VERSION = 1
 TRANSLATE_AND_POLISH_TASK_VERSION = 1
+SEMANTIC_REVIEW_CATEGORIES = frozenset(
+    {"meaning_error", "omission", "terminology", "awkward_join", "source_suspect"}
+)
+SEMANTIC_REPAIR_CATEGORIES = SEMANTIC_REVIEW_CATEGORIES - {"source_suspect"}
 SEMANTIC_GROUP_MAX_CUES = 20
 SEMANTIC_GROUP_MAX_DURATION_MS = 30_000
 SEMANTIC_GROUP_PAUSE_MS = 650
@@ -154,6 +158,64 @@ class PolishBatch:
     items: tuple[PolishItem, ...]
     context_before: tuple[PolishItem, ...]
     context_after: tuple[PolishItem, ...]
+    policy: TranslationPolicy = TranslationPolicy()
+    semantic_groups: tuple[tuple[int, ...], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticReviewItem:
+    id: int
+    source_text: str
+    candidate_text: str
+    duration_ms: int
+    max_target_characters: int
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticSuggestedItem:
+    id: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticIssue:
+    category: str
+    cue_ids: tuple[int, ...]
+    severity: str
+    message: str
+    suggested_items: tuple[SemanticSuggestedItem, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticReviewBatch:
+    id: int
+    source_language: str
+    target_language: str
+    items: tuple[SemanticReviewItem, ...]
+    context_before: tuple[SemanticReviewItem, ...]
+    context_after: tuple[SemanticReviewItem, ...]
+    policy: TranslationPolicy = TranslationPolicy()
+    semantic_groups: tuple[tuple[int, ...], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticRepairBatch:
+    id: int
+    source_language: str
+    target_language: str
+    items: tuple[SemanticReviewItem, ...]
+    context_before: tuple[SemanticReviewItem, ...]
+    context_after: tuple[SemanticReviewItem, ...]
+    issues: tuple[SemanticIssue, ...]
     policy: TranslationPolicy = TranslationPolicy()
     semantic_groups: tuple[tuple[int, ...], ...] = ()
 
@@ -434,6 +496,198 @@ def build_polish_batches(
             semantic_groups=batch.semantic_groups,
         )
         for batch in translation_batches
+    ]
+
+
+def build_semantic_review_batches(
+    source_cues: list[Cue],
+    candidate_cues: list[Cue],
+    *,
+    source_language: str,
+    target_language: str,
+    batch_size: int = 40,
+    policy: TranslationPolicy | None = None,
+) -> list[SemanticReviewBatch]:
+    polish_batches = build_polish_batches(
+        source_cues,
+        candidate_cues,
+        source_language=source_language,
+        target_language=target_language,
+        batch_size=batch_size,
+        policy=policy,
+    )
+
+    def review_item(item: PolishItem) -> SemanticReviewItem:
+        return SemanticReviewItem(
+            id=item.id,
+            source_text=item.source_text,
+            candidate_text=item.draft_text,
+            duration_ms=item.duration_ms,
+            max_target_characters=item.max_target_characters,
+        )
+
+    return [
+        SemanticReviewBatch(
+            id=batch.id,
+            source_language=batch.source_language,
+            target_language=batch.target_language,
+            items=tuple(review_item(item) for item in batch.items),
+            context_before=tuple(review_item(item) for item in batch.context_before),
+            context_after=tuple(review_item(item) for item in batch.context_after),
+            policy=batch.policy,
+            semantic_groups=batch.semantic_groups,
+        )
+        for batch in polish_batches
+    ]
+
+
+def _issue_touches_group(issue: SemanticIssue, group: tuple[int, ...]) -> bool:
+    return bool(set(issue.cue_ids) & set(group))
+
+
+def build_semantic_repair_batches(
+    source_cues: list[Cue],
+    candidate_cues: list[Cue],
+    issues: tuple[SemanticIssue, ...],
+    *,
+    source_language: str,
+    target_language: str,
+    policy: TranslationPolicy | None = None,
+) -> list[SemanticRepairBatch]:
+    review_batches = build_semantic_review_batches(
+        source_cues,
+        candidate_cues,
+        source_language=source_language,
+        target_language=target_language,
+        batch_size=SEMANTIC_GROUP_MAX_CUES,
+        policy=policy,
+    )
+    items = {
+        item.id: item
+        for batch in review_batches
+        for item in (*batch.items, *batch.context_before, *batch.context_after)
+    }
+    groups = build_semantic_groups(source_cues)
+    repairable = tuple(issue for issue in issues if issue.category in SEMANTIC_REPAIR_CATEGORIES)
+    selected_groups = [
+        group for group in groups if any(_issue_touches_group(i, group) for i in repairable)
+    ]
+    group_positions = {group: index for index, group in enumerate(groups)}
+    batches: list[SemanticRepairBatch] = []
+    for group in selected_groups:
+        position = group_positions[group]
+        previous = groups[position - 1] if position > 0 else ()
+        following = groups[position + 1] if position + 1 < len(groups) else ()
+        batches.append(
+            SemanticRepairBatch(
+                id=len(batches) + 1,
+                source_language=source_language,
+                target_language=target_language,
+                items=tuple(items[cue_id] for cue_id in group),
+                context_before=tuple(items[cue_id] for cue_id in previous),
+                context_after=tuple(items[cue_id] for cue_id in following),
+                issues=tuple(issue for issue in repairable if _issue_touches_group(issue, group)),
+                policy=policy or TranslationPolicy(),
+                semantic_groups=(group,),
+            )
+        )
+    return batches
+
+
+def parse_semantic_review_response(
+    batch: SemanticReviewBatch,
+    response: list[dict[str, Any]],
+) -> tuple[SemanticIssue, ...]:
+    owned_ids = {item.id for item in batch.items}
+    allowed_ids = owned_ids | {item.id for item in batch.context_after}
+    issues: list[SemanticIssue] = []
+    seen: set[tuple[str, tuple[int, ...]]] = set()
+    for raw in response:
+        if not isinstance(raw, dict):
+            raise ValueError("semantic review issue must be an object")
+        category = raw.get("category")
+        cue_ids_raw = raw.get("cue_ids")
+        severity = raw.get("severity")
+        message = raw.get("message")
+        suggestions_raw = raw.get("suggested_items")
+        if category not in SEMANTIC_REVIEW_CATEGORIES:
+            raise ValueError("semantic review issue has an unsupported category")
+        if (
+            not isinstance(cue_ids_raw, list)
+            or not cue_ids_raw
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in cue_ids_raw)
+            or len(set(cue_ids_raw)) != len(cue_ids_raw)
+        ):
+            raise ValueError("semantic review issue cue_ids must be unique integers")
+        cue_ids = tuple(sorted(cue_ids_raw))
+        if not set(cue_ids) <= allowed_ids or min(cue_ids) not in owned_ids:
+            raise ValueError("semantic review issue references cues outside its owned batch")
+        if severity != "review":
+            raise ValueError("semantic review issue severity must be review")
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("semantic review issue message must be non-empty text")
+        if not isinstance(suggestions_raw, list):
+            raise ValueError("semantic review issue suggested_items must be an array")
+        suggestions: list[SemanticSuggestedItem] = []
+        suggested_ids: set[int] = set()
+        for item in suggestions_raw:
+            cue_id = item.get("id") if isinstance(item, dict) else None
+            text = item.get("text") if isinstance(item, dict) else None
+            if (
+                not isinstance(cue_id, int)
+                or isinstance(cue_id, bool)
+                or cue_id in suggested_ids
+                or cue_id not in cue_ids
+                or not isinstance(text, str)
+                or not text.strip()
+            ):
+                raise ValueError("semantic review issue contains invalid suggested_items")
+            suggested_ids.add(cue_id)
+            suggestions.append(SemanticSuggestedItem(cue_id, text.strip()))
+        key = (category, cue_ids)
+        if key in seen:
+            raise ValueError("semantic review response contains a duplicate issue")
+        seen.add(key)
+        issues.append(
+            SemanticIssue(
+                category=category,
+                cue_ids=cue_ids,
+                severity=severity,
+                message=message.strip(),
+                suggested_items=tuple(suggestions),
+            )
+        )
+    return tuple(issues)
+
+
+def parse_semantic_repair_response(
+    batch: SemanticRepairBatch,
+    response: list[dict[str, Any]],
+) -> dict[int, str]:
+    expected_ids = {item.id for item in batch.items}
+    repaired: dict[int, str] = {}
+    for item in response:
+        cue_id = item.get("id") if isinstance(item, dict) else None
+        text = item.get("text") if isinstance(item, dict) else None
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool) or cue_id in repaired:
+            raise ValueError("semantic repair response contains an invalid or duplicate cue id")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"semantic repair for cue {cue_id} is empty")
+        repaired[cue_id] = text.strip()
+    if set(repaired) != expected_ids:
+        raise ValueError("semantic repair response must cover its complete semantic group")
+    return repaired
+
+
+def apply_semantic_repairs(
+    candidate_cues: list[Cue],
+    repaired: dict[int, str],
+    expected_ids: set[int],
+) -> list[Cue]:
+    if set(repaired) != expected_ids:
+        raise ValueError("semantic repairs must cover all affected semantic groups exactly once")
+    return [
+        replace(cue, target_text=repaired.get(cue.id, cue.target_text)) for cue in candidate_cues
     ]
 
 

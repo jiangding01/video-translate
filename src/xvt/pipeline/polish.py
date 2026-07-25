@@ -15,16 +15,11 @@ from xvt.pipeline.common import (
     _add_artifact,
     _checksum,
     _error_category,
-    _invalidate_rendered_artifacts,
     _load_cues,
     _set_stage,
     _write_json,
 )
-from xvt.pipeline.translation import (
-    TranslationRunResult,
-    _finalize_translation,
-    _translate_batch_with_retries,
-)
+from xvt.pipeline.translation import TranslationRunResult, _translate_batch_with_retries
 from xvt.process import raise_if_cancelled
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
@@ -306,8 +301,7 @@ def translation_polish_satisfied(
     batches_path = valid_artifact_path(job, "translation_polish_batches")
     progress_path = valid_artifact_path(job, "translation_polish_progress")
     polished_path = valid_artifact_path(job, "translation_polished_cues")
-    translated_path = valid_artifact_path(job, "translated_cues")
-    if not all((draft_path, batches_path, progress_path, polished_path, translated_path)):
+    if not all((draft_path, batches_path, progress_path, polished_path)):
         return False
     try:
         batches_data = json.loads(batches_path.read_text(encoding="utf-8"))
@@ -355,8 +349,7 @@ def translation_polish_satisfied(
             translations[cue_id] = text.strip()
         expected = apply_polish_translations(_load_cues(draft_path), translations)
         polished = _load_cues(polished_path)
-        translated = _load_cues(translated_path)
-        return polished == expected and translated == expected
+        return polished == expected
     except (KeyError, OSError, TypeError, ValueError):
         return False
 
@@ -389,16 +382,26 @@ def _finalize_polish(
     event_sink: EventSink | None,
 ) -> tuple[Path, ...]:
     polished = apply_polish_translations(draft, translations)
+    invalidated = downstream_of(ArtifactKind.TRANSLATION_POLISHED_CUES)
+    job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in invalidated]
+    clear_burn_fingerprint(job)
+    for stage in (StageName.SUBTITLE_QA, StageName.RENDER, StageName.BURN, StageName.MEDIA_QA):
+        record = job.stages[stage]
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
     path = get_job_directory(job) / "artifacts" / "translation-polished-cues.json"
     _write_json(path, [asdict(cue) for cue in polished])
     _add_artifact(job, "translation_polished_cues", path, event_sink)
-    return _finalize_translation(
+    _set_stage(
         job,
-        polished,
+        StageName.TRANSLATE,
+        StageStatus.SUCCEEDED,
         event_sink,
-        invalidate=_invalidate_rendered_artifacts,
-        polished_result=True,
+        extras={"phase": "polish"},
     )
+    return (path,)
 
 
 def _run_translation_polish(

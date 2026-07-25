@@ -27,7 +27,6 @@ from xvt.pipeline.common import (
     _checksum,
     _error_category,
     _invalidate_preview_artifacts,
-    _invalidate_rendered_artifacts,
     _load_cues,
     _set_stage,
     _write_json,
@@ -42,6 +41,8 @@ from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
     TRANSLATE_AND_POLISH_TASK_VERSION,
     PolishBatch,
+    SemanticRepairBatch,
+    SemanticReviewBatch,
     TranslationBatch,
     TranslationPolicy,
     agent_translation_manifest_fingerprint,
@@ -79,13 +80,14 @@ class TranslationRunResult:
 
 
 def _translate_batch_with_retries(
-    batch: TranslationBatch | PolishBatch,
+    batch: TranslationBatch | PolishBatch | SemanticReviewBatch | SemanticRepairBatch,
     provider_config: CompatibleProviderConfig,
     *,
     max_retries: int,
     on_retry: Callable[[int, float, str], None] | None = None,
-    request: Callable[..., dict[int, str]] | None = None,
-) -> dict[int, str]:
+    request: Callable[..., Any] | None = None,
+    response_correction: str = _RESPONSE_CORRECTION,
+) -> Any:
     transport_retries = 0
     response_retries = 0
     request_attempt = 1
@@ -118,7 +120,7 @@ def _translate_batch_with_retries(
             delay = 0.5
             response_retries += 1
             request_attempt += 1
-            correction = _RESPONSE_CORRECTION
+            correction = response_correction
             if on_retry:
                 on_retry(request_attempt, delay, "invalid provider response")
             time.sleep(delay)
@@ -426,13 +428,7 @@ def agent_translation_polish_core_satisfied(job: Job) -> bool:
     try:
         expected = _agent_polished_cues(job)
         polished_path = valid_artifact_path(job, "translation_polished_cues")
-        translated_path = valid_artifact_path(job, "translated_cues")
-        return (
-            polished_path is not None
-            and translated_path is not None
-            and _load_cues(polished_path) == expected
-            and _load_cues(translated_path) == expected
-        )
+        return polished_path is not None and _load_cues(polished_path) == expected
     except (OSError, TypeError, ValueError):
         return False
 
@@ -447,29 +443,26 @@ def complete_agent_polished_outputs(
     artifacts_directory = get_job_directory(job) / "artifacts"
     polished_path = valid_artifact_path(job, "translation_polished_cues")
     if polished_path is None or _load_cues(polished_path) != expected:
+        invalidated = downstream_of(ArtifactKind.TRANSLATION_POLISHED_CUES)
+        job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in invalidated]
+        clear_burn_fingerprint(job)
+        for stage in (StageName.SUBTITLE_QA, StageName.RENDER, StageName.BURN, StageName.MEDIA_QA):
+            record = job.stages[stage]
+            record.status = StageStatus.PENDING
+            record.started_at = None
+            record.completed_at = None
+            record.error = None
         polished_path = artifacts_directory / "translation-polished-cues.json"
         _write_json(polished_path, [asdict(cue) for cue in expected])
         _add_artifact(job, "translation_polished_cues", polished_path, event_sink)
-
-    translated_path = valid_artifact_path(job, "translated_cues")
-    if translated_path is not None and _load_cues(translated_path) == expected:
-        if all(
-            valid_artifact_path(job, kind) is not None
-            for kind in ("translated_srt", "bilingual_srt")
-        ):
-            return tuple(
-                path
-                for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
-                if (path := valid_artifact_path(job, kind)) is not None
-            )
-        return complete_translated_outputs(job_file, event_sink=event_sink)
-    return _finalize_translation(
+    _set_stage(
         job,
-        expected,
+        StageName.TRANSLATE,
+        StageStatus.SUCCEEDED,
         event_sink,
-        invalidate=_invalidate_rendered_artifacts,
-        polished_result=True,
+        extras={"phase": "polish"},
     )
+    return (polished_path,)
 
 
 def _finalize_translation(
@@ -668,11 +661,7 @@ def prepare_agent_translation(
             else "target language must match the persisted workflow goal"
         )
         raise ValueError(message)
-    if (
-        workflow is None
-        and quality == "polished"
-        and job.config.get("target_language") not in {None, target_language}
-    ):
+    if workflow is None and job.config.get("target_language") not in {None, target_language}:
         raise ValueError("target language must match the persisted atomic job goal")
     resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
     source_path = valid_artifact_path(job, "source_cues")
@@ -765,11 +754,7 @@ def run_translation(
             else "target language must match the persisted workflow goal"
         )
         raise ValueError(message)
-    if (
-        workflow is None
-        and quality == "polished"
-        and job.config.get("target_language") not in {None, target_language}
-    ):
+    if workflow is None and job.config.get("target_language") not in {None, target_language}:
         raise ValueError("target language must match the persisted atomic job goal")
     resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
     source_path = valid_artifact_path(job, "source_cues")
@@ -990,10 +975,8 @@ def apply_agent_translation(
             else "target language must match the persisted workflow goal"
         )
         raise ValueError(message)
-    if (
-        workflow is None
-        and quality == "polished"
-        and job.config.get("target_language") != target_language
+    if workflow is None and job.config.get("target_language") not in (
+        {target_language} if quality == "polished" else {None, target_language}
     ):
         raise ValueError("target language must match the persisted atomic job goal")
     manifest = _translation_manifest(job)
@@ -1007,15 +990,10 @@ def apply_agent_translation(
         if quality != "polished" or polished_manifest.get("target_language") != target_language:
             raise ValueError("translation response does not match the polished job goal")
         translations = _load_agent_polished_response(response_file, polished_manifest)
-        if agent_translation_polish_core_satisfied(job) and all(
-            valid_artifact_path(job, kind) is not None
-            for kind in ("translated_srt", "bilingual_srt")
-        ):
-            return tuple(
-                path
-                for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
-                if (path := valid_artifact_path(job, kind)) is not None
-            )
+        if agent_translation_polish_core_satisfied(job):
+            polished_path = valid_artifact_path(job, "translation_polished_cues")
+            assert polished_path is not None
+            return (polished_path,)
         current_progress = _agent_polish_progress(job, polished_manifest)
         if current_progress is None:
             batch_ids, _cue_ids = _manifest_batch_ids_and_cue_ids(polished_manifest)
@@ -1098,12 +1076,16 @@ def apply_subtitle_translation(
 ) -> tuple[Path, ...]:
     job = load_job(job_file)
     workflow = get_workflow_config(job)
-    if (
-        workflow is not None
-        and workflow.translation_quality == "polished"
-        and workflow.target_language != target_language
-    ):
-        raise ValueError("target language must match the polished workflow goal")
+    quality = resolve_translation_quality(job)
+    if workflow is not None and workflow.target_language != target_language:
+        message = (
+            "target language must match the polished workflow goal"
+            if quality == "polished"
+            else "target language must match the persisted workflow goal"
+        )
+        raise ValueError(message)
+    if workflow is None and job.config.get("target_language") not in {None, target_language}:
+        raise ValueError("target language must match the persisted atomic job goal")
     current_stage = StageName.TRANSLATE
     _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:

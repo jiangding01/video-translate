@@ -13,7 +13,7 @@
     - ~~Q3：已有 Job 源字幕重建，通过显式修复命令复用 checkpoint 并失效下游。~~ 已完成：`rebuild-source --strategy asr` 显式重建并保留可验证的译文输入供重新映射。
     - ~~Q4：语义组翻译，避免 provider 批次和中文表达在错误边界断开。~~ 已完成：确定性组按完整组装箱，批次外相邻组只读上下文，prompt/grouping version 保护恢复；默认保持 `faithful`。
     - ~~Q5：可恢复字幕润色。~~ 已完成：Q5a 支持旧译文显式补跑、API checkpoint、Agent 回填和工作流恢复；Q5b 接入新 Job 的 `standard|polished` 质量参数、API draft -> polish 和一次 Agent 翻译+润色。专项设计见 [Q5 可恢复字幕润色技术方案](docs/Q5_TRANSLATION_POLISH_PLAN.md)。
-    - Q6：语义校对、最多一次定向修复和独立人工确认。
+    - ~~Q6：语义校对、最多一次定向修复和独立人工确认。~~ 已完成：polished 候选经结构化语义校对、完整语义组一次修复与最终复查；API/Agent 均可恢复，人工确认绑定候选和报告且不能绕过确定性 QA。专项设计见 [Q6 技术方案](docs/Q6_SEMANTIC_REVIEW_PLAN.md)。
 - 上述质量闭环通过真实 E2E 后，增加可视化校对界面，消费 CLI 的 JSONL 事件和 `job.json`，不复制媒体处理逻辑。
 
 ## 中期
@@ -32,5 +32,5 @@
 - 本地可恢复的 Job 优先于隐式后台状态。
 - 先解决字幕可读性和 QA 闭环，再扩展 GUI 或批处理并发规模。
 - 平台字幕是候选来源，不因成功下载就自动成为最终时间轴；自动降级仍必须通过确定性 QA。
-- Q5 已实现已有译文补跑和新 Job 质量模式；Q6 语义 QA 尚未实现。Q2 不把候选参考文本发送给翻译提供方。
+- Q1–Q6 质量链已实现；默认仍保持 `standard + faithful`，待真实 E2E 后再决定是否切换为 `natural + polished`。Q2 不把候选参考文本发送给翻译提供方。
 - 语义润色可以重新组织既有 cue 的文字，但不能修改 cue ID、数量、顺序和时间码。

@@ -8,11 +8,12 @@ from xvt.job_store import get_job_file, load_job, save_job
 from xvt.models import Cue, StageName, StageStatus
 from xvt.pipeline import (
     agent_translation_polish_core_satisfied,
+    apply_agent_semantic_review,
     apply_agent_translation,
     apply_agent_translation_polish,
     apply_cue_retranslation,
     apply_subtitle_translation,
-    complete_agent_polished_outputs,
+    prepare_agent_semantic_review,
     prepare_agent_translation,
     run_atomic_translation_polish,
     run_subtitle_transcription,
@@ -94,6 +95,25 @@ class TranslationPolishPipelineTest(unittest.TestCase):
         save_job(job)
         return job_file
 
+    def _complete_semantic_review(self, job_file: Path, root: Path) -> None:
+        manifest_path = prepare_agent_semantic_review(job_file)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        response = root / "semantic-response.json"
+        response.write_text(
+            json.dumps(
+                {
+                    "fingerprint": manifest["fingerprint"],
+                    "initial_results": [
+                        {"batch": batch["id"], "issues": []} for batch in manifest["batches"]
+                    ],
+                    "repair_results": [],
+                    "final_results": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        apply_agent_semantic_review(job_file, response)
+
     def test_agent_polish_round_trip_preserves_timeline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -120,10 +140,10 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                     "translation_polish_batches",
                     "translation_polish_progress",
                     "translation_polished_cues",
-                    "translated_cues",
                 }
                 <= kinds
             )
+            self.assertNotIn("translated_cues", kinds)
             polished_path = next(
                 Path(artifact.path)
                 for artifact in job.artifacts
@@ -183,12 +203,10 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 {
                     "translation_polish_progress",
                     "translation_polished_cues",
-                    "translated_cues",
-                    "translated_srt",
-                    "bilingual_srt",
                 }
                 <= kinds
             )
+            self.assertNotIn("translated_cues", kinds)
             self.assertTrue(agent_translation_polish_core_satisfied(job))
             polished_path = next(
                 Path(artifact.path)
@@ -204,9 +222,9 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             self.assertEqual(polished[0]["source_text"], "Hello.")
             self.assertEqual(polished[0]["source_language"], "en")
             self.assertEqual(polished[0]["target_language"], "zh-CN")
-            self.assertEqual({path.suffix for path in paths}, {".srt"})
+            self.assertEqual({path.suffix for path in paths}, {".json"})
 
-    def test_agent_polished_progress_recovers_missing_final_cues_without_response(self) -> None:
+    def test_agent_polished_progress_recovers_missing_cues_by_reapplying_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.srt"
@@ -250,7 +268,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             ]
             save_job(job)
 
-            complete_agent_polished_outputs(job_file)
+            apply_agent_translation(job_file, response, target_language="zh-CN")
 
             self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
 
@@ -289,6 +307,114 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 {artifact.kind for artifact in load_job(job_file).artifacts},
             )
 
+    def test_new_agent_job_rejects_unknown_task_contract_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+
+            for field, value, message in (
+                ("task", "unknown", "unsupported translation task"),
+                ("task_version", 99, "manifest is invalid or stale"),
+            ):
+                with self.subTest(field=field):
+                    output = root / field
+                    job = run_subtitle_transcription(source, output, language="en")
+                    job_file = get_job_file(job)
+                    manifest_path = prepare_agent_translation(
+                        job_file,
+                        source_language="en",
+                        target_language="zh-CN",
+                        translation_quality="polished",
+                    )
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest[field] = value
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                    job = load_job(job_file)
+                    artifact = next(
+                        item for item in job.artifacts if item.kind == "translation_batches"
+                    )
+                    artifact.checksum = file_checksum(manifest_path)
+                    save_job(job)
+                    response = root / f"{field}-response.json"
+                    response.write_text(
+                        json.dumps(
+                            {
+                                "fingerprint": manifest["fingerprint"],
+                                "items": [{"id": 1, "text": "你好。"}],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    before = job_file.read_bytes()
+
+                    with self.assertRaisesRegex(ValueError, message):
+                        apply_agent_translation(
+                            job_file,
+                            response,
+                            target_language="zh-CN",
+                        )
+
+                    self.assertEqual(job_file.read_bytes(), before)
+
+    def test_new_agent_job_rejects_incomplete_or_duplicate_ids_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n\n"
+                "2\n00:00:01,000 --> 00:00:02,000\nWorld.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                translation_quality="polished",
+            )
+            fingerprint = json.loads(manifest_path.read_text(encoding="utf-8"))["fingerprint"]
+
+            for name, items in (
+                ("missing", [{"id": 1, "text": "你好。"}]),
+                (
+                    "duplicate",
+                    [
+                        {"id": 1, "text": "你好。"},
+                        {"id": 1, "text": "您好。"},
+                        {"id": 2, "text": "世界。"},
+                    ],
+                ),
+                (
+                    "extra",
+                    [
+                        {"id": 1, "text": "你好。"},
+                        {"id": 2, "text": "世界。"},
+                        {"id": 99, "text": "多余。"},
+                    ],
+                ),
+            ):
+                with self.subTest(name=name):
+                    response = root / f"{name}-response.json"
+                    response.write_text(
+                        json.dumps({"fingerprint": fingerprint, "items": items}),
+                        encoding="utf-8",
+                    )
+                    before = job_file.read_bytes()
+
+                    with self.assertRaises(ValueError):
+                        apply_agent_translation(
+                            job_file,
+                            response,
+                            target_language="zh-CN",
+                        )
+
+                    self.assertEqual(job_file.read_bytes(), before)
+
     def test_atomic_api_polished_rerun_reuses_draft_and_final_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -309,6 +435,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 "max_retries": 0,
                 "timeout_seconds": 10,
             }
+            events = []
             with (
                 patch.dict("os.environ", {"TEST_POLISH_API_KEY": "secret"}),
                 patch(
@@ -324,8 +451,13 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                     job_file,
                     **provider_args,
                     translation_quality="polished",
+                    event_sink=events.append,
                 )
-                polished = run_atomic_translation_polish(job_file, **provider_args)
+                polished = run_atomic_translation_polish(
+                    job_file,
+                    **provider_args,
+                    event_sink=events.append,
+                )
                 reused_draft = run_translation(
                     job_file,
                     **provider_args,
@@ -339,6 +471,12 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             self.assertEqual(reused_polish.mode, "reused")
             translate_provider.assert_called_once()
             polish_provider.assert_called_once()
+            batch_phases = {
+                event.data.get("phase")
+                for event in events
+                if event.type == "translation_batch_started"
+            }
+            self.assertEqual(batch_phases, {"draft", "polish"})
 
     def test_api_polish_resumes_from_valid_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -437,6 +575,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 [{"id": 1, "text": "旧润色"}],
             )
             apply_agent_translation_polish(job_file, polish_response)
+            self._complete_semantic_review(job_file, root)
             correction = root / "correction.json"
             correction.write_text(
                 json.dumps({"items": [{"id": 1, "text": "新修订"}]}),
@@ -700,6 +839,84 @@ class TranslationPolishPipelineTest(unittest.TestCase):
 
             job = load_job(job_file)
             self.assertEqual(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
+
+    def test_standard_atomic_entrypoints_reject_target_language_change_before_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+
+            for entrypoint in ("prepare", "translate", "apply"):
+                with self.subTest(entrypoint=entrypoint):
+                    output = root / entrypoint
+                    job = run_subtitle_transcription(source, output, language="en")
+                    job_file = get_job_file(job)
+                    prepare_agent_translation(
+                        job_file,
+                        source_language="en",
+                        target_language="zh-CN",
+                    )
+                    before = job_file.read_bytes()
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "target language must match the persisted atomic job goal",
+                    ):
+                        if entrypoint == "prepare":
+                            prepare_agent_translation(
+                                job_file,
+                                source_language="en",
+                                target_language="ja",
+                            )
+                        elif entrypoint == "translate":
+                            run_translation(
+                                job_file,
+                                target_language="ja",
+                                provider="agent",
+                            )
+                        else:
+                            response = root / "standard-response.json"
+                            response.write_text(
+                                json.dumps({"items": [{"id": 1, "text": "翻訳"}]}),
+                                encoding="utf-8",
+                            )
+                            apply_agent_translation(
+                                job_file,
+                                response,
+                                target_language="ja",
+                            )
+
+                    self.assertEqual(job_file.read_bytes(), before)
+
+    def test_standard_workflow_import_rejects_target_language_change_before_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root, cue_count=1)
+            translated = root / "ja.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n翻訳\n",
+                encoding="utf-8",
+            )
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "target language must match the persisted workflow goal",
+            ):
+                apply_subtitle_translation(
+                    job_file,
+                    translated,
+                    target_language="ja",
+                )
+
+            self.assertEqual(job_file.read_bytes(), before)
 
     def test_translate_rejects_polished_target_language_change_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

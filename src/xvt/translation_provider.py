@@ -10,13 +10,19 @@ from urllib.request import Request, urlopen
 from xvt.errors import DependencyError, UserInputError
 from xvt.translate import (
     PolishBatch,
+    SemanticRepairBatch,
+    SemanticReviewBatch,
     TranslationBatch,
     parse_polish_response,
+    parse_semantic_repair_response,
+    parse_semantic_review_response,
     parse_translation_response,
 )
 
 TRANSLATION_PROMPT_VERSION = 3
 TRANSLATION_POLISH_PROMPT_VERSION = 1
+SEMANTIC_REVIEW_PROMPT_VERSION = 1
+SEMANTIC_REPAIR_PROMPT_VERSION = 1
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
@@ -92,17 +98,17 @@ def resolve_provider(
     )
 
 
-def _response_items(content: str) -> list[dict[str, Any]]:
+def _response_array(content: str, key: str) -> list[dict[str, Any]]:
     text = content.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[-1].strip() == "```":
             text = "\n".join(lines[1:-1])
     data = json.loads(text)
-    items = data.get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        raise ProviderResponseError("translation provider response must contain an items array")
-    return items
+    value = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(value, list):
+        raise ProviderResponseError(f"translation provider response must contain a {key} array")
+    return value
 
 
 def translate_batch(
@@ -169,14 +175,69 @@ def polish_batch(
     )
 
 
+def semantic_review_batch(
+    batch: SemanticReviewBatch,
+    config: CompatibleProviderConfig,
+    *,
+    opener=None,
+    correction: str | None = None,
+):
+    system_content = (
+        "Review the candidate subtitle translation for meaning errors, omissions, terminology "
+        "errors, awkward joins, and suspicious source text. Report only genuine issues. Every "
+        "issue must use severity review and one category from meaning_error, omission, "
+        "terminology, awkward_join, source_suspect. An issue may reference current items and "
+        "context_after, but its lowest cue id must belong to items; context_before is read-only. "
+        "Never propose source text or timing changes. Return JSON only in the form "
+        '{"issues":[{"category":"awkward_join","cue_ids":[1],"severity":"review",'
+        '"message":"...","suggested_items":[{"id":1,"text":"..."}]}]}.'
+    )
+    if correction:
+        system_content = f"{system_content} {correction}"
+    return _request_batch(
+        batch,
+        config,
+        system_content=system_content,
+        parser=parse_semantic_review_response,
+        response_key="issues",
+        opener=opener,
+    )
+
+
+def semantic_repair_batch(
+    batch: SemanticRepairBatch,
+    config: CompatibleProviderConfig,
+    *,
+    opener=None,
+    correction: str | None = None,
+) -> dict[int, str]:
+    system_content = (
+        "Repair the reported semantic issues while preserving complete meaning, tone, required "
+        "terminology, cue boundaries, ids, and timing. Return every id in items exactly once, "
+        "including unchanged text where needed to preserve the complete semantic group. "
+        "context_before and context_after are read-only. Return JSON only in the form "
+        '{"items":[{"id":1,"text":"..."}]}.'
+    )
+    if correction:
+        system_content = f"{system_content} {correction}"
+    return _request_batch(
+        batch,
+        config,
+        system_content=system_content,
+        parser=parse_semantic_repair_response,
+        opener=opener,
+    )
+
+
 def _request_batch(
-    batch: TranslationBatch | PolishBatch,
+    batch: TranslationBatch | PolishBatch | SemanticReviewBatch | SemanticRepairBatch,
     config: CompatibleProviderConfig,
     *,
     system_content: str,
     parser,
+    response_key: str = "items",
     opener=None,
-) -> dict[int, str]:
+) -> Any:
     payload = {
         "model": config.model,
         "messages": [
@@ -255,7 +316,7 @@ def _request_batch(
     # 都属于「结构性无效响应」——进入纠错重试，耗尽后按依赖故障分类（exit 3），
     # 而不是被顶层兜底误报为用户输入错误（exit 2）。
     try:
-        return parser(batch, _response_items(content))
+        return parser(batch, _response_array(content, response_key))
     except ProviderResponseError:
         raise
     except ValueError as error:
