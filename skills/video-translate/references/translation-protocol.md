@@ -43,3 +43,33 @@ Requirements:
 - Use an empty-looking source only if it is genuinely meaningful; the pipeline rejects empty translated text.
 
 Before applying the response, verify that the response ID set exactly matches the source ID set. The CLI performs the same validation and will fail on any mismatch.
+
+## Semantic review and one repair
+
+When the manifest has `task=semantic_review_and_repair`, copy its fingerprint and return every review batch exactly once in `initial_results`. Issues may use only `meaning_error`, `omission`, `terminology`, `awkward_join`, or `source_suspect`, always with `severity=review`. Report only genuine issues; never propose timing, ID, source-text, or cue-boundary changes.
+
+For repairable issues, return every repair batch exactly once in `repair_results`, covering every item in the requested complete semantic group, including unchanged items. Never repair `source_suspect`; it remains pending even when unrelated issues are repaired. Review the repaired candidate once and return every final batch in `final_results`. If no repairable issue exists, both arrays must be empty. The CLI validates the entire combined response before replacing the waiting manifest, so a rejected response can be corrected and submitted again.
+
+```json
+{
+  "fingerprint": "manifest fingerprint",
+  "initial_results": [
+    {
+      "batch": 1,
+      "issues": [
+        {
+          "category": "meaning_error",
+          "cue_ids": [1],
+          "severity": "review",
+          "message": "Meaning changed",
+          "suggested_items": [{"id": 1, "text": "Suggested text"}]
+        }
+      ]
+    }
+  ],
+  "repair_results": [
+    {"batch": 1, "items": [{"id": 1, "text": "Repaired text"}]}
+  ],
+  "final_results": [{"batch": 1, "issues": []}]
+}
+```

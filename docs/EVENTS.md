@@ -28,7 +28,7 @@
 - **失败类事件的错误载荷统一为 `error: {category, message}`**：辅助函数 `error_event_fields(category, message)` 提供该形态。
 - 所有 URL、鉴权头、Cookie、签名查询参数在写入事件前统一脱敏。
 
-> `pipeline.py`、`workflow.py`、`batch.py`（P3b）与 `process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）均已全面对齐本文件描述的 v1 信封目标契约：全部 `create_event` 调用引用 `EventType` 枚举成员，携带错误信息的失败类事件统一使用 `error_event_fields` 信封。经 P7c 对账修复 `cli.py`（`cli_failed` 顶层裸 `category`/`message` 改为嵌套 `error`）、`pipeline.py`（补齐 10 处遗漏的 `job_file`）、`batch.py`（`_mark_unfinished_item` 补齐 `index`/`total`）后，生产端 v1 迁移已核实全量完成，无已知残留失配。
+> `pipeline/`、`workflow.py`、`batch.py`（P3b）与 `process.py`、`download.py`、`transcribe.py`、`burn.py`（P3c）均已全面对齐本文件描述的 v1 信封目标契约：全部 `create_event` 调用引用 `EventType` 枚举成员，携带错误信息的失败类事件统一使用 `error_event_fields` 信封。经 P7c 对账修复 `cli.py`（`cli_failed` 顶层裸 `category`/`message` 改为嵌套 `error`）、原 `pipeline.py`（补齐 10 处遗漏的 `job_file`）、`batch.py`（`_mark_unfinished_item` 补齐 `index`/`total`）后，生产端 v1 迁移已核实全量完成，无已知残留失配。
 
 ---
 
@@ -72,7 +72,7 @@
 
 ## Job 生命周期
 
-单个 Job 主流程（`pipeline.py`）。
+单个 Job 主流程（`pipeline/`）。
 
 ### `job_started`
 | 字段 | 类型 | 含义 |
@@ -95,7 +95,7 @@
 
 ## stage 推进
 
-stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射表按状态派发四种类型。
+stage 状态迁移（`pipeline/common.py`），由 `StageStatus → EventType` 映射表按状态派发四种类型。
 
 ### `stage_started` / `stage_waiting` / `stage_completed` / `stage_failed`
 | 字段 | 类型 | 含义 |
@@ -105,12 +105,12 @@ stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射�
 | `stage` | string | stage 名（`StageName` 值） |
 | `status` | string | stage 状态（`StageStatus` 值） |
 | `detail` | string? | 可选人类可读细分，如 `acquire` 的 `subtitles`/`media`，或 QA/渲染的 `source`/`translated` |
-| `phase` | string? | 可选业务子阶段；polished API 第一遍使用 `draft`，润色使用 `polish` |
+| `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 | `error` | object? | 仅 `stage_failed` 且记录了失败信息时存在，`{category, message}` |
 
 ## artifact 登记
 
-产物登记与失效（`pipeline.py`）。
+产物登记与失效（`pipeline/common.py` 与各业务子模块）。
 
 ### `artifact_created`
 | 字段 | 类型 | 含义 |
@@ -139,6 +139,17 @@ stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射�
 | `review_count` | int | 被确认的 review 级问题数量 |
 | `source` | string | `user_flag`（本次显式确认）或 `stored_acknowledgment`（复用既有确认） |
 
+### `translation_review_acknowledged`
+
+用户显式确认当前 `polished` 译文的语义校对 review 问题。确认记录绑定 source、候选和报告 checksum、prompt version 与精确问题集合；内容变化后不能复用。该事件不代表确定性字幕 QA 已通过。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
+| `review_count` | int | 被确认的语义 review 问题数量 |
+| `source` | string | 当前为 `user_flag` |
+
 ## 下载
 
 yt-dlp 下载进度（`download.py`）。
@@ -154,7 +165,7 @@ yt-dlp 下载进度（`download.py`）。
 
 ## 转写
 
-音频转写（`transcribe.py`）与远端字幕选择（`pipeline.py`）。
+音频转写（`transcribe.py`）与远端字幕选择（`pipeline/transcription.py`）。
 
 ### `transcription_progress`
 | 字段 | 类型 | 含义 |
@@ -190,7 +201,7 @@ yt-dlp 下载进度（`download.py`）。
 
 ## 翻译
 
-翻译提供方选择、回退、批次进度（`pipeline.py`）。
+翻译提供方选择、回退、批次进度（`pipeline/translation.py`、`polish.py`、`semantic.py`）。
 
 ### `translation_provider_selected`
 | 字段 | 类型 | 含义 |
@@ -199,7 +210,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `provider` | string | 提供方模式（如 `agent` 或兼容 API 名） |
 | `model` | string | 使用的模型名 |
-| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色请求为 `polish` |
+| `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 ### `translation_fallback`
 | 字段 | 类型 | 含义 |
@@ -209,7 +220,7 @@ yt-dlp 下载进度（`download.py`）。
 | `mode` | string | 回退后的模式（`agent`） |
 | `reason` | string | 回退原因 |
 | `path` | string | 生成的翻译批次文件路径 |
-| `phase` | string? | 可选业务子阶段；润色回退为 `polish` |
+| `phase` | string? | 可选业务子阶段；润色回退为 `polish`，语义校对回退为 `semantic_review` |
 
 ### `translation_progress_reset`
 | 字段 | 类型 | 含义 |
@@ -217,7 +228,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
 | `reason` | string | 重置原因（如翻译指纹变化） |
-| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色 checkpoint 为 `polish` |
+| `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 ### `translation_resegmented`
 | 字段 | 类型 | 含义 |
@@ -235,7 +246,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
-| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色批次为 `polish` |
+| `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 ### `translation_batch_retrying`
 | 字段 | 类型 | 含义 |
@@ -247,7 +258,7 @@ yt-dlp 下载进度（`download.py`）。
 | `attempt` | int | 当前批次即将进行的请求序号；传输重试与结构纠错共用连续序号 |
 | `delay_seconds` | number | 重试前等待秒数；生产端当前限制在 0 到 30 秒 |
 | `reason` | string | 重试原因；当前生产端使用 `provider temporarily unavailable` 或 `invalid provider response` |
-| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色批次为 `polish` |
+| `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 传输重试和结构纠错使用独立预算。默认传输故障最多重试 4 次，结构性无效响应固定最多纠错 1 次；因此 `attempt` 只表示可见请求顺序，不表示任一预算的剩余次数。
 
@@ -258,11 +269,11 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
-| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色批次为 `polish` |
+| `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 ## 烧录与预览
 
-FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline.py`）。
+FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 
 ### `burn_progress`
 | 字段 | 类型 | 含义 |
