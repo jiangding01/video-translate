@@ -131,14 +131,15 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 在可视化校对界面之前，项目先实现 [字幕质量与自适应源字幕技术方案](SUBTITLE_QUALITY_PLAN.md)。方案保持现有边界：
 
 - 不新增 Job stage，不升级 Job schema；源字幕选择复用转写腿，润色和语义校对作为 `translate` / `subtitle_qa` 的可恢复子步骤，通过 artifact、现有 stage 状态和事件 `detail` 细分。
-- YouTube 人工字幕可靠时保留快速路径；自动字幕在翻译/烧录任务中只作为参考，最终时间轴由 ASR 词级分段提供；用户本地字幕仍默认保留。
+- Q2 已完成新 Job 的源字幕选择：平台字幕仅由显式 `--youtube-subtitles` 请求；`auto` 对通过 QA 的人工候选保留快速路径，对失败候选先对齐再 ASR，自动候选在翻译/烧录目标下使用 ASR；`subtitles` / `asr` 可显式覆盖。候选 QA、选择报告和最终 source cues 均为 checksum artifact；用户本地字幕默认保留。
+- Q2 选择报告损坏或缺失但 source cues 仍有效时，只从既有 cue provenance 与校验通过的候选/对齐 artifact 重建审计报告，不重新选择或改写时间轴；原因记为 `selection_artifact_recovered`。
 - 翻译以确定性语义组为上下文，模型只返回既有 cue ID 的文本；润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
 - 新增到端到端质量链的草稿、润色、语义校对和修复模型调用都逐批保存 checkpoint；语义问题与确定性 QA 问题使用独立报告和人工确认通道。现有高级命令 `retranslate-cues` 暂不承诺逐批恢复。
 - 新配置和 artifact 采用向后兼容的可选加法，旧 Job 缺少质量配置时保持当前单遍翻译行为。
 
-Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置及同类 `ConnectionError` 在请求和响应读取边界统一包装为可重试传输故障；其他 `OSError` 以不可重试依赖故障退出。传输重试默认预算为 4，遵循最长 30 秒的有效 `Retry-After` 或指数退避。结构性无效响应只允许 1 次携带纠正提示的重试，不占用传输预算；后续传输重试会清除纠正提示。主翻译与局部重译通过同一批次执行函数保持重试语义一致；只有逐批持久化结果的主翻译发送 `translation_batch_completed`。
+Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置及同类 `ConnectionError` 在请求和响应读取边界统一包装为可重试传输故障；其他 `OSError` 以不可重试依赖故障退出。传输重试默认预算为 4，遵循最长 30 秒的有效 `Retry-After` 或指数退避。结构性无效响应只允许 1 次携带纠正提示的重试，不占用传输预算；后续传输重试会清除纠正提示。主翻译与局部重译通过同一批次执行函数保持重试语义一致；只有逐批持久化结果的主翻译发送 `translation_batch_completed`。Q3 的已有 Job 重建、Q4 语义组翻译、Q5 润色和 Q6 语义 QA 尚未实现；Q2 的 `reference_allowed` 只记录选择结果，不进入翻译请求。
 
-完整的输入矩阵、CLI 计划、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准。在对应 PR 合并前，这些内容不是当前 CLI 能力。
+完整的输入矩阵、CLI、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准；其中 Q1/Q2 已落地，Q3–Q6 仍是后续规划。
 
 ## 安全边界
 

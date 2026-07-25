@@ -9,7 +9,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - 本地视频、音频、YouTube URL 输入
 - MLX Whisper 或 faster-whisper 转写，保留词级时间戳；超宽 ASR 片段会优先按语义边界切分；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
 - 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴
-- YouTube 人工字幕优先，允许显式回退自动字幕或 Whisper
+- YouTube 平台字幕仅在显式请求时下载；新 Job 以候选 QA 和 `--source-strategy auto|subtitles|asr` 选择最终时间轴
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
 - 原文、译文、双语 SRT，及独立中英样式的双语 ASS
@@ -24,9 +24,9 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目将先补齐字幕质量闭环：翻译提供方断线恢复、YouTube 源字幕自适应选择、已有 Job 的 ASR 重建、语义组翻译、可恢复润色和语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成翻译传输可靠性和新 Job 的源字幕自适应选择；后续仍是已有 Job 的 ASR 重建、语义组翻译、可恢复润色和语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
-该文档描述的是待实现能力；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
+该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
 ## 默认命令路径
 
@@ -277,7 +277,7 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
   --allow-auto-subtitles
 ```
 
-XVT 优先选择人工字幕。只有传入 `--allow-auto-subtitles` 才会使用自动字幕。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
+XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有传入 `--allow-auto-subtitles` 才会请求自动字幕。新 Job 默认 `--source-strategy auto`：人工候选 QA 通过直接采用，失败时先尝试对齐再回退 ASR；自动候选在翻译或烧录任务中最终使用 ASR，在只生成源字幕且 QA 通过时可直接采用。`subtitles` 强制候选为时间轴，`asr` 强制媒体转写（不能用于纯字幕输入，也不能与 `--align-subtitles` 同用）。候选 QA 与最终选择会写入 `source-candidate-qa.json`、`source-selection.json`。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
 
 ### 7. 生成短片段预览
 

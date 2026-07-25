@@ -7,6 +7,7 @@
 - 当前协议版本：**v1**（`src/xvt/events.py` 中的 `EVENT_PROTOCOL_VERSION = 1`）。
 - 每条事件都携带信封字段 `v`（整数），标明产出该事件时的协议版本。
 - **加字段不升版本**：向既有事件 `data` 增加新的可选字段属于向后兼容变更，不改变 `v`。消费端必须容忍未知字段。
+- **加事件类型不升版本**：新增事件类型属于向后兼容变更；消费端必须忽略未知事件类型。
 - **删除或修改字段必须升版本**：删除字段、重命名字段、改变字段类型或语义都属于破坏性变更，必须递增 `EVENT_PROTOCOL_VERSION` 并在此处记录迁移说明。
 - 事件类型的单一事实来源是 `EventType`（`StrEnum`）。生产端与消费端都应引用枚举成员，不写裸字符串。
 
@@ -172,6 +173,17 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `language` | string | 选中的字幕语言 |
 | `automatic` | bool | 是否为自动选择（无用户指定语言时为 `true`） |
+
+### `source_selected`
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
+| `strategy` | string | `auto`、`subtitles` 或 `asr` |
+| `candidate_kind` | string | `none`、`user`、`manual` 或 `automatic` |
+| `selected_kind` | string | 最终时间轴来源（`subtitles`、`aligned_subtitles` 或 `asr`） |
+| `reason` | string | 稳定选择原因码 |
+| `report_path` | string | `source-selection.json` 路径 |
 
 ## 翻译
 

@@ -107,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
     run_parser.add_argument("--language")
     run_parser.add_argument("--subtitles")
+    run_parser.add_argument(
+        "--source-strategy", choices=["auto", "subtitles", "asr"], default="auto"
+    )
     run_parser.add_argument("--align-subtitles", action="store_true")
     run_parser.add_argument(
         "--min-alignment-confidence", type=float, default=DEFAULT_MIN_ALIGNMENT_CONFIDENCE
@@ -157,6 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--recursive", action="store_true")
     batch_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
     batch_parser.add_argument("--language")
+    batch_parser.add_argument(
+        "--source-strategy", choices=["auto", "subtitles", "asr"], default="auto"
+    )
     batch_parser.add_argument("--target-language")
     batch_parser.add_argument(
         "--provider",
@@ -485,6 +491,12 @@ _TRANSLATION_RETRY_REASON_LABELS = {
     "invalid provider response": "翻译服务响应无效",
 }
 
+_SOURCE_SELECTION_LABELS = {
+    "subtitles": "采用字幕候选",
+    "aligned_subtitles": "采用已对齐字幕",
+    "asr": "采用 ASR 字幕",
+}
+
 
 def _format_batch_position(data: dict[str, object]) -> str:
     batch = data.get("batch")
@@ -556,6 +568,12 @@ class _HumanEventSink(_TrackedEventSink):
             self._render_preview(data)
         elif event.type == EventType.TRANSCRIPTION_PROGRESS:
             self._render_transcription(data)
+        elif event.type == EventType.SOURCE_SELECTED:
+            self._flush_pending_skips()
+            selected = _SOURCE_SELECTION_LABELS.get(
+                str(data.get("selected_kind")), str(data.get("selected_kind"))
+            )
+            self._line(f"[选择] 源字幕：{selected}（{data.get('reason')}）")
         elif event.type == EventType.TRANSLATION_BATCH_STARTED:
             self._seen_translation = True
             self._flush_pending_skips()
@@ -885,6 +903,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 engine=arguments.engine,
                 language=arguments.language,
                 subtitles=arguments.subtitles,
+                source_strategy=arguments.source_strategy,
                 align_subtitles=arguments.align_subtitles,
                 minimum_alignment_confidence=arguments.min_alignment_confidence,
                 allow_low_confidence_alignment=arguments.allow_low_confidence_alignment,
@@ -933,6 +952,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 output=arguments.output,
                 engine=arguments.engine,
                 language=arguments.language,
+                source_strategy=arguments.source_strategy,
                 target_language=arguments.target_language,
                 provider=arguments.provider,
                 base_url=arguments.base_url,

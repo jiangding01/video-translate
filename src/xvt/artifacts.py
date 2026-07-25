@@ -24,7 +24,9 @@ class ArtifactKind(StrEnum):
     NORMALIZED_AUDIO = "normalized_audio"
     WORD_TRANSCRIPT = "word_transcript"
     SUBTITLE_ALIGNMENT = "subtitle_alignment"
+    SOURCE_CANDIDATE_QA = "source_candidate_qa"
     SOURCE_CUES = "source_cues"
+    SOURCE_SELECTION = "source_selection"
     SOURCE_SRT = "source_srt"
     SUBTITLE_QA = "subtitle_qa"
     TRANSLATION_RESEGMENTATION = "translation_resegmentation"
@@ -71,6 +73,14 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.SUBTITLE_ALIGNMENT: frozenset(
         {ArtifactKind.WORD_TRANSCRIPT, ArtifactKind.INPUT_SUBTITLES}
     ),
+    # 源字幕候选质量报告：本地/远程字幕及媒体边界共同决定候选是否可采用。
+    ArtifactKind.SOURCE_CANDIDATE_QA: frozenset(
+        {
+            ArtifactKind.INPUT_SUBTITLES,
+            ArtifactKind.DOWNLOADED_SUBTITLES,
+            ArtifactKind.MEDIA_INFO,
+        }
+    ),
     ArtifactKind.SOURCE_CUES: frozenset(
         {
             ArtifactKind.WORD_TRANSCRIPT,
@@ -78,6 +88,15 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
             ArtifactKind.SUBTITLE_ALIGNMENT,
             ArtifactKind.TRANSLATION_RESEGMENTATION,
             ArtifactKind.DOWNLOADED_SUBTITLES,
+            ArtifactKind.SOURCE_CANDIDATE_QA,
+        }
+    ),
+    # 选择报告在最终 source cues 写入后登记，记录可校验的最终选择与可选对齐结果。
+    ArtifactKind.SOURCE_SELECTION: frozenset(
+        {
+            ArtifactKind.SOURCE_CUES,
+            ArtifactKind.SOURCE_CANDIDATE_QA,
+            ArtifactKind.SUBTITLE_ALIGNMENT,
         }
     ),
     ArtifactKind.SOURCE_SRT: frozenset({ArtifactKind.SOURCE_CUES}),

@@ -57,6 +57,7 @@ class WorkflowOptions:
     engine: str = DEFAULT_ENGINE
     language: str | None = None
     subtitles: str | Path | None = None
+    source_strategy: str = "auto"
     align_subtitles: bool = False
     minimum_alignment_confidence: float = DEFAULT_MIN_ALIGNMENT_CONFIDENCE
     allow_low_confidence_alignment: bool = False
@@ -90,10 +91,14 @@ class WorkflowOptions:
             raise ValueError("subtitle input cannot be combined with --subtitles")
         if subtitle_input and self.align_subtitles:
             raise ValueError("--align-subtitles requires media input")
+        if subtitle_input and self.source_strategy == "asr":
+            raise ValueError("--source-strategy asr requires media input")
         if subtitle_input and self.burn:
             raise ValueError("--burn requires media input")
         if self.align_subtitles and not self.subtitles:
             raise ValueError("--align-subtitles requires --subtitles")
+        if self.source_strategy == "asr" and self.align_subtitles:
+            raise ValueError("--source-strategy asr cannot be combined with --align-subtitles")
         if self.allow_low_confidence_alignment and not self.align_subtitles:
             raise ValueError("--allow-low-confidence-alignment requires --align-subtitles")
         if not 0 <= self.minimum_alignment_confidence <= 1:
@@ -124,6 +129,8 @@ class WorkflowOptions:
             raise ValueError("--glossary cannot be combined with --translation-subtitles")
         if self.segmentation_preset not in SEGMENTATION_PRESETS:
             raise ValueError("--segmentation-preset must be conservative, balanced, or compact")
+        if self.source_strategy not in {"auto", "subtitles", "asr"}:
+            raise ValueError("--source-strategy must be auto, subtitles, or asr")
 
     def persisted_config(self, policy: TranslationPolicy | None = None) -> WorkflowConfig:
         requested_outputs: list[str] = []
@@ -176,6 +183,24 @@ def _error_category(error: Exception) -> str:
 def _artifact_checksum(job: Job, kind: str) -> str | None:
     artifact = next((item for item in job.artifacts if item.kind == kind), None)
     return artifact.checksum if artifact else None
+
+
+def _source_selection_satisfied(job: Job) -> bool:
+    path = valid_artifact_path(job, "source_selection")
+    source_checksum = _artifact_checksum(job, "source_cues")
+    if path is None or source_checksum is None:
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict) or data.get("source_cues_checksum") != source_checksum:
+        return False
+    return (
+        data.get("candidate_kind") == "none"
+        or job.config.get("input_kind") == "subtitle"
+        or valid_artifact_path(job, "source_candidate_qa") is not None
+    )
 
 
 def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
@@ -547,6 +572,7 @@ def run_workflow(
             engine=options.engine,
             language=options.language,
             subtitles=options.subtitles,
+            source_strategy=options.source_strategy,
             align_subtitles=options.align_subtitles,
             minimum_alignment_confidence=options.minimum_alignment_confidence,
             allow_low_confidence_alignment=options.allow_low_confidence_alignment,
@@ -603,28 +629,33 @@ def continue_workflow(
     try:
         # source_srt 缺失说明转写腿在 QA/渲染处中断（例如 QA needs_review 后
         # 被人工确认放行）：与缺 source_cues 一样先补齐转写腿再推进。
-        if (
-            valid_artifact_path(job, "source_cues") is None
-            or valid_artifact_path(job, "source_srt") is None
-        ):
-            parsed_input = urlparse(job.input)
-            media_info = valid_artifact_path(job, "media_info")
-            transcription_checkpoint = valid_artifact_path(
-                job, "word_transcript"
-            ) or valid_artifact_path(job, "normalized_audio")
-            if (
-                parsed_input.scheme in {"http", "https"}
-                and parsed_input.hostname
-                and not (media_info and transcription_checkpoint)
-            ):
-                resume_remote_transcription(
-                    path,
-                    cookies_from_browser=cookies_from_browser,
-                    proxy=proxy,
-                    event_sink=event_sink,
-                )
-            else:
+        source_cues = valid_artifact_path(job, "source_cues")
+        source_srt = valid_artifact_path(job, "source_srt")
+        source_selection_missing = (
+            "source_strategy" in job.config and not _source_selection_satisfied(job)
+        )
+        if source_cues is None or source_srt is None or source_selection_missing:
+            if source_cues is not None:
                 resume_job(path, event_sink=event_sink)
+            else:
+                parsed_input = urlparse(job.input)
+                media_info = valid_artifact_path(job, "media_info")
+                transcription_checkpoint = valid_artifact_path(
+                    job, "word_transcript"
+                ) or valid_artifact_path(job, "normalized_audio")
+                if (
+                    parsed_input.scheme in {"http", "https"}
+                    and parsed_input.hostname
+                    and not (media_info and transcription_checkpoint)
+                ):
+                    resume_remote_transcription(
+                        path,
+                        cookies_from_browser=cookies_from_browser,
+                        proxy=proxy,
+                        event_sink=event_sink,
+                    )
+                else:
+                    resume_job(path, event_sink=event_sink)
 
         return _advance_workflow(
             path,

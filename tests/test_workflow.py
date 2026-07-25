@@ -60,6 +60,7 @@ class WorkflowTest(unittest.TestCase):
                         target_language="zh-CN",
                         translation_style="natural",
                         segmentation_preset="compact",
+                        source_strategy="asr",
                         burn=True,
                     ),
                     event_sink=events.append,
@@ -74,6 +75,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(workflow_config["translation_policy"], {"style": "natural", "terms": []})
         self.assertEqual(workflow_config["segmentation_preset"], "compact")
         self.assertEqual(transcribe.call_args.kwargs["segmentation_preset"], "compact")
+        self.assertEqual(transcribe.call_args.kwargs["source_strategy"], "asr")
         self.assertEqual(
             workflow_config["requested_outputs"],
             ["translated_subtitles", "bilingual_subtitles", "burned_video"],
@@ -183,6 +185,22 @@ class WorkflowTest(unittest.TestCase):
                     burn=True,
                 )
             )
+
+    def test_source_strategy_rejects_asr_for_subtitle_input_and_alignment(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--source-strategy asr requires media input"):
+            WorkflowOptions(
+                input="/tmp/source.srt", output="/tmp/output", source_strategy="asr"
+            ).validate()
+        with self.assertRaisesRegex(
+            ValueError, "--source-strategy asr cannot be combined with --align-subtitles"
+        ):
+            WorkflowOptions(
+                input="/tmp/video.mp4",
+                output="/tmp/output",
+                subtitles="/tmp/source.srt",
+                source_strategy="asr",
+                align_subtitles=True,
+            ).validate()
 
     def test_subtitle_workflow_imports_translation_without_media(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

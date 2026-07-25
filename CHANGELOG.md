@@ -4,8 +4,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新 Job 支持 `--source-strategy auto|subtitles|asr`；显式平台字幕候选会先经过确定性 QA，并持久化候选报告、最终选择和 `source_selected` 事件。
+
 ### Fixed
 
+- 人工平台字幕候选失败时尝试对齐后再回退 ASR，自动候选在翻译/烧录目标中不再直接决定时间轴。仅平台最后一个 cue 超出媒体不超过 500ms 时安全裁剪。
 - 翻译提供方连接在 `urlopen` 或响应读取阶段抛出的 `RemoteDisconnected`、连接重置等 `ConnectionError` 统一归类为可重试传输故障；其他 `OSError` 与 401/403 等不可重试 HTTP 错误仍立即失败。
 - 翻译重试拆分为独立预算：传输故障默认最多重试 4 次并遵循最长 30 秒的有效 `Retry-After` / 指数退避，结构性无效响应固定只做 1 次携带纠正提示的重试；传输重试不再误带结构纠正提示。主翻译与局部重译共用同一重试实现和 retry 事件语义。
 - 译文 QA `needs_review` 确认后续跑不再漏写 `translated.srt` / `bilingual.srt`：翻译满足度要求 cue 与两份 SRT 均有效；已有 `translated_cues` 时经 `complete_translated_outputs` 只补 QA+渲染，不重打翻译 API。`plan_advance_steps` 新增 `render` 步骤。

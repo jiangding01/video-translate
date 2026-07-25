@@ -97,6 +97,9 @@ class EventProtocolTest(unittest.TestCase):
     def test_create_event_accepts_enum(self) -> None:
         self.assertEqual(create_event(EventType.CLI_COMPLETED).type, "cli_completed")
 
+    def test_source_selected_event_type_is_registered(self) -> None:
+        self.assertEqual(EventType.SOURCE_SELECTED, "source_selected")
+
     def test_job_event_fields_always_contains_both_keys(self) -> None:
         self.assertEqual(
             job_event_fields(None, None),
@@ -205,6 +208,15 @@ class EventPayloadContractTest(unittest.TestCase):
                 stage="translate",
                 status="failed",
                 **error_event_fields("workflow", "boom"),
+            ),
+            EventType.SOURCE_SELECTED: create_event(
+                EventType.SOURCE_SELECTED,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                strategy="auto",
+                candidate_kind="manual",
+                selected_kind="subtitles",
+                reason="manual_subtitles_passed",
+                report_path="/tmp/source-selection.json",
             ),
             EventType.TRANSLATION_BATCH_STARTED: create_event(
                 EventType.TRANSLATION_BATCH_STARTED,
