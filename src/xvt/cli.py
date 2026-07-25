@@ -29,12 +29,16 @@ from xvt.job_store import get_job_file, load_job
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import (
+    TranslationRunResult,
     acknowledge_subtitle_review,
+    acknowledge_translation_review,
+    apply_agent_semantic_review,
     apply_agent_translation,
     apply_agent_translation_polish,
     apply_cue_retranslation,
     apply_subtitle_translation,
     burn_translated_job,
+    complete_acknowledged_semantic_review,
     inspect_input,
     interrupt_running_stage,
     prepare_agent_translation,
@@ -46,6 +50,7 @@ from xvt.pipeline import (
     run_atomic_translation_polish,
     run_translation,
     run_translation_polish,
+    run_translation_semantic_review,
 )
 from xvt.process import CommandCancelled, CommandError
 from xvt.recovery import (
@@ -55,8 +60,10 @@ from xvt.recovery import (
     verify_job,
 )
 from xvt.segment import SEGMENTATION_PRESETS
+from xvt.translate import translation_policy_from_dict
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
 from xvt.workflow_config import (
+    WorkflowConfig,
     get_workflow_config,
     resolve_target_language,
     resolve_translation_quality,
@@ -72,6 +79,7 @@ recommended path:
 when status says awaiting Agent input:
   xvt apply-translation JOB.json RESPONSE --target-language LANG
   # or: xvt apply-polish-translation JOB.json RESPONSE
+  # or: xvt apply-semantic-review JOB.json RESPONSE
   xvt continue JOB.json
 
 batch:
@@ -257,6 +265,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Acknowledge the current needs_review subtitle QA report and proceed",
     )
+    continue_parser.add_argument(
+        "--acknowledge-translation-review",
+        action="store_true",
+        help="Acknowledge the current semantic translation review report and proceed",
+    )
     continue_parser.add_argument("--events-jsonl", action="store_true")
 
     prepare_parser = subparsers.add_parser(
@@ -344,6 +357,21 @@ def build_parser() -> argparse.ArgumentParser:
     apply_polish_parser.add_argument("job_file")
     apply_polish_parser.add_argument("response_file")
     apply_polish_parser.add_argument("--events-jsonl", action="store_true")
+
+    apply_semantic_parser = subparsers.add_parser(
+        "apply-semantic-review",
+        help="Apply Agent semantic review and one-repair JSON, then run continue",
+    )
+    apply_semantic_parser.add_argument("job_file")
+    apply_semantic_parser.add_argument("response_file")
+    apply_semantic_parser.add_argument("--events-jsonl", action="store_true")
+
+    acknowledge_translation_parser = subparsers.add_parser(
+        "acknowledge-translation-review",
+        help="[advanced] Acknowledge the current semantic translation review report",
+    )
+    acknowledge_translation_parser.add_argument("job_file")
+    acknowledge_translation_parser.add_argument("--events-jsonl", action="store_true")
 
     resegment_parser = subparsers.add_parser(
         "resegment-translation",
@@ -631,7 +659,11 @@ class _HumanEventSink(_TrackedEventSink):
             self._seen_translation = True
             self._flush_pending_skips()
             self._last_failed_stage = None
-            action = "润色字幕" if data.get("phase") == "polish" else "翻译字幕"
+            action = {
+                "polish": "润色字幕",
+                "semantic_review": "语义校对",
+                "repair": "定向修复",
+            }.get(data.get("phase"), "翻译字幕")
             self._line(f"[进行中] {action}（批次 {_format_batch_position(data)}）")
         elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
             self._seen_translation = True
@@ -647,7 +679,11 @@ class _HumanEventSink(_TrackedEventSink):
                 parts.append(f"等待 {delay:g}s")
             if reason_label:
                 parts.append(f"原因：{reason_label}")
-            action = "润色字幕" if data.get("phase") == "polish" else "翻译字幕"
+            action = {
+                "polish": "润色字幕",
+                "semantic_review": "语义校对",
+                "repair": "定向修复",
+            }.get(data.get("phase"), "翻译字幕")
             self._line(f"[重试] {action}（{'，'.join(parts)}）")
         elif event.type == EventType.WORKFLOW_WAITING:
             self._flush_pending_skips()
@@ -1140,6 +1176,10 @@ def _run_command(arguments: argparse.Namespace) -> int:
             report_path = acknowledge_subtitle_review(arguments.job_file, event_sink=event_sink)
             if not arguments.events_jsonl:
                 print(f"已确认字幕 QA 复核报告: {report_path}", file=sys.stderr)
+        if arguments.acknowledge_translation_review:
+            report_path = acknowledge_translation_review(arguments.job_file, event_sink=event_sink)
+            if not arguments.events_jsonl:
+                print(f"已确认译文语义复核报告: {report_path}", file=sys.stderr)
         result = continue_workflow(
             arguments.job_file,
             cookies_from_browser=arguments.cookies_from_browser,
@@ -1182,6 +1222,13 @@ def _run_command(arguments: argparse.Namespace) -> int:
             target_language=arguments.target_language,
             event_sink=event_sink,
         )
+        job = load_job(arguments.job_file)
+        if get_workflow_config(job) is None and resolve_translation_quality(job) == "polished":
+            semantic = run_translation_semantic_review(
+                arguments.job_file,
+                event_sink=event_sink,
+            )
+            paths = semantic.paths
         if arguments.events_jsonl:
             _complete(arguments, artifacts=[str(path) for path in paths])
         else:
@@ -1241,6 +1288,33 @@ def _run_command(arguments: argparse.Namespace) -> int:
                     timeout_seconds=arguments.timeout_seconds,
                     event_sink=event_sink,
                 )
+            if result.mode != "agent":
+                job = load_job(arguments.job_file)
+                workflow = get_workflow_config(job)
+                semantic_config = workflow or WorkflowConfig(
+                    target_language=arguments.target_language,
+                    provider=arguments.provider,
+                    base_url=arguments.base_url,
+                    model=arguments.model,
+                    api_key_env=arguments.api_key_env,
+                    batch_size=arguments.batch_size,
+                    max_retries=arguments.max_retries,
+                    timeout_seconds=arguments.timeout_seconds,
+                    translation_policy=translation_policy_from_dict(
+                        job.config.get("translation_policy")
+                    ),
+                    translation_quality="polished",
+                )
+                semantic = run_translation_semantic_review(
+                    arguments.job_file,
+                    config=semantic_config,
+                    event_sink=event_sink,
+                )
+                result = TranslationRunResult(
+                    semantic.mode,
+                    semantic.paths,
+                    semantic.fallback_reason,
+                )
         if arguments.events_jsonl:
             _complete(
                 arguments,
@@ -1293,6 +1367,47 @@ def _run_command(arguments: argparse.Namespace) -> int:
             arguments.response_file,
             event_sink=event_sink,
         )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+        else:
+            for path in paths:
+                print(path)
+        return 0
+
+    if arguments.command == "apply-semantic-review":
+        event_sink = _event_sink(arguments)
+        result = apply_agent_semantic_review(
+            arguments.job_file,
+            arguments.response_file,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(
+                arguments,
+                status=result.status,
+                artifacts=[str(path) for path in result.paths],
+            )
+        else:
+            print(f"status: {result.status}")
+            for path in result.paths:
+                print(path)
+        return 0
+
+    if arguments.command == "acknowledge-translation-review":
+        event_sink = _event_sink(arguments)
+        report_path = acknowledge_translation_review(
+            arguments.job_file,
+            event_sink=event_sink,
+        )
+        paths = (report_path,)
+        if get_workflow_config(load_job(arguments.job_file)) is None:
+            paths = (
+                report_path,
+                *complete_acknowledged_semantic_review(
+                    arguments.job_file,
+                    event_sink=event_sink,
+                ),
+            )
         if arguments.events_jsonl:
             _complete(arguments, artifacts=[str(path) for path in paths])
         else:
@@ -1442,6 +1557,8 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "translate",
         "polish-translation",
         "apply-polish-translation",
+        "apply-semantic-review",
+        "acknowledge-translation-review",
         "prepare-translation",
         "apply-translation",
         "import-translation",

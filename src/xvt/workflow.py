@@ -22,12 +22,14 @@ from xvt.events import EventSink, EventType, create_event, error_event_fields, j
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
+    agent_semantic_review_waiting,
     agent_translation_polish_core_satisfied,
     agent_translation_polish_progress_ready,
     agent_translation_polish_started,
     agent_translation_polish_waiting,
     apply_subtitle_translation,
     burn_translated_job,
+    complete_acknowledged_semantic_review,
     complete_agent_polished_outputs,
     complete_translated_outputs,
     is_subtitle_input,
@@ -36,6 +38,10 @@ from xvt.pipeline import (
     run_transcription,
     run_translation,
     run_translation_polish,
+    run_translation_semantic_review,
+    semantic_review_approved,
+    semantic_review_satisfied,
+    semantic_review_waiting,
     translation_polish_satisfied,
 )
 from xvt.recovery import file_checksum, subtitle_qa_failure_guidance, valid_artifact_path
@@ -302,18 +308,23 @@ def _current_artifacts(
     *,
     waiting: bool = False,
     polishing: bool = False,
+    semantic_reviewing: bool = False,
 ) -> tuple[Path, ...]:
-    kinds = (
-        (("translation_polish_batches",) if polishing else ("translation_batches",))
-        if waiting
-        else (
+    if waiting:
+        if semantic_reviewing:
+            kinds = ("translation_semantic_qa", "translation_semantic_qa_final")
+        elif polishing:
+            kinds = ("translation_polish_batches",)
+        else:
+            kinds = ("translation_batches",)
+    else:
+        kinds = (
             "source_srt",
             "translated_srt",
             "bilingual_srt",
             "bilingual_ass",
             "burned_video",
         )
-    )
     return tuple(path for kind in kinds if (path := valid_artifact_path(job, kind)))
 
 
@@ -347,7 +358,8 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
     )
     if not standard or config is None or config.translation_quality == "standard":
         return standard
-    return translation_polish_satisfied(job) or agent_translation_polish_core_satisfied(job)
+    polished = translation_polish_satisfied(job) or agent_translation_polish_core_satisfied(job)
+    return polished and semantic_review_satisfied(job)
 
 
 def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
@@ -380,8 +392,23 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
     if goals.needs_translation and not _translation_satisfied(job, config):
         draft_path = valid_artifact_path(job, "translation_draft_cues")
         if config.translation_quality == "polished":
+            polished_ready = translation_polish_satisfied(
+                job
+            ) or agent_translation_polish_core_satisfied(job)
+            if polished_ready:
+                if agent_semantic_review_waiting(job):
+                    return ("await_agent_semantic_review",)
+                if semantic_review_waiting(job):
+                    return ("await_translation_review",)
+                if semantic_review_approved(job):
+                    steps.append("render")
+                else:
+                    steps.append("semantic_review")
+                if goals.needs_burn and not _burn_satisfied(job, config):
+                    steps.append("burn")
+                return tuple(steps)
             if agent_translation_polish_progress_ready(job):
-                steps.append("render")
+                steps.append("polish")
             elif agent_translation_polish_waiting(job):
                 return ("await_agent_translation",)
             elif draft_path is None and agent_translation_polish_started(job):
@@ -432,6 +459,7 @@ def planned_run_steps(options: WorkflowOptions) -> list[str]:
         steps.append("import_translation" if options.translation_subtitles else "translate")
         if options.translation_quality == "polished":
             steps.append("polish")
+            steps.append("semantic_review")
     if options.burn:
         steps.append("burn")
     return steps
@@ -471,58 +499,123 @@ def _ensure_translation(
         return None
 
     if config.translation_quality == "polished":
-        if agent_translation_polish_progress_ready(job):
-            complete_agent_polished_outputs(path, event_sink=event_sink)
-            return None
-        if agent_translation_polish_waiting(job):
+        polished_ready = translation_polish_satisfied(
+            job
+        ) or agent_translation_polish_core_satisfied(job)
+        if not polished_ready:
+            if agent_translation_polish_progress_ready(job):
+                complete_agent_polished_outputs(path, event_sink=event_sink)
+            elif agent_translation_polish_waiting(job):
+                return _emit_waiting(
+                    job=job,
+                    path=path,
+                    message="translate_and_polish requires Agent input",
+                    artifacts=_current_artifacts(job, waiting=True),
+                    event_sink=event_sink,
+                )
+            elif valid_artifact_path(job, "translation_draft_cues") is not None:
+                polish = run_translation_polish(path, event_sink=event_sink)
+                if polish.mode == "agent":
+                    return _emit_waiting(
+                        job=load_job(path),
+                        path=path,
+                        message=polish.fallback_reason or "translation polish requires Agent input",
+                        artifacts=polish.paths,
+                        event_sink=event_sink,
+                    )
+            else:
+                invalid_agent_manifest = (
+                    agent_translation_polish_started(job)
+                    and not agent_translation_polish_waiting(job)
+                    and not agent_translation_polish_progress_ready(job)
+                )
+                if (
+                    job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+                    and not invalid_agent_manifest
+                ):
+                    return _emit_waiting(
+                        job=job,
+                        path=path,
+                        message="translation requires Agent input",
+                        artifacts=_current_artifacts(job, waiting=True),
+                        event_sink=event_sink,
+                    )
+                translation = run_translation(
+                    path,
+                    target_language=target_language,
+                    provider=config.provider,
+                    base_url=config.base_url,
+                    model=config.model,
+                    api_key_env=config.api_key_env,
+                    batch_size=config.batch_size,
+                    max_retries=config.max_retries,
+                    timeout_seconds=config.timeout_seconds,
+                    policy=_translation_policy(config),
+                    event_sink=event_sink,
+                )
+                if translation.mode == "agent":
+                    return _emit_waiting(
+                        job=load_job(path),
+                        path=path,
+                        message=translation.fallback_reason or "translation requires Agent input",
+                        artifacts=translation.paths,
+                        event_sink=event_sink,
+                    )
+                polish = run_translation_polish(path, event_sink=event_sink)
+                if polish.mode == "agent":
+                    return _emit_waiting(
+                        job=load_job(path),
+                        path=path,
+                        message=polish.fallback_reason or "translation polish requires Agent input",
+                        artifacts=polish.paths,
+                        event_sink=event_sink,
+                    )
+            job = load_job(path)
+
+        if agent_semantic_review_waiting(job):
             return _emit_waiting(
                 job=job,
                 path=path,
-                message="translate_and_polish requires Agent input",
-                artifacts=_current_artifacts(job, waiting=True),
+                message="semantic review requires Agent input",
+                artifacts=_current_artifacts(job, waiting=True, semantic_reviewing=True),
                 event_sink=event_sink,
             )
-
-    # cues 已落盘但缺 SRT：只补 QA+渲染，禁止再次调用翻译 API。
-    if (
-        config.translation_quality == "polished"
-        and valid_artifact_path(job, "translation_draft_cues") is not None
-    ):
-        polish = run_translation_polish(path, event_sink=event_sink)
-        if polish.mode == "agent":
+        if semantic_review_waiting(job):
+            return _emit_waiting(
+                job=job,
+                path=path,
+                message="semantic review requires user acknowledgment",
+                artifacts=_current_artifacts(job, waiting=True, semantic_reviewing=True),
+                event_sink=event_sink,
+            )
+        if semantic_review_approved(job):
+            complete_acknowledged_semantic_review(path, event_sink=event_sink)
+            return None
+        semantic = run_translation_semantic_review(
+            path,
+            config=config,
+            event_sink=event_sink,
+        )
+        if semantic.status != "completed":
             return _emit_waiting(
                 job=load_job(path),
                 path=path,
-                message=polish.fallback_reason or "translation polish requires Agent input",
-                artifacts=polish.paths,
+                message=(
+                    "semantic review requires Agent input"
+                    if semantic.status == "awaiting_agent"
+                    else "semantic review requires user acknowledgment"
+                ),
+                artifacts=semantic.paths,
                 event_sink=event_sink,
             )
         return None
 
+    # Standard quality: cues 已落盘但缺 SRT 时只补 QA+渲染，禁止再次调用翻译 API。
     if valid_artifact_path(job, "translated_cues") is not None:
         complete_translated_outputs(path, event_sink=event_sink)
-        if config.translation_quality == "polished":
-            polish = run_translation_polish(path, event_sink=event_sink)
-            if polish.mode == "agent":
-                return _emit_waiting(
-                    job=load_job(path),
-                    path=path,
-                    message=polish.fallback_reason or "translation polish requires Agent input",
-                    artifacts=polish.paths,
-                    event_sink=event_sink,
-                )
         return None
 
-    invalid_agent_manifest = (
-        config.translation_quality == "polished"
-        and agent_translation_polish_started(job)
-        and not agent_translation_polish_waiting(job)
-        and not agent_translation_polish_progress_ready(job)
-    )
-    if (
-        job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
-        and not invalid_agent_manifest
-    ):
+    if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
         return _emit_waiting(
             job=job,
             path=path,
@@ -541,16 +634,6 @@ def _ensure_translation(
             target_language=target_language,
             event_sink=event_sink,
         )
-        if config.translation_quality == "polished":
-            polish = run_translation_polish(path, event_sink=event_sink)
-            if polish.mode == "agent":
-                return _emit_waiting(
-                    job=load_job(path),
-                    path=path,
-                    message=polish.fallback_reason or "translation polish requires Agent input",
-                    artifacts=polish.paths,
-                    event_sink=event_sink,
-                )
         return None
 
     translation = run_translation(
@@ -574,16 +657,6 @@ def _ensure_translation(
             artifacts=translation.paths,
             event_sink=event_sink,
         )
-    if config.translation_quality == "polished":
-        polish = run_translation_polish(path, event_sink=event_sink)
-        if polish.mode == "agent":
-            return _emit_waiting(
-                job=load_job(path),
-                path=path,
-                message=polish.fallback_reason or "translation polish requires Agent input",
-                artifacts=polish.paths,
-                event_sink=event_sink,
-            )
     return None
 
 
@@ -646,18 +719,33 @@ def _advance_workflow(
         in {
             "await_agent_translation",
             "await_agent_polish",
+            "await_agent_semantic_review",
+            "await_translation_review",
         }
     ):
         polishing = advance_steps[0] == "await_agent_polish"
+        semantic_reviewing = advance_steps[0] in {
+            "await_agent_semantic_review",
+            "await_translation_review",
+        }
         return _emit_waiting(
             job=job,
             path=path,
             message=(
-                "translation polish requires Agent input"
+                "semantic review requires user acknowledgment"
+                if advance_steps[0] == "await_translation_review"
+                else "semantic review requires Agent input"
+                if semantic_reviewing
+                else "translation polish requires Agent input"
                 if polishing
                 else "translation requires Agent input"
             ),
-            artifacts=_current_artifacts(job, waiting=True, polishing=polishing),
+            artifacts=_current_artifacts(
+                job,
+                waiting=True,
+                polishing=polishing,
+                semantic_reviewing=semantic_reviewing,
+            ),
             event_sink=event_sink,
         )
 

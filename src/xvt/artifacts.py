@@ -40,6 +40,10 @@ class ArtifactKind(StrEnum):
     TRANSLATION_POLISH_BATCHES = "translation_polish_batches"
     TRANSLATION_POLISH_PROGRESS = "translation_polish_progress"
     TRANSLATION_POLISHED_CUES = "translation_polished_cues"
+    TRANSLATION_SEMANTIC_QA = "translation_semantic_qa"
+    TRANSLATION_SEMANTIC_REPAIR = "translation_semantic_repair"
+    TRANSLATION_REPAIRED_CUES = "translation_repaired_cues"
+    TRANSLATION_SEMANTIC_QA_FINAL = "translation_semantic_qa_final"
     TRANSLATED_CUES = "translated_cues"
     TRANSLATED_SRT = "translated_srt"
     TRANSLATED_SUBTITLE_QA = "translated_subtitle_qa"
@@ -132,6 +136,22 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.TRANSLATION_POLISHED_CUES: frozenset(
         {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_POLISH_PROGRESS}
     ),
+    ArtifactKind.TRANSLATION_SEMANTIC_QA: frozenset(
+        {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_POLISHED_CUES}
+    ),
+    ArtifactKind.TRANSLATION_SEMANTIC_REPAIR: frozenset(
+        {
+            ArtifactKind.SOURCE_CUES,
+            ArtifactKind.TRANSLATION_POLISHED_CUES,
+            ArtifactKind.TRANSLATION_SEMANTIC_QA,
+        }
+    ),
+    ArtifactKind.TRANSLATION_REPAIRED_CUES: frozenset(
+        {ArtifactKind.TRANSLATION_POLISHED_CUES, ArtifactKind.TRANSLATION_SEMANTIC_REPAIR}
+    ),
+    ArtifactKind.TRANSLATION_SEMANTIC_QA_FINAL: frozenset(
+        {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_REPAIRED_CUES}
+    ),
     ArtifactKind.TRANSLATED_CUES: frozenset(
         {
             ArtifactKind.SOURCE_CUES,
@@ -140,6 +160,9 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
             ArtifactKind.TRANSLATION_PROGRESS,
             ArtifactKind.CUE_RETRANSLATION_RESPONSE,
             ArtifactKind.TRANSLATION_POLISHED_CUES,
+            ArtifactKind.TRANSLATION_SEMANTIC_QA,
+            ArtifactKind.TRANSLATION_REPAIRED_CUES,
+            ArtifactKind.TRANSLATION_SEMANTIC_QA_FINAL,
         }
     ),
     # 渲染与烧录链。

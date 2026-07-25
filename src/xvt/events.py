@@ -46,6 +46,7 @@ class EventType(StrEnum):
 
     # 字幕 QA 人工确认
     SUBTITLE_REVIEW_ACKNOWLEDGED = "subtitle_review_acknowledged"
+    TRANSLATION_REVIEW_ACKNOWLEDGED = "translation_review_acknowledged"
 
     # 下载
     DOWNLOAD_PROGRESS = "download_progress"

@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from xvt import cancellation
@@ -1302,12 +1303,14 @@ class CliTest(unittest.TestCase):
         output = StringIO()
         draft = TranslationRunResult("openai-compatible", (Path("/tmp/draft.json"),))
         polished = TranslationRunResult("reused", (Path("/tmp/translated.srt"),))
+        semantic = TranslationRunResult("openai-compatible", (Path("/tmp/semantic.json"),))
         with (
             patch("xvt.cli.run_translation", return_value=draft) as translate,
-            patch("xvt.cli.load_job", return_value=object()),
+            patch("xvt.cli.load_job", return_value=SimpleNamespace(config={})),
             patch("xvt.cli.resolve_translation_quality", return_value="polished"),
             patch("xvt.cli.get_workflow_config", return_value=None),
             patch("xvt.cli.run_atomic_translation_polish", return_value=polished) as polish,
+            patch("xvt.cli.run_translation_semantic_review", return_value=semantic) as review,
             redirect_stdout(output),
         ):
             return_code = main(
@@ -1330,7 +1333,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(translate.call_args.kwargs["translation_quality"], "polished")
         polish.assert_called_once()
-        self.assertIn("mode: reused", output.getvalue())
+        review.assert_called_once()
+        self.assertIn("mode: openai-compatible", output.getvalue())
 
     def test_burn_can_force_software_encoding(self) -> None:
         output = StringIO()

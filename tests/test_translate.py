@@ -10,12 +10,17 @@ from xvt.translate import (
     TranslationPolicy,
     agent_translation_manifest_fingerprint,
     apply_polish_translations,
+    apply_semantic_repairs,
     apply_translations,
     build_cue_retranslation_batches,
     build_polish_batches,
+    build_semantic_repair_batches,
+    build_semantic_review_batches,
     build_translation_batches,
     load_translation_policy,
     map_subtitle_translations,
+    parse_semantic_repair_response,
+    parse_semantic_review_response,
     parse_translation_response,
     translation_policy_from_dict,
 )
@@ -350,6 +355,95 @@ class TranslateTest(unittest.TestCase):
             [(cue.id, cue.start_ms, cue.end_ms, cue.source_text) for cue in draft],
         )
 
+    def test_semantic_review_rejects_unknown_duplicate_and_unowned_issues(self) -> None:
+        candidate = [
+            Cue(
+                cue.id,
+                cue.start_ms,
+                cue.end_ms,
+                cue.source_text,
+                target_text=f"译文{cue.id}",
+                target_language="zh-CN",
+            )
+            for cue in self.cues
+        ]
+        batch = build_semantic_review_batches(
+            self.cues,
+            candidate,
+            source_language="en",
+            target_language="zh-CN",
+            batch_size=2,
+        )[0]
+        valid = {
+            "category": "meaning_error",
+            "cue_ids": [1],
+            "severity": "review",
+            "message": "meaning changed",
+            "suggested_items": [{"id": 1, "text": "修订"}],
+        }
+
+        with self.assertRaisesRegex(ValueError, "unsupported category"):
+            parse_semantic_review_response(batch, [{**valid, "category": "style"}])
+        with self.assertRaisesRegex(ValueError, "duplicate issue"):
+            parse_semantic_review_response(batch, [valid, valid])
+        with self.assertRaisesRegex(ValueError, "outside its owned batch"):
+            parse_semantic_review_response(batch, [{**valid, "cue_ids": [3]}])
+
+    def test_semantic_repair_covers_complete_group_and_preserves_timeline(self) -> None:
+        candidate = [
+            Cue(
+                cue.id,
+                cue.start_ms,
+                cue.end_ms,
+                cue.source_text,
+                target_text=f"译文{cue.id}",
+                target_language="zh-CN",
+            )
+            for cue in self.cues
+        ]
+        review_batch = build_semantic_review_batches(
+            self.cues,
+            candidate,
+            source_language="en",
+            target_language="zh-CN",
+        )[0]
+        issues = parse_semantic_review_response(
+            review_batch,
+            [
+                {
+                    "category": "omission",
+                    "cue_ids": [2],
+                    "severity": "review",
+                    "message": "missing meaning",
+                    "suggested_items": [],
+                }
+            ],
+        )
+        repair_batch = build_semantic_repair_batches(
+            self.cues,
+            candidate,
+            issues,
+            source_language="en",
+            target_language="zh-CN",
+        )[0]
+
+        with self.assertRaisesRegex(ValueError, "complete semantic group"):
+            parse_semantic_repair_response(repair_batch, [{"id": 2, "text": "修订二"}])
+        repaired = parse_semantic_repair_response(
+            repair_batch,
+            [
+                {"id": 1, "text": "译文1"},
+                {"id": 2, "text": "修订二"},
+                {"id": 3, "text": "译文3"},
+            ],
+        )
+        result = apply_semantic_repairs(candidate, repaired, {1, 2, 3})
+        self.assertEqual([cue.target_text for cue in result], ["译文1", "修订二", "译文3"])
+        self.assertEqual(
+            [(cue.id, cue.start_ms, cue.end_ms) for cue in result],
+            [(cue.id, cue.start_ms, cue.end_ms) for cue in candidate],
+        )
+
     def test_maps_equal_cue_counts_by_order(self) -> None:
         translated = [
             Cue(1, 9000, 10000, "", target_text="一"),
@@ -384,3 +478,5 @@ class TranslateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    (parse_semantic_repair_response,)
+    (parse_semantic_review_response,)

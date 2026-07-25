@@ -8,8 +8,10 @@ from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import (
     TranslationRunResult,
+    apply_agent_semantic_review,
     apply_agent_translation,
     apply_subtitle_translation,
+    prepare_agent_semantic_review,
     prepare_agent_translation,
     run_subtitle_transcription,
 )
@@ -48,6 +50,10 @@ class WorkflowTest(unittest.TestCase):
                     "xvt.pipeline.polish.polish_batch",
                     return_value={1: "润色"},
                 ) as polish,
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    return_value=(),
+                ) as semantic_review,
             ):
                 result = run_workflow(
                     WorkflowOptions(
@@ -79,6 +85,7 @@ class WorkflowTest(unittest.TestCase):
             )
             translate.assert_called_once()
             polish.assert_called_once()
+            semantic_review.assert_called_once()
 
     def test_polished_options_validate_and_plan_two_translation_phases(self) -> None:
         options = WorkflowOptions(
@@ -91,7 +98,10 @@ class WorkflowTest(unittest.TestCase):
         options.validate()
 
         self.assertEqual(options.persisted_config().translation_quality, "polished")
-        self.assertEqual(planned_run_steps(options), ["transcribe", "translate", "polish"])
+        self.assertEqual(
+            planned_run_steps(options),
+            ["transcribe", "translate", "polish", "semantic_review"],
+        )
         with self.assertRaisesRegex(ValueError, "translation-subtitles"):
             WorkflowOptions(
                 input="/tmp/video.mp4",
@@ -152,6 +162,24 @@ class WorkflowTest(unittest.TestCase):
                 encoding="utf-8",
             )
             apply_agent_translation(job_file, response, target_language="zh-CN")
+            semantic_manifest_path = prepare_agent_semantic_review(job_file)
+            semantic_manifest = json.loads(semantic_manifest_path.read_text(encoding="utf-8"))
+            semantic_response = root / "semantic-response.json"
+            semantic_response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": semantic_manifest["fingerprint"],
+                        "initial_results": [
+                            {"batch": batch["id"], "issues": []}
+                            for batch in semantic_manifest["batches"]
+                        ],
+                        "repair_results": [],
+                        "final_results": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_agent_semantic_review(job_file, semantic_response)
             completed = load_job(job_file)
             completed.artifacts = [
                 artifact

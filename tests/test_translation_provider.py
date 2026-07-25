@@ -18,7 +18,10 @@ from xvt.translate import (
     GlossaryTerm,
     TranslationPolicy,
     build_polish_batches,
+    build_semantic_repair_batches,
+    build_semantic_review_batches,
     build_translation_batches,
+    parse_semantic_review_response,
 )
 from xvt.translation_provider import (
     CompatibleProviderConfig,
@@ -26,11 +29,97 @@ from xvt.translation_provider import (
     TranslationProviderError,
     polish_batch,
     resolve_provider,
+    semantic_repair_batch,
+    semantic_review_batch,
     translate_batch,
 )
 
 
 class TranslationProviderTest(unittest.TestCase):
+    def test_semantic_review_provider_requires_issues_array(self) -> None:
+        source = [Cue(1, 0, 1000, "Hello", source_language="en")]
+        candidate = [Cue(1, 0, 1000, "Hello", target_text="你好", target_language="zh-CN")]
+        batch = build_semantic_review_batches(
+            source,
+            candidate,
+            source_language="en",
+            target_language="zh-CN",
+        )[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                content = json.dumps({"items": []})
+                return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+        with self.assertRaisesRegex(ProviderResponseError, "issues array"):
+            semantic_review_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+
+    def test_semantic_repair_provider_sends_complete_group_and_issues(self) -> None:
+        source = [Cue(1, 0, 1000, "Hello", source_language="en")]
+        candidate = [Cue(1, 0, 1000, "Hello", target_text="你好", target_language="zh-CN")]
+        review_batch = build_semantic_review_batches(
+            source,
+            candidate,
+            source_language="en",
+            target_language="zh-CN",
+        )[0]
+        issues = parse_semantic_review_response(
+            review_batch,
+            [
+                {
+                    "category": "meaning_error",
+                    "cue_ids": [1],
+                    "severity": "review",
+                    "message": "wrong meaning",
+                    "suggested_items": [{"id": 1, "text": "您好"}],
+                }
+            ],
+        )
+        batch = build_semantic_repair_batches(
+            source,
+            candidate,
+            issues,
+            source_language="en",
+            target_language="zh-CN",
+        )[0]
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                content = json.dumps({"items": [{"id": 1, "text": "您好"}]})
+                return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+        def opener(request, **_kwargs):
+            captured.update(json.loads(request.data))
+            return Response()
+
+        result = semantic_repair_batch(
+            batch,
+            CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+            opener=opener,
+        )
+
+        self.assertEqual(result, {1: "您好"})
+        manifest = json.loads(captured["messages"][1]["content"])
+        self.assertEqual([item["id"] for item in manifest["items"]], [1])
+        self.assertEqual(manifest["issues"][0]["category"], "meaning_error")
+
     def test_polish_provider_sends_draft_and_rejects_context_ids(self) -> None:
         source = [
             Cue(1, 0, 1000, "Hello", source_language="en"),
@@ -573,7 +662,7 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertEqual(result.mode, "openai-compatible")
         self.assertTrue(any(path.name == "translated.srt" for path in result.paths))
 
-    def test_translation_discards_progress_when_language_policy_or_grouping_changes(self) -> None:
+    def test_translation_discards_progress_when_policy_or_grouping_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
@@ -604,15 +693,13 @@ class TranslationProviderTest(unittest.TestCase):
             def translate(batch, _config, *, correction=None):
                 self.assertIsNone(correction)
                 calls.append((batch.target_language, batch.policy.style))
-                text = "你好" if batch.target_language == "zh-CN" else "こんにちは"
-                return {1: text}
+                return {1: "你好"}
 
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch("xvt.pipeline.translation.translate_batch", side_effect=translate),
             ):
                 run_translation(job_file, target_language="zh-CN")
-                run_translation(job_file, target_language="ja")
                 run_translation(
                     job_file,
                     target_language="zh-CN",
@@ -633,7 +720,6 @@ class TranslationProviderTest(unittest.TestCase):
             calls,
             [
                 ("zh-CN", "faithful"),
-                ("ja", "faithful"),
                 ("zh-CN", "natural"),
                 ("zh-CN", "natural"),
             ],

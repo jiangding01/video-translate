@@ -337,11 +337,56 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         )
 
     # 原子 Job（无 workflow 目标）：保持独立 translate / apply 入口。
+    from xvt.pipeline.semantic import (
+        agent_semantic_review_waiting,
+        semantic_review_approved,
+        semantic_review_waiting,
+    )
     from xvt.pipeline.translation import (
         agent_translation_polish_progress_ready,
         agent_translation_polish_started,
         agent_translation_polish_waiting,
     )
+
+    if agent_semantic_review_waiting(job):
+        return plan(
+            "awaiting_input",
+            "任务正在等待 Agent 语义校对与一次修复结果回填。",
+            prerequisite_commands=(_job_command("apply-semantic-review", job_file, "RESPONSE"),),
+            report_paths=(str(valid_artifacts["translation_semantic_qa"]),),
+        )
+
+    if semantic_review_waiting(job):
+        report_kind = (
+            "translation_semantic_qa_final"
+            if "translation_semantic_qa_final" in valid_artifacts
+            else "translation_semantic_qa"
+        )
+        return plan(
+            "awaiting_input",
+            "语义校对仍有 review 问题；请检查报告后显式确认。",
+            primary_command=_job_command("acknowledge-translation-review", job_file),
+            report_paths=(str(valid_artifacts[report_kind]),),
+        )
+
+    if (
+        job.config.get("translation_quality") == "polished"
+        and "translation_polished_cues" in valid_artifacts
+        and not semantic_review_approved(job)
+    ):
+        target = target_language or "LANGUAGE"
+        return plan(
+            "retryable",
+            "润色候选有效，可以重新执行原子翻译命令继续语义校对。",
+            primary_command=_job_command(
+                "translate",
+                job_file,
+                "--target-language",
+                target,
+                "--translation-quality",
+                "polished",
+            ),
+        )
 
     agent_waiting = agent_translation_polish_waiting(job)
     agent_progress = agent_translation_polish_progress_ready(job)
@@ -440,6 +485,37 @@ def _recovery_for_workflow(
             advance_steps=steps,
         )
 
+    if steps[0] == "await_agent_semantic_review":
+        return plan(
+            "awaiting_input",
+            "任务正在等待 Agent 语义校对与一次修复结果回填。",
+            primary_command=_job_command("continue", job_file),
+            prerequisite_commands=(_job_command("apply-semantic-review", job_file, "RESPONSE"),),
+            report_paths=tuple(
+                str(valid_artifacts[kind])
+                for kind in ("translation_semantic_qa", "translation_semantic_qa_final")
+                if kind in valid_artifacts
+            ),
+            advance_steps=steps,
+        )
+
+    if steps[0] == "await_translation_review":
+        return plan(
+            "awaiting_input",
+            "语义校对仍有 review 问题；请检查报告后显式确认。",
+            primary_command=_job_command(
+                "continue",
+                job_file,
+                "--acknowledge-translation-review",
+            ),
+            report_paths=tuple(
+                str(valid_artifacts[kind])
+                for kind in ("translation_semantic_qa_final", "translation_semantic_qa")
+                if kind in valid_artifacts
+            ),
+            advance_steps=steps,
+        )
+
     if steps[0] == "repair_polish_draft":
         return plan(
             "manual_fix",
@@ -453,6 +529,8 @@ def _recovery_for_workflow(
         reason = "源字幕有效，可以继续未完成的翻译阶段。"
     elif "polish" in steps:
         reason = "译文草稿有效，可以继续未完成的润色阶段。"
+    elif "semantic_review" in steps:
+        reason = "润色候选有效，可以继续未完成的语义校对阶段。"
     elif "render" in steps:
         reason = "译文 cue 已就绪，可以补齐字幕渲染产物后继续。"
     elif "burn" in steps:

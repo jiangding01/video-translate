@@ -163,3 +163,117 @@ def acknowledge_subtitle_review(
             )
         )
     return report_path
+
+
+def _semantic_issue_keys(report: dict[str, Any]) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    issues = report.get("issues")
+    if not isinstance(issues, list) or not issues:
+        raise UserInputError("semantic review report has no review issues")
+    keys: list[tuple[str, tuple[int, ...]]] = []
+    for issue in issues:
+        category = issue.get("category") if isinstance(issue, dict) else None
+        cue_ids = issue.get("cue_ids") if isinstance(issue, dict) else None
+        severity = issue.get("severity") if isinstance(issue, dict) else None
+        if (
+            not isinstance(category, str)
+            or not isinstance(cue_ids, list)
+            or not cue_ids
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in cue_ids)
+            or severity != "review"
+        ):
+            raise UserInputError("semantic review report contains an invalid issue")
+        keys.append((category, tuple(sorted(cue_ids))))
+    if len(set(keys)) != len(keys):
+        raise UserInputError("semantic review report contains duplicate issues")
+    return tuple(sorted(keys))
+
+
+def translation_review_acknowledged(job: Job, report_path: Path) -> bool:
+    record = job.config.get("translation_review_acknowledgment")
+    if not isinstance(record, dict):
+        return False
+    from xvt.pipeline.semantic import semantic_review_target
+
+    target = semantic_review_target(job)
+    if target is None or target[0] != report_path:
+        return False
+    repaired_path = valid_artifact_path(job, "translation_repaired_cues")
+    candidate_kind = (
+        "translation_repaired_cues"
+        if repaired_path is not None and target[1] == repaired_path
+        else "translation_polished_cues"
+    )
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        issue_keys = _semantic_issue_keys(report)
+    except (OSError, json.JSONDecodeError, UserInputError):
+        return False
+    return bool(
+        record.get("source_cues_checksum") == _artifact_checksum_for(job, "source_cues")
+        and record.get("candidate_cues_checksum") == _artifact_checksum_for(job, candidate_kind)
+        and record.get("report_checksum")
+        == _artifact_checksum_for(
+            job,
+            "translation_semantic_qa_final"
+            if candidate_kind == "translation_repaired_cues"
+            else "translation_semantic_qa",
+        )
+        and record.get("prompt_version") == report.get("prompt_version")
+        and record.get("acknowledged_issues")
+        == [[category, list(cue_ids)] for category, cue_ids in issue_keys]
+    )
+
+
+def acknowledge_translation_review(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> Path:
+    job = load_job(job_file)
+    from xvt.pipeline.semantic import semantic_review_target
+
+    target = semantic_review_target(job)
+    if target is None:
+        raise UserInputError("no confirmable semantic review report found")
+    report_path, candidate_path = target
+    repaired_path = valid_artifact_path(job, "translation_repaired_cues")
+    report_kind = (
+        "translation_semantic_qa_final"
+        if repaired_path is not None and candidate_path == repaired_path
+        else "translation_semantic_qa"
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "needs_review":
+        raise UserInputError("semantic review report does not require acknowledgment")
+    issue_keys = _semantic_issue_keys(report)
+    candidate_kind = (
+        "translation_repaired_cues"
+        if report_kind == "translation_semantic_qa_final"
+        else "translation_polished_cues"
+    )
+    job.config["translation_review_acknowledgment"] = {
+        "report_kind": report_kind,
+        "report_checksum": _artifact_checksum_for(job, report_kind),
+        "source_cues_checksum": _artifact_checksum_for(job, "source_cues"),
+        "candidate_cues_checksum": _artifact_checksum_for(job, candidate_kind),
+        "prompt_version": report.get("prompt_version"),
+        "acknowledged_issues": [[category, list(cue_ids)] for category, cue_ids in issue_keys],
+        "acknowledged_at": utc_now(),
+    }
+    record = job.stages[StageName.TRANSLATE]
+    if record.status in {StageStatus.AWAITING_INPUT, StageStatus.FAILED}:
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
+    save_job(job)
+    if event_sink:
+        event_sink(
+            create_event(
+                EventType.TRANSLATION_REVIEW_ACKNOWLEDGED,
+                **job_event_fields(job.id, get_job_file(job)),
+                review_count=len(issue_keys),
+                source="user_flag",
+            )
+        )
+    return report_path
