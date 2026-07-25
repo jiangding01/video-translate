@@ -37,6 +37,7 @@ from xvt.recovery import valid_artifact_path
 from xvt.render import save_bilingual_ass
 from xvt.subtitles import load_subtitles, save_subtitles
 from xvt.translate import (
+    SEMANTIC_GROUPING_VERSION,
     TranslationBatch,
     TranslationPolicy,
     apply_translations,
@@ -316,6 +317,8 @@ def prepare_agent_translation(
                 "job_id": job.id,
                 "source_language": source_language,
                 "target_language": target_language,
+                "prompt_version": TRANSLATION_PROMPT_VERSION,
+                "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
                 "policy": resolved_policy.to_dict(),
                 "batches": [batch.to_dict() for batch in batches],
             },
@@ -415,6 +418,7 @@ def run_translation(
         "model": provider_config.model,
         "batch_size": batch_size,
         "prompt_version": TRANSLATION_PROMPT_VERSION,
+        "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
         "translation_policy": resolved_policy.to_dict(),
     }
     translation_fingerprint = hashlib.sha256(

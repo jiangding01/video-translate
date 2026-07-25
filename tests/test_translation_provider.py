@@ -75,6 +75,60 @@ class TranslationProviderTest(unittest.TestCase):
                 opener=opener,
             )
 
+    def test_provider_payload_exposes_semantic_groups_and_prompt_constraints(self) -> None:
+        cues = [
+            Cue(1, 0, 500, "First"),
+            Cue(2, 500, 1000, "continues."),
+            Cue(3, 1000, 1500, "Next sentence."),
+        ]
+        batch = build_translation_batches(cues, source_language="en", target_language="zh-CN")[0]
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "items": [
+                                                {"id": 1, "text": "第一部分"},
+                                                {"id": 2, "text": "延续。"},
+                                                {"id": 3, "text": "下一句。"},
+                                            ]
+                                        }
+                                    )
+                                }
+                            }
+                        ]
+                    }
+                ).encode()
+
+        def opener(request, **_kwargs):
+            captured.update(json.loads(request.data.decode()))
+            return Response()
+
+        translate_batch(
+            batch,
+            CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+            opener=opener,
+        )
+
+        prompt = captured["messages"][0]["content"]
+        manifest = json.loads(captured["messages"][1]["content"])
+        self.assertEqual(manifest["semantic_groups"], [[1, 2], [3]])
+        self.assertIn("semantic_groups", prompt)
+        self.assertIn("never move meaning between groups", prompt)
+        self.assertIn("display recommendation", prompt)
+
     def test_non_json_body_is_provider_response_error(self) -> None:
         # P7f：真实解析路径——HTTP 200 但响应体不是 JSON。
         cue = Cue(1, 0, 1000, "Hello", source_language="en")
@@ -468,7 +522,7 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertEqual(result.mode, "openai-compatible")
         self.assertTrue(any(path.name == "translated.srt" for path in result.paths))
 
-    def test_translation_discards_progress_when_target_language_or_policy_changes(self) -> None:
+    def test_translation_discards_progress_when_language_policy_or_grouping_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
@@ -513,6 +567,12 @@ class TranslationProviderTest(unittest.TestCase):
                     target_language="zh-CN",
                     translation_style="natural",
                 )
+                with patch("xvt.pipeline.translation.SEMANTIC_GROUPING_VERSION", 999):
+                    run_translation(
+                        job_file,
+                        target_language="zh-CN",
+                        translation_style="natural",
+                    )
 
             progress = json.loads(
                 (artifacts / "translation-progress.json").read_text(encoding="utf-8")
@@ -520,7 +580,12 @@ class TranslationProviderTest(unittest.TestCase):
 
         self.assertEqual(
             calls,
-            [("zh-CN", "faithful"), ("ja", "faithful"), ("zh-CN", "natural")],
+            [
+                ("zh-CN", "faithful"),
+                ("ja", "faithful"),
+                ("zh-CN", "natural"),
+                ("zh-CN", "natural"),
+            ],
         )
         self.assertIn("fingerprint", progress)
         self.assertEqual(progress["items"], [{"id": 1, "text": "你好"}])

@@ -10,7 +10,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - MLX Whisper 或 faster-whisper 转写，保留词级时间戳；超宽 ASR 片段会优先按语义边界切分；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
 - 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴
 - YouTube 平台字幕仅在显式请求时下载；新 Job 以候选 QA 和 `--source-strategy auto|subtitles|asr` 选择最终时间轴
-- OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议
+- OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议；确定性语义组避免在 provider 批次边界切开句意
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
 - 原文、译文、双语 SRT，及独立中英样式的双语 ASS
 - 按 cue 或时间范围生成短片段预览，复用正式 ASS 样式和烧录参数
@@ -24,7 +24,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成翻译传输可靠性和新 Job 的源字幕自适应选择；后续仍是已有 Job 的 ASR 重建、语义组翻译、可恢复润色和语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成翻译传输可靠性、新 Job 的源字幕自适应选择、既有 Job 的 ASR 源重建和语义组翻译；下一步是可恢复润色（Q5），随后是语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -209,7 +209,7 @@ export XVT_TRANSLATION_API_KEY="secret"
 
 API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误和 5xx 会退避重试。
 
-`translate` 和 `prepare-translation` 支持结构化术语表及 `faithful`（默认）、`natural`、`concise` 三种风格。术语表是 JSON 文件；命中当前批次源 cue 的术语才会写入 API 请求或 Agent 批次，避免无关提示膨胀：
+`translate` 和 `prepare-translation` 支持结构化术语表及 `faithful`（默认）、`natural`、`concise` 三种风格。Q4 不改变默认风格：新 Job 仍使用 `faithful`，除非显式传入 `--translation-style`。术语表是 JSON 文件；命中当前批次源 cue 的术语才会写入 API 请求或 Agent 批次，避免无关提示膨胀：
 
 ```json
 {
@@ -221,6 +221,8 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 ```
 
 `translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。译文 QA 会确定性检查命中源 cue 的术语是否包含要求的目标词；违规会以 `glossary_violation` 写入 `qa-translated.json`，阻断渲染和烧录。
+
+Q4 在翻译前按已有 cue 确定性建立语义组：句末标点、相邻 cue 间隔达到 650ms、20 个 cue 或 30 秒会形成边界；达到上限时优先在句末、软标点、连接词前或最大停顿处分界。provider 批次仍最多容纳 40 个 cue，但只以完整语义组装箱，不会从组中切开。批次中的 `semantic_groups` 仅记录各组的 cue ID，时间轴、cue 数量和顺序始终不变。
 
 对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
 

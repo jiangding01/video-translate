@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 384 个测试、6 个子测试，全部通过 |
+| 自动化测试 | 392 个测试、6 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -55,10 +55,11 @@
 - `translate` 和 `prepare-translation` 支持 JSON 术语表与 `faithful`、`natural`、`concise` 风格；批次仅携带命中源 cue 的术语。
 - `run` 也支持同一套参数，并将解析后的策略快照写入工作流配置；`continue` 不依赖原术语表文件，始终复用该快照。
 - 译文 QA 对命中源 cue 的术语确定性检查目标词；违规生成 `glossary_violation`、保留 QA 报告并阻断渲染和烧录。
-- API 翻译按批次保存进度，指纹包含源 cue checksum、语言、端点、模型、批次大小、提示词版本和翻译策略。
+- API 翻译按批次保存进度，指纹包含源 cue checksum、语言、端点、模型、批次大小、提示词版本、语义分组版本和翻译策略。
 - 429、部分 4xx、5xx、网络异常、远端断连和响应读取连接重置具有明确的传输重试分类。传输故障默认最多重试 4 次，优先使用最长 30 秒的有效 `Retry-After`，否则指数退避；结构性无效响应另有固定 1 次纠错重试，两个预算互不消耗。
 - 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID。
-- 批次包含相邻上下文。上下文只用于理解，输出仍按原 cue ID 回填。
+- 翻译在不改动 cue 的前提下建立确定性语义组：句末标点或 650ms 间隔结束组，组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限按软标点、连接词前和最大停顿择边；单个超长 cue 单独成组。provider 批次只按完整组装箱，批次外前后各一个完整相邻组仅作只读上下文。
+- `TranslationBatch.semantic_groups` 记录当前批次的组 ID；响应仍只覆盖当前 `items` 的原 cue ID，不得输出上下文 ID。局部重译使用 singleton groups；`max_target_characters` 是显示建议，最终显示风险仍由确定性 QA 判定。
 - `resegment-translation` 仅对超过硬显示阈值且具有 ASR 词级时间戳的 cue 按语义优先边界重切；它重建 source cue 和 source SRT，废弃旧翻译及其下游产物，禁止复用或字符拆分旧译文。
 - `retranslate-cues` 只翻译指定 cue ID，保留其他译文和时间轴；每个目标 cue 带相邻源 cue 作为上下文，回填后完整重跑译文 QA 并使旧渲染/烧录产物失效。
 
@@ -287,7 +288,7 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- 当前 API 翻译仍是单遍逐 cue 回填，没有独立的上下文润色和语义校对；长句跨 cue 时可能出现中文拼接生硬或术语识别错误。
+- 当前 API 翻译已按语义组生成单遍译文，但没有独立的上下文润色和语义校对；复杂长句仍可能需要后续质量步骤处理。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
 - 目录批处理当前串行执行，不支持后台队列、目录监控或每项不同参数；请求烧录时目录只能包含视频，音频和纯字幕输入必须拆成不烧录的独立批次。
@@ -299,7 +300,7 @@ media-qa.json
 
 ### Q1-Q6：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。实施顺序固定为：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复润色 → 语义校对与一次修复。全部阶段继续使用 `codex/` 开发分支串行 PR，前一项合并后再开始下一项。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。已完成顺序为：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译；下一步为可恢复润色，再后为语义校对与一次修复。全部阶段继续使用 `codex/` 开发分支串行 PR，前一项合并后再开始下一项。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
@@ -307,7 +308,9 @@ media-qa.json
 
 **Q2：新 Job 自适应源字幕已完成。** 平台字幕只在显式 `--youtube-subtitles` 下请求；`--source-strategy auto|subtitles|asr` 写入新 Job 顶层配置。`auto` 直接采用通过 QA 的人工候选，对失败候选先对齐再回退 ASR；自动候选在翻译/烧录目标中使用 ASR，源字幕-only 且 QA 通过时可直接采用。候选 QA 和选择写为 `source_candidate_qa`、`source_selection` checksum artifact，并以 `source_selected` 事件记录；平台尾 cue 仅在超出媒体不超过 500ms 时裁剪。旧 Job 缺少策略仍走历史路径。
 
-**Q3：已有 Job 源字幕重建已完成。** advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]` 显式重建，不由 `continue` 自动执行。它复用校验通过的词级转写、规范化音频和本地或已下载媒体；远程缺少可用 checkpoint 与媒体时才重取。命令持久化 ASR 策略与修复意图、关闭对齐，失效 `source_candidate_qa`、`source_cues`、`source_selection`、`translation_resegmentation` 及全部下游产物，并保留 `input_translation_subtitles` 以按新 cue 重新验证映射。修复中断后 `status` 保持显式重试，成功后端到端 Job 用 `continue`，旧原子 Job 用 `translate`。`status` 仅在非 ASR 源字幕 QA error 且可重建时首次给出建议，不对 ASR 自身 error、`needs_review` 或译文 QA 重复建议重建；不升级 schema 或新增 stage/事件类型，复用既有 artifact/stage、`source_selected` 和 `cli_completed`。下一步为 Q4 语义组翻译。
+**Q3：已有 Job 源字幕重建已完成。** advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]` 显式重建，不由 `continue` 自动执行。它复用校验通过的词级转写、规范化音频和本地或已下载媒体；远程缺少可用 checkpoint 与媒体时才重取。命令持久化 ASR 策略与修复意图、关闭对齐，失效 `source_candidate_qa`、`source_cues`、`source_selection`、`translation_resegmentation` 及全部下游产物，并保留 `input_translation_subtitles` 以按新 cue 重新验证映射。修复中断后 `status` 保持显式重试，成功后端到端 Job 用 `continue`，旧原子 Job 用 `translate`。`status` 仅在非 ASR 源字幕 QA error 且可重建时首次给出建议，不对 ASR 自身 error、`needs_review` 或译文 QA 重复建议重建；不升级 schema 或新增 stage/事件类型，复用既有 artifact/stage、`source_selected` 和 `cli_completed`。
+
+**Q4：语义组翻译已完成。** 翻译前由确定性代码建立语义组，句末标点或 650ms 间隔结束组；组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限依次按软标点、连接词前和最大停顿择边，单个超长 cue 单独成组。provider 以完整组装箱，批次外前后各一个完整相邻组只读；`semantic_groups` 保持为批次协议的可选加法，响应继续严格只覆盖当前 `items`。prompt v3 和 grouping version 进入 API 指纹以重置旧 API checkpoint，并写入 Agent manifest 供消费者识别；已等待输入的旧 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才获得语义组。Q4 不新增 stage、artifact、事件或 Job schema，默认翻译风格继续为 `faithful`，局部重译使用 singleton groups。下一步为 Q5 可恢复润色。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 
