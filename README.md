@@ -25,7 +25,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成翻译传输可靠性、新 Job 的源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译和 Q5a 已有译文可恢复润色；下一步是 Q5b 新 Job 质量模式，随后是语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成翻译传输可靠性、新 Job 的源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译和 Q5 可恢复字幕润色；下一步是 Q6 语义校对与一次定向修复。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -34,7 +34,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 日常优先记住三条命令；中断后先看 `status`，再执行它提示的下一步：
 
 ```text
-xvt run INPUT --output DIR [--target-language LANG] [--burn]
+xvt run INPUT --output DIR [--target-language LANG] [--translation-quality standard|polished] [--burn]
 xvt status JOB.json
 xvt continue JOB.json
 ```
@@ -225,6 +225,16 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 
 Q4 在翻译前按已有 cue 确定性建立语义组：句末标点、相邻 cue 间隔达到 650ms、20 个 cue 或 30 秒会形成边界；达到上限时优先在句末、软标点、连接词前或最大停顿处分界。provider 批次仍最多容纳 40 个 cue，但只以完整语义组装箱，不会从组中切开。批次中的 `semantic_groups` 仅记录各组的 cue ID，时间轴、cue 数量和顺序始终不变。
 
+新 Job 可显式选择翻译质量，默认仍为 `standard`：
+
+```bash
+uv run --no-sync xvt run INPUT --output OUTPUT \
+  --target-language zh-CN \
+  --translation-quality polished
+```
+
+`run`、`batch`、`translate` 和 `prepare-translation` 都支持 `standard|polished`。API 模式的 `polished` 先保存完整翻译草稿，再逐批润色；两阶段各自 checkpoint，中断后不会重做有效批次。Agent 模式生成带 `task=translate_and_polish` 和 fingerprint 的单个 `translation-batches.json`，外部 Agent 一次返回最终译文；响应必须回传 fingerprint 并精确覆盖全部 ID。旧 Job 或旧 batch 缺质量字段时继续按 `standard`。`--translation-subtitles` 不能与新 Job 的 `polished` 同时使用，应先导入译文再执行 `polish-translation`。
+
 已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
 
 ```bash
@@ -238,7 +248,7 @@ uv run --no-sync xvt apply-polish-translation "/path/to/job.json" RESPONSE.json
 uv run --no-sync xvt continue "/path/to/job.json"
 ```
 
-润色响应必须回传当前 `translation-polish-batches.json` 的 `fingerprint`、精确覆盖全部请求 ID，并且只能替换译文文本；旧响应不能用于新的 draft。确定性 QA 失败仍会阻断渲染与烧录。Q5a 不为旧原子 Job 增加恢复配置，也尚未给新 `run` / `batch` 增加 `--translation-quality`；后者属于 Q5b。
+润色响应必须回传当前 `translation-polish-batches.json` 的 `fingerprint`、精确覆盖全部请求 ID，并且只能替换译文文本；旧响应不能用于新的 draft。确定性 QA 失败仍会阻断渲染与烧录。Q5a 的显式补跑仍只支持带工作流配置的端到端 Job；原子 `translate --translation-quality polished` 通过重跑同一命令恢复 API draft 和润色 checkpoint。
 
 `translation-draft-cues.json` 是恢复润色的必要检查点。它缺失或 checksum 失效时，`status` 会要求人工恢复原始译文草稿，不会把已润色的最终译文再次复制为 draft。
 

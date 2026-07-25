@@ -4,7 +4,7 @@ The same response contract is used by Agent translation and OpenAI-compatible pr
 
 Read `artifacts/translation-batches.json`. Its `batches` array contains cue items with stable integer IDs and source text. A batch can also contain `semantic_groups`, an array of cue-ID arrays. These are deterministic, complete semantic groups: use the source text of every item in the same group to make the target language read naturally, but do not change group membership, cue boundaries, IDs, order, or timing.
 
-Return one UTF-8 JSON object in this exact shape:
+For a standard translation manifest, return one UTF-8 JSON object in this exact shape:
 
 ```json
 {
@@ -15,11 +15,24 @@ Return one UTF-8 JSON object in this exact shape:
 }
 ```
 
+When the manifest has `task=translate_and_polish`, translate, polish, and self-check in one pass. Copy the manifest's top-level `fingerprint` into the response:
+
+```json
+{
+  "fingerprint": "manifest fingerprint",
+  "items": [
+    {"id": 1, "text": "Final polished subtitle text"},
+    {"id": 2, "text": "Final polished subtitle text"}
+  ]
+}
+```
+
 Requirements:
 
 - Include every source cue exactly once across all batches.
 - Preserve each integer `id`; do not renumber, omit, duplicate, or add IDs.
-- Return only the `items` response contract above. Do not return `semantic_groups`, context items, timestamps, group summaries, or any other batch metadata.
+- Return only the applicable response contract above. Do not return `semantic_groups`, context items, timestamps, group summaries, or any other batch metadata.
+- For `task=translate_and_polish`, return the manifest fingerprint unchanged. For a standard manifest, do not add a fingerprint.
 - Translate only `text`. Do not copy timestamps or other batch metadata into the response.
 - Preserve meaning, terminology, names, numbers, tone, and intentional formatting.
 - Write natural subtitle language rather than literal machine-translated prose.
