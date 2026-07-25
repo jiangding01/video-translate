@@ -96,7 +96,7 @@ output/<job-id>/
     └── burn-fingerprint.json
 ```
 
-Q5a 润色复用 `translate` stage 并在事件中增加 `phase=polish`，不新增 stage 或 schema。`polish-translation` 先登记 draft，再持久化 `workflow.translation_quality=polished`，最后通过 artifact DAG 失效旧最终译文及其 QA、渲染和烧录。API checkpoint 的指纹包含源/草稿 checksum、provider、模型、策略、prompt 和语义组版本；Agent 回填及最终进度都严格覆盖完整 cue ID。`continue` 的计划步骤包含 `polish` / `await_agent_polish`，批处理经同一 recovery planner 继承该行为。局部重译或重新导入译文时，新完整译文会成为新 draft，旧润色结果不能回写。polished Job 的 draft 缺失或 checksum 失效时进入人工修复，不得从最终译文反向重建 draft。
+Q5 润色复用 `translate` stage，不新增 stage 或 schema。Q5a 的 `polish-translation` 先登记 draft，再持久化 `workflow.translation_quality=polished`，最后通过 artifact DAG 失效旧最终译文及其 QA、渲染和烧录。Q5b 为新 Job 增加 `standard|polished`：API 第一遍写 `phase=draft` 并保存 draft，第二遍写 `phase=polish`；Agent 新 Job 生成 `task=translate_and_polish` 的单个 manifest，以规范化 payload fingerprint 和完整 ID 完成一次回填，不伪造 draft。Agent progress 先于 polished/final cues 落盘，中断后可确定性补齐 QA 和渲染而不再次请求模型。`continue` 的计划步骤区分 Agent 无 draft 证据链与 Q5a/API draft 证据链，批处理经同一 recovery planner 继承该行为。局部重译或重新导入译文时，新完整译文会成为新 draft，旧润色结果不能回写。
 
 Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 和 `skipped`。字幕 QA 的 `needs_review` 阻断可由用户经 `continue --acknowledge-subtitle-review` 显式确认放行：确认记录持久化在 job config、绑定 source cue checksum 与已确认的 review 问题集合，仅覆盖 review 级问题（error 级永不放行），后续 QA 中相同问题子集直接放行并发出 `subtitle_review_acknowledged` 事件，出现新 review 问题仍然阻断；显示宽度类问题按 cue 粒度归并（源字幕 QA 与双语 QA 对同一物理风险的不同 code 视为同族，确认一次即可覆盖两道门）。`low_timing_confidence` 对 ASR / `asr_resegmented` 为 warning，对对齐与用户导入字幕仍为 review。原始 QA 报告不被改写。纯字幕 Job 将媒体获取、ASR、对齐和分段标为 `skipped`，但仍保存导入字幕、source cue、QA 与渲染 artifact；它不保存 `media_info`。Agent 翻译批次生成后任务进入 `awaiting_input`；兼容 API 模式逐批更新进度文件，全部完成后直接继续 QA 和渲染。`retranslate-cues` 为每个指定 cue 构造独立批次，并携带相邻源 cue 作为只读上下文；回填只改写指定 ID，之后完整重跑译文 QA。
 
@@ -143,13 +143,13 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 - Q2 选择报告损坏或缺失但 source cues 仍有效时，只从既有 cue provenance 与校验通过的候选/对齐 artifact 重建审计报告，不重新选择或改写时间轴；原因记为 `selection_artifact_recovered`。
 - Q3 已完成既有媒体 Job 的显式 ASR 源重建；它不改变端到端目标或翻译策略，保留输入译文以重新映射，且不把重建隐式塞入 `continue`。
 - Q4 已完成：翻译以确定性语义组为上下文，按完整组装箱，模型只返回既有 cue ID 的文本；规则版本和 prompt 版本进入恢复边界。
-- Q5a 已完成：已有工作流译文可显式补跑可恢复润色，API/Agent 都只替换目标文本；Q5b 新 Job 质量参数尚未实现。润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
+- Q5 已完成：已有工作流译文可显式补跑润色，新 Job 可选择 `standard|polished`，API 支持 draft -> polish 恢复，Agent 支持一次翻译+润色回填。润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
 - 新增到端到端质量链的草稿、润色、语义校对和修复模型调用都逐批保存 checkpoint；语义问题与确定性 QA 问题使用独立报告和人工确认通道。现有高级命令 `retranslate-cues` 暂不承诺逐批恢复。
 - 新配置和 artifact 采用向后兼容的可选加法，旧 Job 缺少质量配置时保持当前单遍翻译行为。
 
-Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置及同类 `ConnectionError` 在请求和响应读取边界统一包装为可重试传输故障；其他 `OSError` 以不可重试依赖故障退出。传输重试默认预算为 4，遵循最长 30 秒的有效 `Retry-After` 或指数退避。结构性无效响应只允许 1 次携带纠正提示的重试，不占用传输预算；后续传输重试会清除纠正提示。主翻译与局部重译通过同一批次执行函数保持重试语义一致；只有逐批持久化结果的主翻译发送 `translation_batch_completed`。Q4 与 Q5a 已完成；下一步是 Q5b 新 Job 质量模式，Q6 语义 QA 尚未实现；Q2 的 `reference_allowed` 只记录选择结果，不进入翻译请求。
+Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置及同类 `ConnectionError` 在请求和响应读取边界统一包装为可重试传输故障；其他 `OSError` 以不可重试依赖故障退出。传输重试默认预算为 4，遵循最长 30 秒的有效 `Retry-After` 或指数退避。结构性无效响应只允许 1 次携带纠正提示的重试，不占用传输预算；后续传输重试会清除纠正提示。主翻译与局部重译通过同一批次执行函数保持重试语义一致；只有逐批持久化结果的主翻译发送 `translation_batch_completed`。Q4 与 Q5 已完成；下一步是 Q6 语义 QA；Q2 的 `reference_allowed` 只记录选择结果，不进入翻译请求。
 
-完整的输入矩阵、CLI、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准；其中 Q1–Q4 与 Q5a 已落地，Q5b–Q6 仍是后续规划。
+完整的输入矩阵、CLI、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准；其中 Q1–Q5 已落地，Q6 仍是后续规划。
 
 ## 安全边界
 
@@ -171,6 +171,6 @@ Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置
 
 1. 已完成保守、平衡和紧凑分段预设。
 2. 已完成串行目录批处理、独立 Job、失败恢复和汇总报告。
-3. 翻译提供方可靠性、源字幕自适应、既有 Job 源重建、语义组翻译和 Q5a 已有译文润色已完成；下一步按 [Q5 可恢复字幕润色技术方案](Q5_TRANSLATION_POLISH_PLAN.md) 实现 Q5b，再实现语义 QA。
+3. 翻译提供方可靠性、源字幕自适应、既有 Job 源重建、语义组翻译和 Q5 可恢复润色已完成；下一步实现 Q6 语义 QA。
 4. 字幕质量闭环通过真实 E2E 后，实现只消费 JSONL 事件、`job.json` 和 `batch.json` 的可视化校对界面。
 5. 单机 CLI 和界面稳定后，再评估队列、远程执行和 Web 服务。
