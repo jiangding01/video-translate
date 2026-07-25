@@ -42,6 +42,7 @@ from xvt.translation_provider import (
 from xvt.workflow_config import (
     WorkflowConfig,
     clear_burn_fingerprint,
+    get_workflow_config,
     require_workflow_config,
     set_workflow_config,
 )
@@ -158,8 +159,10 @@ def _prepare_draft(
     return draft_path
 
 
-def _build_batches(job: Job, draft_path: Path) -> list[PolishBatch]:
-    config = require_workflow_config(job)
+def _build_batches(
+    job: Job, draft_path: Path, config: WorkflowConfig | None = None
+) -> list[PolishBatch]:
+    config = config or require_workflow_config(job)
     if config.target_language is None:
         raise ValueError("translation polishing requires a target language")
     source_path = valid_artifact_path(job, "source_cues")
@@ -183,11 +186,12 @@ def _build_batches(job: Job, draft_path: Path) -> list[PolishBatch]:
 def _fingerprint(
     job: Job,
     *,
+    config: WorkflowConfig | None = None,
     mode: str,
     base_url: str | None,
     model: str | None,
 ) -> str:
-    config = require_workflow_config(job)
+    config = config or require_workflow_config(job)
     source_path = valid_artifact_path(job, "source_cues")
     draft_path = valid_artifact_path(job, "translation_draft_cues")
     if source_path is None or draft_path is None:
@@ -293,7 +297,11 @@ def _load_progress(
         return set(), {}
 
 
-def translation_polish_satisfied(job: Job) -> bool:
+def translation_polish_satisfied(
+    job: Job,
+    config: WorkflowConfig | None = None,
+    expected_fingerprint: str | None = None,
+) -> bool:
     draft_path = valid_artifact_path(job, "translation_draft_cues")
     batches_path = valid_artifact_path(job, "translation_polish_batches")
     progress_path = valid_artifact_path(job, "translation_polish_progress")
@@ -311,11 +319,12 @@ def translation_polish_satisfied(job: Job) -> bool:
             not isinstance(fingerprint, str)
             or not fingerprint
             or fingerprint != progress_data.get("fingerprint")
+            or (expected_fingerprint is not None and fingerprint != expected_fingerprint)
             or batches_data.get("prompt_version") != TRANSLATION_POLISH_PROMPT_VERSION
             or batches_data.get("semantic_grouping_version") != SEMANTIC_GROUPING_VERSION
         ):
             return False
-        batches = _build_batches(job, draft_path)
+        batches = _build_batches(job, draft_path, config)
         expected_batches = json.loads(
             json.dumps([batch.to_dict() for batch in batches], ensure_ascii=False)
         )
@@ -392,53 +401,16 @@ def _finalize_polish(
     )
 
 
-def run_translation_polish(
+def _run_translation_polish(
     job_file: str | Path,
-    *,
-    provider: str | None = None,
-    base_url: str | None = None,
-    model: str | None = None,
-    api_key_env: str | None = None,
-    batch_size: int | None = None,
-    max_retries: int | None = None,
-    timeout_seconds: float | None = None,
-    event_sink: EventSink | None = None,
+    config: WorkflowConfig,
+    draft_path: Path,
+    event_sink: EventSink | None,
 ) -> TranslationRunResult:
     job = load_job(job_file)
-    _polished_config(
-        require_workflow_config(job),
-        provider=provider,
-        base_url=base_url,
-        model=model,
-        api_key_env=api_key_env,
-        batch_size=batch_size,
-        max_retries=max_retries,
-        timeout_seconds=timeout_seconds,
-    )
-    draft_path = _prepare_draft(
-        job,
-        provider=provider,
-        base_url=base_url,
-        model=model,
-        api_key_env=api_key_env,
-        batch_size=batch_size,
-        max_retries=max_retries,
-        timeout_seconds=timeout_seconds,
-        event_sink=event_sink,
-    )
-    job = load_job(job_file)
-    if translation_polish_satisfied(job):
-        paths = tuple(
-            path
-            for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
-            if (path := valid_artifact_path(job, kind)) is not None
-        )
-        return TranslationRunResult("reused", paths)
-
-    config = require_workflow_config(job)
     if config.max_retries < 0 or config.timeout_seconds <= 0:
         raise ValueError("invalid persisted translation provider retry configuration")
-    batches = _build_batches(job, draft_path)
+    batches = _build_batches(job, draft_path, config)
     mode, provider_config, fallback_reason = resolve_provider(
         config.provider,
         base_url=config.base_url,
@@ -448,10 +420,18 @@ def run_translation_polish(
     )
     fingerprint = _fingerprint(
         job,
+        config=config,
         mode=mode,
         base_url=provider_config.base_url if provider_config else config.base_url,
         model=provider_config.model if provider_config else config.model,
     )
+    if translation_polish_satisfied(job, config, fingerprint):
+        paths = tuple(
+            path
+            for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
+            if (path := valid_artifact_path(job, kind)) is not None
+        )
+        return TranslationRunResult("reused", paths)
     batches_path = _write_batches(job, batches, fingerprint, event_sink)
     _set_stage(
         job,
@@ -560,6 +540,86 @@ def run_translation_polish(
         raise
     rendered = _finalize_polish(job, _load_cues(draft_path), translations, event_sink)
     return TranslationRunResult(mode, (progress_path, *rendered))
+
+
+def run_translation_polish(
+    job_file: str | Path,
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    api_key_env: str | None = None,
+    batch_size: int | None = None,
+    max_retries: int | None = None,
+    timeout_seconds: float | None = None,
+    event_sink: EventSink | None = None,
+) -> TranslationRunResult:
+    job = load_job(job_file)
+    _polished_config(
+        require_workflow_config(job),
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        batch_size=batch_size,
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+    )
+    draft_path = _prepare_draft(
+        job,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        batch_size=batch_size,
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+        event_sink=event_sink,
+    )
+    return _run_translation_polish(
+        job_file,
+        require_workflow_config(load_job(job_file)),
+        draft_path,
+        event_sink,
+    )
+
+
+def run_atomic_translation_polish(
+    job_file: str | Path,
+    *,
+    target_language: str,
+    provider: str,
+    base_url: str | None,
+    model: str | None,
+    api_key_env: str,
+    batch_size: int,
+    max_retries: int,
+    timeout_seconds: float,
+    event_sink: EventSink | None = None,
+) -> TranslationRunResult:
+    job = load_job(job_file)
+    if get_workflow_config(job) is not None:
+        raise ValueError("atomic polish execution requires a job without a workflow goal")
+    if job.config.get("translation_quality") != "polished":
+        raise ValueError("atomic job does not request polished translation quality")
+    if job.config.get("target_language") != target_language:
+        raise ValueError("target language must match the persisted atomic job goal")
+    draft_path = valid_artifact_path(job, "translation_draft_cues")
+    if draft_path is None:
+        raise ValueError("atomic polished translation has no valid draft checkpoint")
+    config = WorkflowConfig(
+        target_language=target_language,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        batch_size=batch_size,
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+        translation_policy=translation_policy_from_dict(job.config.get("translation_policy")),
+        translation_quality="polished",
+    )
+    return _run_translation_polish(job_file, config, draft_path, event_sink)
 
 
 def apply_agent_translation_polish(

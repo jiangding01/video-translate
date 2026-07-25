@@ -8,6 +8,7 @@ from xvt.models import Cue
 from xvt.translate import (
     GlossaryTerm,
     TranslationPolicy,
+    agent_translation_manifest_fingerprint,
     apply_polish_translations,
     apply_translations,
     build_cue_retranslation_batches,
@@ -27,6 +28,21 @@ class TranslateTest(unittest.TestCase):
             Cue(2, 1000, 2000, "Two"),
             Cue(3, 2000, 3000, "Three"),
         ]
+
+    def test_agent_manifest_fingerprint_excludes_only_its_own_field(self) -> None:
+        payload = {
+            "job_id": "job",
+            "task": "translate_and_polish",
+            "batches": [{"id": 1, "items": [{"id": 1, "source_text": "One"}]}],
+        }
+        fingerprint = agent_translation_manifest_fingerprint(payload)
+
+        self.assertEqual(
+            agent_translation_manifest_fingerprint({**payload, "fingerprint": fingerprint}),
+            fingerprint,
+        )
+        changed = {**payload, "batches": [{"id": 1, "items": []}]}
+        self.assertNotEqual(agent_translation_manifest_fingerprint(changed), fingerprint)
 
     def test_builds_batches_with_read_only_context(self) -> None:
         batches = build_translation_batches(

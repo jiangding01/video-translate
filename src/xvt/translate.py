@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from xvt.segment import BREAK_BEFORE, SENTENCE_END, SOFT_BREAK
 
 TRANSLATION_STYLES = frozenset({"faithful", "natural", "concise"})
 SEMANTIC_GROUPING_VERSION = 1
+TRANSLATE_AND_POLISH_TASK_VERSION = 1
 SEMANTIC_GROUP_MAX_CUES = 20
 SEMANTIC_GROUP_MAX_DURATION_MS = 30_000
 SEMANTIC_GROUP_PAUSE_MS = 650
@@ -157,6 +159,15 @@ class PolishBatch:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def agent_translation_manifest_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = {key: value for key, value in payload.items() if key != "fingerprint"}
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def _ends_with_marker(text: str, markers: frozenset[str]) -> bool:

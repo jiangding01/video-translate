@@ -7,11 +7,14 @@ from unittest.mock import patch
 from xvt.job_store import get_job_file, load_job, save_job
 from xvt.models import Cue, StageName, StageStatus
 from xvt.pipeline import (
+    agent_translation_polish_core_satisfied,
     apply_agent_translation,
     apply_agent_translation_polish,
     apply_cue_retranslation,
     apply_subtitle_translation,
+    complete_agent_polished_outputs,
     prepare_agent_translation,
+    run_atomic_translation_polish,
     run_subtitle_transcription,
     run_translation,
     run_translation_polish,
@@ -133,6 +136,209 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 [(1, 0, 1000), (2, 1000, 2000)],
             )
             self.assertEqual(job.config["workflow"]["translation_quality"], "polished")
+
+    def test_new_agent_job_translates_and_polishes_in_one_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n\n"
+                "2\n00:00:01,000 --> 00:00:02,000\nWorld.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                translation_quality="polished",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["task"], "translate_and_polish")
+            self.assertEqual(manifest["task_version"], 1)
+            response = root / "response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 1, "text": "你好。"}, {"id": 2, "text": "世界。"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            paths = apply_agent_translation(
+                job_file,
+                response,
+                target_language="zh-CN",
+            )
+
+            job = load_job(job_file)
+            kinds = {artifact.kind for artifact in job.artifacts}
+            self.assertNotIn("translation_draft_cues", kinds)
+            self.assertNotIn("translation_polish_batches", kinds)
+            self.assertTrue(
+                {
+                    "translation_polish_progress",
+                    "translation_polished_cues",
+                    "translated_cues",
+                    "translated_srt",
+                    "bilingual_srt",
+                }
+                <= kinds
+            )
+            self.assertTrue(agent_translation_polish_core_satisfied(job))
+            polished_path = next(
+                Path(artifact.path)
+                for artifact in job.artifacts
+                if artifact.kind == "translation_polished_cues"
+            )
+            polished = json.loads(polished_path.read_text(encoding="utf-8"))
+            self.assertEqual([item["target_text"] for item in polished], ["你好。", "世界。"])
+            self.assertEqual(
+                [(item["id"], item["start_ms"], item["end_ms"]) for item in polished],
+                [(1, 0, 1000), (2, 1000, 2000)],
+            )
+            self.assertEqual(polished[0]["source_text"], "Hello.")
+            self.assertEqual(polished[0]["source_language"], "en")
+            self.assertEqual(polished[0]["target_language"], "zh-CN")
+            self.assertEqual({path.suffix for path in paths}, {".srt"})
+
+    def test_agent_polished_progress_recovers_missing_final_cues_without_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                translation_quality="polished",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            response = root / "response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 1, "text": "你好。"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+            job = load_job(job_file)
+            job.artifacts = [
+                artifact
+                for artifact in job.artifacts
+                if artifact.kind
+                not in {
+                    "translation_polished_cues",
+                    "translated_cues",
+                    "translated_subtitle_qa",
+                    "translated_srt",
+                    "bilingual_srt",
+                    "bilingual_ass",
+                }
+            ]
+            save_job(job)
+
+            complete_agent_polished_outputs(job_file)
+
+            self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
+
+    def test_new_agent_job_rejects_stale_fingerprint_without_writing_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                translation_quality="polished",
+            )
+            response = root / "response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": "stale",
+                        "items": [{"id": 1, "text": "你好。"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "fingerprint"):
+                apply_agent_translation(job_file, response, target_language="zh-CN")
+
+            self.assertNotIn(
+                "translation_polish_progress",
+                {artifact.kind for artifact in load_job(job_file).artifacts},
+            )
+
+    def test_atomic_api_polished_rerun_reuses_draft_and_final_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            provider_args = {
+                "target_language": "zh-CN",
+                "provider": "openai-compatible",
+                "base_url": "https://example.com/v1",
+                "model": "model",
+                "api_key_env": "TEST_POLISH_API_KEY",
+                "batch_size": 40,
+                "max_retries": 0,
+                "timeout_seconds": 10,
+            }
+            with (
+                patch.dict("os.environ", {"TEST_POLISH_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    return_value={1: "草稿"},
+                ) as translate_provider,
+                patch(
+                    "xvt.pipeline.polish.polish_batch",
+                    return_value={1: "润色"},
+                ) as polish_provider,
+            ):
+                draft = run_translation(
+                    job_file,
+                    **provider_args,
+                    translation_quality="polished",
+                )
+                polished = run_atomic_translation_polish(job_file, **provider_args)
+                reused_draft = run_translation(
+                    job_file,
+                    **provider_args,
+                    translation_quality="polished",
+                )
+                reused_polish = run_atomic_translation_polish(job_file, **provider_args)
+
+            self.assertEqual(draft.mode, "openai-compatible")
+            self.assertEqual(polished.mode, "openai-compatible")
+            self.assertEqual(reused_draft.mode, "draft_reused")
+            self.assertEqual(reused_polish.mode, "reused")
+            translate_provider.assert_called_once()
+            polish_provider.assert_called_once()
 
     def test_api_polish_resumes_from_valid_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
