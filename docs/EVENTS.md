@@ -185,6 +185,8 @@ yt-dlp 下载进度（`download.py`）。
 | `reason` | string | 稳定选择原因码 |
 | `report_path` | string | `source-selection.json` 路径 |
 
+`rebuild-source --strategy asr` 复用此事件记录重建后的选择（`strategy=asr`、`selected_kind=asr`）；不新增事件类型。命令成功后的 CLI JSONL 终态仍为既有 `cli_completed`。
+
 ## 翻译
 
 翻译提供方选择、回退、批次进度（`pipeline.py`）。

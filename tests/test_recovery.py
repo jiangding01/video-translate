@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,156 @@ class RecoveryTest(unittest.TestCase):
         self.assertIsNone(plan.primary_command)
         self.assertIn("修复字幕", plan.reason)
         self.assertEqual(plan.report_paths, (str(report),))
+
+    def test_source_qa_error_recommends_rebuild_source_when_media_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job = create_job(str(media), root)
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(
+                job,
+                root,
+                "subtitle_qa",
+                '{"status":"failed","issues":[{"severity":"error"}]}',
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("rebuild-source", plan.primary_command or "")
+        self.assertIn("--strategy asr", plan.primary_command or "")
+
+    def test_asr_source_qa_error_does_not_recommend_identical_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job = create_job(str(media), root, {"source_strategy": "asr"})
+            source = self._add_artifact(job, root, "source_cues")
+            self._add_artifact(
+                job,
+                root,
+                "source_selection",
+                json.dumps(
+                    {
+                        "selected_kind": "asr",
+                        "source_cues_checksum": file_checksum(source),
+                    }
+                ),
+            )
+            self._add_artifact(
+                job,
+                root,
+                "subtitle_qa",
+                '{"status":"failed","issues":[{"severity":"error"}]}',
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertNotIn("rebuild-source", plan.primary_command or "")
+
+    def test_interrupted_source_qa_resumes_from_existing_cues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"workflow": {}})
+            self._add_artifact(job, root, "source_cues")
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
+    def test_failed_atomic_remote_rebuild_can_be_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "https://youtu.be/example",
+                Path(directory),
+                {"source_strategy": "asr", "source_rebuild_requested": True},
+            )
+
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("rebuild-source", plan.primary_command or "")
+
+    def test_initial_atomic_asr_failure_is_not_misclassified_as_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "https://youtu.be/example",
+                Path(directory),
+                {"source_strategy": "asr"},
+            )
+
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "unrecoverable")
+        self.assertNotIn("rebuild-source", plan.primary_command or "")
+
+    def test_failed_workflow_rebuild_stays_explicit_for_batch_safety(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "https://youtu.be/example",
+                Path(directory),
+                {
+                    "source_strategy": "asr",
+                    "source_rebuild_requested": True,
+                    "workflow": {"target_language": "zh-CN"},
+                },
+            )
+
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("rebuild-source", plan.primary_command or "")
+        self.assertNotIn("continue", plan.primary_command or "")
+
+    def test_qa_failures_not_eligible_for_rebuild_remain_manual_fix(self) -> None:
+        cases = (
+            ({"input_kind": "subtitle"}, '{"status":"failed","issues":[{"severity":"error"}]}'),
+            ({}, '{"status":"needs_review","issues":[{"severity":"review"}]}'),
+            ({}, '{"status":"failed","issues":[{"severity":"error"}]}'),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, (config, source_report) in enumerate(cases):
+                job = create_job(f"/tmp/input-{index}.mp4", root / str(index), config)
+                self._add_artifact(job, Path(job.output_root), "source_cues")
+                self._add_artifact(job, Path(job.output_root), "subtitle_qa", source_report)
+                if index == 2:
+                    self._add_artifact(
+                        job,
+                        Path(job.output_root),
+                        "translated_subtitle_qa",
+                        '{"status":"failed","issues":[{"severity":"error"}]}',
+                    )
+                job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+                plan = build_recovery_plan(save_job(job))
+                self.assertEqual(plan.category, "manual_fix")
+                self.assertNotIn("rebuild-source", plan.primary_command or "")
+
+    def test_local_burn_media_does_not_make_missing_source_rebuildable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job(str(root / "missing-audio.wav"), root, {})
+            self._add_artifact(job, root, "source_video")
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(
+                job,
+                root,
+                "subtitle_qa",
+                '{"status":"failed","issues":[{"severity":"error"}]}',
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+
+            plan = build_recovery_plan(save_job(job))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertNotIn("rebuild-source", plan.primary_command or "")
 
     def test_recovery_plan_guides_acknowledge_for_needs_review(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

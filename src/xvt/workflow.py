@@ -418,10 +418,13 @@ def _ensure_translation(
             event_sink=event_sink,
         )
 
-    if config.translation_subtitles:
+    translation_subtitles = (
+        valid_artifact_path(job, "input_translation_subtitles") or config.translation_subtitles
+    )
+    if translation_subtitles:
         apply_subtitle_translation(
             path,
-            config.translation_subtitles,
+            translation_subtitles,
             target_language=target_language,
             event_sink=event_sink,
         )

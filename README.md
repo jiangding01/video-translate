@@ -279,7 +279,20 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 
 XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有传入 `--allow-auto-subtitles` 才会请求自动字幕。新 Job 默认 `--source-strategy auto`：人工候选 QA 通过直接采用，失败时先尝试对齐再回退 ASR；自动候选在翻译或烧录任务中最终使用 ASR，在只生成源字幕且 QA 通过时可直接采用。`subtitles` 强制候选为时间轴，`asr` 强制媒体转写（不能用于纯字幕输入，也不能与 `--align-subtitles` 同用）。候选 QA 与最终选择会写入 `source-candidate-qa.json`、`source-selection.json`。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
 
-### 7. 生成短片段预览
+### 7. 重建既有 Job 的源字幕
+
+当媒体 Job 的源字幕 QA 出现 error 时，可显式用 ASR 重建时间轴：
+
+```bash
+uv run --no-sync xvt rebuild-source "/path/to/job.json" \
+  --strategy asr \
+  --cookies-from-browser "firefox" \
+  --proxy "http://127.0.0.1:7890"
+```
+
+这是 advanced 原子命令，`continue` 不会自动执行。它优先复用校验通过的词级转写、规范化音频和本地或已下载媒体；只有远程 Job 缺少这些可复用内容时，才按显式 Cookie/代理重新获取。命令持久化 ASR 策略与修复意图并关闭对齐，失效旧候选 QA、source cue、选择、重分段及全部下游产物，但保留 Job 内 checksum 有效的输入译文副本，以便原始外部译文文件已移动时仍可按新时间轴重新映射。修复中断后 `status` 会继续给出显式重试命令；成功后端到端 Job 运行 `xvt continue JOB`，旧原子 Job 运行 `xvt translate JOB --target-language ...`。`status` 仅在非 ASR 源字幕 QA 为 error 且可重建时首次建议此命令；ASR 自身 QA error、`needs_review` 和译文 QA 不会重复建议重建。
+
+### 8. 生成短片段预览
 
 在烧录整段视频前，可以围绕指定 cue 快速检查字体、位置、换行和同步：
 
@@ -300,7 +313,7 @@ uv run --no-sync xvt preview "/path/to/job.json" \
 
 不传 `--cue` 或 `--start` 时，默认从第一条有效译文 cue 附近生成 15 秒预览。预览要求译文 QA 已通过，使用与正式烧录相同的字体、分辨率自适应码率和硬件回退逻辑，但不会修改正式 `burn`、`media_qa` stage，也不会覆盖 `bilingual.ass` 或 `burned.mp4`。本地纯音频 Job 以及没有有效 `source_video` 的远程 Job 必须通过 `--media` 提供视频。
 
-### 8. 单独烧录双语字幕
+### 9. 单独烧录双语字幕
 
 ```bash
 uv run --no-sync xvt burn "/path/to/job.json" \

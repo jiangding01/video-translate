@@ -59,6 +59,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 - `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。
 - `xvt continue JOB` 读取 `job.config.workflow`（类型化为 `WorkflowConfig`），补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
+- `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
 - `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
 - Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先运行 `apply-translation` 或 `import-translation`，再运行 `continue`。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。

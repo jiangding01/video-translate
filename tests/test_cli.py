@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import signal
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
-from xvt.pipeline import ResegmentationResult, TranslationRunResult
+from xvt.pipeline import RebuildSourceResult, ResegmentationResult, TranslationRunResult
 from xvt.process import CommandCancelled
 from xvt.workflow import WorkflowResult
 
@@ -347,6 +348,48 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertIn('xvt continue "/tmp/job.json"', output.getvalue())
 
+    def test_rebuild_source_quotes_follow_up_command_arguments(self) -> None:
+        output = StringIO()
+        result = RebuildSourceResult(
+            Path("/tmp/source-cues.json"),
+            Path("/tmp/source.srt"),
+            Path("/tmp/qa.json"),
+            Path("/tmp/source-selection.json"),
+        )
+        unsafe_job_file = "/tmp/$(touch xvt-unsafe)/job.json"
+        job = Job(
+            "job-1",
+            "",
+            "",
+            "input",
+            "/tmp",
+            {"target_language": "zh-CN; touch xvt-unsafe"},
+        )
+        with (
+            patch("xvt.cli.hold_job_lock"),
+            patch("xvt.cli.rebuild_source", return_value=result),
+            patch("xvt.cli.load_job", return_value=job),
+            redirect_stdout(output),
+        ):
+            return_code = main(["rebuild-source", unsafe_job_file, "--strategy", "asr"])
+
+        command = next(
+            line.removeprefix("继续翻译: ")
+            for line in output.getvalue().splitlines()
+            if line.startswith("继续翻译: ")
+        )
+        self.assertEqual(return_code, 0)
+        self.assertEqual(
+            shlex.split(command),
+            [
+                "xvt",
+                "translate",
+                str(Path(unsafe_job_file).resolve()),
+                "--target-language",
+                "zh-CN; touch xvt-unsafe",
+            ],
+        )
+
     def test_retranslate_cues_forwards_requested_ids(self) -> None:
         output = StringIO()
         result = TranslationRunResult("agent", (Path("/tmp/cue-retranslation-batches.json"),))
@@ -465,6 +508,76 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         resume.assert_called_once()
         self.assertEqual(output.getvalue(), f"{get_job_file(job)}\n")
+
+    def test_rebuild_source_dispatches_and_prints_next_workflow_command(self) -> None:
+        output = StringIO()
+        result = RebuildSourceResult(
+            Path("/tmp/source-cues.json"),
+            Path("/tmp/source.srt"),
+            Path("/tmp/qa.json"),
+            Path("/tmp/source-selection.json"),
+        )
+        job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})
+        with (
+            patch("xvt.cli.rebuild_source", return_value=result) as rebuild,
+            patch("xvt.cli.load_job", return_value=job),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "rebuild-source",
+                    "/tmp/job.json",
+                    "--strategy",
+                    "asr",
+                    "--cookies-from-browser",
+                    "chrome",
+                    "--proxy",
+                    "http://127.0.0.1:7890",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(rebuild.call_args.kwargs["strategy"], "asr")
+        self.assertEqual(rebuild.call_args.kwargs["cookies_from_browser"], "chrome")
+        self.assertIn("已使用 ASR 重建源字幕", output.getvalue())
+        self.assertIn(
+            f"xvt continue {shlex.quote(str(Path('/tmp/job.json').resolve()))}",
+            output.getvalue(),
+        )
+
+    def test_rebuild_source_jsonl_emits_terminal_artifacts(self) -> None:
+        output = StringIO()
+        result = RebuildSourceResult(
+            Path("/tmp/source-cues.json"),
+            Path("/tmp/source.srt"),
+            Path("/tmp/qa.json"),
+            Path("/tmp/source-selection.json"),
+        )
+        with (
+            patch("xvt.cli.rebuild_source", return_value=result),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                ["rebuild-source", "/tmp/job.json", "--strategy", "asr", "--events-jsonl"]
+            )
+
+        event = json.loads(output.getvalue())
+        self.assertEqual(return_code, 0)
+        self.assertEqual(event["type"], "cli_completed")
+        self.assertEqual(
+            event["data"]["artifacts"],
+            [
+                "/tmp/source-cues.json",
+                "/tmp/source.srt",
+                "/tmp/qa.json",
+                "/tmp/source-selection.json",
+            ],
+        )
+
+    def test_rebuild_source_is_a_locked_mutating_command(self) -> None:
+        from xvt.cli import _JOB_MUTATING_COMMANDS
+
+        self.assertIn("rebuild-source", _JOB_MUTATING_COMMANDS)
 
     def test_continue_forwards_runtime_network_options(self) -> None:
         output = StringIO()

@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 321 个，全部通过 |
+| 自动化测试 | 384 个测试、6 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -288,7 +288,7 @@ media-qa.json
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
 - 当前 API 翻译仍是单遍逐 cue 回填，没有独立的上下文润色和语义校对；长句跨 cue 时可能出现中文拼接生硬或术语识别错误。
-- 当前 YouTube 平台字幕一旦选中便跳过 ASR；平台字幕存在滚动重叠、越界或错误断句时，QA 会阻断，但尚不能在原 Job 中自动切换到 ASR 重建源字幕。
+- `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
 - 目录批处理当前串行执行，不支持后台队列、目录监控或每项不同参数；请求烧录时目录只能包含视频，音频和纯字幕输入必须拆成不烧录的独立批次。
 - 不支持远程执行或多租户 Web 服务。
@@ -305,7 +305,9 @@ media-qa.json
 
 **Q1：翻译传输可靠性已完成。** `RemoteDisconnected`、连接重置等传输错误已进入 retryable 分类；传输重试与结构纠错使用独立预算，默认分别为 4 次和 1 次；主翻译与局部重译共用重试实现和 retry 事件语义。
 
-**Q2：新 Job 自适应源字幕已完成。** 平台字幕只在显式 `--youtube-subtitles` 下请求；`--source-strategy auto|subtitles|asr` 写入新 Job 顶层配置。`auto` 直接采用通过 QA 的人工候选，对失败候选先对齐再回退 ASR；自动候选在翻译/烧录目标中使用 ASR，源字幕-only 且 QA 通过时可直接采用。候选 QA 和选择写为 `source_candidate_qa`、`source_selection` checksum artifact，并以 `source_selected` 事件记录；平台尾 cue 仅在超出媒体不超过 500ms 时裁剪。旧 Job 缺少策略仍走历史路径。Q3（已有 Job 重建）、Q4（语义组翻译）、Q5（润色）和 Q6（语义 QA）仍未实现。
+**Q2：新 Job 自适应源字幕已完成。** 平台字幕只在显式 `--youtube-subtitles` 下请求；`--source-strategy auto|subtitles|asr` 写入新 Job 顶层配置。`auto` 直接采用通过 QA 的人工候选，对失败候选先对齐再回退 ASR；自动候选在翻译/烧录目标中使用 ASR，源字幕-only 且 QA 通过时可直接采用。候选 QA 和选择写为 `source_candidate_qa`、`source_selection` checksum artifact，并以 `source_selected` 事件记录；平台尾 cue 仅在超出媒体不超过 500ms 时裁剪。旧 Job 缺少策略仍走历史路径。
+
+**Q3：已有 Job 源字幕重建已完成。** advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]` 显式重建，不由 `continue` 自动执行。它复用校验通过的词级转写、规范化音频和本地或已下载媒体；远程缺少可用 checkpoint 与媒体时才重取。命令持久化 ASR 策略与修复意图、关闭对齐，失效 `source_candidate_qa`、`source_cues`、`source_selection`、`translation_resegmentation` 及全部下游产物，并保留 `input_translation_subtitles` 以按新 cue 重新验证映射。修复中断后 `status` 保持显式重试，成功后端到端 Job 用 `continue`，旧原子 Job 用 `translate`。`status` 仅在非 ASR 源字幕 QA error 且可重建时首次给出建议，不对 ASR 自身 error、`needs_review` 或译文 QA 重复建议重建；不升级 schema 或新增 stage/事件类型，复用既有 artifact/stage、`source_selected` 和 `cli_completed`。下一步为 Q4 语义组翻译。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 

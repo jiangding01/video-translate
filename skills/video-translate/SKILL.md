@@ -113,6 +113,14 @@ uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
 
 Read `status` first: it prints `recovery` category/reason, optional `steps:` (`advance_steps` aligned with `continue`), and `next` / `before` commands. Do not guess between `resume` and `continue`.
 
+When `status` reports a source-subtitle QA error and recommends rebuilding a media Job, inspect the QA report and run the explicit repair command:
+
+```bash
+uv run --no-sync xvt rebuild-source "/path/to/job.json" --strategy asr
+```
+
+Pass `--cookies-from-browser` or `--proxy` only when remote access requires it. This command reuses checksum-valid word/audio checkpoints or downloaded media when possible, invalidates the old candidate QA, source timeline, and all derived translation/render/burn artifacts, and preserves a valid imported translation artifact for remapping onto the rebuilt cues. It is not supported for pure-subtitle Jobs, and `continue` never triggers it implicitly. If the repair is interrupted, follow the explicit `rebuild-source` command from `status`; after success, use `continue` for workflow Jobs or the `translate` command printed by the CLI for legacy atomic Jobs. Do not repeat the same rebuild when the rebuilt ASR cues themselves fail QA; that requires manual subtitle repair or a different segmentation decision.
+
 Optionally run `uv run --no-sync xvt verify "/path/to/job.json" --json` when integrity is in doubt. `continue` can retry remote inspection or acquisition in the same Job, resume API batches, and retry missing translation or burn outputs (including stale burn fingerprints). Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. Translation waiting states still require `apply-translation` or `import-translation` before `continue`. Keep `xvt resume` for transcription checkpoints only (advanced). Prefer `run`/`continue` over atomic `translate`/`burn` for end-to-end goals. Never bypass a missing-file or checksum-mismatch result.
 
 For a directory batch, use `uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl`. Read each incomplete item's `recovery_plan` before claiming the batch is recoverable: retryable Jobs continue automatically, Agent waits still require translation application, and manual or unrecoverable items remain blocked. Completed items are skipped only when their Job recovery plan confirms checksum-valid outputs.

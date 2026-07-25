@@ -7,6 +7,7 @@
 ### Added
 
 - 新 Job 支持 `--source-strategy auto|subtitles|asr`；显式平台字幕候选会先经过确定性 QA，并持久化候选报告、最终选择和 `source_selected` 事件。
+- advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]`：显式以 ASR 重建既有媒体 Job 的源字幕，不由 `continue` 自动执行。复用校验通过的 words/audio/本地或已下载媒体，远程缺 checkpoint 时才重取；持久化 ASR 策略、修复意图并关闭对齐，失效源 cue、候选 QA、选择、重分段及全部下游产物，同时保留输入译文字幕以重新验证映射。重建中断后 `status` 继续给出显式修复命令；端到端 Job 成功后用 `continue`，旧原子 Job 用 `translate`。不新增 stage、schema 或事件类型，复用 `source_selected` 与 `cli_completed`。
 
 ### Fixed
 
