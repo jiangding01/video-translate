@@ -183,6 +183,8 @@ xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]
 
 ## 翻译质量模式
 
+Q5 的决策完备实施方案见 [Q5 可恢复字幕润色技术方案](Q5_TRANSLATION_POLISH_PLAN.md)。本节保留 Q5/Q6 总体边界；实现时以专项方案的切分、恢复和验收约束为准。
+
 ### CLI 与兼容性
 
 计划新增：
@@ -192,7 +194,7 @@ xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]
 ```
 
 - `standard`：语义组翻译草稿直接作为最终候选，随后运行确定性 QA。
-- `polished`：草稿翻译后继续上下文润色、语义校对和最多一次定向修复。
+- `polished`：Q5 先增加草稿后的上下文润色；Q6 再在同一质量模式中增加语义校对和最多一次定向修复。
 
 实施初期保持 `standard` 为默认，完成完整真实 E2E 验收后，新 Job 默认切为：
 

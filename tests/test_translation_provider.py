@@ -14,17 +14,68 @@ from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, Cue
 from xvt.pipeline import run_translation
 from xvt.recovery import file_checksum
-from xvt.translate import GlossaryTerm, TranslationPolicy, build_translation_batches
+from xvt.translate import (
+    GlossaryTerm,
+    TranslationPolicy,
+    build_polish_batches,
+    build_translation_batches,
+)
 from xvt.translation_provider import (
     CompatibleProviderConfig,
     ProviderResponseError,
     TranslationProviderError,
+    polish_batch,
     resolve_provider,
     translate_batch,
 )
 
 
 class TranslationProviderTest(unittest.TestCase):
+    def test_polish_provider_sends_draft_and_rejects_context_ids(self) -> None:
+        source = [
+            Cue(1, 0, 1000, "Hello", source_language="en"),
+            Cue(2, 1000, 2000, "World", source_language="en"),
+        ]
+        draft = [
+            Cue(1, 0, 1000, "Hello", target_text="你好", target_language="zh-CN"),
+            Cue(2, 1000, 2000, "World", target_text="世界", target_language="zh-CN"),
+        ]
+        batch = build_polish_batches(
+            source,
+            draft,
+            source_language="en",
+            target_language="zh-CN",
+            batch_size=1,
+        )[0]
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                content = json.dumps({"items": [{"id": 1, "text": "你好。"}]})
+                return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+        def opener(request, **_kwargs):
+            captured.update(json.loads(request.data))
+            return Response()
+
+        result = polish_batch(
+            batch,
+            CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+            opener=opener,
+        )
+
+        self.assertEqual(result, {1: "你好。"})
+        manifest = json.loads(captured["messages"][1]["content"])
+        self.assertEqual(manifest["items"][0]["draft_text"], "你好")
+        self.assertEqual([item["id"] for item in manifest["context_after"]], [2])
+        self.assertIn("read-only context", captured["messages"][0]["content"])
+
     def test_auto_mode_falls_back_when_configuration_is_incomplete(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             mode, config, reason = resolve_provider(

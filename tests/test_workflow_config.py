@@ -33,6 +33,7 @@ class WorkflowConfigTest(unittest.TestCase):
             max_retries=3,
             timeout_seconds=90.0,
             translation_policy=policy,
+            translation_quality="polished",
             segmentation_preset="compact",
             burn=True,
             burn_media="/tmp/video.mp4",
@@ -55,6 +56,7 @@ class WorkflowConfigTest(unittest.TestCase):
         )
         self.assertEqual(config.target_language, "zh-CN")
         self.assertEqual(config.provider, "auto")
+        self.assertEqual(config.translation_quality, "standard")
         self.assertFalse(config.burn)
         self.assertIsNone(config.burn_fingerprint)
         self.assertEqual(config.requested_outputs, ("translated_subtitles", "future_output"))
@@ -106,6 +108,10 @@ class WorkflowConfigTest(unittest.TestCase):
             WorkflowConfig.from_dict({"requested_outputs": [1]})
         with self.assertRaisesRegex(ValueError, "burn"):
             WorkflowConfig.from_dict({"burn": "yes"})
+        with self.assertRaisesRegex(ValueError, "translation_quality"):
+            WorkflowConfig.from_dict({"translation_quality": "premium"})
+        with self.assertRaisesRegex(ValueError, "translation_quality"):
+            WorkflowConfig.from_dict({"translation_quality": []})
 
     def test_workflow_options_persisted_config_is_typed(self) -> None:
         options = WorkflowOptions(
@@ -184,6 +190,7 @@ class WorkflowConfigTest(unittest.TestCase):
         config = WorkflowConfig.from_dict(legacy)
         self.assertEqual(config.target_language, "zh-CN")
         self.assertIsNone(config.translation_policy)
+        self.assertEqual(config.translation_quality, "standard")
         self.assertIsNone(config.burn_fingerprint)
 
 

@@ -373,6 +373,47 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("continue", plan.primary_command or "")
         self.assertEqual(plan.advance_steps, ("await_agent_translation",))
 
+    def test_recovery_plan_describes_agent_polish_prerequisite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {
+                "target_language": "zh-CN",
+                "translation_quality": "polished",
+            }
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "translation_draft_cues")
+            self._add_artifact(job, root, "translation_polish_batches")
+            job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertIn("apply-polish-translation", plan.prerequisite_commands[0])
+        self.assertEqual(plan.advance_steps, ("await_agent_polish",))
+
+    def test_recovery_plan_blocks_when_polished_draft_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {
+                "target_language": "zh-CN",
+                "translation_quality": "polished",
+            }
+            self._add_artifact(job, root, "source_cues")
+            draft = self._add_artifact(job, root, "translation_draft_cues")
+            self._add_artifact(job, root, "translation_polish_batches")
+            job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+            draft.write_text("corrupt", encoding="utf-8")
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIsNone(plan.primary_command)
+        self.assertEqual(plan.advance_steps, ("repair_polish_draft",))
+
     def test_recovery_plan_workflow_translate_exposes_advance_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

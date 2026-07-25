@@ -8,9 +8,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from xvt.errors import DependencyError, UserInputError
-from xvt.translate import TranslationBatch, parse_translation_response
+from xvt.translate import (
+    PolishBatch,
+    TranslationBatch,
+    parse_polish_response,
+    parse_translation_response,
+)
 
 TRANSLATION_PROMPT_VERSION = 3
+TRANSLATION_POLISH_PROMPT_VERSION = 1
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
@@ -127,6 +133,50 @@ def translate_batch(
         )
     if correction:
         system_content = f"{system_content} {correction}"
+    return _request_batch(
+        batch,
+        config,
+        system_content=system_content,
+        parser=parse_translation_response,
+        opener=opener,
+    )
+
+
+def polish_batch(
+    batch: PolishBatch,
+    config: CompatibleProviderConfig,
+    *,
+    opener=None,
+    correction: str | None = None,
+) -> dict[int, str]:
+    system_content = (
+        "Polish each draft_text into natural, concise subtitle language while preserving its "
+        "complete meaning, tone, and required glossary terms. Preserve every integer id and "
+        "return only the ids in items. Never change cue boundaries or move meaning between "
+        "semantic_groups. context_before and context_after are read-only context; never include "
+        "their ids in the response. max_target_characters is a display recommendation, not a "
+        "hard limit. Return JSON only in the form "
+        '{"items":[{"id":1,"text":"..."}]}.'
+    )
+    if correction:
+        system_content = f"{system_content} {correction}"
+    return _request_batch(
+        batch,
+        config,
+        system_content=system_content,
+        parser=parse_polish_response,
+        opener=opener,
+    )
+
+
+def _request_batch(
+    batch: TranslationBatch | PolishBatch,
+    config: CompatibleProviderConfig,
+    *,
+    system_content: str,
+    parser,
+    opener=None,
+) -> dict[int, str]:
     payload = {
         "model": config.model,
         "messages": [
@@ -205,7 +255,7 @@ def translate_batch(
     # 都属于「结构性无效响应」——进入纠错重试，耗尽后按依赖故障分类（exit 3），
     # 而不是被顶层兜底误报为用户输入错误（exit 2）。
     try:
-        return parse_translation_response(batch, _response_items(content))
+        return parser(batch, _response_items(content))
     except ProviderResponseError:
         raise
     except ValueError as error:

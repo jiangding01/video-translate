@@ -16,9 +16,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.config import DEFAULT_MAX_RETRIES
 from xvt.events import EventSink, EventType, create_event, job_event_fields
-from xvt.job_store import get_job_directory, get_job_file, load_job
+from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
     _add_artifact,
@@ -38,6 +39,7 @@ from xvt.render import save_bilingual_ass
 from xvt.subtitles import load_subtitles, save_subtitles
 from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
+    PolishBatch,
     TranslationBatch,
     TranslationPolicy,
     apply_translations,
@@ -54,6 +56,7 @@ from xvt.translation_provider import (
     resolve_provider,
     translate_batch,
 )
+from xvt.workflow_config import clear_burn_fingerprint, get_workflow_config
 
 _RESPONSE_CORRECTION = (
     "The previous response was invalid. Return every requested id "
@@ -69,20 +72,22 @@ class TranslationRunResult:
 
 
 def _translate_batch_with_retries(
-    batch: TranslationBatch,
+    batch: TranslationBatch | PolishBatch,
     provider_config: CompatibleProviderConfig,
     *,
     max_retries: int,
     on_retry: Callable[[int, float, str], None] | None = None,
+    request: Callable[..., dict[int, str]] | None = None,
 ) -> dict[int, str]:
     transport_retries = 0
     response_retries = 0
     request_attempt = 1
     correction: str | None = None
+    request_batch = request or translate_batch
     while True:
         raise_if_cancelled()
         try:
-            return translate_batch(batch, provider_config, correction=correction)
+            return request_batch(batch, provider_config, correction=correction)
         except TranslationProviderError as error:
             if not error.retryable or transport_retries >= max_retries:
                 raise
@@ -143,6 +148,7 @@ def _finalize_translation(
     event_sink: EventSink | None,
     *,
     invalidate: Callable[[Job], None],
+    polished_result: bool = False,
 ) -> tuple[Path, ...]:
     """翻译成功后的统一收尾：写译文 cue → 失效旧下游产物 → 译文 QA → 渲染。
 
@@ -152,6 +158,34 @@ def _finalize_translation(
     current_stage = StageName.TRANSLATE
     try:
         artifacts_directory = get_job_directory(job) / "artifacts"
+        workflow = get_workflow_config(job)
+        if (
+            workflow is not None
+            and workflow.translation_quality == "polished"
+            and not polished_result
+        ):
+            draft_path = artifacts_directory / "translation-draft-cues.json"
+            _write_json(draft_path, [asdict(cue) for cue in translated])
+            _add_artifact(job, "translation_draft_cues", draft_path, event_sink)
+            invalidated = downstream_of(ArtifactKind.TRANSLATION_DRAFT_CUES)
+            job.artifacts = [
+                artifact for artifact in job.artifacts if artifact.kind not in invalidated
+            ]
+            clear_burn_fingerprint(job)
+            for stage in (
+                StageName.TRANSLATE,
+                StageName.SUBTITLE_QA,
+                StageName.RENDER,
+                StageName.BURN,
+                StageName.MEDIA_QA,
+            ):
+                record = job.stages[stage]
+                record.status = StageStatus.PENDING
+                record.started_at = None
+                record.completed_at = None
+                record.error = None
+            save_job(job)
+            return (draft_path,)
         translated_cues_path = artifacts_directory / "translated-cues.json"
         _write_json(translated_cues_path, [asdict(cue) for cue in translated])
         invalidate(job)
@@ -299,6 +333,13 @@ def prepare_agent_translation(
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
+    workflow = get_workflow_config(job)
+    if (
+        workflow is not None
+        and workflow.translation_quality == "polished"
+        and workflow.target_language != target_language
+    ):
+        raise ValueError("target language must match the polished workflow goal")
     resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     try:
@@ -362,6 +403,13 @@ def run_translation(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     job = load_job(job_file)
+    workflow = get_workflow_config(job)
+    if (
+        workflow is not None
+        and workflow.translation_quality == "polished"
+        and workflow.target_language != target_language
+    ):
+        raise ValueError("target language must match the polished workflow goal")
     resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
     cues = _load_cues(_artifact_path(job, "source_cues"))
     source_language = next(
@@ -554,6 +602,13 @@ def apply_agent_translation(
     event_sink: EventSink | None = None,
 ) -> tuple[Path, ...]:
     job = load_job(job_file)
+    workflow = get_workflow_config(job)
+    if (
+        workflow is not None
+        and workflow.translation_quality == "polished"
+        and workflow.target_language != target_language
+    ):
+        raise ValueError("target language must match the polished workflow goal")
     current_stage = StageName.TRANSLATE
     _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
@@ -595,6 +650,13 @@ def apply_subtitle_translation(
     event_sink: EventSink | None = None,
 ) -> tuple[Path, ...]:
     job = load_job(job_file)
+    workflow = get_workflow_config(job)
+    if (
+        workflow is not None
+        and workflow.translation_quality == "polished"
+        and workflow.target_language != target_language
+    ):
+        raise ValueError("target language must match the polished workflow goal")
     current_stage = StageName.TRANSLATE
     _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:

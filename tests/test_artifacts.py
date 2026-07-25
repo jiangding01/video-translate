@@ -52,6 +52,11 @@ LEGACY_RESEGMENT_INVALIDATION = {
     "subtitle_qa",
     # Q2：选择报告包含最终 source cue checksum，重分段后不得保留旧选择记录。
     "source_selection",
+    # Q5a：润色草稿、批次、进度和结果都直接或间接引用 source_cues。
+    "translation_draft_cues",
+    "translation_polish_batches",
+    "translation_polish_progress",
+    "translation_polished_cues",
 }
 
 

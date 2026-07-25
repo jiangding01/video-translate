@@ -29,7 +29,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与读写边界 |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
 | `src/xvt/artifacts.py` | artifact kind 枚举、派生依赖图与失效闭包 |
-| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 确认通道）、`transcription`（转写与恢复）、`translation`（翻译与收尾）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
+| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 确认通道）、`transcription`（转写与恢复）、`translation`（翻译与收尾）、`polish`（可恢复润色）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
 | `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |
@@ -62,6 +62,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 - `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
 - `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
 - Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先运行 `apply-translation` 或 `import-translation`，再运行 `continue`。
+- `xvt polish-translation JOB` 为已有端到端 Job 显式补跑润色；API 模式逐批 checkpoint，Agent 模式必须先运行 `apply-polish-translation`，再运行 `continue`。Q5a 尚未给新 Job 增加质量参数。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。
 - `xvt burn JOB` 是独立烧录入口（advanced）。本地纯音频 Job 必须通过 `--media` 提供视频。烧录成功后登记 `burn_fingerprint` artifact；`continue` 用其判断是否可复用成品。
 
