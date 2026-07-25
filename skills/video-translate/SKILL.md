@@ -68,6 +68,8 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
    uv run --no-sync xvt prepare-translation "/path/to/job.json" --source-language en --target-language zh-CN
    ```
 
+   For a new polished translation, add `--translation-quality polished`. The generated manifest uses `task=translate_and_polish`; translate, polish, and self-check in one pass, then return the manifest fingerprint and every requested ID exactly once. Do not create a second polish response for this path.
+
 6. Read `artifacts/translation-batches.json`, including each batch's `semantic_groups`. Translate every item according to [translation-protocol.md](references/translation-protocol.md): use a complete group to keep the expression natural, but return only the existing `items` IDs in one response JSON. Never merge, split, renumber, or move text across cue IDs.
 7. Apply the response:
 
@@ -89,7 +91,7 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
    uv run --no-sync xvt polish-translation "/path/to/job.json"
    ```
 
-   API mode checkpoints each polish batch. Agent mode requires `apply-polish-translation JOB RESPONSE`, followed by `continue`; the response must copy the current manifest's top-level `fingerprint` and cover every requested ID exactly once. Never alter cue IDs, order, source text, or timestamps in the response. This explicit Q5a path does not support legacy atomic Jobs without `config.workflow`.
+   API mode checkpoints each polish batch. Agent mode requires `apply-polish-translation JOB RESPONSE`, followed by `continue`; the response must copy the current manifest's top-level `fingerprint` and cover every requested ID exactly once. Never alter cue IDs, order, source text, or timestamps in the response. This explicit existing-translation path does not support legacy atomic Jobs without `config.workflow`; use `translate --translation-quality polished` when starting a new atomic translation.
 
 8. Before a full burn, generate a short preview when the user wants to inspect subtitle layout or timing:
 

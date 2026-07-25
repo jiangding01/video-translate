@@ -105,7 +105,7 @@ stage 状态迁移（`pipeline.py`），由 `StageStatus → EventType` 映射�
 | `stage` | string | stage 名（`StageName` 值） |
 | `status` | string | stage 状态（`StageStatus` 值） |
 | `detail` | string? | 可选人类可读细分，如 `acquire` 的 `subtitles`/`media`，或 QA/渲染的 `source`/`translated` |
-| `phase` | string? | 可选业务子阶段；Q5a 润色使用 `polish` |
+| `phase` | string? | 可选业务子阶段；polished API 第一遍使用 `draft`，润色使用 `polish` |
 | `error` | object? | 仅 `stage_failed` 且记录了失败信息时存在，`{category, message}` |
 
 ## artifact 登记
@@ -199,7 +199,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `provider` | string | 提供方模式（如 `agent` 或兼容 API 名） |
 | `model` | string | 使用的模型名 |
-| `phase` | string? | 可选业务子阶段；润色请求为 `polish` |
+| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色请求为 `polish` |
 
 ### `translation_fallback`
 | 字段 | 类型 | 含义 |
@@ -217,7 +217,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
 | `reason` | string | 重置原因（如翻译指纹变化） |
-| `phase` | string? | 可选业务子阶段；润色 checkpoint 重置为 `polish` |
+| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色 checkpoint 为 `polish` |
 
 ### `translation_resegmented`
 | 字段 | 类型 | 含义 |
@@ -235,7 +235,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
-| `phase` | string? | 可选业务子阶段；润色批次为 `polish` |
+| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色批次为 `polish` |
 
 ### `translation_batch_retrying`
 | 字段 | 类型 | 含义 |
@@ -247,7 +247,7 @@ yt-dlp 下载进度（`download.py`）。
 | `attempt` | int | 当前批次即将进行的请求序号；传输重试与结构纠错共用连续序号 |
 | `delay_seconds` | number | 重试前等待秒数；生产端当前限制在 0 到 30 秒 |
 | `reason` | string | 重试原因；当前生产端使用 `provider temporarily unavailable` 或 `invalid provider response` |
-| `phase` | string? | 可选业务子阶段；润色批次为 `polish` |
+| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色批次为 `polish` |
 
 传输重试和结构纠错使用独立预算。默认传输故障最多重试 4 次，结构性无效响应固定最多纠错 1 次；因此 `attempt` 只表示可见请求顺序，不表示任一预算的剩余次数。
 
@@ -258,7 +258,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
-| `phase` | string? | 可选业务子阶段；润色批次为 `polish` |
+| `phase` | string? | 可选业务子阶段；polished API 第一遍为 `draft`，润色批次为 `polish` |
 
 ## 烧录与预览
 

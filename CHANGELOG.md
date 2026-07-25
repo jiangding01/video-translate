@@ -6,7 +6,8 @@
 
 ### Added
 
-- Q5a 可恢复译文润色：新增 `polish-translation` 与 `apply-polish-translation`，为已有端到端 Job 保存不可变草稿，API 逐批 checkpoint、Agent 以 fingerprint 和完整 ID 严格回填，并由 `status` / `continue` / `batch-continue` 恢复。新增 draft、batch、progress、polished 四类 checksum artifact；润色只改译文文本，完成后仍经确定性 QA 与渲染。旧 Job 缺质量字段继续按 `standard`；新 Job 的质量参数留待 Q5b。
+- Q5b 新 Job 翻译质量模式：`run`、`batch`、`translate` 和 `prepare-translation` 新增 `--translation-quality standard|polished`，默认保持 `standard + faithful`。兼容 API 的 polished 路径按 draft -> polish 分阶段 checkpoint；Agent 以带 task/version/fingerprint 的单个 manifest 完成一次翻译+润色回填，并可从完整 progress 确定性补齐中断的最终 cue、QA 和渲染。旧 Job、旧 batch 和旧 Agent manifest 继续按 `standard`。
+- Q5a 可恢复译文润色：新增 `polish-translation` 与 `apply-polish-translation`，为已有端到端 Job 保存不可变草稿，API 逐批 checkpoint、Agent 以 fingerprint 和完整 ID 严格回填，并由 `status` / `continue` / `batch-continue` 恢复。新增 draft、batch、progress、polished 四类 checksum artifact；润色只改译文文本，完成后仍经确定性 QA 与渲染。旧 Job 缺质量字段继续按 `standard`。
 
 - Q4 语义组翻译：翻译前按句末标点、650ms 间隔及 20 cue / 30 秒上限确定性分组；provider 批次继续最多 40 个 cue，但以完整语义组装箱，避免在批次边界切开句意。`translation-batches.json` 的每个 batch 新增兼容字段 `semantic_groups`（cue ID 组），Agent / provider 的响应仍只返回既有 `items`，并继续严格校验全部 ID；回填不改变 cue 顺序或时间轴。提示词版本升级会使旧 API 翻译进度安全失效并从完整批次恢复；已等待输入的旧 Agent Job 继续按严格 ID 契约兼容回填。默认翻译风格仍为 `faithful`。下一阶段为 Q5 可恢复字幕润色。
 - 新 Job 支持 `--source-strategy auto|subtitles|asr`；显式平台字幕候选会先经过确定性 QA，并持久化候选报告、最终选择和 `source_selected` 事件。

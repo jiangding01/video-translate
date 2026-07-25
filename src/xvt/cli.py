@@ -43,6 +43,7 @@ from xvt.pipeline import (
     resegment_translation,
     resume_job,
     retranslate_cues,
+    run_atomic_translation_polish,
     run_translation,
     run_translation_polish,
 )
@@ -55,11 +56,16 @@ from xvt.recovery import (
 )
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
-from xvt.workflow_config import get_workflow_config, resolve_target_language
+from xvt.workflow_config import (
+    get_workflow_config,
+    resolve_target_language,
+    resolve_translation_quality,
+)
 
 _CLI_EPILOG = """\
 recommended path:
-  xvt run INPUT --output DIR [--target-language LANG] [--burn]
+  xvt run INPUT --output DIR [--target-language LANG]
+    [--translation-quality standard|polished] [--burn]
   xvt status JOB.json
   xvt continue JOB.json
 
@@ -69,7 +75,7 @@ when status says awaiting Agent input:
   xvt continue JOB.json
 
 batch:
-  xvt batch DIR --output DIR [--target-language LANG]
+  xvt batch DIR --output DIR [--target-language LANG] [--translation-quality standard|polished]
   xvt batch-continue BATCH.json
 
 Core commands: run, status, continue, batch, batch-continue, doctor, verify.
@@ -127,6 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--translation-subtitles")
     run_parser.add_argument("--target-language")
     run_parser.add_argument(
+        "--translation-quality", choices=["standard", "polished"], default="standard"
+    )
+    run_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
         default=DEFAULT_PROVIDER,
@@ -168,6 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-strategy", choices=["auto", "subtitles", "asr"], default="auto"
     )
     batch_parser.add_argument("--target-language")
+    batch_parser.add_argument(
+        "--translation-quality", choices=["standard", "polished"], default="standard"
+    )
     batch_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
@@ -254,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("job_file")
     prepare_parser.add_argument("--source-language", required=True)
     prepare_parser.add_argument("--target-language", required=True)
+    prepare_parser.add_argument("--translation-quality", choices=["standard", "polished"])
     prepare_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     prepare_parser.add_argument("--glossary")
     prepare_parser.add_argument(
@@ -287,6 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     translate_parser.add_argument("job_file")
     translate_parser.add_argument("--target-language", required=True)
+    translate_parser.add_argument("--translation-quality", choices=["standard", "polished"])
     translate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
@@ -885,6 +899,12 @@ def _print_workflow_result(result: object) -> None:
     status = getattr(result, "status", None)
     if job_file is not None:
         print(job_file)
+        try:
+            job = load_job(job_file)
+            if resolve_target_language(job):
+                print(f"翻译质量: {resolve_translation_quality(job)}")
+        except (OSError, ValueError):
+            pass
     videos: list[Path] = []
     subtitles: list[Path] = []
     others: list[Path] = []
@@ -955,6 +975,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 allow_auto_subtitles=arguments.allow_auto_subtitles,
                 translation_subtitles=arguments.translation_subtitles,
                 target_language=arguments.target_language,
+                translation_quality=arguments.translation_quality,
                 provider=arguments.provider,
                 base_url=arguments.base_url,
                 model=arguments.model,
@@ -995,6 +1016,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 language=arguments.language,
                 source_strategy=arguments.source_strategy,
                 target_language=arguments.target_language,
+                translation_quality=arguments.translation_quality,
                 provider=arguments.provider,
                 base_url=arguments.base_url,
                 model=arguments.model,
@@ -1143,6 +1165,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
             batch_size=arguments.batch_size,
             glossary=arguments.glossary,
             translation_style=arguments.translation_style,
+            translation_quality=arguments.translation_quality,
             event_sink=event_sink,
         )
         if arguments.events_jsonl:
@@ -1195,8 +1218,29 @@ def _run_command(arguments: argparse.Namespace) -> int:
             timeout_seconds=arguments.timeout_seconds,
             glossary=arguments.glossary,
             translation_style=arguments.translation_style,
+            translation_quality=arguments.translation_quality,
             event_sink=event_sink,
         )
+        if (
+            result.mode != "agent"
+            and resolve_translation_quality(load_job(arguments.job_file)) == "polished"
+        ):
+            job = load_job(arguments.job_file)
+            if get_workflow_config(job) is not None:
+                result = run_translation_polish(arguments.job_file, event_sink=event_sink)
+            else:
+                result = run_atomic_translation_polish(
+                    arguments.job_file,
+                    target_language=arguments.target_language,
+                    provider=arguments.provider,
+                    base_url=arguments.base_url,
+                    model=arguments.model,
+                    api_key_env=arguments.api_key_env,
+                    batch_size=arguments.batch_size,
+                    max_retries=arguments.max_retries,
+                    timeout_seconds=arguments.timeout_seconds,
+                    event_sink=event_sink,
+                )
         if arguments.events_jsonl:
             _complete(
                 arguments,

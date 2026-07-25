@@ -27,6 +27,7 @@ from xvt.pipeline.common import (
     _checksum,
     _error_category,
     _invalidate_preview_artifacts,
+    _invalidate_rendered_artifacts,
     _load_cues,
     _set_stage,
     _write_json,
@@ -39,9 +40,11 @@ from xvt.render import save_bilingual_ass
 from xvt.subtitles import load_subtitles, save_subtitles
 from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
+    TRANSLATE_AND_POLISH_TASK_VERSION,
     PolishBatch,
     TranslationBatch,
     TranslationPolicy,
+    agent_translation_manifest_fingerprint,
     apply_translations,
     build_translation_batches,
     load_translation_policy,
@@ -56,7 +59,11 @@ from xvt.translation_provider import (
     resolve_provider,
     translate_batch,
 )
-from xvt.workflow_config import clear_burn_fingerprint, get_workflow_config
+from xvt.workflow_config import (
+    clear_burn_fingerprint,
+    get_workflow_config,
+    resolve_translation_quality,
+)
 
 _RESPONSE_CORRECTION = (
     "The previous response was invalid. Return every requested id "
@@ -142,6 +149,329 @@ def _load_translation_response(response_file: str | Path, expected_ids: set[int]
     return translations
 
 
+def _requested_translation_quality(job: Job, requested: str | None) -> str:
+    current = resolve_translation_quality(job)
+    workflow = get_workflow_config(job)
+    if workflow is not None:
+        if requested is not None and requested != current:
+            raise ValueError("translation quality must match the persisted workflow goal")
+        return current
+    if requested is None:
+        return current
+    if requested not in {"standard", "polished"}:
+        raise ValueError("translation quality must be standard or polished")
+    if "translation_quality" in job.config and requested != current:
+        raise ValueError("translation quality must match the persisted atomic job goal")
+    return requested
+
+
+def _translation_fingerprint(
+    *,
+    source_cues_checksum: str,
+    source_language: str,
+    target_language: str,
+    provider: str,
+    base_url: str,
+    model: str,
+    batch_size: int,
+    policy: TranslationPolicy,
+) -> str:
+    payload = {
+        "source_cues_checksum": source_cues_checksum,
+        "source_language": source_language,
+        "target_language": target_language,
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "batch_size": batch_size,
+        "prompt_version": TRANSLATION_PROMPT_VERSION,
+        "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
+        "translation_policy": policy.to_dict(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _atomic_draft_matches_translation_progress(
+    job: Job,
+    cues: list[Cue],
+    batches: list[TranslationBatch],
+    fingerprint: str,
+    target_language: str,
+) -> Path | None:
+    draft_path = valid_artifact_path(job, "translation_draft_cues")
+    progress_path = valid_artifact_path(job, "translation_progress")
+    if draft_path is None or progress_path is None:
+        return None
+    try:
+        data = json.loads(progress_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(data, dict)
+            or data.get("fingerprint") != fingerprint
+            or data.get("completed_batches") != [batch.id for batch in batches]
+        ):
+            return None
+        expected_ids = {item.id for batch in batches for item in batch.items}
+        items = data.get("items")
+        if not isinstance(items, list):
+            return None
+        translations = _load_translation_response(progress_path, expected_ids)
+        expected = apply_translations(cues, translations, target_language=target_language)
+        return draft_path if _load_cues(draft_path) == expected else None
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _translation_manifest(job: Job) -> dict[str, Any] | None:
+    path = valid_artifact_path(job, "translation_batches")
+    if path is None:
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _agent_polished_manifest(job: Job) -> dict[str, Any] | None:
+    manifest = _translation_manifest(job)
+    if manifest is None or manifest.get("task") != "translate_and_polish":
+        return None
+    source_path = valid_artifact_path(job, "source_cues")
+    workflow = get_workflow_config(job)
+    target_language = (
+        workflow.target_language if workflow is not None else job.config.get("target_language")
+    )
+    policy = (
+        workflow.translation_policy.to_dict()
+        if workflow is not None and workflow.translation_policy is not None
+        else translation_policy_from_dict(job.config.get("translation_policy")).to_dict()
+    )
+    source_language = manifest.get("source_language")
+    batch_size = manifest.get("batch_size")
+    fingerprint = manifest.get("fingerprint")
+    if (
+        source_path is None
+        or manifest.get("job_id") != job.id
+        or manifest.get("source_cues_checksum") != _checksum(source_path)
+        or manifest.get("target_language") != target_language
+        or manifest.get("policy") != policy
+        or not isinstance(source_language, str)
+        or not source_language
+        or not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size < 1
+        or manifest.get("task_version") != TRANSLATE_AND_POLISH_TASK_VERSION
+        or manifest.get("prompt_version") != TRANSLATION_PROMPT_VERSION
+        or manifest.get("semantic_grouping_version") != SEMANTIC_GROUPING_VERSION
+        or not isinstance(fingerprint, str)
+        or fingerprint != agent_translation_manifest_fingerprint(manifest)
+    ):
+        return None
+    expected_batches = build_translation_batches(
+        _load_cues(source_path),
+        source_language=source_language,
+        target_language=target_language,
+        batch_size=batch_size,
+        policy=translation_policy_from_dict(policy),
+    )
+    expected_payload = json.loads(
+        json.dumps([batch.to_dict() for batch in expected_batches], ensure_ascii=False)
+    )
+    if manifest.get("batches") != expected_payload:
+        return None
+    return manifest
+
+
+def _manifest_batch_ids_and_cue_ids(manifest: dict[str, Any]) -> tuple[list[int], set[int]]:
+    batches = manifest.get("batches")
+    if not isinstance(batches, list):
+        raise ValueError("translation batch manifest must contain a batches array")
+    batch_ids: list[int] = []
+    cue_ids: set[int] = set()
+    for batch in batches:
+        batch_id = batch.get("id") if isinstance(batch, dict) else None
+        items = batch.get("items") if isinstance(batch, dict) else None
+        if (
+            not isinstance(batch_id, int)
+            or isinstance(batch_id, bool)
+            or batch_id in batch_ids
+            or not isinstance(items, list)
+        ):
+            raise ValueError("translation batch manifest contains an invalid batch")
+        batch_ids.append(batch_id)
+        for item in items:
+            cue_id = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(cue_id, int) or isinstance(cue_id, bool) or cue_id in cue_ids:
+                raise ValueError("translation batch manifest contains an invalid cue id")
+            cue_ids.add(cue_id)
+    return batch_ids, cue_ids
+
+
+def _load_agent_polished_response(
+    response_file: str | Path, manifest: dict[str, Any]
+) -> dict[int, str]:
+    _batch_ids, cue_ids = _manifest_batch_ids_and_cue_ids(manifest)
+    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    if not isinstance(response, dict) or response.get("fingerprint") != manifest.get("fingerprint"):
+        raise ValueError("translation response fingerprint does not match the current manifest")
+    items = response.get("items")
+    if not isinstance(items, list):
+        raise ValueError("translation response must contain an items array")
+    translations: dict[int, str] = {}
+    for item in items:
+        cue_id = item.get("id") if isinstance(item, dict) else None
+        text = item.get("text") if isinstance(item, dict) else None
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool) or cue_id in translations:
+            raise ValueError("translation response contains an invalid or duplicate cue id")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"translation for cue {cue_id} is empty")
+        translations[cue_id] = text.strip()
+    if set(translations) != cue_ids:
+        raise ValueError("translation response must cover the requested cue ids exactly once")
+    return translations
+
+
+def _agent_polish_progress(
+    job: Job, manifest: dict[str, Any]
+) -> tuple[list[int], dict[int, str]] | None:
+    path = valid_artifact_path(job, "translation_polish_progress")
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        batch_ids, cue_ids = _manifest_batch_ids_and_cue_ids(manifest)
+        if (
+            not isinstance(data, dict)
+            or data.get("fingerprint") != manifest.get("fingerprint")
+            or data.get("completed_batches") != batch_ids
+        ):
+            return None
+        items = data.get("items")
+        if not isinstance(items, list):
+            return None
+        translations: dict[int, str] = {}
+        for item in items:
+            cue_id = item.get("id") if isinstance(item, dict) else None
+            text = item.get("text") if isinstance(item, dict) else None
+            if (
+                not isinstance(cue_id, int)
+                or isinstance(cue_id, bool)
+                or cue_id in translations
+                or not isinstance(text, str)
+                or not text.strip()
+            ):
+                return None
+            translations[cue_id] = text.strip()
+        if set(translations) != cue_ids:
+            return None
+        return batch_ids, translations
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def agent_translation_polish_waiting(job: Job) -> bool:
+    manifest = _agent_polished_manifest(job)
+    return manifest is not None and _agent_polish_progress(job, manifest) is None
+
+
+def agent_translation_polish_started(job: Job) -> bool:
+    artifact = next((item for item in job.artifacts if item.kind == "translation_batches"), None)
+    data = None
+    if artifact is not None:
+        try:
+            data = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+    if isinstance(data, dict) and data.get("task") == "translate_and_polish":
+        return True
+    kinds = {item.kind for item in job.artifacts}
+    return (
+        "translation_draft_cues" not in kinds
+        and "translation_polish_batches" not in kinds
+        and (
+            job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+            or bool({"translation_polish_progress", "translation_polished_cues"} & kinds)
+        )
+    )
+
+
+def agent_translation_polish_progress_ready(job: Job) -> bool:
+    manifest = _agent_polished_manifest(job)
+    return manifest is not None and _agent_polish_progress(job, manifest) is not None
+
+
+def _agent_polished_cues(job: Job) -> list[Cue]:
+    manifest = _agent_polished_manifest(job)
+    if manifest is None:
+        raise ValueError("job has no valid translate_and_polish manifest")
+    progress = _agent_polish_progress(job, manifest)
+    if progress is None:
+        raise ValueError("job has no complete translate_and_polish response")
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        raise ValueError("translate_and_polish requires checksum-valid source_cues")
+    target_language = manifest.get("target_language")
+    if not isinstance(target_language, str) or not target_language:
+        raise ValueError("translate_and_polish manifest has no target language")
+    return apply_translations(
+        _load_cues(source_path),
+        progress[1],
+        target_language=target_language,
+    )
+
+
+def agent_translation_polish_core_satisfied(job: Job) -> bool:
+    try:
+        expected = _agent_polished_cues(job)
+        polished_path = valid_artifact_path(job, "translation_polished_cues")
+        translated_path = valid_artifact_path(job, "translated_cues")
+        return (
+            polished_path is not None
+            and translated_path is not None
+            and _load_cues(polished_path) == expected
+            and _load_cues(translated_path) == expected
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def complete_agent_polished_outputs(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, ...]:
+    job = load_job(job_file)
+    expected = _agent_polished_cues(job)
+    artifacts_directory = get_job_directory(job) / "artifacts"
+    polished_path = valid_artifact_path(job, "translation_polished_cues")
+    if polished_path is None or _load_cues(polished_path) != expected:
+        polished_path = artifacts_directory / "translation-polished-cues.json"
+        _write_json(polished_path, [asdict(cue) for cue in expected])
+        _add_artifact(job, "translation_polished_cues", polished_path, event_sink)
+
+    translated_path = valid_artifact_path(job, "translated_cues")
+    if translated_path is not None and _load_cues(translated_path) == expected:
+        if all(
+            valid_artifact_path(job, kind) is not None
+            for kind in ("translated_srt", "bilingual_srt")
+        ):
+            return tuple(
+                path
+                for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
+                if (path := valid_artifact_path(job, kind)) is not None
+            )
+        return complete_translated_outputs(job_file, event_sink=event_sink)
+    return _finalize_translation(
+        job,
+        expected,
+        event_sink,
+        invalidate=_invalidate_rendered_artifacts,
+        polished_result=True,
+    )
+
+
 def _finalize_translation(
     job: Job,
     translated: list[Cue],
@@ -158,12 +488,7 @@ def _finalize_translation(
     current_stage = StageName.TRANSLATE
     try:
         artifacts_directory = get_job_directory(job) / "artifacts"
-        workflow = get_workflow_config(job)
-        if (
-            workflow is not None
-            and workflow.translation_quality == "polished"
-            and not polished_result
-        ):
+        if resolve_translation_quality(job) == "polished" and not polished_result:
             draft_path = artifacts_directory / "translation-draft-cues.json"
             _write_json(draft_path, [asdict(cue) for cue in translated])
             _add_artifact(job, "translation_draft_cues", draft_path, event_sink)
@@ -329,44 +654,71 @@ def prepare_agent_translation(
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
     translation_style: str = "faithful",
+    translation_quality: str | None = None,
     await_input: bool = True,
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
     workflow = get_workflow_config(job)
+    quality = _requested_translation_quality(job, translation_quality)
+    if workflow is not None and workflow.target_language != target_language:
+        message = (
+            "target language must match the polished workflow goal"
+            if quality == "polished"
+            else "target language must match the persisted workflow goal"
+        )
+        raise ValueError(message)
     if (
-        workflow is not None
-        and workflow.translation_quality == "polished"
-        and workflow.target_language != target_language
+        workflow is None
+        and quality == "polished"
+        and job.config.get("target_language") not in {None, target_language}
     ):
-        raise ValueError("target language must match the polished workflow goal")
+        raise ValueError("target language must match the persisted atomic job goal")
     resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        raise ValueError("translation requires checksum-valid source_cues")
+    cues = _load_cues(source_path)
+    batches = build_translation_batches(
+        cues,
+        source_language=source_language,
+        target_language=target_language,
+        batch_size=batch_size,
+        policy=resolved_policy,
+    )
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     try:
-        cues = _load_cues(_artifact_path(job, "source_cues"))
-        batches = build_translation_batches(
-            cues,
-            source_language=source_language,
-            target_language=target_language,
-            batch_size=batch_size,
-            policy=resolved_policy,
-        )
         output_path = get_job_directory(job) / "artifacts" / "translation-batches.json"
+        manifest: dict[str, Any] = {
+            "job_id": job.id,
+            "source_language": source_language,
+            "target_language": target_language,
+            "prompt_version": TRANSLATION_PROMPT_VERSION,
+            "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
+            "policy": resolved_policy.to_dict(),
+            "batches": [batch.to_dict() for batch in batches],
+        }
+        if quality == "polished" and await_input:
+            manifest.update(
+                {
+                    "batch_size": batch_size,
+                    "source_cues_checksum": _checksum(source_path),
+                    "task": "translate_and_polish",
+                    "task_version": TRANSLATE_AND_POLISH_TASK_VERSION,
+                }
+            )
+            manifest["fingerprint"] = agent_translation_manifest_fingerprint(manifest)
         _write_json(
             output_path,
-            {
-                "job_id": job.id,
-                "source_language": source_language,
-                "target_language": target_language,
-                "prompt_version": TRANSLATION_PROMPT_VERSION,
-                "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
-                "policy": resolved_policy.to_dict(),
-                "batches": [batch.to_dict() for batch in batches],
-            },
+            manifest,
         )
         _add_artifact(job, "translation_batches", output_path, event_sink)
         job.config["target_language"] = target_language
+        job.config["source_language"] = source_language
         job.config["translation_policy"] = resolved_policy.to_dict()
+        if workflow is None:
+            job.config["translation_quality"] = quality
+            save_job(job)
         if await_input:
             _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return output_path
@@ -396,6 +748,7 @@ def run_translation(
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
     translation_style: str = "faithful",
+    translation_quality: str | None = None,
     event_sink: EventSink | None = None,
 ) -> TranslationRunResult:
     if max_retries < 0:
@@ -404,14 +757,25 @@ def run_translation(
         raise ValueError("timeout_seconds must be positive")
     job = load_job(job_file)
     workflow = get_workflow_config(job)
+    quality = _requested_translation_quality(job, translation_quality)
+    if workflow is not None and workflow.target_language != target_language:
+        message = (
+            "target language must match the polished workflow goal"
+            if quality == "polished"
+            else "target language must match the persisted workflow goal"
+        )
+        raise ValueError(message)
     if (
-        workflow is not None
-        and workflow.translation_quality == "polished"
-        and workflow.target_language != target_language
+        workflow is None
+        and quality == "polished"
+        and job.config.get("target_language") not in {None, target_language}
     ):
-        raise ValueError("target language must match the polished workflow goal")
+        raise ValueError("target language must match the persisted atomic job goal")
     resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
-    cues = _load_cues(_artifact_path(job, "source_cues"))
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        raise ValueError("translation requires checksum-valid source_cues")
+    cues = _load_cues(source_path)
     source_language = next(
         (cue.source_language for cue in cues if cue.source_language),
         job.config.get("source_language", "auto"),
@@ -423,6 +787,36 @@ def run_translation(
         api_key_env=api_key_env,
         timeout_seconds=timeout_seconds,
     )
+    batches: list[TranslationBatch] | None = None
+    translation_fingerprint: str | None = None
+    if provider_config is not None:
+        batches = build_translation_batches(
+            cues,
+            source_language=source_language,
+            target_language=target_language,
+            batch_size=batch_size,
+            policy=resolved_policy,
+        )
+        translation_fingerprint = _translation_fingerprint(
+            source_cues_checksum=_checksum(source_path),
+            source_language=source_language,
+            target_language=target_language,
+            provider=mode,
+            base_url=provider_config.base_url,
+            model=provider_config.model,
+            batch_size=batch_size,
+            policy=resolved_policy,
+        )
+        if workflow is None and quality == "polished":
+            draft_path = _atomic_draft_matches_translation_progress(
+                job,
+                cues,
+                batches,
+                translation_fingerprint,
+                target_language,
+            )
+            if draft_path is not None:
+                return TranslationRunResult("draft_reused", (draft_path,))
     # API 路径准备批次时不得进入 awaiting_input，避免人类可读进度误报「等待」。
     batches_path = prepare_agent_translation(
         job_file,
@@ -430,6 +824,7 @@ def run_translation(
         target_language=target_language,
         batch_size=batch_size,
         policy=resolved_policy,
+        translation_quality=quality,
         await_input=(mode == "agent"),
         event_sink=event_sink,
     )
@@ -449,35 +844,15 @@ def run_translation(
     if provider_config is None:
         raise RuntimeError("translation provider configuration was not resolved")
     job = load_job(job_file)
-    batches = build_translation_batches(
-        cues,
-        source_language=source_language,
-        target_language=target_language,
-        batch_size=batch_size,
-        policy=resolved_policy,
-    )
-    source_cues_checksum = _checksum(_artifact_path(job, "source_cues"))
-    fingerprint_payload = {
-        "source_cues_checksum": source_cues_checksum,
-        "source_language": source_language,
-        "target_language": target_language,
-        "provider": mode,
-        "base_url": provider_config.base_url,
-        "model": provider_config.model,
-        "batch_size": batch_size,
-        "prompt_version": TRANSLATION_PROMPT_VERSION,
-        "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
-        "translation_policy": resolved_policy.to_dict(),
-    }
-    translation_fingerprint = hashlib.sha256(
-        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    if batches is None or translation_fingerprint is None:
+        raise RuntimeError("translation batches were not resolved")
     _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     if event_sink:
         event_sink(
             create_event(
                 EventType.TRANSLATION_PROVIDER_SELECTED,
                 **job_event_fields(job.id, get_job_file(job)),
+                **({"phase": "draft"} if quality == "polished" else {}),
                 provider=mode,
                 model=provider_config.model,
             )
@@ -502,6 +877,7 @@ def run_translation(
                 create_event(
                     EventType.TRANSLATION_PROGRESS_RESET,
                     **job_event_fields(job.id, get_job_file(job)),
+                    **({"phase": "draft"} if quality == "polished" else {}),
                     reason="translation fingerprint changed",
                 )
             )
@@ -520,6 +896,7 @@ def run_translation(
                     create_event(
                         EventType.TRANSLATION_BATCH_STARTED,
                         **job_event_fields(job.id, get_job_file(job)),
+                        **({"phase": "draft"} if quality == "polished" else {}),
                         batch=batch.id,
                         batch_total=batch_total,
                     )
@@ -531,6 +908,7 @@ def run_translation(
                         create_event(
                             EventType.TRANSLATION_BATCH_RETRYING,
                             **job_event_fields(job.id, get_job_file(job)),
+                            **({"phase": "draft"} if quality == "polished" else {}),
                             batch=batch.id,
                             batch_total=batch_total,
                             attempt=attempt,
@@ -564,6 +942,7 @@ def run_translation(
                     create_event(
                         EventType.TRANSLATION_BATCH_COMPLETED,
                         **job_event_fields(job.id, get_job_file(job)),
+                        **({"phase": "draft"} if quality == "polished" else {}),
                         batch=batch.id,
                         batch_total=batch_total,
                     )
@@ -603,12 +982,80 @@ def apply_agent_translation(
 ) -> tuple[Path, ...]:
     job = load_job(job_file)
     workflow = get_workflow_config(job)
+    quality = resolve_translation_quality(job)
+    if workflow is not None and workflow.target_language != target_language:
+        message = (
+            "target language must match the polished workflow goal"
+            if quality == "polished"
+            else "target language must match the persisted workflow goal"
+        )
+        raise ValueError(message)
     if (
-        workflow is not None
-        and workflow.translation_quality == "polished"
-        and workflow.target_language != target_language
+        workflow is None
+        and quality == "polished"
+        and job.config.get("target_language") != target_language
     ):
-        raise ValueError("target language must match the polished workflow goal")
+        raise ValueError("target language must match the persisted atomic job goal")
+    manifest = _translation_manifest(job)
+    task = manifest.get("task") if manifest is not None else None
+    if task not in {None, "translate_and_polish"}:
+        raise ValueError(f"unsupported translation task: {task}")
+    if task == "translate_and_polish":
+        polished_manifest = _agent_polished_manifest(job)
+        if polished_manifest is None:
+            raise ValueError("translate_and_polish manifest is invalid or stale")
+        if quality != "polished" or polished_manifest.get("target_language") != target_language:
+            raise ValueError("translation response does not match the polished job goal")
+        translations = _load_agent_polished_response(response_file, polished_manifest)
+        if agent_translation_polish_core_satisfied(job) and all(
+            valid_artifact_path(job, kind) is not None
+            for kind in ("translated_srt", "bilingual_srt")
+        ):
+            return tuple(
+                path
+                for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
+                if (path := valid_artifact_path(job, kind)) is not None
+            )
+        current_progress = _agent_polish_progress(job, polished_manifest)
+        if current_progress is None:
+            batch_ids, _cue_ids = _manifest_batch_ids_and_cue_ids(polished_manifest)
+            progress_path = (
+                get_job_directory(job) / "artifacts" / "translation-polish-progress.json"
+            )
+            _write_json(
+                progress_path,
+                {
+                    "fingerprint": polished_manifest["fingerprint"],
+                    "completed_batches": batch_ids,
+                    "items": [
+                        {"id": cue_id, "text": text}
+                        for cue_id, text in sorted(translations.items())
+                    ],
+                },
+            )
+            _add_artifact(job, "translation_polish_progress", progress_path, event_sink)
+        elif current_progress[1] != translations:
+            raise ValueError("translation response differs from completed polished progress")
+        _set_stage(
+            job,
+            StageName.TRANSLATE,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"phase": "polish"},
+        )
+        try:
+            return complete_agent_polished_outputs(job_file, event_sink=event_sink)
+        except Exception as error:
+            _set_stage(
+                job,
+                StageName.TRANSLATE,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=_error_category(error),
+                extras={"phase": "polish"},
+            )
+            raise
     current_stage = StageName.TRANSLATE
     _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:

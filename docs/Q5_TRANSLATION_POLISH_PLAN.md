@@ -1,8 +1,9 @@
 # Q5 可恢复字幕润色技术方案
 
-状态：Q5a 已实现，Q5b 待实现
+状态：Q5a、Q5b 均已实现；Q5b 的决策完备实施方案见
+[Q5b 新 Job 翻译质量模式技术方案](Q5B_NEW_JOB_QUALITY_MODE_PLAN.md)
 
-当前 CLI 仅提供“已有译文补跑”路径。下文“新 Job”、`--translation-quality` 和 `translate_and_polish` 描述的是 Q5b 目标行为，尚不可用。
+当前 CLI 同时提供已有译文补跑和新 Job `standard|polished` 质量模式。
 
 ## 目标
 
@@ -166,7 +167,11 @@ API 每完成一个批次后原子重写进度并更新 artifact checksum。指�
 
 Q5a 显式 Agent 回填成功后写入相同结构的完整 progress 文件；provider mode 已进入 fingerprint，不额外保存 `mode` 字段。Agent 响应必须回传当前 manifest 的 fingerprint，避免旧 draft 的响应误用于新 draft。该路径与 API 一样绑定 source/draft checksum、目标语言、策略、prompt 和 grouping version。
 
-Q5b 新 Job 的一次 Agent 回填计划改用 source cue checksum、`translation_batches` checksum、目标语言、translation policy、`task_version` 和 grouping version 生成独立指纹，不要求不存在的 draft checksum。`task_version` 与 API 的 polish prompt version 独立，Agent 协议变化不会误用旧完成证据。
+Q5b 新 Job 的一次 Agent 回填使用 source cue checksum、目标语言、translation policy、
+`task_version`、prompt/grouping version 和完整 batches 生成独立指纹，不要求不存在的 draft
+checksum。指纹对不含 fingerprint 字段的规范化 manifest payload 计算，避免依赖
+`translation_batches` 文件 checksum 形成自引用。`task_version` 与 API 的 polish prompt version
+独立，Agent 协议变化不会误用旧完成证据。
 
 API `translation_quality=polished` 只有同时满足以下条件才算完成：
 
@@ -296,9 +301,12 @@ Q5 使用两个串行 PR，第二个只在第一个合入 `main` 后开始。
 - `status` / `continue` / batch 恢复；
 - 现有译文快照、下游失效、确定性 QA 和重新渲染。
 
-Q5a 独立可用：用户可以对任意现代端到端 Job 的现有译文补跑润色，即使 Q5b 不实施也不影响当前默认流程。
+Q5a 独立可用：用户可以对任意现代端到端 Job 的现有译文补跑润色；Q5b 在此基础上接入新 Job，不改变该入口。
 
 ### Q5b：新 Job 质量模式
+
+实现时以 [Q5b 新 Job 翻译质量模式技术方案](Q5B_NEW_JOB_QUALITY_MODE_PLAN.md) 为准；
+本节仅保留阶段交付边界。
 
 交付：
 
@@ -308,7 +316,7 @@ Q5a 独立可用：用户可以对任意现代端到端 Job 的现有译文补�
 - Agent `task=translate_and_polish` 一次回填；
 - 质量感知的工作流满足度、完成摘要、Skill 和用户文档。
 
-Q5b 合入后 Q5 完成。默认仍是 `standard + faithful`；切换 `natural + polished` 必须等待 Q6 和真实 E2E。
+Q5b 完成后 Q5 已闭环。默认仍是 `standard + faithful`；切换 `natural + polished` 必须等待 Q6 和真实 E2E。
 
 两个 PR 都会超过 6 个文件，按项目约束在各自分支内拆成三组可单独验证的提交：
 

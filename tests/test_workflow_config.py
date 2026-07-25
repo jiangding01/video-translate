@@ -13,6 +13,7 @@ from xvt.workflow_config import (
     get_workflow_config,
     require_workflow_config,
     resolve_target_language,
+    resolve_translation_quality,
     set_workflow_config,
 )
 
@@ -120,6 +121,7 @@ class WorkflowConfigTest(unittest.TestCase):
             target_language="zh-CN",
             burn=True,
             translation_style="natural",
+            translation_quality="polished",
         )
         config = options.persisted_config(TranslationPolicy(style="natural"))
         self.assertIsInstance(config, WorkflowConfig)
@@ -130,6 +132,7 @@ class WorkflowConfigTest(unittest.TestCase):
             ("translated_subtitles", "bilingual_subtitles", "burned_video"),
         )
         self.assertEqual(config.translation_policy, TranslationPolicy(style="natural"))
+        self.assertEqual(config.translation_quality, "polished")
         # 序列化边界仍是普通 dict，供 transcription 落盘。
         self.assertEqual(config.to_dict()["target_language"], "zh-CN")
 
@@ -138,9 +141,12 @@ class WorkflowConfigTest(unittest.TestCase):
             job = create_job("/tmp/video.mp4", directory)
             self.assertIsNone(get_workflow_config(job))
             self.assertIsNone(resolve_target_language(job))
+            self.assertEqual(resolve_translation_quality(job), "standard")
 
             job.config["target_language"] = "ja"
+            job.config["translation_quality"] = "polished"
             self.assertEqual(resolve_target_language(job), "ja")
+            self.assertEqual(resolve_translation_quality(job), "polished")
 
             set_workflow_config(
                 job,

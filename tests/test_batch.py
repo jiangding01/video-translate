@@ -166,6 +166,28 @@ class BatchTest(unittest.TestCase):
 
         self.assertEqual(report["workflow"]["glossary"], str(glossary.resolve()))
 
+    def test_batch_persists_polished_translation_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+
+            waiting = run_batch(
+                inputs,
+                WorkflowOptions(
+                    input="",
+                    output=output,
+                    target_language="zh-CN",
+                    translation_quality="polished",
+                    provider="agent",
+                ),
+            )
+            report = json.loads(waiting.batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(waiting.status, "awaiting_input")
+        self.assertEqual(report["workflow"]["translation_quality"], "polished")
+
     def test_continue_does_not_rerun_completed_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

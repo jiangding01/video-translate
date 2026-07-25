@@ -71,7 +71,7 @@ flowchart TD
 
 ### CLI
 
-计划新增：
+已新增：
 
 ```text
 --source-strategy auto|subtitles|asr
@@ -412,10 +412,10 @@ Q2/Q6 的新增事件类型或可选字段均保持 v1 兼容；Q3 不新增事�
 
 ### Q5：润色与断点恢复
 
-- 增加 `standard|polished` 配置与 artifact。
-- API 模式支持可恢复第二遍润色。
-- Agent 模式提供 `translate_and_polish` 任务说明。
-- 增加 `polish-translation` 修复入口。
+- ~~增加 `standard|polished` 配置与 artifact。~~ 已完成。
+- ~~API 模式支持可恢复第二遍润色。~~ 已完成。
+- ~~Agent 模式提供 `translate_and_polish` 任务说明。~~ 已完成。
+- ~~增加 `polish-translation` 修复入口。~~ 已完成。
 
 独立价值：用户可显式获得或补跑高质量译文。
 

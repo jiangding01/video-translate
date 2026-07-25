@@ -40,6 +40,8 @@ class CliTest(unittest.TestCase):
                     "zh-CN",
                     "--provider",
                     "agent",
+                    "--translation-quality",
+                    "polished",
                     "--segmentation-preset",
                     "compact",
                     "--source-strategy",
@@ -54,6 +56,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["recursive"])
         self.assertEqual(options.target_language, "zh-CN")
         self.assertEqual(options.provider, "agent")
+        self.assertEqual(options.translation_quality, "polished")
         self.assertEqual(options.segmentation_preset, "compact")
         self.assertEqual(options.source_strategy, "asr")
         self.assertTrue(options.burn)
@@ -461,6 +464,7 @@ class CliTest(unittest.TestCase):
         help_text = output.getvalue() + error_output.getvalue()
         self.assertIn("run → status → continue", help_text)
         self.assertIn("recommended path:", help_text)
+        self.assertIn("--translation-quality standard|polished", help_text)
         self.assertIn("[advanced]", help_text)
         self.assertIn("resume ≠ continue", help_text)
 
@@ -1293,6 +1297,40 @@ class CliTest(unittest.TestCase):
         self.assertEqual(translate.call_args.kwargs["translation_style"], "concise")
         self.assertIn("using Agent mode", output.getvalue())
         self.assertIn("translation-batches.json", output.getvalue())
+
+    def test_translate_runs_atomic_polish_for_polished_api_result(self) -> None:
+        output = StringIO()
+        draft = TranslationRunResult("openai-compatible", (Path("/tmp/draft.json"),))
+        polished = TranslationRunResult("reused", (Path("/tmp/translated.srt"),))
+        with (
+            patch("xvt.cli.run_translation", return_value=draft) as translate,
+            patch("xvt.cli.load_job", return_value=object()),
+            patch("xvt.cli.resolve_translation_quality", return_value="polished"),
+            patch("xvt.cli.get_workflow_config", return_value=None),
+            patch("xvt.cli.run_atomic_translation_polish", return_value=polished) as polish,
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "translate",
+                    "/tmp/job.json",
+                    "--target-language",
+                    "zh-CN",
+                    "--translation-quality",
+                    "polished",
+                    "--provider",
+                    "openai-compatible",
+                    "--base-url",
+                    "https://example.com/v1",
+                    "--model",
+                    "model",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(translate.call_args.kwargs["translation_quality"], "polished")
+        polish.assert_called_once()
+        self.assertIn("mode: reused", output.getvalue())
 
     def test_burn_can_force_software_encoding(self) -> None:
         output = StringIO()

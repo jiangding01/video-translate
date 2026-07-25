@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 418 个测试、6 个子测试，全部通过 |
+| 自动化测试 | 428 个测试、6 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -288,7 +288,7 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- 新 Job 当前仍默认生成单遍语义组译文；已有端到端 Job 可显式补跑上下文润色，但新 Job 自动润色和语义校对尚未实现。
+- 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；语义校对尚未实现。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
 - 目录批处理当前串行执行，不支持后台队列、目录监控或每项不同参数；请求烧录时目录只能包含视频，音频和纯字幕输入必须拆成不烧录的独立批次。
@@ -300,7 +300,7 @@ media-qa.json
 
 ### Q1-Q6：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。已完成顺序为：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → Q5a 已有译文可恢复润色；下一步按 [Q5 可恢复字幕润色技术方案](docs/Q5_TRANSLATION_POLISH_PLAN.md) 实施 Q5b 新 Job 质量模式，再后为语义校对与一次修复。全部阶段继续使用 `codex/` 开发分支串行 PR，前一项合并后再开始下一项。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q5 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色；下一步是 Q6 语义校对与一次修复。全部阶段继续使用 `codex/` 开发分支串行 PR，前一项合并后再开始下一项。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
@@ -312,7 +312,9 @@ media-qa.json
 
 **Q4：语义组翻译已完成。** 翻译前由确定性代码建立语义组，句末标点或 650ms 间隔结束组；组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限依次按软标点、连接词前和最大停顿择边，单个超长 cue 单独成组。provider 以完整组装箱，批次外前后各一个完整相邻组只读；`semantic_groups` 保持为批次协议的可选加法，响应继续严格只覆盖当前 `items`。prompt v3 和 grouping version 进入 API 指纹以重置旧 API checkpoint，并写入 Agent manifest 供消费者识别；已等待输入的旧 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才获得语义组。Q4 不新增 stage、artifact、事件或 Job schema，默认翻译风格继续为 `faithful`，局部重译使用 singleton groups。
 
-**Q5a：已有译文可恢复润色已完成。** `polish-translation` 为现代端到端 Job 保存 `translation_draft_cues`，持久化 `translation_quality=polished`，并以 `translation_polish_batches` / `translation_polish_progress` / `translation_polished_cues` 表达 Agent/API 恢复状态。`status`、`continue` 和 `batch-continue` 共用 `polish` / `await_agent_polish` 计划；局部重译和重新导入译文会重建 draft 并失效旧润色结果。润色复用 `translate` stage 与批次事件的 `phase=polish`，不升级 Job schema。下一步为 Q5b 新 Job 质量参数与一次 Agent 翻译+润色。
+**Q5a：已有译文可恢复润色已完成。** `polish-translation` 为现代端到端 Job 保存 `translation_draft_cues`，持久化 `translation_quality=polished`，并以 `translation_polish_batches` / `translation_polish_progress` / `translation_polished_cues` 表达 Agent/API 恢复状态。`status`、`continue` 和 `batch-continue` 共用 `polish` / `await_agent_polish` 计划；局部重译和重新导入译文会重建 draft 并失效旧润色结果。润色复用 `translate` stage 与批次事件的 `phase=polish`，不升级 Job schema。
+
+**Q5b：新 Job 翻译质量模式已完成。** `run`、`batch`、`translate` 和 `prepare-translation` 支持 `--translation-quality standard|polished`，默认仍为 `standard + faithful`。API polished 路径按 draft -> polish 保存两阶段 checkpoint；Agent manifest 使用 `task=translate_and_polish`、task version 和可重算 fingerprint，一次回填登记 progress、polished cues 和最终 cues。Agent 无 draft 证据链可从完整 progress 确定性补齐中断产物，且不会被误判为 Q5a 的 draft 修复。旧 WorkflowConfig、原子 Job、batch manifest 和无 task Agent manifest 继续按 `standard`。下一步为 Q6。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 
