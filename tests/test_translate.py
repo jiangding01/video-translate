@@ -8,8 +8,10 @@ from xvt.models import Cue
 from xvt.translate import (
     GlossaryTerm,
     TranslationPolicy,
+    apply_polish_translations,
     apply_translations,
     build_cue_retranslation_batches,
+    build_polish_batches,
     build_translation_batches,
     load_translation_policy,
     map_subtitle_translations,
@@ -270,6 +272,66 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual(
             [(cue.start_ms, cue.end_ms) for cue in translated],
             [(0, 1000), (1000, 2000), (2000, 3000)],
+        )
+
+    def test_polish_batches_include_draft_and_preserve_semantic_groups(self) -> None:
+        draft = [
+            Cue(
+                cue.id,
+                cue.start_ms,
+                cue.end_ms,
+                cue.source_text,
+                target_text=f"draft {cue.id}",
+                target_language="zh-CN",
+            )
+            for cue in self.cues
+        ]
+
+        batches = build_polish_batches(
+            self.cues,
+            draft,
+            source_language="en",
+            target_language="zh-CN",
+            batch_size=2,
+        )
+
+        self.assertEqual([item.draft_text for item in batches[0].items], ["draft 1", "draft 2"])
+        self.assertEqual(batches[0].semantic_groups, ((1, 2),))
+
+    def test_polish_rejects_changed_timeline(self) -> None:
+        draft = [
+            Cue(1, 1, 1000, "One", target_text="一", target_language="zh-CN"),
+            Cue(2, 1000, 2000, "Two", target_text="二", target_language="zh-CN"),
+            Cue(3, 2000, 3000, "Three", target_text="三", target_language="zh-CN"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "preserve source ids, timeline"):
+            build_polish_batches(
+                self.cues,
+                draft,
+                source_language="en",
+                target_language="zh-CN",
+            )
+
+    def test_applies_polish_without_changing_cue_metadata(self) -> None:
+        draft = [
+            Cue(
+                cue.id,
+                cue.start_ms,
+                cue.end_ms,
+                cue.source_text,
+                target_text=f"draft {cue.id}",
+                target_language="zh-CN",
+            )
+            for cue in self.cues
+        ]
+
+        polished = apply_polish_translations(draft, {1: "一", 2: "二", 3: "三"})
+
+        self.assertEqual([cue.target_text for cue in polished], ["一", "二", "三"])
+        self.assertEqual(
+            [(cue.id, cue.start_ms, cue.end_ms, cue.source_text) for cue in polished],
+            [(cue.id, cue.start_ms, cue.end_ms, cue.source_text) for cue in draft],
         )
 
     def test_maps_equal_cue_counts_by_order(self) -> None:

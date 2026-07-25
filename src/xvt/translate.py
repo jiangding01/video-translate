@@ -135,6 +135,30 @@ class TranslationBatch:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class PolishItem:
+    id: int
+    source_text: str
+    draft_text: str
+    duration_ms: int
+    max_target_characters: int
+
+
+@dataclass(frozen=True, slots=True)
+class PolishBatch:
+    id: int
+    source_language: str
+    target_language: str
+    items: tuple[PolishItem, ...]
+    context_before: tuple[PolishItem, ...]
+    context_after: tuple[PolishItem, ...]
+    policy: TranslationPolicy = TranslationPolicy()
+    semantic_groups: tuple[tuple[int, ...], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _ends_with_marker(text: str, markers: frozenset[str]) -> bool:
     normalized = text.rstrip()
     while normalized and normalized[-1] in _TRAILING_CLOSERS:
@@ -343,6 +367,65 @@ def build_cue_retranslation_batches(
     return batches
 
 
+def build_polish_batches(
+    source_cues: list[Cue],
+    draft_cues: list[Cue],
+    *,
+    source_language: str,
+    target_language: str,
+    batch_size: int = 40,
+    context_size: int = 1,
+    policy: TranslationPolicy | None = None,
+) -> list[PolishBatch]:
+    if len(source_cues) != len(draft_cues):
+        raise ValueError("draft cues must match source cues exactly")
+    for source, draft in zip(source_cues, draft_cues, strict=True):
+        if (
+            source.id != draft.id
+            or source.start_ms != draft.start_ms
+            or source.end_ms != draft.end_ms
+            or source.source_text != draft.source_text
+        ):
+            raise ValueError("draft cues must preserve source ids, timeline, order, and text")
+        if not draft.target_text or not draft.target_text.strip():
+            raise ValueError(f"draft translation for cue {draft.id} is empty")
+        if draft.target_language and draft.target_language != target_language:
+            raise ValueError("draft cue target language does not match the polish target")
+
+    translation_batches = build_translation_batches(
+        source_cues,
+        source_language=source_language,
+        target_language=target_language,
+        batch_size=batch_size,
+        context_size=context_size,
+        policy=policy,
+    )
+    drafts_by_id = {cue.id: cue.target_text.strip() for cue in draft_cues if cue.target_text}
+
+    def polish_item(item: TranslationItem) -> PolishItem:
+        return PolishItem(
+            id=item.id,
+            source_text=item.source_text,
+            draft_text=drafts_by_id[item.id],
+            duration_ms=item.duration_ms,
+            max_target_characters=item.max_target_characters,
+        )
+
+    return [
+        PolishBatch(
+            id=batch.id,
+            source_language=batch.source_language,
+            target_language=batch.target_language,
+            items=tuple(polish_item(item) for item in batch.items),
+            context_before=tuple(polish_item(item) for item in batch.context_before),
+            context_after=tuple(polish_item(item) for item in batch.context_after),
+            policy=batch.policy,
+            semantic_groups=batch.semantic_groups,
+        )
+        for batch in translation_batches
+    ]
+
+
 def parse_translation_response(
     batch: TranslationBatch,
     response: list[dict[str, Any]],
@@ -368,6 +451,27 @@ def parse_translation_response(
     return translations
 
 
+def parse_polish_response(
+    batch: PolishBatch,
+    response: list[dict[str, Any]],
+) -> dict[int, str]:
+    expected_ids = {item.id for item in batch.items}
+    polished = {}
+    for item in response:
+        cue_id = item.get("id")
+        text = item.get("text")
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool) or cue_id in polished:
+            raise ValueError("polish response contains an invalid or duplicate cue id")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"polished translation for cue {cue_id} is empty")
+        polished[cue_id] = text.strip()
+    if set(polished) != expected_ids:
+        missing = sorted(expected_ids - polished.keys())
+        extra = sorted(polished.keys() - expected_ids)
+        raise ValueError(f"polish cue ids do not match batch: missing={missing}, extra={extra}")
+    return polished
+
+
 def apply_translations(
     cues: list[Cue],
     translations: dict[int, str],
@@ -385,6 +489,15 @@ def apply_translations(
         )
         for cue in cues
     ]
+
+
+def apply_polish_translations(
+    draft_cues: list[Cue],
+    polished: dict[int, str],
+) -> list[Cue]:
+    if set(polished) != {cue.id for cue in draft_cues}:
+        raise ValueError("polished translations must cover every cue exactly once")
+    return [replace(cue, target_text=polished[cue.id].strip()) for cue in draft_cues]
 
 
 def map_subtitle_translations(

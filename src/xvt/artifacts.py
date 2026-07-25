@@ -36,6 +36,10 @@ class ArtifactKind(StrEnum):
     TRANSLATION_RESPONSE = "translation_response"
     CUE_RETRANSLATION_BATCHES = "cue_retranslation_batches"
     CUE_RETRANSLATION_RESPONSE = "cue_retranslation_response"
+    TRANSLATION_DRAFT_CUES = "translation_draft_cues"
+    TRANSLATION_POLISH_BATCHES = "translation_polish_batches"
+    TRANSLATION_POLISH_PROGRESS = "translation_polish_progress"
+    TRANSLATION_POLISHED_CUES = "translation_polished_cues"
     TRANSLATED_CUES = "translated_cues"
     TRANSLATED_SRT = "translated_srt"
     TRANSLATED_SUBTITLE_QA = "translated_subtitle_qa"
@@ -110,6 +114,24 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.TRANSLATION_RESPONSE: frozenset({ArtifactKind.TRANSLATION_BATCHES}),
     ArtifactKind.CUE_RETRANSLATION_BATCHES: frozenset({ArtifactKind.SOURCE_CUES}),
     ArtifactKind.CUE_RETRANSLATION_RESPONSE: frozenset({ArtifactKind.CUE_RETRANSLATION_BATCHES}),
+    ArtifactKind.TRANSLATION_DRAFT_CUES: frozenset(
+        {
+            ArtifactKind.SOURCE_CUES,
+            ArtifactKind.TRANSLATION_RESPONSE,
+            ArtifactKind.TRANSLATION_MAPPING,
+            ArtifactKind.TRANSLATION_PROGRESS,
+            ArtifactKind.CUE_RETRANSLATION_RESPONSE,
+        }
+    ),
+    ArtifactKind.TRANSLATION_POLISH_BATCHES: frozenset(
+        {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_DRAFT_CUES}
+    ),
+    ArtifactKind.TRANSLATION_POLISH_PROGRESS: frozenset(
+        {ArtifactKind.TRANSLATION_BATCHES, ArtifactKind.TRANSLATION_POLISH_BATCHES}
+    ),
+    ArtifactKind.TRANSLATION_POLISHED_CUES: frozenset(
+        {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_POLISH_PROGRESS}
+    ),
     ArtifactKind.TRANSLATED_CUES: frozenset(
         {
             ArtifactKind.SOURCE_CUES,
@@ -117,6 +139,7 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
             ArtifactKind.TRANSLATION_MAPPING,
             ArtifactKind.TRANSLATION_PROGRESS,
             ArtifactKind.CUE_RETRANSLATION_RESPONSE,
+            ArtifactKind.TRANSLATION_POLISHED_CUES,
         }
     ),
     # 渲染与烧录链。

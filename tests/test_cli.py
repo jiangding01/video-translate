@@ -417,6 +417,28 @@ class CliTest(unittest.TestCase):
         self.assertIn("mode: agent", output.getvalue())
         self.assertIn("apply-cue-retranslation", output.getvalue())
 
+    def test_polish_translation_preserves_persisted_provider_defaults(self) -> None:
+        output = StringIO()
+        result = TranslationRunResult("agent", (Path("/tmp/polish-batches.json"),))
+        with (
+            patch("xvt.cli.run_translation_polish", return_value=result) as polish,
+            redirect_stdout(output),
+        ):
+            return_code = main(["polish-translation", "/tmp/job.json"])
+
+        self.assertEqual(return_code, 0)
+        self.assertIsNone(polish.call_args.kwargs["provider"])
+        self.assertIsNone(polish.call_args.kwargs["batch_size"])
+        self.assertIn("mode: agent", output.getvalue())
+
+    def test_apply_polish_translation_forwards_response(self) -> None:
+        paths = (Path("/tmp/translated.srt"), Path("/tmp/bilingual.srt"))
+        with patch("xvt.cli.apply_agent_translation_polish", return_value=paths) as apply:
+            return_code = main(["apply-polish-translation", "/tmp/job.json", "/tmp/response.json"])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
+
     def test_inspect_prints_json(self) -> None:
         output = StringIO()
         with (

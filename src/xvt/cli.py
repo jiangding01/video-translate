@@ -31,6 +31,7 @@ from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import (
     acknowledge_subtitle_review,
     apply_agent_translation,
+    apply_agent_translation_polish,
     apply_cue_retranslation,
     apply_subtitle_translation,
     burn_translated_job,
@@ -43,6 +44,7 @@ from xvt.pipeline import (
     resume_job,
     retranslate_cues,
     run_translation,
+    run_translation_polish,
 )
 from xvt.process import CommandCancelled, CommandError
 from xvt.recovery import (
@@ -63,6 +65,7 @@ recommended path:
 
 when status says awaiting Agent input:
   xvt apply-translation JOB.json RESPONSE --target-language LANG
+  # or: xvt apply-polish-translation JOB.json RESPONSE
   xvt continue JOB.json
 
 batch:
@@ -302,6 +305,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TRANSLATION_STYLE,
     )
     translate_parser.add_argument("--events-jsonl", action="store_true")
+
+    polish_parser = subparsers.add_parser(
+        "polish-translation",
+        help="[advanced] Polish valid translated cues with a recoverable checkpoint",
+    )
+    polish_parser.add_argument("job_file")
+    polish_parser.add_argument(
+        "--provider",
+        choices=["auto", "openai-compatible", "agent"],
+    )
+    polish_parser.add_argument("--base-url")
+    polish_parser.add_argument("--model")
+    polish_parser.add_argument("--api-key-env")
+    polish_parser.add_argument("--batch-size", type=int)
+    polish_parser.add_argument("--max-retries", type=int)
+    polish_parser.add_argument("--timeout-seconds", type=float)
+    polish_parser.add_argument("--events-jsonl", action="store_true")
+
+    apply_polish_parser = subparsers.add_parser(
+        "apply-polish-translation",
+        help="Apply Agent polish JSON, then run continue",
+    )
+    apply_polish_parser.add_argument("job_file")
+    apply_polish_parser.add_argument("response_file")
+    apply_polish_parser.add_argument("--events-jsonl", action="store_true")
 
     resegment_parser = subparsers.add_parser(
         "resegment-translation",
@@ -589,7 +617,8 @@ class _HumanEventSink(_TrackedEventSink):
             self._seen_translation = True
             self._flush_pending_skips()
             self._last_failed_stage = None
-            self._line(f"[进行中] 翻译字幕（批次 {_format_batch_position(data)}）")
+            action = "润色字幕" if data.get("phase") == "polish" else "翻译字幕"
+            self._line(f"[进行中] {action}（批次 {_format_batch_position(data)}）")
         elif event.type == EventType.TRANSLATION_BATCH_RETRYING:
             self._seen_translation = True
             self._flush_pending_skips()
@@ -604,7 +633,8 @@ class _HumanEventSink(_TrackedEventSink):
                 parts.append(f"等待 {delay:g}s")
             if reason_label:
                 parts.append(f"原因：{reason_label}")
-            self._line(f"[重试] 翻译字幕（{'，'.join(parts)}）")
+            action = "润色字幕" if data.get("phase") == "polish" else "翻译字幕"
+            self._line(f"[重试] {action}（{'，'.join(parts)}）")
         elif event.type == EventType.WORKFLOW_WAITING:
             self._flush_pending_skips()
             self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
@@ -1183,6 +1213,49 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 print(path)
         return 0
 
+    if arguments.command == "polish-translation":
+        event_sink = _event_sink(arguments)
+        result = run_translation_polish(
+            arguments.job_file,
+            provider=arguments.provider,
+            base_url=arguments.base_url,
+            model=arguments.model,
+            api_key_env=arguments.api_key_env,
+            batch_size=arguments.batch_size,
+            max_retries=arguments.max_retries,
+            timeout_seconds=arguments.timeout_seconds,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(
+                arguments,
+                mode=result.mode,
+                artifacts=[str(path) for path in result.paths],
+            )
+        else:
+            if result.fallback_reason:
+                print(
+                    f"translation provider unavailable ({result.fallback_reason}); using Agent mode"
+                )
+            print(f"mode: {result.mode}")
+            for path in result.paths:
+                print(path)
+        return 0
+
+    if arguments.command == "apply-polish-translation":
+        event_sink = _event_sink(arguments)
+        paths = apply_agent_translation_polish(
+            arguments.job_file,
+            arguments.response_file,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+        else:
+            for path in paths:
+                print(path)
+        return 0
+
     if arguments.command == "resegment-translation":
         event_sink = _event_sink(arguments)
         result = resegment_translation(arguments.job_file, event_sink=event_sink)
@@ -1323,6 +1396,8 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "resume",
         "rebuild-source",
         "translate",
+        "polish-translation",
+        "apply-polish-translation",
         "prepare-translation",
         "apply-translation",
         "import-translation",

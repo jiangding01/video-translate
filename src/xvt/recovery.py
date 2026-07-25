@@ -413,8 +413,28 @@ def _recovery_for_workflow(
             advance_steps=steps,
         )
 
+    if steps[0] == "await_agent_polish":
+        return plan(
+            "awaiting_input",
+            "任务正在等待译文润色结果回填。",
+            primary_command=_job_command("continue", job_file),
+            prerequisite_commands=(_job_command("apply-polish-translation", job_file, "RESPONSE"),),
+            advance_steps=steps,
+        )
+
+    if steps[0] == "repair_polish_draft":
+        return plan(
+            "manual_fix",
+            "润色草稿缺失或 checksum 已失效，不能从最终译文安全重建；"
+            "请重新导入或生成原始译文草稿。",
+            primary_command=None,
+            advance_steps=steps,
+        )
+
     if "translate" in steps or "import_translation" in steps:
         reason = "源字幕有效，可以继续未完成的翻译阶段。"
+    elif "polish" in steps:
+        reason = "译文草稿有效，可以继续未完成的润色阶段。"
     elif "render" in steps:
         reason = "译文 cue 已就绪，可以补齐字幕渲染产物后继续。"
     elif "burn" in steps:

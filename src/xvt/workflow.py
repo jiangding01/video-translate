@@ -30,6 +30,8 @@ from xvt.pipeline import (
     resume_remote_transcription,
     run_transcription,
     run_translation,
+    run_translation_polish,
+    translation_polish_satisfied,
 )
 from xvt.recovery import file_checksum, subtitle_qa_failure_guidance, valid_artifact_path
 from xvt.segment import SEGMENTATION_PRESETS
@@ -279,9 +281,14 @@ def _record_burn_fingerprint(job_file: Path) -> None:
     save_job(job)
 
 
-def _current_artifacts(job: Job, *, waiting: bool = False) -> tuple[Path, ...]:
+def _current_artifacts(
+    job: Job,
+    *,
+    waiting: bool = False,
+    polishing: bool = False,
+) -> tuple[Path, ...]:
     kinds = (
-        ("translation_batches",)
+        (("translation_polish_batches",) if polishing else ("translation_batches",))
         if waiting
         else (
             "source_srt",
@@ -314,14 +321,17 @@ def workflow_goals(config: WorkflowConfig) -> WorkflowGoals:
     )
 
 
-def _translation_satisfied(job: Job) -> bool:
+def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bool:
     """译文目标完成：cue 与用户可见的译文字幕文件均 checksum 有效。"""
 
-    return (
+    standard = (
         valid_artifact_path(job, "translated_cues") is not None
         and valid_artifact_path(job, "translated_srt") is not None
         and valid_artifact_path(job, "bilingual_srt") is not None
     )
+    if not standard or config is None or config.translation_quality == "standard":
+        return standard
+    return translation_polish_satisfied(job)
 
 
 def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
@@ -339,7 +349,10 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
 
     返回值为有序步骤名：
     - ``await_agent_translation``：已进入 Agent 等待，调用方应停止并提示回填
+    - ``await_agent_polish``：润色已进入 Agent 等待，调用方应停止并提示回填
     - ``import_translation`` / ``translate``：补齐译文 cue
+    - ``polish``：从有效 draft 继续润色
+    - ``repair_polish_draft``：polished Job 的 draft 已失效，需要人工恢复
     - ``render``：已有译文 cue，补齐 SRT/ASS 渲染产物
     - ``burn``：补齐或重做烧录
 
@@ -348,8 +361,32 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
 
     goals = workflow_goals(config)
     steps: list[str] = []
-    if goals.needs_translation and not _translation_satisfied(job):
-        if valid_artifact_path(job, "translated_cues") is not None:
+    if goals.needs_translation and not _translation_satisfied(job, config):
+        draft_path = valid_artifact_path(job, "translation_draft_cues")
+        polish_started = any(
+            artifact.kind
+            in {
+                "translation_draft_cues",
+                "translation_polish_batches",
+                "translation_polish_progress",
+                "translation_polished_cues",
+            }
+            for artifact in job.artifacts
+        )
+        if (
+            config.translation_quality == "polished"
+            and draft_path is None
+            and (polish_started or valid_artifact_path(job, "translated_cues") is not None)
+        ):
+            return ("repair_polish_draft",)
+        if config.translation_quality == "polished" and draft_path is not None:
+            if (
+                job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+                and valid_artifact_path(job, "translation_polish_batches") is not None
+            ):
+                return ("await_agent_polish",)
+            steps.append("polish")
+        elif valid_artifact_path(job, "translated_cues") is not None:
             steps.append("render")
         elif job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
             return ("await_agent_translation",)
@@ -405,8 +442,33 @@ def _ensure_translation(
         return None
 
     # cues 已落盘但缺 SRT：只补 QA+渲染，禁止再次调用翻译 API。
+    if (
+        config.translation_quality == "polished"
+        and valid_artifact_path(job, "translation_draft_cues") is not None
+    ):
+        polish = run_translation_polish(path, event_sink=event_sink)
+        if polish.mode == "agent":
+            return _emit_waiting(
+                job=load_job(path),
+                path=path,
+                message=polish.fallback_reason or "translation polish requires Agent input",
+                artifacts=polish.paths,
+                event_sink=event_sink,
+            )
+        return None
+
     if valid_artifact_path(job, "translated_cues") is not None:
         complete_translated_outputs(path, event_sink=event_sink)
+        if config.translation_quality == "polished":
+            polish = run_translation_polish(path, event_sink=event_sink)
+            if polish.mode == "agent":
+                return _emit_waiting(
+                    job=load_job(path),
+                    path=path,
+                    message=polish.fallback_reason or "translation polish requires Agent input",
+                    artifacts=polish.paths,
+                    event_sink=event_sink,
+                )
         return None
 
     if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
@@ -428,6 +490,16 @@ def _ensure_translation(
             target_language=target_language,
             event_sink=event_sink,
         )
+        if config.translation_quality == "polished":
+            polish = run_translation_polish(path, event_sink=event_sink)
+            if polish.mode == "agent":
+                return _emit_waiting(
+                    job=load_job(path),
+                    path=path,
+                    message=polish.fallback_reason or "translation polish requires Agent input",
+                    artifacts=polish.paths,
+                    event_sink=event_sink,
+                )
         return None
 
     translation = run_translation(
@@ -451,6 +523,16 @@ def _ensure_translation(
             artifacts=translation.paths,
             event_sink=event_sink,
         )
+    if config.translation_quality == "polished":
+        polish = run_translation_polish(path, event_sink=event_sink)
+        if polish.mode == "agent":
+            return _emit_waiting(
+                job=load_job(path),
+                path=path,
+                message=polish.fallback_reason or "translation polish requires Agent input",
+                artifacts=polish.paths,
+                event_sink=event_sink,
+            )
     return None
 
 
@@ -504,22 +586,31 @@ def _advance_workflow(
     if guidance is not None:
         raise RuntimeError(guidance.message)
 
-    # 与 plan_advance_steps 一致：Agent 等待是终态快照，不得继续烧录。
+    # 与 planner 共用等待判定：Agent 等待是终态快照，不得继续烧录。
+    advance_steps = plan_advance_steps(job, config)
     if (
         goals.needs_translation
-        and not _translation_satisfied(job)
-        and job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
-        and valid_artifact_path(job, "translated_cues") is None
+        and advance_steps
+        and advance_steps[0]
+        in {
+            "await_agent_translation",
+            "await_agent_polish",
+        }
     ):
+        polishing = advance_steps[0] == "await_agent_polish"
         return _emit_waiting(
             job=job,
             path=path,
-            message="translation requires Agent input",
-            artifacts=_current_artifacts(job, waiting=True),
+            message=(
+                "translation polish requires Agent input"
+                if polishing
+                else "translation requires Agent input"
+            ),
+            artifacts=_current_artifacts(job, waiting=True, polishing=polishing),
             event_sink=event_sink,
         )
 
-    if goals.needs_translation and not _translation_satisfied(job):
+    if goals.needs_translation and not _translation_satisfied(job, config):
         waiting = _ensure_translation(path, job, config, event_sink=event_sink)
         if waiting is not None:
             return waiting

@@ -37,6 +37,7 @@ _KNOWN_FIELDS = frozenset(
         "max_retries",
         "timeout_seconds",
         "translation_policy",
+        "translation_quality",
         "segmentation_preset",
         "burn",
         "burn_media",
@@ -64,6 +65,7 @@ class WorkflowConfig:
     max_retries: int = DEFAULT_MAX_RETRIES
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     translation_policy: TranslationPolicy | None = None
+    translation_quality: str = "standard"
     segmentation_preset: str = DEFAULT_SEGMENTATION_PRESET
     burn: bool = False
     burn_media: str | None = None
@@ -91,6 +93,7 @@ class WorkflowConfig:
             "translation_policy": (
                 self.translation_policy.to_dict() if self.translation_policy is not None else None
             ),
+            "translation_quality": self.translation_quality,
             "segmentation_preset": self.segmentation_preset,
             "burn": self.burn,
             "burn_media": self.burn_media,
@@ -137,6 +140,12 @@ class WorkflowConfig:
         translation_policy = (
             None if policy_raw is None else translation_policy_from_dict(policy_raw)
         )
+        translation_quality = data.get("translation_quality", "standard")
+        if not isinstance(translation_quality, str) or translation_quality not in {
+            "standard",
+            "polished",
+        }:
+            raise ValueError("workflow config translation_quality must be standard or polished")
         segmentation_preset = data.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET)
         if not isinstance(segmentation_preset, str) or not segmentation_preset:
             raise ValueError("workflow config segmentation_preset must be a non-empty string")
@@ -163,6 +172,7 @@ class WorkflowConfig:
             max_retries=max_retries,
             timeout_seconds=timeout_seconds,
             translation_policy=translation_policy,
+            translation_quality=translation_quality,
             segmentation_preset=segmentation_preset,
             burn=burn,
             burn_media=burn_media,

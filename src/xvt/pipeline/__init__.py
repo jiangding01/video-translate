@@ -6,6 +6,7 @@
 - ``review``：字幕 QA ``needs_review`` 的人工确认通道。
 - ``transcription``：素材获取、音频规范化、Whisper 转写、分段、对齐与恢复。
 - ``translation``：翻译批次、兼容 API 调用、Agent 回填、导入译文与统一收尾。
+- ``polish``：已有译文的可恢复 API/Agent 润色（依赖 ``translation`` 的收尾）。
 - ``retranslate``：指定 cue 局部重译（依赖 ``translation`` 的收尾）。
 - ``resegment``：超宽 ASR cue 语义重分段（仅依赖 ``common``）。
 - ``burnin``：短片段预览与正式烧录、媒体 QA。
@@ -15,6 +16,11 @@ from __future__ import annotations
 
 from xvt.pipeline.burnin import burn_translated_job, preview_translated_job
 from xvt.pipeline.common import inspect_input, interrupt_running_stage, is_subtitle_input
+from xvt.pipeline.polish import (
+    apply_agent_translation_polish,
+    run_translation_polish,
+    translation_polish_satisfied,
+)
 from xvt.pipeline.resegment import ResegmentationResult, resegment_translation
 from xvt.pipeline.retranslate import apply_cue_retranslation, retranslate_cues
 from xvt.pipeline.review import acknowledge_subtitle_review
@@ -43,6 +49,7 @@ __all__ = [
     "TranslationRunResult",
     "acknowledge_subtitle_review",
     "apply_agent_translation",
+    "apply_agent_translation_polish",
     "apply_cue_retranslation",
     "apply_subtitle_translation",
     "burn_translated_job",
@@ -62,4 +69,6 @@ __all__ = [
     "run_subtitle_transcription",
     "run_transcription",
     "run_translation",
+    "run_translation_polish",
+    "translation_polish_satisfied",
 ]

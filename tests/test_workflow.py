@@ -780,6 +780,71 @@ class WorkflowPlannerTest(unittest.TestCase):
                     ("await_agent_translation",),
                 )
 
+    def test_plan_advance_steps_polishes_draft_before_burn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/video.mp4", directory)
+            save_job(job)
+            config = WorkflowConfig(
+                target_language="zh-CN",
+                translation_quality="polished",
+                burn=True,
+            )
+            with patch(
+                "xvt.workflow.valid_artifact_path",
+                side_effect=lambda _job, kind: (
+                    Path(f"/tmp/{kind}") if kind == "translation_draft_cues" else None
+                ),
+            ):
+                self.assertEqual(plan_advance_steps(job, config), ("polish", "burn"))
+
+    def test_plan_advance_steps_awaits_agent_polish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/video.mp4", directory)
+            job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+            save_job(job)
+            config = WorkflowConfig(
+                target_language="zh-CN",
+                translation_quality="polished",
+            )
+            with patch(
+                "xvt.workflow.valid_artifact_path",
+                side_effect=lambda _job, kind: (
+                    Path(f"/tmp/{kind}")
+                    if kind in {"translation_draft_cues", "translation_polish_batches"}
+                    else None
+                ),
+            ):
+                self.assertEqual(plan_advance_steps(job, config), ("await_agent_polish",))
+
+    def test_polish_waiting_exposes_only_polish_manifest(self) -> None:
+        from xvt.workflow import _current_artifacts
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/video.mp4", root)
+            translation = root / "translation-batches.json"
+            polish = root / "translation-polish-batches.json"
+            translation.write_text("{}", encoding="utf-8")
+            polish.write_text("{}", encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact(
+                        "translation_batches",
+                        str(translation),
+                        file_checksum(translation),
+                    ),
+                    Artifact(
+                        "translation_polish_batches",
+                        str(polish),
+                        file_checksum(polish),
+                    ),
+                ]
+            )
+
+            artifacts = _current_artifacts(job, waiting=True, polishing=True)
+
+        self.assertEqual(artifacts, (polish,))
+
     def test_plan_advance_steps_skips_satisfied_burn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job(

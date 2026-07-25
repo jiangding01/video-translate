@@ -12,6 +12,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - YouTube 平台字幕仅在显式请求时下载；新 Job 以候选 QA 和 `--source-strategy auto|subtitles|asr` 选择最终时间轴
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议；确定性语义组避免在 provider 批次边界切开句意
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
+- 已有端到端 Job 可显式补跑可恢复译文润色，支持 API checkpoint 与 Agent 回填
 - 原文、译文、双语 SRT，及独立中英样式的双语 ASS
 - 按 cue 或时间范围生成短片段预览，复用正式 ASS 样式和烧录参数
 - `conservative`、`balanced`、`compact` 三种 ASR 字幕分段预设，默认保持既有平衡行为
@@ -24,7 +25,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成翻译传输可靠性、新 Job 的源字幕自适应选择、既有 Job 的 ASR 源重建和语义组翻译；下一步是可恢复润色（Q5），随后是语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成翻译传输可靠性、新 Job 的源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译和 Q5a 已有译文可恢复润色；下一步是 Q5b 新 Job 质量模式，随后是语义校对。已评审的完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -224,6 +225,23 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 
 Q4 在翻译前按已有 cue 确定性建立语义组：句末标点、相邻 cue 间隔达到 650ms、20 个 cue 或 30 秒会形成边界；达到上限时优先在句末、软标点、连接词前或最大停顿处分界。provider 批次仍最多容纳 40 个 cue，但只以完整语义组装箱，不会从组中切开。批次中的 `semantic_groups` 仅记录各组的 cue ID，时间轴、cue 数量和顺序始终不变。
 
+已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
+
+```bash
+uv run --no-sync xvt polish-translation "/path/to/job.json"
+```
+
+命令先保存不可变草稿，再将工作流质量目标设为 `polished` 并失效旧译文下游。API 模式逐批写入 `translation-polish-progress.json`，中断后执行 `xvt continue JOB` 只续跑未完成批次；配置不完整的 `auto` 模式生成 `translation-polish-batches.json`，完成 Agent 响应后执行：
+
+```bash
+uv run --no-sync xvt apply-polish-translation "/path/to/job.json" RESPONSE.json
+uv run --no-sync xvt continue "/path/to/job.json"
+```
+
+润色响应必须回传当前 `translation-polish-batches.json` 的 `fingerprint`、精确覆盖全部请求 ID，并且只能替换译文文本；旧响应不能用于新的 draft。确定性 QA 失败仍会阻断渲染与烧录。Q5a 不为旧原子 Job 增加恢复配置，也尚未给新 `run` / `batch` 增加 `--translation-quality`；后者属于 Q5b。
+
+`translation-draft-cues.json` 是恢复润色的必要检查点。它缺失或 checksum 失效时，`status` 会要求人工恢复原始译文草稿，不会把已润色的最终译文再次复制为 draft。
+
 对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
 
 ```bash
@@ -334,6 +352,10 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 | `source.srt` | 原文字幕 |
 | `translation-batches.json` | Agent 翻译批次 |
 | `translation-progress.json` | API 翻译断点进度 |
+| `translation-draft-cues.json` | 润色前的不可变译文草稿 |
+| `translation-polish-batches.json` | Agent 润色批次 |
+| `translation-polish-progress.json` | API/Agent 润色恢复进度 |
+| `translation-polished-cues.json` | 完成润色且待统一收尾的 cue |
 | `translated.srt` | 仅译文字幕 |
 | `bilingual.srt` | 中英双语字幕 |
 | `bilingual.ass` | 带独立中英样式的字幕 |
@@ -361,11 +383,11 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 ```
 
-`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 中断会复用批次进度，Agent 等待会停在 `apply-translation`，烧录失败只重跑烧录。烧录成品只有在 checksum、派生指纹和媒体 QA 全部有效时才会复用；媒体 QA 失败不会被 `status` 或批处理误判为完成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
+`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 翻译或润色中断会复用各自批次进度，Agent 等待会停在 `apply-translation` 或 `apply-polish-translation`，烧录失败只重跑烧录。烧录成品只有在 checksum、派生指纹和媒体 QA 全部有效时才会复用；媒体 QA 失败不会被 `status` 或批处理误判为完成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C（SIGINT）或向进程发送 SIGTERM 时，外部命令的整个进程组会被清理，当前运行阶段记录为失败，CLI 分别返回退出码 130 和 143 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。 对 `needs_review` 级的报告（例如导入字幕折叠后超宽），确认可接受后可用 `xvt continue JOB --acknowledge-subtitle-review` 显式放行：确认记录绑定当前字幕内容与具体问题集合，字幕变化或出现新的 review 问题后自动失效；error 级问题（时间轴无效、缺失译文、术语违规等）永远不能通过该通道放行。当前 schema 的 Job 缺少必填字段、stage 或正确字段类型时会返回无效输入错误，不输出 Python traceback。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
-`run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply-translation`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+`run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply-translation`、`polish-translation`、`apply-polish-translation`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
 ## 退出码
 
