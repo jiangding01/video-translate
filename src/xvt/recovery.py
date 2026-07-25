@@ -337,7 +337,25 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         )
 
     # 原子 Job（无 workflow 目标）：保持独立 translate / apply 入口。
-    if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+    from xvt.pipeline.translation import (
+        agent_translation_polish_progress_ready,
+        agent_translation_polish_started,
+        agent_translation_polish_waiting,
+    )
+
+    agent_waiting = agent_translation_polish_waiting(job)
+    agent_progress = agent_translation_polish_progress_ready(job)
+    invalid_polished_agent = (
+        job.config.get("translation_quality") == "polished"
+        and agent_translation_polish_started(job)
+        and not agent_waiting
+        and not agent_progress
+    )
+    if not invalid_polished_agent and (
+        job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+        or agent_waiting
+        or agent_progress
+    ):
         target = target_language or "LANGUAGE"
         apply_command = _job_command(
             "apply-translation",

@@ -22,8 +22,13 @@ from xvt.events import EventSink, EventType, create_event, error_event_fields, j
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
+    agent_translation_polish_core_satisfied,
+    agent_translation_polish_progress_ready,
+    agent_translation_polish_started,
+    agent_translation_polish_waiting,
     apply_subtitle_translation,
     burn_translated_job,
+    complete_agent_polished_outputs,
     complete_translated_outputs,
     is_subtitle_input,
     resume_job,
@@ -79,6 +84,7 @@ class WorkflowOptions:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     glossary: str | Path | None = None
     translation_style: str = DEFAULT_TRANSLATION_STYLE
+    translation_quality: str = "standard"
     segmentation_preset: str = DEFAULT_SEGMENTATION_PRESET
     burn: bool = False
     burn_media: str | Path | None = None
@@ -113,6 +119,15 @@ class WorkflowOptions:
             raise ValueError("--allow-auto-subtitles requires --youtube-subtitles")
         if self.translation_subtitles and not self.target_language:
             raise ValueError("--translation-subtitles requires --target-language")
+        if self.translation_quality not in {"standard", "polished"}:
+            raise ValueError("--translation-quality must be standard or polished")
+        if self.translation_quality == "polished" and not self.target_language:
+            raise ValueError("--translation-quality polished requires --target-language")
+        if self.translation_subtitles and self.translation_quality == "polished":
+            raise ValueError(
+                "--translation-subtitles cannot be combined with --translation-quality polished; "
+                "import the translation first, then run polish-translation"
+            )
         if self.burn and not self.target_language:
             raise ValueError("--burn requires --target-language")
         if self.burn_media and not self.burn:
@@ -156,6 +171,7 @@ class WorkflowOptions:
             max_retries=self.max_retries,
             timeout_seconds=self.timeout_seconds,
             translation_policy=policy,
+            translation_quality=self.translation_quality,
             segmentation_preset=self.segmentation_preset,
             burn=self.burn,
             burn_media=(
@@ -331,7 +347,7 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
     )
     if not standard or config is None or config.translation_quality == "standard":
         return standard
-    return translation_polish_satisfied(job)
+    return translation_polish_satisfied(job) or agent_translation_polish_core_satisfied(job)
 
 
 def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
@@ -363,6 +379,17 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
     steps: list[str] = []
     if goals.needs_translation and not _translation_satisfied(job, config):
         draft_path = valid_artifact_path(job, "translation_draft_cues")
+        if config.translation_quality == "polished":
+            if agent_translation_polish_progress_ready(job):
+                steps.append("render")
+            elif agent_translation_polish_waiting(job):
+                return ("await_agent_translation",)
+            elif draft_path is None and agent_translation_polish_started(job):
+                steps.append("translate")
+            if steps:
+                if goals.needs_burn and not _burn_satisfied(job, config):
+                    steps.append("burn")
+                return tuple(steps)
         polish_started = any(
             artifact.kind
             in {
@@ -403,6 +430,8 @@ def planned_run_steps(options: WorkflowOptions) -> list[str]:
     steps = ["import_subtitles" if is_subtitle_input(options.input) else "transcribe"]
     if options.target_language:
         steps.append("import_translation" if options.translation_subtitles else "translate")
+        if options.translation_quality == "polished":
+            steps.append("polish")
     if options.burn:
         steps.append("burn")
     return steps
@@ -441,6 +470,19 @@ def _ensure_translation(
     if not target_language:
         return None
 
+    if config.translation_quality == "polished":
+        if agent_translation_polish_progress_ready(job):
+            complete_agent_polished_outputs(path, event_sink=event_sink)
+            return None
+        if agent_translation_polish_waiting(job):
+            return _emit_waiting(
+                job=job,
+                path=path,
+                message="translate_and_polish requires Agent input",
+                artifacts=_current_artifacts(job, waiting=True),
+                event_sink=event_sink,
+            )
+
     # cues 已落盘但缺 SRT：只补 QA+渲染，禁止再次调用翻译 API。
     if (
         config.translation_quality == "polished"
@@ -471,7 +513,16 @@ def _ensure_translation(
                 )
         return None
 
-    if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+    invalid_agent_manifest = (
+        config.translation_quality == "polished"
+        and agent_translation_polish_started(job)
+        and not agent_translation_polish_waiting(job)
+        and not agent_translation_polish_progress_ready(job)
+    )
+    if (
+        job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+        and not invalid_agent_manifest
+    ):
         return _emit_waiting(
             job=job,
             path=path,

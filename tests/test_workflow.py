@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,7 +6,13 @@ from unittest.mock import patch
 
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
-from xvt.pipeline import TranslationRunResult, apply_subtitle_translation
+from xvt.pipeline import (
+    TranslationRunResult,
+    apply_agent_translation,
+    apply_subtitle_translation,
+    prepare_agent_translation,
+    run_subtitle_transcription,
+)
 from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import (
@@ -19,10 +26,147 @@ from xvt.workflow import (
     run_workflow,
     workflow_goals,
 )
-from xvt.workflow_config import WorkflowConfig
+from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 class WorkflowTest(unittest.TestCase):
+    def test_polished_api_stub_runs_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    return_value={1: "草稿"},
+                ) as translate,
+                patch(
+                    "xvt.pipeline.polish.polish_batch",
+                    return_value={1: "润色"},
+                ) as polish,
+            ):
+                result = run_workflow(
+                    WorkflowOptions(
+                        input=str(source),
+                        output=root / "output",
+                        target_language="zh-CN",
+                        translation_quality="polished",
+                        provider="openai-compatible",
+                        base_url="https://example.com/v1",
+                        model="model",
+                        api_key_env="TEST_TRANSLATION_API_KEY",
+                    )
+                )
+
+            job = load_job(result.job_file)
+            kinds = {artifact.kind for artifact in job.artifacts}
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(job.config["workflow"]["translation_quality"], "polished")
+            self.assertTrue(
+                {
+                    "translation_draft_cues",
+                    "translation_polish_progress",
+                    "translation_polished_cues",
+                    "translated_cues",
+                    "translated_srt",
+                    "bilingual_srt",
+                }
+                <= kinds
+            )
+            translate.assert_called_once()
+            polish.assert_called_once()
+
+    def test_polished_options_validate_and_plan_two_translation_phases(self) -> None:
+        options = WorkflowOptions(
+            input="/tmp/video.mp4",
+            output="/tmp/output",
+            target_language="zh-CN",
+            translation_quality="polished",
+        )
+
+        options.validate()
+
+        self.assertEqual(options.persisted_config().translation_quality, "polished")
+        self.assertEqual(planned_run_steps(options), ["transcribe", "translate", "polish"])
+        with self.assertRaisesRegex(ValueError, "translation-subtitles"):
+            WorkflowOptions(
+                input="/tmp/video.mp4",
+                output="/tmp/output",
+                target_language="zh-CN",
+                translation_subtitles="/tmp/translated.srt",
+                translation_quality="polished",
+            ).validate()
+
+    def test_agent_polished_workflow_waits_once_then_renders_without_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN", translation_quality="polished"),
+            )
+            save_job(job)
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                plan_advance_steps(
+                    load_job(job_file),
+                    WorkflowConfig.from_dict(job.config["workflow"]),
+                ),
+                ("await_agent_translation",),
+            )
+            original_manifest = manifest_path.read_bytes()
+            manifest_path.write_bytes(original_manifest + b" ")
+            self.assertEqual(
+                plan_advance_steps(
+                    load_job(job_file),
+                    WorkflowConfig.from_dict(job.config["workflow"]),
+                ),
+                ("translate",),
+            )
+            manifest_path.write_bytes(original_manifest)
+
+            response = root / "response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 1, "text": "你好。"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+            completed = load_job(job_file)
+            completed.artifacts = [
+                artifact
+                for artifact in completed.artifacts
+                if artifact.kind not in {"translated_srt", "bilingual_srt", "bilingual_ass"}
+            ]
+            save_job(completed)
+
+            self.assertEqual(
+                plan_advance_steps(
+                    load_job(job_file), WorkflowConfig.from_dict(job.config["workflow"])
+                ),
+                ("render",),
+            )
+
     def test_automatic_translation_and_burn_run_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/video.mp4", directory)

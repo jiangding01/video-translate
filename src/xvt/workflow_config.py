@@ -194,6 +194,18 @@ def get_workflow_config(job: Job) -> WorkflowConfig | None:
     return WorkflowConfig.from_dict(raw)
 
 
+def resolve_translation_quality(job: Job) -> str:
+    workflow = get_workflow_config(job)
+    value = (
+        workflow.translation_quality
+        if workflow is not None
+        else job.config.get("translation_quality", "standard")
+    )
+    if not isinstance(value, str) or value not in {"standard", "polished"}:
+        raise ValueError("translation_quality must be standard or polished")
+    return value
+
+
 def require_workflow_config(job: Job) -> WorkflowConfig:
     """读取端到端 workflow 配置；缺失时提示改用原子 resume。"""
 
