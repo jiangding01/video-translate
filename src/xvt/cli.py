@@ -38,6 +38,7 @@ from xvt.pipeline import (
     interrupt_running_stage,
     prepare_agent_translation,
     preview_translated_job,
+    rebuild_source,
     resegment_translation,
     resume_job,
     retranslate_cues,
@@ -218,6 +219,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resume_parser.add_argument("job_file")
     resume_parser.add_argument("--events-jsonl", action="store_true")
+
+    rebuild_source_parser = subparsers.add_parser(
+        "rebuild-source",
+        help="[advanced] Rebuild source cues with ASR and invalidate downstream outputs",
+    )
+    rebuild_source_parser.add_argument("job_file")
+    rebuild_source_parser.add_argument("--strategy", choices=["asr"], required=True)
+    rebuild_source_parser.add_argument("--cookies-from-browser")
+    rebuild_source_parser.add_argument("--proxy")
+    rebuild_source_parser.add_argument("--events-jsonl", action="store_true")
 
     continue_parser = subparsers.add_parser(
         "continue",
@@ -1037,6 +1048,40 @@ def _run_command(arguments: argparse.Namespace) -> int:
             print(get_job_file(job))
         return 0
 
+    if arguments.command == "rebuild-source":
+        event_sink = _event_sink(arguments)
+        result = rebuild_source(
+            arguments.job_file,
+            strategy=arguments.strategy,
+            cookies_from_browser=arguments.cookies_from_browser,
+            proxy=arguments.proxy,
+            event_sink=event_sink,
+        )
+        artifacts = [
+            result.source_cues_path,
+            result.source_srt_path,
+            result.qa_path,
+            result.selection_path,
+        ]
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path) for path in artifacts])
+        else:
+            print(f"已使用 ASR 重建源字幕: {result.source_cues_path}")
+            print(f"源字幕文件: {result.source_srt_path}")
+            print(f"质量报告: {result.qa_path}")
+            job = load_job(arguments.job_file)
+            quoted_job_file = shlex.quote(str(Path(arguments.job_file).expanduser().resolve()))
+            if get_workflow_config(job) is not None:
+                print(f"继续任务: xvt continue {quoted_job_file}")
+            else:
+                target_language = resolve_target_language(job)
+                if target_language:
+                    print(
+                        f"继续翻译: xvt translate {quoted_job_file} "
+                        f"--target-language {shlex.quote(target_language)}"
+                    )
+        return 0
+
     if arguments.command == "continue":
         event_sink = _event_sink(arguments)
         if arguments.acknowledge_subtitle_review:
@@ -1276,6 +1321,7 @@ _JOB_MUTATING_COMMANDS = frozenset(
     {
         "continue",
         "resume",
+        "rebuild-source",
         "translate",
         "prepare-translation",
         "apply-translation",

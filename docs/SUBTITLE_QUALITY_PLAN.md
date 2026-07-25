@@ -1,6 +1,6 @@
 # 字幕质量与自适应源字幕技术方案
 
-状态：已评审，待按阶段实现
+状态：已评审，Q1–Q3 已完成
 更新时间：2026-07-25
 
 ## 背景
@@ -137,26 +137,23 @@ forced_asr
 selection_artifact_recovered
 ```
 
-计划新增一个 `source_selected` 事件，携带 `job_id`、`job_file`、`strategy`、`candidate_kind`、`selected_kind`、`reason` 和 `report_path`。这是新增事件类型，不改变既有事件字段语义，事件协议保持 v1；实现该事件时必须先在 `docs/EVENTS.md` 明确消费端忽略未知事件类型，并用契约测试钉住该兼容规则。
+`source_selected` 事件已记录 `job_id`、`job_file`、`strategy`、`candidate_kind`、`selected_kind`、`reason` 和 `report_path`。Q3 重建复用该事件记录最终 ASR 选择，不新增事件类型；事件协议保持 v1。
 
 ### 已有 Job 修复入口
 
-计划新增：
-
 ```text
-xvt rebuild-source JOB.json --strategy asr
-xvt continue JOB.json
+xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]
 ```
 
 `rebuild-source` 是 advanced 原子修复命令：
 
-- 保留 checksum 有效的下载媒体、平台字幕、规范化音频和词级转写。
-- 失效 `source_selection`、`source_cues` 及其全部下游 artifact。
-- 优先复用词级转写，否则复用规范化音频继续 ASR，再按持久化 `segmentation_preset` 重建 source cues。
-- 不修改 `job.input`、工作流目标、翻译策略或烧录配置。
-- 完成后由 `continue` 重新翻译和烧录。
+- 显式执行，`continue` 不会自动重建。
+- 优先复用校验通过的词级转写、规范化音频和本地或已下载媒体；远程 Job 只有缺少这些 checkpoint 时才按显式 Cookie/代理重取媒体。
+- 持久化 `source_strategy=asr`、`source_rebuild_requested=true` 并关闭 `align_subtitles`，再按保存的 `segmentation_preset` 重建 source cues；中断后仍由同一显式命令恢复，不交给 batch 自动 `continue`。
+- 失效 `source_candidate_qa`、`source_cues`、`source_selection`、`translation_resegmentation` 及其全部下游 artifact；有效候选的 QA 会重算，`input_translation_subtitles` 保留并由现有映射在新 cue 上重新验证。
+- 不修改 `job.input`、工作流目标、翻译策略或烧录配置。完成后端到端 Job 用 `continue`，旧原子 Job 用 `translate`。
 
-远程或本地媒体 Job 的源字幕 QA 出现不可确认的 error 且媒体仍可用时，`status` 应把该命令作为可执行恢复建议；纯字幕 Job 继续要求人工修复。
+远程或本地媒体 Job 的非 ASR 源字幕 QA 出现 error 且可重建时，`status` 才把该命令作为恢复建议；ASR 自身 QA error 不重复执行相同重建，`needs_review` 与译文 QA 也不建议重建。纯字幕 Job 继续要求人工修复。Q3 不新增 stage、Job schema 或事件类型，复用既有 artifact/stage、`source_selected` 与 `cli_completed`。
 
 ## 语义组翻译
 
@@ -309,9 +306,9 @@ translation_semantic_qa_final
 ```mermaid
 flowchart LR
     A["downloaded_subtitles"] --> B["source_candidate_qa"]
-    C["word_transcript"] --> D["source_selection"]
-    B --> D
-    D --> E["source_cues"]
+    C["word_transcript"] --> E["source_cues"]
+    B --> D["source_selection"]
+    E --> D
     E --> F["translation_draft_cues"]
     F --> G["translation_polished_cues"]
     G --> H["translation_semantic_qa"]
@@ -336,12 +333,12 @@ flowchart LR
 
 不增加 Job stage，只扩展事件：
 
-- 新增 `source_selected`。
+- `source_selected` 已由 Q2 实现；Q3 重建复用它。
 - 现有 `translation_batch_started`、`translation_batch_retrying`、`translation_batch_completed` 增加可选 `phase`：`draft`、`polish`、`semantic_review`、`repair`。
 - 新增 `translation_review_acknowledged`。
-- `workflow_planned` / `RecoveryPlan.advance_steps` 可出现 `select_source`、`rebuild_source`、`polish`、`semantic_review`、`await_translation_review`。
+- Q3 的恢复建议直接给出既有 `rebuild-source` 命令；不增加 `workflow_planned` 步骤或事件类型。后续 Q4–Q6 可出现 `select_source`、`polish`、`semantic_review`、`await_translation_review`。
 
-以上都是新增事件类型或可选字段，既有字段类型和语义不变，事件协议继续为 v1。Q2/Q6 必须同步更新 `docs/EVENTS.md` 和契约测试，确保未知事件类型由消费端忽略；若现有消费者不能满足，必须与生产端变更在同一 PR 修复。CLI 普通输出必须显示当前 phase、批次进度、重试原因以及恢复命令，JSONL 保持 stdout 纯事件。
+Q2/Q6 的新增事件类型或可选字段均保持 v1 兼容；Q3 不新增事件类型或字段。CLI 普通输出必须显示当前 phase、批次进度、重试原因以及恢复命令，JSONL 保持 stdout 纯事件。
 
 ## 翻译提供方可靠性前置修复
 
@@ -396,9 +393,9 @@ flowchart LR
 
 ### Q3：已有 Job 源字幕重建
 
-- 增加 `rebuild-source`。
-- 对接 artifact 失效闭包和恢复建议。
-- 覆盖 checkpoint 复用和旧 Job 行为。
+- ~~增加 `rebuild-source`。~~ 已完成：仅支持显式 `--strategy asr`，不由 `continue` 自动执行。
+- ~~对接 artifact 失效闭包和恢复建议。~~ 已完成：只在源字幕 QA error 且可重建时建议，保留输入译文以重新映射。
+- ~~覆盖 checkpoint 复用和旧 Job 行为。~~ 已完成：复用 words/audio/本地或已下载媒体；端到端 Job 后续 `continue`，旧原子 Job 后续 `translate`。
 
 独立价值：修复已经被坏字幕卡住的 Job，无需重建任务。
 

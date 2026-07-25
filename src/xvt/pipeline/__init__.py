@@ -19,6 +19,8 @@ from xvt.pipeline.resegment import ResegmentationResult, resegment_translation
 from xvt.pipeline.retranslate import apply_cue_retranslation, retranslate_cues
 from xvt.pipeline.review import acknowledge_subtitle_review
 from xvt.pipeline.transcription import (
+    RebuildSourceResult,
+    rebuild_source,
     resume_job,
     resume_remote_transcription,
     run_local_transcription,
@@ -37,6 +39,7 @@ from xvt.pipeline.translation import (
 
 __all__ = [
     "ResegmentationResult",
+    "RebuildSourceResult",
     "TranslationRunResult",
     "acknowledge_subtitle_review",
     "apply_agent_translation",
@@ -49,6 +52,7 @@ __all__ = [
     "is_subtitle_input",
     "prepare_agent_translation",
     "preview_translated_job",
+    "rebuild_source",
     "resegment_translation",
     "resume_job",
     "resume_remote_transcription",

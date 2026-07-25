@@ -101,6 +101,41 @@ def _qa_report_has_errors(report: dict[str, Any]) -> bool:
     return any(isinstance(issue, dict) and issue.get("severity") == "error" for issue in issues)
 
 
+def _source_can_be_rebuilt(job: Job, valid_artifacts: dict[str, Path]) -> bool:
+    if job.config.get("input_kind") == "subtitle":
+        return False
+    if (
+        "media_info" in valid_artifacts
+        and {
+            "word_transcript",
+            "normalized_audio",
+        }
+        & valid_artifacts.keys()
+    ):
+        return True
+    parsed = urlparse(job.input)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        return True
+    return Path(job.input).expanduser().is_file()
+
+
+def _source_selection_is_asr(job: Job, valid_artifacts: dict[str, Path]) -> bool:
+    selection_path = valid_artifacts.get("source_selection")
+    source_cues_path = valid_artifacts.get("source_cues")
+    if selection_path is None or source_cues_path is None:
+        return False
+    try:
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        source_checksum = file_checksum(source_cues_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(selection, dict)
+        and selection.get("selected_kind") == "asr"
+        and selection.get("source_cues_checksum") == source_checksum
+    )
+
+
 def subtitle_qa_failure_guidance(
     job: Job,
     job_file: str | Path | None = None,
@@ -203,6 +238,19 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         {"word_transcript", "normalized_audio"} & valid_artifacts.keys()
     )
     if source_cues is None:
+        if job.config.get("source_rebuild_requested") is True and _source_can_be_rebuilt(
+            job, valid_artifacts
+        ):
+            return plan(
+                "manual_fix",
+                "ASR 源字幕重建尚未完成，可以重试显式修复命令。",
+                primary_command=_job_command(
+                    "rebuild-source",
+                    job_file,
+                    "--strategy",
+                    "asr",
+                ),
+            )
         if subtitle_resumable:
             command = "continue" if workflow is not None else "resume"
             return plan(
@@ -235,6 +283,40 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
 
     qa_failed = job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED
     if qa_failed:
+        source_report_path = valid_artifacts.get("subtitle_qa")
+        translated_report_path = valid_artifacts.get("translated_subtitle_qa")
+        source_report = _load_qa_report(source_report_path) if source_report_path else None
+        translated_report = (
+            _load_qa_report(translated_report_path) if translated_report_path else None
+        )
+        if source_report is None and "source_srt" not in valid_artifacts:
+            command = "continue" if workflow is not None else "resume"
+            return plan(
+                "retryable",
+                "源字幕 QA 或渲染在落盘前中断，可以从现有 source cues 继续。",
+                primary_command=_job_command(command, job_file),
+            )
+        source_has_errors = bool(source_report and _qa_report_has_errors(source_report))
+        translated_has_errors = bool(translated_report and _qa_report_has_errors(translated_report))
+        if (
+            source_has_errors
+            and not translated_has_errors
+            and job.config.get("source_rebuild_requested") is not True
+            and not _source_selection_is_asr(job, valid_artifacts)
+            and _source_can_be_rebuilt(job, valid_artifacts)
+        ):
+            return plan(
+                "manual_fix",
+                "源字幕 QA 未通过，可以使用 ASR 在当前 Job 中重建时间轴；"
+                "旧翻译、渲染和烧录产物将失效。",
+                primary_command=_job_command(
+                    "rebuild-source",
+                    job_file,
+                    "--strategy",
+                    "asr",
+                ),
+                report_paths=(str(source_report_path),),
+            )
         guidance = subtitle_qa_failure_guidance(job, job_file)
         assert guidance is not None
         return plan(

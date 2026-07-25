@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xvt.align import align_source_cues
+from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.config import (
     DEFAULT_ENGINE,
     DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
@@ -27,7 +28,7 @@ from xvt.download import (
     select_subtitle_language,
 )
 from xvt.events import EventSink, EventType, create_event, job_event_fields
-from xvt.job_store import create_job, get_job_directory, get_job_file, load_job
+from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.pipeline.common import (
@@ -61,13 +62,21 @@ from xvt.stages import (
 )
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS, load_subtitles, save_subtitles
 from xvt.transcribe import transcribe_audio
-from xvt.workflow_config import get_workflow_config
+from xvt.workflow_config import clear_burn_fingerprint, get_workflow_config
 
 
 @dataclass(frozen=True, slots=True)
 class AcquiredSubtitleCandidate:
     path: Path
     kind: SourceCandidateKind
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildSourceResult:
+    source_cues_path: Path
+    source_srt_path: Path
+    qa_path: Path
+    selection_path: Path
 
 
 def _candidate_from_job(job: Job) -> AcquiredSubtitleCandidate | None:
@@ -227,9 +236,13 @@ def _normalize_audio_and_transcribe(
     language: str | None,
     event_sink: EventSink | None,
 ) -> Transcript:
-    if source is None:
-        raise RuntimeError("audio acquisition is required for transcription or alignment")
     artifacts_directory = get_job_directory(job) / "artifacts"
+    transcript_path = valid_artifact_path(job, "word_transcript")
+    if transcript_path is not None:
+        return _load_transcript(transcript_path)
+
+    if source is None and valid_artifact_path(job, "normalized_audio") is None:
+        raise RuntimeError("audio acquisition is required for transcription or alignment")
     audio_path = valid_artifact_path(job, "normalized_audio")
     if audio_path is None:
         _set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.RUNNING, event_sink)
@@ -256,21 +269,17 @@ def _normalize_audio_and_transcribe(
         _add_artifact(job, "normalized_audio", audio_path, event_sink)
     _set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SUCCEEDED, event_sink)
 
-    transcript_path = valid_artifact_path(job, "word_transcript")
-    if transcript_path is not None:
-        transcript = _load_transcript(transcript_path)
-    else:
-        _set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
-        transcript = transcribe_audio(
-            audio_path,
-            engine=engine,
-            language=language,
-            event_sink=event_sink,
-            total_ms=media_info.duration_ms,
-        )
-        transcript_path = artifacts_directory / "words.json"
-        _write_json(transcript_path, asdict(transcript))
-        _add_artifact(job, "word_transcript", transcript_path, event_sink)
+    _set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
+    transcript = transcribe_audio(
+        audio_path,
+        engine=engine,
+        language=language,
+        event_sink=event_sink,
+        total_ms=media_info.duration_ms,
+    )
+    transcript_path = artifacts_directory / "words.json"
+    _write_json(transcript_path, asdict(transcript))
+    _add_artifact(job, "word_transcript", transcript_path, event_sink)
     _set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
     return transcript
 
@@ -1658,3 +1667,196 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             raise RuntimeError("transcription produced no subtitle cues")
         _set_stage(job, StageName.SEGMENT, StageStatus.SUCCEEDED, event_sink)
     return _finish_resumed_source(job, cues, media_info, event_sink)
+
+
+def rebuild_source(
+    job_file: str | Path,
+    *,
+    strategy: str,
+    cookies_from_browser: str | None = None,
+    proxy: str | None = None,
+    event_sink: EventSink | None = None,
+) -> RebuildSourceResult:
+    """显式使用 ASR 重建既有 Job 的 source cues，并废弃全部旧下游产物。"""
+
+    if strategy != SourceStrategy.ASR:
+        raise ValueError("rebuild source strategy must be asr")
+
+    requested_job_file = Path(job_file).expanduser().resolve()
+    job = load_job(requested_job_file)
+    if requested_job_file != get_job_file(job).resolve():
+        raise ValueError("job file path does not match the Job's persisted identity")
+    if job.config.get("input_kind") == "subtitle":
+        raise ValueError("source rebuild requires media input; subtitle-only jobs are unsupported")
+
+    engine = str(job.config.get("engine", DEFAULT_ENGINE))
+    if engine not in {"mlx", "faster"}:
+        raise ValueError(f"unsupported transcription engine: {engine}")
+    source_language = job.config.get("source_language")
+    if source_language is not None and not isinstance(source_language, str):
+        raise ValueError("source_language must be a string or null")
+    language = None if source_language in {None, "auto"} else str(source_language)
+    segmentation_config_for_preset(
+        str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
+    )
+    minimum_alignment_confidence_value = job.config.get(
+        "minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE
+    )
+    if isinstance(minimum_alignment_confidence_value, bool) or not isinstance(
+        minimum_alignment_confidence_value, int | float
+    ):
+        raise ValueError("minimum_alignment_confidence must be a number")
+    minimum_alignment_confidence = float(minimum_alignment_confidence_value)
+    allow_low_confidence_alignment_value = job.config.get("allow_low_confidence_alignment", False)
+    if not isinstance(allow_low_confidence_alignment_value, bool):
+        raise ValueError("allow_low_confidence_alignment must be a boolean")
+    allow_low_confidence_alignment = allow_low_confidence_alignment_value
+
+    parsed = urlparse(job.input)
+    is_remote = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    word_transcript = valid_artifact_path(job, "word_transcript")
+    normalized_audio = valid_artifact_path(job, "normalized_audio")
+    media_info = valid_artifact_path(job, "media_info")
+    reusable_remote_media = None
+    reusable_remote_media_info = None
+    if is_remote and word_transcript is None and normalized_audio is None:
+        reusable_remote_media = valid_artifact_path(job, "source_video") or valid_artifact_path(
+            job, "downloaded_media"
+        )
+        if reusable_remote_media is not None:
+            reusable_remote_media_info = probe_media(reusable_remote_media)
+    if not is_remote:
+        source = Path(job.input).expanduser()
+        has_checkpoint = media_info is not None and (
+            word_transcript is not None or normalized_audio is not None
+        )
+        if not source.is_file() and not has_checkpoint:
+            raise ValueError("source rebuild requires an available local media file")
+        if source.is_file() and not has_checkpoint:
+            probed = probe_media(source)
+            media_info = get_job_directory(job) / "artifacts" / "media.json"
+            _write_json(media_info, asdict(probed))
+            _add_artifact(job, "media_info", media_info, event_sink)
+
+    invalidated_kinds = downstream_of(ArtifactKind.SOURCE_CUES) | {
+        ArtifactKind.SOURCE_CANDIDATE_QA,
+        ArtifactKind.SOURCE_CUES,
+        ArtifactKind.SUBTITLE_ALIGNMENT,
+        ArtifactKind.TRANSLATION_RESEGMENTATION,
+    }
+    invalidated = [artifact for artifact in job.artifacts if artifact.kind in invalidated_kinds]
+    job.artifacts = [
+        artifact for artifact in job.artifacts if artifact.kind not in invalidated_kinds
+    ]
+    job.config["source_strategy"] = SourceStrategy.ASR.value
+    job.config["source_rebuild_requested"] = True
+    job.config["align_subtitles"] = False
+    clear_burn_fingerprint(job)
+
+    stages_to_reset = {
+        StageName.IMPORT_SUBTITLES,
+        StageName.ALIGN,
+        StageName.SEGMENT,
+        StageName.SUBTITLE_QA,
+        StageName.RENDER,
+        StageName.TRANSLATE,
+        StageName.BURN,
+        StageName.MEDIA_QA,
+    }
+    if word_transcript is None:
+        stages_to_reset.add(StageName.TRANSCRIBE)
+    else:
+        record = job.stages[StageName.TRANSCRIBE]
+        if record.status is not StageStatus.SUCCEEDED:
+            record.started_at = None
+            record.completed_at = utc_now()
+        record.status = StageStatus.SUCCEEDED
+        record.error = None
+    if word_transcript is None and normalized_audio is None:
+        stages_to_reset.add(StageName.NORMALIZE_AUDIO)
+    elif normalized_audio is not None:
+        record = job.stages[StageName.NORMALIZE_AUDIO]
+        if record.status is not StageStatus.SUCCEEDED:
+            record.started_at = None
+            record.completed_at = utc_now()
+        record.status = StageStatus.SUCCEEDED
+        record.error = None
+    else:
+        record = job.stages[StageName.NORMALIZE_AUDIO]
+        record.status = StageStatus.SKIPPED
+        record.started_at = None
+        record.completed_at = utc_now()
+        record.error = None
+    for stage in stages_to_reset:
+        record = job.stages[stage]
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
+    save_job(job)
+
+    if event_sink:
+        for artifact in invalidated:
+            event_sink(
+                create_event(
+                    EventType.ARTIFACT_INVALIDATED,
+                    **job_event_fields(job.id, get_job_file(job)),
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
+
+    if reusable_remote_media_info is not None:
+        media_info = get_job_directory(job) / "artifacts" / "media.json"
+        _write_json(media_info, asdict(reusable_remote_media_info))
+        _add_artifact(job, "media_info", media_info, event_sink)
+
+    has_transcription_checkpoint = media_info is not None and (
+        word_transcript is not None or normalized_audio is not None
+    )
+    if not is_remote and media_info is not None:
+        _set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
+        _set_stage(job, StageName.ACQUIRE, StageStatus.SKIPPED, event_sink)
+    elif is_remote and (has_transcription_checkpoint or reusable_remote_media is not None):
+        _set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
+        _set_stage(job, StageName.ACQUIRE, StageStatus.SUCCEEDED, event_sink)
+
+    if has_transcription_checkpoint:
+        rebuilt = resume_job(requested_job_file, event_sink=event_sink)
+    elif reusable_remote_media is not None and reusable_remote_media_info is not None:
+        rebuilt = _process_adaptive_media(
+            job,
+            reusable_remote_media,
+            reusable_remote_media_info,
+            engine=engine,
+            language=language,
+            candidate=_candidate_from_job(job),
+            align_subtitles=False,
+            minimum_alignment_confidence=minimum_alignment_confidence,
+            allow_low_confidence_alignment=allow_low_confidence_alignment,
+            event_sink=event_sink,
+            emit_job_completed=False,
+        )
+    elif is_remote:
+        rebuilt = resume_remote_transcription(
+            requested_job_file,
+            cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
+            event_sink=event_sink,
+        )
+    else:
+        rebuilt = resume_job(requested_job_file, event_sink=event_sink)
+
+    paths = {
+        kind: valid_artifact_path(rebuilt, kind)
+        for kind in ("source_cues", "source_srt", "subtitle_qa", "source_selection")
+    }
+    missing = [kind for kind, path in paths.items() if path is None]
+    if missing:
+        raise RuntimeError(f"source rebuild completed without required artifacts: {missing}")
+    return RebuildSourceResult(
+        source_cues_path=paths["source_cues"],
+        source_srt_path=paths["source_srt"],
+        qa_path=paths["subtitle_qa"],
+        selection_path=paths["source_selection"],
+    )

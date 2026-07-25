@@ -609,7 +609,8 @@ def apply_subtitle_translation(
         )
         artifacts_directory = get_job_directory(job) / "artifacts"
         imported_path = artifacts_directory / f"input-translation{subtitle_path.suffix.lower()}"
-        shutil.copy2(subtitle_path, imported_path)
+        if subtitle_path.resolve() != imported_path.resolve():
+            shutil.copy2(subtitle_path, imported_path)
         _add_artifact(job, "input_translation_subtitles", imported_path, event_sink)
         mapping_path = artifacts_directory / "translation-mapping.json"
         _write_json(mapping_path, mapping_report)
