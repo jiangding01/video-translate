@@ -53,6 +53,7 @@ class EventType(StrEnum):
     # 转写
     TRANSCRIPTION_PROGRESS = "transcription_progress"
     REMOTE_SUBTITLES_SELECTED = "remote_subtitles_selected"
+    SOURCE_SELECTED = "source_selected"
 
     # 翻译
     TRANSLATION_PROVIDER_SELECTED = "translation_provider_selected"

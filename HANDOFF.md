@@ -305,7 +305,7 @@ media-qa.json
 
 **Q1：翻译传输可靠性已完成。** `RemoteDisconnected`、连接重置等传输错误已进入 retryable 分类；传输重试与结构纠错使用独立预算，默认分别为 4 次和 1 次；主翻译与局部重译共用重试实现和 retry 事件语义。
 
-下一项是 **Q2：新 Job 自适应源字幕**，按输入矩阵完成平台字幕候选 QA、人工字幕快速路径、自动字幕参考路径、必要时对齐或 ASR 降级，并保证最终 source cues 通过正式 QA。
+**Q2：新 Job 自适应源字幕已完成。** 平台字幕只在显式 `--youtube-subtitles` 下请求；`--source-strategy auto|subtitles|asr` 写入新 Job 顶层配置。`auto` 直接采用通过 QA 的人工候选，对失败候选先对齐再回退 ASR；自动候选在翻译/烧录目标中使用 ASR，源字幕-only 且 QA 通过时可直接采用。候选 QA 和选择写为 `source_candidate_qa`、`source_selection` checksum artifact，并以 `source_selected` 事件记录；平台尾 cue 仅在超出媒体不超过 500ms 时裁剪。旧 Job 缺少策略仍走历史路径。Q3（已有 Job 重建）、Q4（语义组翻译）、Q5（润色）和 Q6（语义 QA）仍未实现。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 

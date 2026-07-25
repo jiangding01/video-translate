@@ -50,6 +50,8 @@ LEGACY_RESEGMENT_INVALIDATION = {
     # P7f：subtitle_qa 派生自 source_cues，resegment 只重置 stage、不立即重建
     # 报告，旧 QA 引用废弃 cue 必须一并失效（source_srt 因立即原位重建仍排除）。
     "subtitle_qa",
+    # Q2：选择报告包含最终 source cue checksum，重分段后不得保留旧选择记录。
+    "source_selection",
 }
 
 
@@ -81,6 +83,24 @@ def test_derives_from_covers_every_kind() -> None:
     known = set(ArtifactKind)
     for kind, upstreams in DERIVES_FROM.items():
         assert upstreams <= known, f"{kind} references unknown upstream: {upstreams - known}"
+
+
+def test_source_selection_dependencies_are_directional() -> None:
+    assert DERIVES_FROM[ArtifactKind.SOURCE_CANDIDATE_QA] == frozenset(
+        {
+            ArtifactKind.INPUT_SUBTITLES,
+            ArtifactKind.DOWNLOADED_SUBTITLES,
+            ArtifactKind.MEDIA_INFO,
+        }
+    )
+    assert ArtifactKind.SOURCE_CANDIDATE_QA in DERIVES_FROM[ArtifactKind.SOURCE_CUES]
+    assert DERIVES_FROM[ArtifactKind.SOURCE_SELECTION] == frozenset(
+        {
+            ArtifactKind.SOURCE_CUES,
+            ArtifactKind.SOURCE_CANDIDATE_QA,
+            ArtifactKind.SUBTITLE_ALIGNMENT,
+        }
+    )
 
 
 def test_rendered_invalidation_matches_legacy() -> None:

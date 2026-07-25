@@ -134,6 +134,7 @@ alignment_below_threshold
 alignment_post_qa_failed
 platform_subtitles_missing
 forced_asr
+selection_artifact_recovered
 ```
 
 计划新增一个 `source_selected` 事件，携带 `job_id`、`job_file`、`strategy`、`candidate_kind`、`selected_kind`、`reason` 和 `report_path`。这是新增事件类型，不改变既有事件字段语义，事件协议保持 v1；实现该事件时必须先在 `docs/EVENTS.md` 明确消费端忽略未知事件类型，并用契约测试钉住该兼容规则。

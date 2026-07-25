@@ -41,6 +41,8 @@ class CliTest(unittest.TestCase):
                     "agent",
                     "--segmentation-preset",
                     "compact",
+                    "--source-strategy",
+                    "asr",
                     "--burn",
                     "--software",
                 ]
@@ -52,6 +54,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(options.target_language, "zh-CN")
         self.assertEqual(options.provider, "agent")
         self.assertEqual(options.segmentation_preset, "compact")
+        self.assertEqual(options.source_strategy, "asr")
         self.assertTrue(options.burn)
         self.assertFalse(options.hardware_encoding)
         self.assertIn("/tmp/batch.json", output.getvalue())
@@ -521,6 +524,8 @@ class CliTest(unittest.TestCase):
                         "--min-alignment-confidence",
                         "0.7",
                         "--allow-low-confidence-alignment",
+                        "--source-strategy",
+                        "subtitles",
                     ]
                 )
 
@@ -532,6 +537,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(options.align_subtitles)
         self.assertEqual(options.minimum_alignment_confidence, 0.7)
         self.assertTrue(options.allow_low_confidence_alignment)
+        self.assertEqual(options.source_strategy, "subtitles")
 
     def test_run_shows_human_progress_on_stderr_and_keeps_paths_on_stdout(self) -> None:
         output = StringIO()
@@ -574,6 +580,13 @@ class CliTest(unittest.TestCase):
                     EventType.TRANSLATION_BATCH_STARTED,
                     batch=2,
                     batch_total=5,
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.SOURCE_SELECTED,
+                    selected_kind="asr",
+                    reason="automatic_subtitles_reference_only",
                 )
             )
             event_sink(
@@ -621,6 +634,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("[进行中] 下载源视频  42%  2.0 MB/s  剩余 00:15", progress)
         self.assertIn("[进行中] 转写音频  42%  03:30/08:20  剩余 00:41", progress)
         self.assertIn("[进行中] 翻译字幕（批次 2/5）", progress)
+        self.assertIn(
+            "[选择] 源字幕：采用 ASR 字幕（automatic_subtitles_reference_only）",
+            progress,
+        )
         # 已知重试原因在渲染层映射为中文，契约字符串本身保持英文。
         self.assertIn(
             "[重试] 翻译字幕（批次 2/5，第 2 次尝试，等待 1s，原因：翻译服务暂时不可用）",
