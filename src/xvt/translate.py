@@ -8,8 +8,15 @@ from typing import Any
 from xvt.errors import InternalError, UserInputError
 from xvt.models import Cue
 from xvt.qa import character_limit, reading_speed_limit
+from xvt.segment import BREAK_BEFORE, SENTENCE_END, SOFT_BREAK
 
 TRANSLATION_STYLES = frozenset({"faithful", "natural", "concise"})
+SEMANTIC_GROUPING_VERSION = 1
+SEMANTIC_GROUP_MAX_CUES = 20
+SEMANTIC_GROUP_MAX_DURATION_MS = 30_000
+SEMANTIC_GROUP_PAUSE_MS = 650
+SEMANTIC_SENTENCE_END = SENTENCE_END | frozenset("؟۔।॥։՞")
+_TRAILING_CLOSERS = frozenset("\"'”’»）)]}」』】》〉〕〗〙〛〞〟＂＇")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,9 +129,78 @@ class TranslationBatch:
     context_before: tuple[TranslationItem, ...]
     context_after: tuple[TranslationItem, ...]
     policy: TranslationPolicy = TranslationPolicy()
+    semantic_groups: tuple[tuple[int, ...], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _ends_with_marker(text: str, markers: frozenset[str]) -> bool:
+    normalized = text.rstrip()
+    while normalized and normalized[-1] in _TRAILING_CLOSERS:
+        normalized = normalized[:-1].rstrip()
+    return bool(normalized) and normalized[-1] in markers
+
+
+def _starts_with_connector(text: str) -> bool:
+    words = "".join(
+        character if character.isalnum() else " " for character in text.casefold()
+    ).split()
+    return bool(words) and words[0] in BREAK_BEFORE
+
+
+def _group_duration_ms(cues: list[Cue]) -> int:
+    return cues[-1].end_ms - cues[0].start_ms
+
+
+def _forced_group_cut(cues: list[Cue]) -> int:
+    boundaries = range(1, len(cues))
+    for predicate in (
+        lambda previous, _following: _ends_with_marker(previous.source_text, SEMANTIC_SENTENCE_END),
+        lambda previous, _following: _ends_with_marker(previous.source_text, SOFT_BREAK),
+        lambda _previous, following: _starts_with_connector(following.source_text),
+    ):
+        matches = [index for index in boundaries if predicate(cues[index - 1], cues[index])]
+        if matches:
+            return matches[-1]
+    return max(
+        boundaries,
+        key=lambda index: (cues[index].start_ms - cues[index - 1].end_ms, index),
+    )
+
+
+def build_semantic_groups(
+    cues: list[Cue],
+    *,
+    max_cues: int = SEMANTIC_GROUP_MAX_CUES,
+    max_duration_ms: int = SEMANTIC_GROUP_MAX_DURATION_MS,
+    pause_ms: int = SEMANTIC_GROUP_PAUSE_MS,
+) -> tuple[tuple[int, ...], ...]:
+    if max_cues < 1:
+        raise ValueError("semantic group max_cues must be positive")
+    if max_duration_ms < 1:
+        raise ValueError("semantic group max_duration_ms must be positive")
+    if pause_ms < 0:
+        raise ValueError("semantic group pause_ms must not be negative")
+
+    groups: list[tuple[int, ...]] = []
+    pending: list[Cue] = []
+    for index, cue in enumerate(cues):
+        pending.append(cue)
+        while len(pending) > max_cues or (
+            len(pending) > 1 and _group_duration_ms(pending) > max_duration_ms
+        ):
+            cut = _forced_group_cut(pending)
+            groups.append(tuple(item.id for item in pending[:cut]))
+            pending = pending[cut:]
+
+        following = cues[index + 1] if index + 1 < len(cues) else None
+        sentence_ended = _ends_with_marker(cue.source_text, SEMANTIC_SENTENCE_END)
+        paused = following is not None and following.start_ms - cue.end_ms >= pause_ms
+        if pending and (following is None or sentence_ended or paused):
+            groups.append(tuple(item.id for item in pending))
+            pending = []
+    return tuple(groups)
 
 
 def build_translation_batches(
@@ -133,11 +209,13 @@ def build_translation_batches(
     source_language: str,
     target_language: str,
     batch_size: int = 40,
-    context_size: int = 2,
+    context_size: int = 1,
     policy: TranslationPolicy | None = None,
 ) -> list[TranslationBatch]:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    if context_size < 0:
+        raise ValueError("context_size must not be negative")
     speed_limit = reading_speed_limit(target_language)
     line_limit = character_limit(target_language)
     resolved_policy = policy or TranslationPolicy()
@@ -150,18 +228,45 @@ def build_translation_batches(
         )
         for cue in cues
     ]
+    items_by_id = {item.id: item for item in items}
+    if len(items_by_id) != len(items):
+        raise InternalError("source cues contains duplicate cue ids")
+    semantic_groups = build_semantic_groups(
+        cues,
+        max_cues=min(SEMANTIC_GROUP_MAX_CUES, batch_size),
+    )
+    packed_groups: list[tuple[int, int]] = []
+    start = 0
+    while start < len(semantic_groups):
+        end = start
+        item_count = 0
+        while end < len(semantic_groups):
+            group_size = len(semantic_groups[end])
+            if item_count and item_count + group_size > batch_size:
+                break
+            if group_size > batch_size:
+                raise InternalError("semantic group exceeds translation batch capacity")
+            item_count += group_size
+            end += 1
+        packed_groups.append((start, end))
+        start = end
+
     batches = []
-    for start in range(0, len(items), batch_size):
-        end = min(len(items), start + batch_size)
-        batch_items = tuple(items[start:end])
+    for group_start, group_end in packed_groups:
+        batch_groups = semantic_groups[group_start:group_end]
+        batch_items = tuple(items_by_id[cue_id] for group in batch_groups for cue_id in group)
+        before_groups = semantic_groups[max(0, group_start - context_size) : group_start]
+        after_groups = semantic_groups[group_end : group_end + context_size]
+        context_before = tuple(items_by_id[cue_id] for group in before_groups for cue_id in group)
+        context_after = tuple(items_by_id[cue_id] for group in after_groups for cue_id in group)
         batches.append(
             TranslationBatch(
                 id=len(batches) + 1,
                 source_language=source_language,
                 target_language=target_language,
                 items=batch_items,
-                context_before=tuple(items[max(0, start - context_size) : start]),
-                context_after=tuple(items[end : end + context_size]),
+                context_before=context_before,
+                context_after=context_after,
                 policy=TranslationPolicy(
                     style=resolved_policy.style,
                     terms=tuple(
@@ -173,6 +278,7 @@ def build_translation_batches(
                         )
                     ),
                 ),
+                semantic_groups=batch_groups,
             )
         )
     return batches
@@ -231,6 +337,7 @@ def build_cue_retranslation_batches(
                         if term.source.casefold() in item.source_text.casefold()
                     ),
                 ),
+                semantic_groups=((item.id,),),
             )
         )
     return batches

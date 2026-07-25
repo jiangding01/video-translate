@@ -37,7 +37,135 @@ class TranslateTest(unittest.TestCase):
 
         self.assertEqual([item.id for item in batches[0].items], [1, 2])
         self.assertEqual([item.id for item in batches[0].context_after], [3])
+        self.assertEqual([item.id for item in batches[1].context_before], [1, 2])
+
+    def test_semantic_groups_end_at_sentence_boundary_or_long_gap(self) -> None:
+        cues = [
+            Cue(1, 0, 500, "First sentence."),
+            Cue(2, 500, 1000, "Second clause"),
+            Cue(3, 1650, 2150, "After a pause"),
+            Cue(4, 2150, 2650, "continues."),
+        ]
+
+        batches = build_translation_batches(cues, source_language="en", target_language="zh-CN")
+
+        self.assertEqual(batches[0].semantic_groups, ((1,), (2,), (3, 4)))
+
+    def test_semantic_groups_recognize_non_latin_sentence_endings(self) -> None:
+        cues = [
+            Cue(1, 0, 500, "هل هذا صحيح؟"),
+            Cue(2, 500, 1000, "यह सही है।"),
+            Cue(3, 1000, 1500, "「終わり。」"),
+            Cue(4, 1500, 2000, "Այո։"),
+        ]
+
+        batches = build_translation_batches(cues, source_language="auto", target_language="zh-CN")
+
+        self.assertEqual(batches[0].semantic_groups, ((1,), (2,), (3,), (4,)))
+
+    def test_semantic_group_limit_prefers_latest_soft_punctuation(self) -> None:
+        cues = [
+            Cue(index, (index - 1) * 1000, index * 1000, f"Cue {index}") for index in range(1, 22)
+        ]
+        cues[5] = Cue(6, 5000, 6000, "Earlier clause,")
+        cues[11] = Cue(12, 11000, 12000, "Later clause;")
+        cues[16] = Cue(17, 16000, 17000, "and a connector")
+
+        batches = build_translation_batches(cues, source_language="en", target_language="zh-CN")
+
+        self.assertEqual(batches[0].semantic_groups[0], tuple(range(1, 13)))
+
+    def test_semantic_group_limit_prefers_connector_then_largest_latest_gap(self) -> None:
+        connector_cues = [
+            Cue(index, (index - 1) * 1000, index * 1000, f"Cue {index}") for index in range(1, 22)
+        ]
+        connector_cues[4] = Cue(5, 4000, 5000, "and earlier")
+        connector_cues[9] = Cue(10, 9000, 10000, "but later")
+        gap_cues = [
+            Cue(index, (index - 1) * 1000, index * 1000, f"Cue {index}") for index in range(1, 22)
+        ]
+        gap_cues[7] = Cue(8, 7300, 8300, "Smaller gap")
+        gap_cues[15] = Cue(16, 15500, 16500, "Largest gap")
+        tied_gap_cues = [
+            Cue(index, (index - 1) * 1000, index * 1000, f"Cue {index}") for index in range(1, 22)
+        ]
+        tied_gap_cues[7] = Cue(8, 7500, 8500, "First tied gap")
+        tied_gap_cues[11] = Cue(12, 11500, 12500, "Later tied gap")
+
+        connector_batches = build_translation_batches(
+            connector_cues, source_language="en", target_language="zh-CN"
+        )
+        gap_batches = build_translation_batches(
+            gap_cues, source_language="en", target_language="zh-CN"
+        )
+        tied_gap_batches = build_translation_batches(
+            tied_gap_cues, source_language="en", target_language="zh-CN"
+        )
+
+        self.assertEqual(connector_batches[0].semantic_groups[0], tuple(range(1, 10)))
+        self.assertEqual(gap_batches[0].semantic_groups[0], tuple(range(1, 16)))
+        self.assertEqual(tied_gap_batches[0].semantic_groups[0], tuple(range(1, 12)))
+
+    def test_semantic_group_limit_uses_duration_and_keeps_single_long_cue(self) -> None:
+        duration_limited = [
+            Cue(1, 0, 10000, "One"),
+            Cue(2, 10000, 20000, "Two"),
+            Cue(3, 20000, 30000, "Three"),
+            Cue(4, 30000, 40000, "Four"),
+        ]
+        long_cue = [Cue(1, 0, 31000, "An unbreakable long cue.")]
+
+        duration_batches = build_translation_batches(
+            duration_limited, source_language="en", target_language="zh-CN"
+        )
+        long_cue_batches = build_translation_batches(
+            long_cue, source_language="en", target_language="zh-CN"
+        )
+
+        self.assertEqual(duration_batches[0].semantic_groups, ((1, 2, 3), (4,)))
+        self.assertEqual(long_cue_batches[0].semantic_groups, ((1,),))
+
+    def test_batches_pack_complete_semantic_groups_and_keep_group_context(self) -> None:
+        cues = [
+            Cue(1, 0, 500, "First."),
+            Cue(2, 500, 1000, "Second."),
+            Cue(3, 1000, 1500, "Third"),
+            Cue(4, 1500, 2000, "continues."),
+            Cue(5, 2000, 2500, "Fifth."),
+        ]
+
+        batches = build_translation_batches(
+            cues,
+            source_language="en",
+            target_language="zh-CN",
+            batch_size=2,
+        )
+
+        self.assertEqual(
+            [[item.id for item in batch.items] for batch in batches],
+            [[1, 2], [3, 4], [5]],
+        )
+        self.assertEqual(batches[0].semantic_groups, ((1,), (2,)))
+        self.assertEqual(batches[1].semantic_groups, ((3, 4),))
         self.assertEqual([item.id for item in batches[1].context_before], [2])
+        self.assertEqual([item.id for item in batches[1].context_after], [5])
+
+    def test_small_batch_size_reduces_max_group_cues_without_splitting_a_group(self) -> None:
+        cues = [
+            Cue(1, 0, 500, "First"),
+            Cue(2, 500, 1000, "continues"),
+            Cue(3, 1000, 1500, "here."),
+        ]
+
+        batches = build_translation_batches(
+            cues,
+            source_language="en",
+            target_language="zh-CN",
+            batch_size=2,
+        )
+
+        self.assertEqual([[item.id for item in batch.items] for batch in batches], [[1, 2], [3]])
+        self.assertEqual(batches[0].semantic_groups, ((1, 2),))
 
     def test_builds_cue_retranslation_batches_with_original_neighbors(self) -> None:
         batches = build_cue_retranslation_batches(

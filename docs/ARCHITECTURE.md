@@ -56,7 +56,7 @@ flowchart LR
 | `transcribe.py` | MLX Whisper、faster-whisper 引擎适配 |
 | `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠；提供可持久化的 ASR 分段预设 |
 | `subtitles.py` / `align.py` | 字幕读写和已有字幕到 ASR 的顺序模糊对齐 |
-| `translate.py` / `translation_provider.py` | 结构化术语表和翻译风格、翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填 |
+| `translate.py` / `translation_provider.py` | 确定性语义组、结构化术语表和翻译风格、按完整组装箱的翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填 |
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
 | `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式、分辨率自适应码率与安全的 FFmpeg 参数构造 |
 | `paths.py` | 用户烧录/预览输出绝对路径校验与覆盖保护（源媒体、job 文件、已登记 artifact） |
@@ -108,7 +108,7 @@ artifact 依赖图与失效闭包的单一来源是 `src/xvt/artifacts.py`：`Ar
 
 Job schema 演进策略：给 `Job`、`Artifact` 或 stage record 新增可选字段属于前向兼容变更，不需要提升 `schema_version`。`Job.from_dict` 按各 dataclass 已知字段过滤后构造，未知字段会被静默忽略，旧版本 CLI 读取新版本写出的 `job.json` 不会因未知字段崩溃。只有结构性变更（字段重命名、删除或语义变化）才提升 `SCHEMA_VERSION`，并需要在 `models.py` 的 `_MIGRATIONS` 中登记对应源版本号到下一版本的纯函数迁移；`from_dict` 会沿迁移链逐级升级，无迁移路径的未知版本仍报 `Unsupported job schema version` 错误。
 
-Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，由 `WorkflowConfig` 在内存中结构化表示：入口 `WorkflowOptions.persisted_config` 构造类型化对象，写入 Job 时 `to_dict`，读取时 `from_dict`（未知字段忽略，错误类型在边界失败）。`resolve_target_language` 优先读 workflow，再回退原子 `translate` 写入的顶层 `config.target_language`。转写完成后的翻译与烧录推进共用 `workflow_goals`、译文/烧录满足度判定：译文满足要求 `translated_cues` 与 `translated_srt` / `bilingual_srt` 均 checksum 有效；`plan_advance_steps` 列出剩余步骤（含已有 cue 时的 `render`）；`_advance_workflow` 按同一套判定执行，缺 SRT 时经 `complete_translated_outputs` 只补 QA+渲染且不重打翻译 API，并在翻译完成后重新检查烧录指纹；`build_recovery_plan` 对端到端 Job 复用该计划写入 `RecoveryPlan.advance_steps` 与下一步命令，使 `status` 与 `continue` 决策一致。字幕 QA `needs_review`（无 error 级问题）时 recovery / continue 引导 `continue --acknowledge-subtitle-review`。Agent 等待使推进提前返回且不进入烧录。原子转写和端到端工作流都会持久化 `segmentation_preset`，恢复时以保存值重新构造 ASR cue；缺失该字段的旧 Job 按 `balanced` 处理。原子翻译命令和端到端工作流都会持久化解析后的术语表与风格；端到端配置保存策略快照而不保存源文件路径，因此 `continue` 能复现首次运行的策略。策略进入 API 翻译指纹，批次只携带命中自身源 cue 的术语。译文 QA 会把源 cue 已命中但译文缺失目标词的情况标记为 `glossary_violation` 错误。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
+Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，由 `WorkflowConfig` 在内存中结构化表示：入口 `WorkflowOptions.persisted_config` 构造类型化对象，写入 Job 时 `to_dict`，读取时 `from_dict`（未知字段忽略，错误类型在边界失败）。`resolve_target_language` 优先读 workflow，再回退原子 `translate` 写入的顶层 `config.target_language`。转写完成后的翻译与烧录推进共用 `workflow_goals`、译文/烧录满足度判定：译文满足要求 `translated_cues` 与 `translated_srt` / `bilingual_srt` 均 checksum 有效；`plan_advance_steps` 列出剩余步骤（含已有 cue 时的 `render`）；`_advance_workflow` 按同一套判定执行，缺 SRT 时经 `complete_translated_outputs` 只补 QA+渲染且不重打翻译 API，并在翻译完成后重新检查烧录指纹；`build_recovery_plan` 对端到端 Job 复用该计划写入 `RecoveryPlan.advance_steps` 与下一步命令，使 `status` 与 `continue` 决策一致。字幕 QA `needs_review`（无 error 级问题）时 recovery / continue 引导 `continue --acknowledge-subtitle-review`。Agent 等待使推进提前返回且不进入烧录。原子转写和端到端工作流都会持久化 `segmentation_preset`，恢复时以保存值重新构造 ASR cue；缺失该字段的旧 Job 按 `balanced` 处理。原子翻译命令和端到端工作流都会持久化解析后的术语表与风格；端到端配置保存策略快照而不保存源文件路径，因此 `continue` 能复现首次运行的策略。翻译先按确定性语义组处理：句末标点或 650ms 间隔结束组，组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限按软标点、连接词前和最大停顿择边；单个超长 cue 作为不可拆分单元素组。provider 批次只按完整组装箱，批次外前后各一个完整组为只读上下文。`TranslationBatch.semantic_groups`、prompt v3 和 grouping version 是可选协议加法；prompt 与 grouping version 进入 API 翻译指纹，规则变化会重置 API 进度而不误复用，Agent manifest 只暴露版本供外部消费者识别。已在等待输入的旧 Agent Job 仍可按严格 ID 契约回填，重新准备批次后才获得语义组。局部重译使用 singleton groups。Q4 不新增 stage、artifact、事件或 schema，默认翻译风格继续为 `faithful`。策略进入 API 翻译指纹，批次只携带命中自身源 cue 的术语。译文 QA 会把源 cue 已命中但译文缺失目标词的情况标记为 `glossary_violation` 错误。API Key、代理凭据和 Cookie 内容不进入 Job。当前每个 Job 只对应一个目标语言，多目标语言应创建独立 Job。
 
 ## 事件和用户反馈
 
@@ -136,13 +136,13 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 - Q2 已完成新 Job 的源字幕选择：平台字幕仅由显式 `--youtube-subtitles` 请求；`auto` 对通过 QA 的人工候选保留快速路径，对失败候选先对齐再 ASR，自动候选在翻译/烧录目标下使用 ASR；`subtitles` / `asr` 可显式覆盖。候选 QA、选择报告和最终 source cues 均为 checksum artifact；用户本地字幕默认保留。
 - Q2 选择报告损坏或缺失但 source cues 仍有效时，只从既有 cue provenance 与校验通过的候选/对齐 artifact 重建审计报告，不重新选择或改写时间轴；原因记为 `selection_artifact_recovered`。
 - Q3 已完成既有媒体 Job 的显式 ASR 源重建；它不改变端到端目标或翻译策略，保留输入译文以重新映射，且不把重建隐式塞入 `continue`。
-- 翻译以确定性语义组为上下文，模型只返回既有 cue ID 的文本；润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
+- Q4 已完成：翻译以确定性语义组为上下文，按完整组装箱，模型只返回既有 cue ID 的文本；规则版本和 prompt 版本进入恢复边界。润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
 - 新增到端到端质量链的草稿、润色、语义校对和修复模型调用都逐批保存 checkpoint；语义问题与确定性 QA 问题使用独立报告和人工确认通道。现有高级命令 `retranslate-cues` 暂不承诺逐批恢复。
 - 新配置和 artifact 采用向后兼容的可选加法，旧 Job 缺少质量配置时保持当前单遍翻译行为。
 
-Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置及同类 `ConnectionError` 在请求和响应读取边界统一包装为可重试传输故障；其他 `OSError` 以不可重试依赖故障退出。传输重试默认预算为 4，遵循最长 30 秒的有效 `Retry-After` 或指数退避。结构性无效响应只允许 1 次携带纠正提示的重试，不占用传输预算；后续传输重试会清除纠正提示。主翻译与局部重译通过同一批次执行函数保持重试语义一致；只有逐批持久化结果的主翻译发送 `translation_batch_completed`。Q3 已完成；下一步是 Q4 语义组翻译，Q5 润色和 Q6 语义 QA 尚未实现；Q2 的 `reference_allowed` 只记录选择结果，不进入翻译请求。
+Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置及同类 `ConnectionError` 在请求和响应读取边界统一包装为可重试传输故障；其他 `OSError` 以不可重试依赖故障退出。传输重试默认预算为 4，遵循最长 30 秒的有效 `Retry-After` 或指数退避。结构性无效响应只允许 1 次携带纠正提示的重试，不占用传输预算；后续传输重试会清除纠正提示。主翻译与局部重译通过同一批次执行函数保持重试语义一致；只有逐批持久化结果的主翻译发送 `translation_batch_completed`。Q4 已完成；下一步是 Q5 可恢复润色，Q6 语义 QA 尚未实现；Q2 的 `reference_allowed` 只记录选择结果，不进入翻译请求。
 
-完整的输入矩阵、CLI、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准；其中 Q1–Q3 已落地，Q4–Q6 仍是后续规划。
+完整的输入矩阵、CLI、artifact DAG、恢复语义、测试和分阶段交付标准均以该设计文档为准；其中 Q1–Q4 已落地，Q5–Q6 仍是后续规划。
 
 ## 安全边界
 
@@ -164,6 +164,6 @@ Q1 已固定翻译请求的可靠性边界：`RemoteDisconnected`、连接重置
 
 1. 已完成保守、平衡和紧凑分段预设。
 2. 已完成串行目录批处理、独立 Job、失败恢复和汇总报告。
-3. 翻译提供方可靠性、源字幕自适应和既有 Job 源重建已完成；下一步按 [字幕质量与自适应源字幕技术方案](SUBTITLE_QUALITY_PLAN.md) 实现语义组翻译、润色和语义 QA。
+3. 翻译提供方可靠性、源字幕自适应、既有 Job 源重建和语义组翻译已完成；下一步按 [字幕质量与自适应源字幕技术方案](SUBTITLE_QUALITY_PLAN.md) 实现可恢复润色和语义 QA。
 4. 字幕质量闭环通过真实 E2E 后，实现只消费 JSONL 事件、`job.json` 和 `batch.json` 的可视化校对界面。
 5. 单机 CLI 和界面稳定后，再评估队列、远程执行和 Web 服务。

@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from xvt.errors import DependencyError, UserInputError
 from xvt.translate import TranslationBatch, parse_translation_response
 
-TRANSLATION_PROMPT_VERSION = 2
+TRANSLATION_PROMPT_VERSION = 3
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
@@ -112,8 +112,12 @@ def translate_batch(
         "concise": "Keep the core meaning while removing only non-semantic repetition when needed.",
     }[batch.policy.style]
     system_content = (
-        f"{style_instruction} Preserve every integer id, "
-        "respect max_target_characters, use neighboring context only for meaning, and "
+        f"{style_instruction} Preserve every integer id and return only the ids in items. "
+        "Use semantic_groups to coordinate natural phrasing within each group, but never move "
+        "meaning between groups. context_before and context_after are read-only context; never "
+        "include their ids in the response. max_target_characters is a display recommendation, "
+        "not a hard limit: never split words, omit meaning, or create an ungrammatical sentence "
+        "to satisfy it. "
         'return JSON only in the form {"items":[{"id":1,"text":"..."}]}.'
     )
     if batch.policy.terms:

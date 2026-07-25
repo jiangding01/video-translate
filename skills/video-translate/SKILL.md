@@ -68,7 +68,7 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
    uv run --no-sync xvt prepare-translation "/path/to/job.json" --source-language en --target-language zh-CN
    ```
 
-6. Read `artifacts/translation-batches.json`, translate every item according to [translation-protocol.md](references/translation-protocol.md), and create one response JSON containing all cue IDs.
+6. Read `artifacts/translation-batches.json`, including each batch's `semantic_groups`. Translate every item according to [translation-protocol.md](references/translation-protocol.md): use a complete group to keep the expression natural, but return only the existing `items` IDs in one response JSON. Never merge, split, renumber, or move text across cue IDs.
 7. Apply the response:
 
    ```bash
@@ -128,6 +128,7 @@ For a directory batch, use `uv run --no-sync xvt batch-continue "/path/to/batch.
 ## Safety and boundaries
 
 - Never alter cue IDs or timestamps during translation.
+- Treat `semantic_groups` as read-only translation context. They describe complete cue groups within a provider batch; they do not authorize changing the response schema or cue boundaries.
 - Never hand-edit generated SRT/ASS files when a pipeline command can regenerate them.
 - Never pass browser cookies or a proxy by default. If YouTube access fails, explain the failure and obtain explicit user direction before using `--cookies-from-browser` or `--proxy`.
 - Do not expose cookie contents, signed URLs, or proxy credentials in logs or responses.

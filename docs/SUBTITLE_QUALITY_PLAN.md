@@ -1,6 +1,6 @@
 # 字幕质量与自适应源字幕技术方案
 
-状态：已评审，Q1–Q3 已完成
+状态：已评审，Q1–Q4 已完成
 更新时间：2026-07-25
 
 ## 背景
@@ -163,12 +163,12 @@ xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]
 
 - 源文以句末标点结束时结束当前组。
 - 相邻 cue 的时间间隔达到 650ms 时结束当前组。
-- 单组最多 20 个 cue 或 30 秒。
+- 单组最多 `min(20, batch_size)` 个 cue 或 30 秒；`batch_size` 小于 20 时保留既有小批次容量语义，不从组中间拆开。
 - 达到上限时依次优先选择句末标点、软标点、连接词前和最大停顿处作为边界。
-- provider 批次继续以最多 40 个 cue 为容量，但以完整语义组为装箱单位，不从组中间切开。
-- 单组超过批次容量属于内部不变量错误；上述 20 cue 上限保证正常情况下不会发生。
+- 单个 cue 自身超过 30 秒时，作为不可拆分的单元素组保留，是时长上限的唯一例外。
+- provider 批次以 `batch_size` 个 cue 为容量，但以完整语义组为装箱单位，不从组中间切开。
 
-`TranslationBatch` 计划增加可选 `semantic_groups` 字段，记录每组 cue ID。既有 `items`、响应 `items` 和 cue ID 校验保持不变，旧 Agent 消费者可以忽略新字段。
+`TranslationBatch` 增加可选的 `semantic_groups` 字段，记录当前批次每组 cue ID。批次外只携带前后各一个完整相邻组作为只读上下文；上下文 cue 不属于 `items`，也不得出现在响应中。既有 `items`、响应 `items` 和 cue ID 校验保持不变，旧 Agent 消费者可以忽略新字段。
 
 ### 输出约束
 
@@ -179,7 +179,7 @@ xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]
 - `max_target_characters` 保留以兼容现有批次协议，但提示词明确它是显示建议值；不得为满足长度而拆词、漏译或制造病句。
 - 最终长度、阅读速度和显示宽度仍由确定性 QA 判定。
 
-翻译 prompt version 必须递增，确保旧进度不会被错误复用。
+翻译 prompt version 已递增至 v3；语义分组规则另有 grouping version。两者都进入 API 翻译指纹，确保旧 API 进度不会被错误复用，并写入 Agent manifest 供外部消费者识别协议。为保持已进入 `awaiting_input` 的旧 Job 可恢复，旧 Agent 响应仍按既有严格 ID 契约接受；只有重新执行 `prepare-translation` 才会生成带语义组的新批次。Q4 不新增 stage、artifact、事件或 Job schema；`translation_batches`、`translation_progress` 和既有 `translate` stage 继续承担审计与恢复。
 
 ## 翻译质量模式
 
@@ -401,10 +401,10 @@ Q2/Q6 的新增事件类型或可选字段均保持 v1 兼容；Q3 不新增事�
 
 ### Q4：语义组翻译
 
-- 实现确定性句组和按组装箱。
-- 更新 provider / Agent 批次协议和 prompt version。
-- 长度改为软提示，保持严格 ID 校验。
-- 准备把新任务默认风格切换为 `natural`。
+- ~~实现确定性句组和按组装箱。~~ 已完成：强边界为句末标点或 650ms 间隔；上限为 `min(20, batch_size)` 个 cue 或 30 秒，按软标点、连接词前、最大停顿稳定择边；单个超长 cue 单独成组。
+- ~~更新 provider / Agent 批次协议和 prompt version。~~ 已完成：`semantic_groups` 记录当前批次组 ID，批次外前后各一个完整组仅作上下文；prompt v3 与 grouping version 进入 API 恢复指纹，并写入 Agent manifest 供消费者识别。
+- ~~长度改为软提示，保持严格 ID 校验。~~ 已完成：长度只作为显示建议，响应仍严格覆盖当前 `items` 的 cue ID。
+- ~~准备把新任务默认风格切换为 `natural`。~~ 已确认不在 Q4 变更：默认继续为 `faithful`，已持久化策略照常复用。
 
 独立价值：即使不启用第二遍润色，第一遍翻译也减少机械断句。
 
