@@ -123,6 +123,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
 
             self.assertEqual(result.mode, "agent")
             manifest = json.loads(result.paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(manifest["prompt_version"], 2)
             self.assertEqual(manifest["batches"][0]["items"][0]["draft_text"], "草稿1")
             response = root / "polish-response.json"
             self._write_polish_response(
@@ -157,6 +158,27 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             )
             self.assertEqual(job.config["workflow"]["translation_quality"], "polished")
 
+    def test_agent_polish_rejects_old_prompt_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            with patch("xvt.pipeline.polish.TRANSLATION_POLISH_PROMPT_VERSION", 1):
+                result = run_translation_polish(job_file)
+            manifest = json.loads(result.paths[0].read_text(encoding="utf-8"))
+            response = root / "polish-response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 1, "text": "润色一"}, {"id": 2, "text": "润色二"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "fingerprint no longer matches"):
+                apply_agent_translation_polish(job_file, response)
+
     def test_new_agent_job_translates_and_polishes_in_one_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -178,6 +200,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["task"], "translate_and_polish")
             self.assertEqual(manifest["task_version"], 1)
+            self.assertEqual(manifest["prompt_version"], 4)
             response = root / "response.json"
             response.write_text(
                 json.dumps(
@@ -319,6 +342,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             for field, value, message in (
                 ("task", "unknown", "unsupported translation task"),
                 ("task_version", 99, "manifest is invalid or stale"),
+                ("prompt_version", 3, "manifest is invalid or stale"),
             ):
                 with self.subTest(field=field):
                     output = root / field

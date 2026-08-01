@@ -25,7 +25,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成 Q1–Q6 字幕质量闭环：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色，以及语义校对与一次定向修复。下一步是使用公开素材完成 polished API/Agent E2E，再决定是否调整默认质量。完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复，以及人工修订和提示词加固。下一步是使用公开素材完成 polished API/Agent E2E，再决定是否调整默认质量。完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -234,6 +234,8 @@ uv run --no-sync xvt run INPUT --output OUTPUT \
 ```
 
 `run`、`batch`、`translate` 和 `prepare-translation` 都支持 `standard|polished`。API 模式的 `polished` 先保存完整翻译草稿，再逐批润色；Agent 模式生成带 `task=translate_and_polish` 和 fingerprint 的单个 `translation-batches.json`。润色候选随后必须经过 Q6 语义校对；API 对可修复问题按完整语义组最多修复一次并复查，Agent 生成 `task=semantic_review_and_repair` manifest，使用 `apply-semantic-review JOB RESPONSE` 回填。旧 Job 或旧 batch 缺质量字段时继续按 `standard`。`--translation-subtitles` 不能与新 Job 的 `polished` 同时使用，应先导入译文再执行 `polish-translation`。
+
+Q6.1c 要求 API 和 Agent 都把每个语义组作为连续话语处理：先理解完整组，再在不改变 cue ID 和时间轴的前提下生成自然、连贯的目标语言文本。专名、产品名和代码标识符没有术语表证据时不得猜测修正；语义校对只有在上下文矛盾、明显误听或可识别专名异常时才报告 `source_suspect`，源文修改继续由人工修订入口完成。
 
 语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板。编辑其中的 `items[].text` 后运行 `xvt apply-translation-review-fixes JOB REVIEW.json`，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。存在 `source_suspect` 时还会为相关源 cue 自动生成源文模板，`status` 优先推荐修订源文，同时保留译文修订和 `--acknowledge-translation-review` 直接确认两条备选路径。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 

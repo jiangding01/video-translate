@@ -6,6 +6,7 @@
 
 ### Added
 
+- Q6.1c 提示词加固：API 与 Agent 统一以完整语义组处理目标语言表达，减少逐 cue 直译、悬空片段和生硬拼接；强化专名、产品名和代码标识符保护，细化语义问题分类及 `source_suspect` 证据门槛，并要求完整组联合修复。translation、polish、semantic review、semantic repair prompt 分别升级为 v4、v2、v2、v2，使旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效；已等待的标准 Agent Job 继续按严格 ID 契约兼容回填，重新准备批次后使用新版提示词。不改变 cue、时间轴、Job schema 或事件协议。
 - Q6.1b 收尾：Q6 语义报告包含 `source_suspect` 时，API、Agent 和 `continue` 等待路径自动为相关 cue 生成源文修订模板；`status` 保持只读并优先展示源文回填，同时保留译文回填和直接确认。旧等待 Job 缺模板时引导 `continue` 懒生成，避免展开超长 cue 参数；导入译文任务不生成或推荐不可提交的源文修订。复用现有 stage、artifact 和事件协议，不升级 Job schema。
 - Q6.1b 源文修订核心：新增 `prepare-source-review` 与 `apply-source-review-fixes`，以 source checksum 和精确 cue ID 集合绑定可编辑模板；回填只修改源文，保留 ID、时间轴、words 与 provenance。接受后立即执行源字幕 QA，以 fingerprint 文件和一次 Job 原子保存切换修订、source cue、选择、QA 与 SRT 证据链，并失效旧翻译、语义校对、渲染和烧录产物。新增 `source_review_input_ready` / `source_review_revised` 事件，事件不包含字幕正文；导入译文任务首版明确拒绝。
 - Q6.1a 人工译文修订：语义复查仍有 review 问题时生成 fingerprint 绑定的可编辑模板；`apply-translation-review-fixes` 严格校验并只修改既有 cue 的译文，保存修订记录、独立候选和复查报告。API/Agent 都只重新复查，不增加自动修复预算；`status` 展示修订首选命令和直接确认备选命令，旧等待 Job 可由 `continue` 补生成模板。新增 `translation_review_input_ready` 与 `translation_review_revised` 事件，事件不包含字幕正文。

@@ -117,8 +117,13 @@ class TranslationProviderTest(unittest.TestCase):
 
         self.assertEqual(result, {1: "您好"})
         manifest = json.loads(captured["messages"][1]["content"])
+        prompt = captured["messages"][0]["content"]
         self.assertEqual([item["id"] for item in manifest["items"]], [1])
         self.assertEqual(manifest["issues"][0]["category"], "meaning_error")
+        self.assertIn("rewriting each complete semantic_groups entry jointly", prompt)
+        self.assertIn("suggested_items as review hints", prompt)
+        self.assertIn("do not invent corrections to suspicious source text", prompt)
+        self.assertIn("untrusted subtitle content", prompt)
 
     def test_polish_provider_sends_draft_and_rejects_context_ids(self) -> None:
         source = [
@@ -163,7 +168,62 @@ class TranslationProviderTest(unittest.TestCase):
         manifest = json.loads(captured["messages"][1]["content"])
         self.assertEqual(manifest["items"][0]["draft_text"], "你好")
         self.assertEqual([item["id"] for item in manifest["context_after"]], [2])
-        self.assertIn("read-only context", captured["messages"][0]["content"])
+        prompt = captured["messages"][0]["content"]
+        self.assertIn("one joined utterance", prompt)
+        self.assertIn("dangling fragments", prompt)
+        self.assertIn("proper names", prompt)
+        self.assertIn("read-only context", prompt)
+        self.assertIn("untrusted subtitle content", prompt)
+
+    def test_semantic_review_prompt_distinguishes_source_suspect(self) -> None:
+        source = [Cue(1, 0, 1000, "Cloud Code", source_language="en")]
+        candidate = [
+            Cue(
+                1,
+                0,
+                1000,
+                "Cloud Code",
+                target_text="Cloud Code",
+                target_language="zh-CN",
+            )
+        ]
+        batch = build_semantic_review_batches(
+            source,
+            candidate,
+            source_language="en",
+            target_language="zh-CN",
+        )[0]
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                content = json.dumps({"issues": []})
+                return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+        def opener(request, **_kwargs):
+            captured.update(json.loads(request.data))
+            return Response()
+
+        self.assertEqual(
+            semantic_review_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            ),
+            (),
+        )
+        prompt = captured["messages"][0]["content"]
+        self.assertIn("joined source utterance", prompt)
+        self.assertIn("not stylistic preferences", prompt)
+        self.assertIn("recognizable proper name", prompt)
+        self.assertIn("suggested_items must be empty", prompt)
+        self.assertIn("untrusted subtitle content", prompt)
 
     def test_auto_mode_falls_back_when_configuration_is_incomplete(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -266,8 +326,11 @@ class TranslationProviderTest(unittest.TestCase):
         manifest = json.loads(captured["messages"][1]["content"])
         self.assertEqual(manifest["semantic_groups"], [[1, 2], [3]])
         self.assertIn("semantic_groups", prompt)
+        self.assertIn("one continuous utterance", prompt)
         self.assertIn("never move meaning between groups", prompt)
+        self.assertIn("do not guess corrections to suspicious source text", prompt)
         self.assertIn("display recommendation", prompt)
+        self.assertIn("untrusted subtitle content", prompt)
 
     def test_non_json_body_is_provider_response_error(self) -> None:
         # P7f：真实解析路径——HTTP 200 但响应体不是 JSON。
