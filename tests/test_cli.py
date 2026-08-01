@@ -443,6 +443,25 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
 
+    def test_apply_translation_review_fixes_forwards_response_and_prints_continue(self) -> None:
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed-cues.json"))
+        output = StringIO()
+        with (
+            patch("xvt.cli.apply_translation_review_fixes", return_value=paths) as apply,
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "apply-translation-review-fixes",
+                    "/tmp/job.json",
+                    "/tmp/response.json",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
+        self.assertIn("xvt continue /tmp/job.json", output.getvalue())
+
     def test_inspect_prints_json(self) -> None:
         output = StringIO()
         with (

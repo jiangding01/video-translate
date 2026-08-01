@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 455 个测试、14 个子测试，全部通过 |
+| 自动化测试 | 463 个测试、14 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
@@ -317,6 +317,8 @@ media-qa.json
 **Q5b：新 Job 翻译质量模式已完成。** `run`、`batch`、`translate` 和 `prepare-translation` 支持 `--translation-quality standard|polished`，默认仍为 `standard + faithful`。API polished 路径按 draft -> polish 保存两阶段 checkpoint；Agent manifest 使用 `task=translate_and_polish`、task version 和可重算 fingerprint，一次回填登记 progress 与 polished 候选。Agent 无 draft 证据链可从完整 progress 确定性补齐 polished 候选，且不会被误判为 Q5a 的 draft 修复。旧 WorkflowConfig、原子 Job、batch manifest 和无 task Agent manifest 继续按 `standard`。
 
 **Q6：语义校对与一次修复已完成。** polished 候选必须经过 `meaning_error`、`omission`、`terminology`、`awkward_join`、`source_suspect` 五类结构化 review；除 `source_suspect` 外的问题按完整语义组最多修复一次并最终复查。API 初审、修复和复审逐批 checkpoint，并使用阶段对应的结构纠错提示；Agent 使用严格绑定 Job、候选、版本和批次的 `task=semantic_review_and_repair` manifest，通过 `apply-semantic-review` 一次性校验后回填，无效响应不会破坏等待状态。初次报告含可修复问题时不能提前确认；`source_suspect` 在无关修复后继续保留；最终报告只有在初次报告、修复 checkpoint 和修复候选 checksum 均有效时才能批准。新增四类 checksum artifact，`status` / `continue` / batch recovery 区分 Agent 输入等待和人工语义确认等待。确认绑定 source、候选、报告、prompt version 与精确问题集合，且后续确定性字幕 QA 仍可阻断。专项方案见 [Q6 技术方案](docs/Q6_SEMANTIC_REVIEW_PLAN.md)。
+
+**Q6.1a：人工译文修订已完成。** Q6 等待人工复核时生成 fingerprint 绑定的 `review/translation-review-*.json`，用户通过 `apply-translation-review-fixes` 回填；只允许修改既有 cue 的译文，接受后登记完整修订记录、独立候选并执行 review-only 语义复查，不增加第二次自动修复。`status` 只读并展示修订首选路径和确认备选路径；旧等待 Job 由 `continue` 懒生成模板。Q6.1b 源文修订和 Q6.1c 提示词加固尚未开始。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 

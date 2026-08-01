@@ -197,12 +197,17 @@ def translation_review_acknowledged(job: Job, report_path: Path) -> bool:
     target = semantic_review_target(job)
     if target is None or target[0] != report_path:
         return False
+    reviewed_path = valid_artifact_path(job, "translation_reviewed_cues")
     repaired_path = valid_artifact_path(job, "translation_repaired_cues")
-    candidate_kind = (
-        "translation_repaired_cues"
-        if repaired_path is not None and target[1] == repaired_path
-        else "translation_polished_cues"
-    )
+    if reviewed_path is not None and target[1] == reviewed_path:
+        candidate_kind = "translation_reviewed_cues"
+        report_kind = "translation_semantic_qa_reviewed"
+    elif repaired_path is not None and target[1] == repaired_path:
+        candidate_kind = "translation_repaired_cues"
+        report_kind = "translation_semantic_qa_final"
+    else:
+        candidate_kind = "translation_polished_cues"
+        report_kind = "translation_semantic_qa"
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         issue_keys = _semantic_issue_keys(report)
@@ -211,13 +216,7 @@ def translation_review_acknowledged(job: Job, report_path: Path) -> bool:
     return bool(
         record.get("source_cues_checksum") == _artifact_checksum_for(job, "source_cues")
         and record.get("candidate_cues_checksum") == _artifact_checksum_for(job, candidate_kind)
-        and record.get("report_checksum")
-        == _artifact_checksum_for(
-            job,
-            "translation_semantic_qa_final"
-            if candidate_kind == "translation_repaired_cues"
-            else "translation_semantic_qa",
-        )
+        and record.get("report_checksum") == _artifact_checksum_for(job, report_kind)
         and record.get("prompt_version") == report.get("prompt_version")
         and record.get("acknowledged_issues")
         == [[category, list(cue_ids)] for category, cue_ids in issue_keys]
@@ -236,21 +235,21 @@ def acknowledge_translation_review(
     if target is None:
         raise UserInputError("no confirmable semantic review report found")
     report_path, candidate_path = target
+    reviewed_path = valid_artifact_path(job, "translation_reviewed_cues")
     repaired_path = valid_artifact_path(job, "translation_repaired_cues")
-    report_kind = (
-        "translation_semantic_qa_final"
-        if repaired_path is not None and candidate_path == repaired_path
-        else "translation_semantic_qa"
-    )
+    if reviewed_path is not None and candidate_path == reviewed_path:
+        report_kind = "translation_semantic_qa_reviewed"
+        candidate_kind = "translation_reviewed_cues"
+    elif repaired_path is not None and candidate_path == repaired_path:
+        report_kind = "translation_semantic_qa_final"
+        candidate_kind = "translation_repaired_cues"
+    else:
+        report_kind = "translation_semantic_qa"
+        candidate_kind = "translation_polished_cues"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("status") != "needs_review":
         raise UserInputError("semantic review report does not require acknowledgment")
     issue_keys = _semantic_issue_keys(report)
-    candidate_kind = (
-        "translation_repaired_cues"
-        if report_kind == "translation_semantic_qa_final"
-        else "translation_polished_cues"
-    )
     job.config["translation_review_acknowledgment"] = {
         "report_kind": report_kind,
         "report_checksum": _artifact_checksum_for(job, report_kind),

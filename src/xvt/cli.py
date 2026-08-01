@@ -37,6 +37,7 @@ from xvt.pipeline import (
     apply_agent_translation_polish,
     apply_cue_retranslation,
     apply_subtitle_translation,
+    apply_translation_review_fixes,
     burn_translated_job,
     complete_acknowledged_semantic_review,
     inspect_input,
@@ -365,6 +366,14 @@ def build_parser() -> argparse.ArgumentParser:
     apply_semantic_parser.add_argument("job_file")
     apply_semantic_parser.add_argument("response_file")
     apply_semantic_parser.add_argument("--events-jsonl", action="store_true")
+
+    apply_review_fixes_parser = subparsers.add_parser(
+        "apply-translation-review-fixes",
+        help="Apply human translation review edits, then run continue",
+    )
+    apply_review_fixes_parser.add_argument("job_file")
+    apply_review_fixes_parser.add_argument("response_file")
+    apply_review_fixes_parser.add_argument("--events-jsonl", action="store_true")
 
     acknowledge_translation_parser = subparsers.add_parser(
         "acknowledge-translation-review",
@@ -773,10 +782,14 @@ class _HumanEventSink(_TrackedEventSink):
             return
         if plan.get("reason"):
             self._line(f"恢复建议：{plan.get('reason')}")
+        for path in plan.get("input_paths", []):
+            self._line(f"待编辑: {path}")
         for command in plan.get("prerequisite_commands", []):
             self._line(f"  {command}")
         if plan.get("primary_command"):
             self._line(f"  {plan.get('primary_command')}")
+        for command in plan.get("alternative_commands", []):
+            self._line(f"  或：{command}")
 
     def _render_download(self, data: dict[str, object]) -> None:
         parts = ["[进行中] 下载源视频"]
@@ -833,10 +846,14 @@ class _HumanEventSink(_TrackedEventSink):
             self._line(f"恢复建议：{plan.reason}")
             for path in plan.report_paths:
                 self._line(f"报告: {path}")
+            for path in plan.input_paths:
+                self._line(f"待编辑: {path}")
             for command in plan.prerequisite_commands:
                 self._line(f"  {command}")
             if plan.primary_command:
                 self._line(f"  {plan.primary_command}")
+            for command in plan.alternative_commands:
+                self._line(f"  或：{command}")
         if self.job_file:
             self._line("查看详情：")
             self._line(f'  xvt status "{self.job_file}"')
@@ -1108,6 +1125,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 print(f"steps: {', '.join(plan.advance_steps)}")
             for path in plan.report_paths:
                 print(f"report: {path}")
+            for path in plan.input_paths:
+                print(f"input: {path}")
             for command in plan.prerequisite_commands:
                 print(f"before: {command}")
             if plan.primary_command:
@@ -1115,6 +1134,8 @@ def _run_command(arguments: argparse.Namespace) -> int:
             elif plan.category in {"manual_fix", "awaiting_input"}:
                 # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
                 print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
+            for command in plan.alternative_commands:
+                print(f"alternative: {command}")
         return 0
 
     if arguments.command == "verify":
@@ -1393,6 +1414,21 @@ def _run_command(arguments: argparse.Namespace) -> int:
                 print(path)
         return 0
 
+    if arguments.command == "apply-translation-review-fixes":
+        event_sink = _event_sink(arguments)
+        paths = apply_translation_review_fixes(
+            arguments.job_file,
+            arguments.response_file,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+        else:
+            for path in paths:
+                print(path)
+            print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
+        return 0
+
     if arguments.command == "acknowledge-translation-review":
         event_sink = _event_sink(arguments)
         report_path = acknowledge_translation_review(
@@ -1558,6 +1594,7 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "polish-translation",
         "apply-polish-translation",
         "apply-semantic-review",
+        "apply-translation-review-fixes",
         "acknowledge-translation-review",
         "prepare-translation",
         "apply-translation",

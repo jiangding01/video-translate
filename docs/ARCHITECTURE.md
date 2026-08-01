@@ -50,7 +50,7 @@ flowchart LR
 | `batch.py` | 目录输入快照、串行 Job 编排、失败隔离、原子汇总报告和批量恢复 |
 | `workflow.py` | 端到端目标编排：Goals → `plan_advance_steps` → 执行；等待/继续语义和烧录派生指纹 |
 | `workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与唯一读写边界（`WorkflowConfig`、目标语言解析、烧录指纹清除） |
-| `pipeline/` | 业务主链包：`common` 共享记账、`review` QA 与人工确认、`transcription` 转写、恢复与显式源重建、`translation` 翻译与收尾、`polish` 可恢复润色、`semantic` 语义校对与一次修复、`retranslate` 局部重译、`resegment` 重分段、`burnin` 预览与烧录；`__init__` 仅 re-export 公共入口 |
+| `pipeline/` | 业务主链包：`common` 共享记账、`review` QA 与人工确认、`revision` 人工译文修订、`transcription` 转写、恢复与显式源重建、`translation` 翻译与收尾、`polish` 可恢复润色、`semantic` 语义校对与一次修复、`retranslate` 局部重译、`resegment` 重分段、`burnin` 预览与烧录；`__init__` 仅 re-export 公共入口 |
 | `job_store.py` / `models.py` | 任务模型、原子持久化、schema 和 checksum |
 | `download.py` / `media.py` | yt-dlp 获取、ffprobe 媒体检查 |
 | `transcribe.py` | MLX Whisper、faster-whisper 引擎适配 |
@@ -103,6 +103,8 @@ output/<job-id>/
 Q5 润色复用 `translate` stage，不新增 stage 或 schema。Q5a 的 `polish-translation` 先登记 draft，再持久化 `workflow.translation_quality=polished`，最后通过 artifact DAG 失效旧最终译文及其 QA、渲染和烧录。Q5b 为新 Job 增加 `standard|polished`：API 第一遍写 `phase=draft` 并保存 draft，第二遍写 `phase=polish`；Agent 新 Job 生成 `task=translate_and_polish` 的单个 manifest，以规范化 payload fingerprint 和完整 ID 完成一次回填，不伪造 draft。Agent progress 先于 polished/final cues 落盘，中断后可确定性补齐 QA 和渲染而不再次请求模型。`continue` 的计划步骤区分 Agent 无 draft 证据链与 Q5a/API draft 证据链，批处理经同一 recovery planner 继承该行为。局部重译或重新导入译文时，新完整译文会成为新 draft，旧润色结果不能回写。
 
 Q6 只扩展 `polished`：`translation_polished_cues` 先进入语义校对，可修复分类按完整语义组最多修复一次并生成 `translation_repaired_cues`，随后执行最终复查；`source_suspect` 不自动修复，并在无关文本修复后继续保留。初次报告、修复 checkpoint、修复候选和最终报告分别登记为 `translation_semantic_qa`、`translation_semantic_repair`、`translation_repaired_cues`、`translation_semantic_qa_final`。API 各阶段逐批 checkpoint；Agent 使用 `task=semantic_review_and_repair` 的单个 fingerprint manifest，完整响应校验通过后才写入报告和修复产物。初次报告含可修复问题时不能直接确认；最终报告必须与 checksum 有效的初次报告、修复 checkpoint 和修复候选组成完整链。仍有问题时 planner 返回 `await_translation_review`，确认记录绑定 source、当前候选、报告 checksum、prompt version 和精确问题集合。确认后仍必须通过确定性字幕 QA。默认继续为 `standard + faithful`。
+
+Q6.1a 为 `await_translation_review` 增加人工译文修订：可编辑模板不属于 artifact，接受后的完整修订记录、候选和复查报告分别登记为 `translation_review_revision`、`translation_reviewed_cues`、`translation_semantic_qa_reviewed`。修订 fingerprint 绑定当前 source、候选、报告、prompt 和问题集合；回填只允许修改既有 cue 的 `target_text`。每轮接受结果使用 fingerprint 区分的文件，并通过一次 Job 原子保存切换两项 artifact；失败不会破坏上一轮有效检查点，译文变化同时清除旧字幕 QA 确认。人工候选只重新语义复查，不再获得自动修复预算；API/Agent 语义一致。旧等待 Job 由 `continue` 懒生成模板，`status` 只读取已有模板。专项方案见 [Q6.1 人工校对交互技术方案](Q6_1_HUMAN_REVISION_PLAN.md)。
 
 Stage 状态包含 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 和 `skipped`。字幕 QA 的 `needs_review` 阻断可由用户经 `continue --acknowledge-subtitle-review` 显式确认放行：确认记录持久化在 job config、绑定 source cue checksum 与已确认的 review 问题集合，仅覆盖 review 级问题（error 级永不放行），后续 QA 中相同问题子集直接放行并发出 `subtitle_review_acknowledged` 事件，出现新 review 问题仍然阻断；显示宽度类问题按 cue 粒度归并（源字幕 QA 与双语 QA 对同一物理风险的不同 code 视为同族，确认一次即可覆盖两道门）。`low_timing_confidence` 对 ASR / `asr_resegmented` 为 warning，对对齐与用户导入字幕仍为 review。原始 QA 报告不被改写。纯字幕 Job 将媒体获取、ASR、对齐和分段标为 `skipped`，但仍保存导入字幕、source cue、QA 与渲染 artifact；它不保存 `media_info`。Agent 翻译批次生成后任务进入 `awaiting_input`；兼容 API 模式逐批更新进度文件，全部完成后直接继续 QA 和渲染。`retranslate-cues` 为每个指定 cue 构造独立批次，并携带相邻源 cue 作为只读上下文；回填只改写指定 ID，之后完整重跑译文 QA。
 

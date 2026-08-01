@@ -32,6 +32,7 @@ from xvt.pipeline import (
     complete_acknowledged_semantic_review,
     complete_agent_polished_outputs,
     complete_translated_outputs,
+    ensure_translation_review_input,
     is_subtitle_input,
     resume_job,
     resume_remote_transcription,
@@ -581,11 +582,15 @@ def _ensure_translation(
                 event_sink=event_sink,
             )
         if semantic_review_waiting(job):
+            review_input = ensure_translation_review_input(path, event_sink=event_sink)
             return _emit_waiting(
                 job=job,
                 path=path,
                 message="semantic review requires user acknowledgment",
-                artifacts=_current_artifacts(job, waiting=True, semantic_reviewing=True),
+                artifacts=(
+                    *_current_artifacts(job, waiting=True, semantic_reviewing=True),
+                    review_input,
+                ),
                 event_sink=event_sink,
             )
         if semantic_review_approved(job):
@@ -728,6 +733,17 @@ def _advance_workflow(
             "await_agent_semantic_review",
             "await_translation_review",
         }
+        waiting_artifacts = _current_artifacts(
+            job,
+            waiting=True,
+            polishing=polishing,
+            semantic_reviewing=semantic_reviewing,
+        )
+        if advance_steps[0] == "await_translation_review":
+            waiting_artifacts = (
+                *waiting_artifacts,
+                ensure_translation_review_input(path, event_sink=event_sink),
+            )
         return _emit_waiting(
             job=job,
             path=path,
@@ -740,12 +756,7 @@ def _advance_workflow(
                 if polishing
                 else "translation requires Agent input"
             ),
-            artifacts=_current_artifacts(
-                job,
-                waiting=True,
-                polishing=polishing,
-                semantic_reviewing=semantic_reviewing,
-            ),
+            artifacts=waiting_artifacts,
             event_sink=event_sink,
         )
 
