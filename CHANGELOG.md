@@ -6,6 +6,7 @@
 
 ### Added
 
+- Q6.1b 收尾：Q6 语义报告包含 `source_suspect` 时，API、Agent 和 `continue` 等待路径自动为相关 cue 生成源文修订模板；`status` 保持只读并优先展示源文回填，同时保留译文回填和直接确认。旧等待 Job 缺模板时引导 `continue` 懒生成，避免展开超长 cue 参数；导入译文任务不生成或推荐不可提交的源文修订。复用现有 stage、artifact 和事件协议，不升级 Job schema。
 - Q6.1b 源文修订核心：新增 `prepare-source-review` 与 `apply-source-review-fixes`，以 source checksum 和精确 cue ID 集合绑定可编辑模板；回填只修改源文，保留 ID、时间轴、words 与 provenance。接受后立即执行源字幕 QA，以 fingerprint 文件和一次 Job 原子保存切换修订、source cue、选择、QA 与 SRT 证据链，并失效旧翻译、语义校对、渲染和烧录产物。新增 `source_review_input_ready` / `source_review_revised` 事件，事件不包含字幕正文；导入译文任务首版明确拒绝。
 - Q6.1a 人工译文修订：语义复查仍有 review 问题时生成 fingerprint 绑定的可编辑模板；`apply-translation-review-fixes` 严格校验并只修改既有 cue 的译文，保存修订记录、独立候选和复查报告。API/Agent 都只重新复查，不增加自动修复预算；`status` 展示修订首选命令和直接确认备选命令，旧等待 Job 可由 `continue` 补生成模板。新增 `translation_review_input_ready` 与 `translation_review_revised` 事件，事件不包含字幕正文。
 - Q6 polished 译文语义校对：润色候选先生成结构化语义报告，对 `meaning_error`、`omission`、`terminology`、`awkward_join` 按完整语义组最多修复一次并最终复查，`source_suspect` 只进入人工确认且在无关修复后继续保留。API 各阶段逐批 checkpoint，并使用阶段对应的结构纠错契约；Agent manifest 严格绑定当前 Job、候选、版本和批次，完整响应校验通过后才持久化。新增四类 checksum artifact、`apply-semantic-review`、`acknowledge-translation-review`、`continue --acknowledge-translation-review`、恢复步骤与 `translation_review_acknowledged` 事件；初次可修复报告不能提前确认，最终报告必须绑定完整有效的修复链，确认也不能绕过确定性字幕 QA。默认仍为 `standard + faithful`。

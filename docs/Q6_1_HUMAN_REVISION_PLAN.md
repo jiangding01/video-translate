@@ -92,4 +92,16 @@ xvt continue JOB
 
 源字幕修订会清除字幕与语义确认，并失效旧 source SRT/QA/selection、翻译批次与 checkpoint、润色、语义校对、译文修订、字幕渲染、预览、烧录和媒体 QA。下载字幕、候选 QA、对齐、词级转写、音频和媒体证据保留。确定性源字幕 QA 在修订命令内执行：`failed` 或 `needs_review` 会保存新 source 证据链但不登记 source SRT，从而阻断翻译；人工确认后 `continue` 从新 source cue 恢复，不重新导入旧源字幕。
 
-配置了导入译文字幕的任务首版拒绝源文修订，避免静默复用与新源文不匹配的旧译文。Q6.1b 的 `source_suspect` 自动模板和 `status` 多路径引导在后续独立阶段接入；当前核心命令已经可单独使用。
+配置了导入译文字幕的任务拒绝源文修订，避免静默复用与新源文不匹配的旧译文；准备和回填入口使用同一适用性判断，不能先生成最终无法提交的模板。
+
+## Q6.1b `source_suspect` 自动引导
+
+当前 checksum 有效的语义报告包含 `source_suspect` 时，XVT 对这些问题引用的 cue ID 取去重并集，并在进入人工等待状态前自动生成对应的 `source-review-*.json`。源文模板仍只绑定 Job、当前 source checksum 和精确 cue ID 集合，不绑定语义报告；报告变化但源文和 ID 集合不变时不会覆盖用户尚未提交的编辑。译文模板继续覆盖报告中的全部 review 问题。
+
+`status` 保持只读，并按以下顺序展示恢复路径：
+
+1. 优先回填源文修订；
+2. 用户确认源文正确时，可只回填译文修订；
+3. 用户接受当前结果时，可显式确认语义报告。
+
+升级前已处于等待状态且缺少源文模板的 Job，`status` 引导运行 `continue`，由恢复流程按报告中的完整 ID 集合懒生成模板；这样不会把大量 `--cue` 参数展开到终端或触及系统命令长度上限。导入译文任务不生成或推荐源文修订，只保留译文修订与确认路径。该行为复用 `await_translation_review`、`RecoveryPlan.input_paths` / `alternative_commands` 和已有 source review 事件，不新增 stage、artifact、事件或 Job schema。

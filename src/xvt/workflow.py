@@ -32,7 +32,7 @@ from xvt.pipeline import (
     complete_acknowledged_semantic_review,
     complete_agent_polished_outputs,
     complete_translated_outputs,
-    ensure_translation_review_input,
+    ensure_semantic_review_inputs,
     is_subtitle_input,
     resume_job,
     resume_remote_transcription,
@@ -594,14 +594,14 @@ def _ensure_translation(
                 event_sink=event_sink,
             )
         if semantic_review_waiting(job):
-            review_input = ensure_translation_review_input(path, event_sink=event_sink)
+            review_inputs = ensure_semantic_review_inputs(path, event_sink=event_sink)
             return _emit_waiting(
                 job=job,
                 path=path,
                 message="semantic review requires user acknowledgment",
                 artifacts=(
                     *_current_artifacts(job, waiting=True, semantic_reviewing=True),
-                    review_input,
+                    *review_inputs,
                 ),
                 event_sink=event_sink,
             )
@@ -754,7 +754,7 @@ def _advance_workflow(
         if advance_steps[0] == "await_translation_review":
             waiting_artifacts = (
                 *waiting_artifacts,
-                ensure_translation_review_input(path, event_sink=event_sink),
+                *ensure_semantic_review_inputs(path, event_sink=event_sink),
             )
         return _emit_waiting(
             job=job,

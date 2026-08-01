@@ -39,6 +39,31 @@ def _source_revision_fingerprint(job: Job, cue_ids: list[int]) -> str:
     ).hexdigest()
 
 
+def source_review_supported(job: Job) -> bool:
+    workflow = get_workflow_config(job)
+    return not (
+        (workflow is not None and workflow.translation_subtitles)
+        or valid_artifact_path(job, "input_translation_subtitles") is not None
+    )
+
+
+def _require_source_review_supported(job: Job) -> None:
+    if not source_review_supported(job):
+        raise UserInputError(
+            "cannot revise source cues while reusing imported translation subtitles; "
+            "provide a matching translated subtitle file in a new job"
+        )
+
+
+def source_review_input_path(job: Job, cue_ids: list[int]) -> Path | None:
+    try:
+        fingerprint = _source_revision_fingerprint(job, cue_ids)
+    except UserInputError:
+        return None
+    path = get_job_directory(job) / "review" / f"source-review-{fingerprint[:12]}.json"
+    return path if path.is_file() else None
+
+
 def prepare_source_review(
     job_file: str | Path,
     cue_ids: list[int],
@@ -46,6 +71,7 @@ def prepare_source_review(
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
+    _require_source_review_supported(job)
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise UserInputError("source review requires valid source cues")
@@ -138,13 +164,7 @@ def apply_source_review_fixes(
 ) -> tuple[Path, ...]:
     job = load_job(job_file)
     workflow = get_workflow_config(job)
-    if (workflow is not None and workflow.translation_subtitles) or valid_artifact_path(
-        job, "input_translation_subtitles"
-    ) is not None:
-        raise UserInputError(
-            "cannot revise source cues while reusing imported translation subtitles; "
-            "provide a matching translated subtitle file in a new job"
-        )
+    _require_source_review_supported(job)
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise UserInputError("source review requires valid source cues")
@@ -393,6 +413,43 @@ def _issue_set(report: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(normalized, key=lambda item: (item["category"], item["cue_ids"]))
 
 
+def source_suspect_cue_ids(job: Job) -> tuple[int, ...]:
+    target = _target_kinds(job)
+    if target is None:
+        return ()
+    _report_kind, _candidate_kind, report_path, _candidate_path = target
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        issues = _issue_set(report)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, UserInputError):
+        return ()
+    return tuple(
+        sorted(
+            {
+                cue_id
+                for issue in issues
+                if issue["category"] == "source_suspect"
+                for cue_id in issue["cue_ids"]
+            }
+        )
+    )
+
+
+def ensure_source_suspect_review_input(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> Path | None:
+    job = load_job(job_file)
+    cue_ids = source_suspect_cue_ids(job)
+    if not cue_ids or not source_review_supported(job):
+        return None
+    existing = source_review_input_path(job, list(cue_ids))
+    if existing is not None:
+        return existing
+    return prepare_source_review(job_file, list(cue_ids), event_sink=event_sink)
+
+
 def _revision_fingerprint(
     job: Job,
     report_kind: str,
@@ -473,6 +530,18 @@ def ensure_translation_review_input(
             )
         )
     return path
+
+
+def ensure_semantic_review_inputs(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, ...]:
+    translation_input = ensure_translation_review_input(job_file, event_sink=event_sink)
+    source_input = ensure_source_suspect_review_input(job_file, event_sink=event_sink)
+    if source_input is None:
+        return (translation_input,)
+    return source_input, translation_input
 
 
 def apply_translation_review_fixes(

@@ -235,7 +235,7 @@ uv run --no-sync xvt run INPUT --output OUTPUT \
 
 `run`、`batch`、`translate` 和 `prepare-translation` 都支持 `standard|polished`。API 模式的 `polished` 先保存完整翻译草稿，再逐批润色；Agent 模式生成带 `task=translate_and_polish` 和 fingerprint 的单个 `translation-batches.json`。润色候选随后必须经过 Q6 语义校对；API 对可修复问题按完整语义组最多修复一次并复查，Agent 生成 `task=semantic_review_and_repair` manifest，使用 `apply-semantic-review JOB RESPONSE` 回填。旧 Job 或旧 batch 缺质量字段时继续按 `standard`。`--translation-subtitles` 不能与新 Job 的 `polished` 同时使用，应先导入译文再执行 `polish-translation`。
 
-语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板。编辑其中的 `items[].text` 后运行 `xvt apply-translation-review-fixes JOB REVIEW.json`，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。`status` 会把修订作为首选路径，同时保留 `--acknowledge-translation-review` 直接确认作为备选。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
+语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板。编辑其中的 `items[].text` 后运行 `xvt apply-translation-review-fixes JOB REVIEW.json`，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。存在 `source_suspect` 时还会为相关源 cue 自动生成源文模板，`status` 优先推荐修订源文，同时保留译文修订和 `--acknowledge-translation-review` 直接确认两条备选路径。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 
 源字幕存在误听或专名错误时，可显式生成源文修订模板。该路径只修改指定 cue 的源文字段，立即重新执行确定性源字幕 QA，并使旧翻译、润色、语义报告、渲染和烧录结果失效；ID、时间轴、词级时间戳和 provenance 保持不变：
 
@@ -246,7 +246,7 @@ uv run --no-sync xvt apply-source-review-fixes JOB REVIEW.json
 uv run --no-sync xvt continue JOB
 ```
 
-源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；应创建任务并提供匹配的新译文。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁。
+源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；准备和回填命令都会提前拒绝，`status` 也不会展示不可执行的源文路径。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁。
 
 已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
 

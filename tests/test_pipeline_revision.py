@@ -303,6 +303,8 @@ class SourceReviewPipelineTest(unittest.TestCase):
             save_job(job)
 
             with self.assertRaisesRegex(UserInputError, "imported translation"):
+                prepare_source_review(job_file, [1])
+            with self.assertRaisesRegex(UserInputError, "imported translation"):
                 apply_source_review_fixes(job_file, response)
 
     def test_save_failure_keeps_previous_job_and_artifact_bytes(self) -> None:

@@ -29,8 +29,12 @@ from xvt.pipeline.review import acknowledge_subtitle_review, acknowledge_transla
 from xvt.pipeline.revision import (
     apply_source_review_fixes,
     apply_translation_review_fixes,
+    ensure_semantic_review_inputs,
     ensure_translation_review_input,
     prepare_source_review,
+    source_review_input_path,
+    source_review_supported,
+    source_suspect_cue_ids,
     translation_review_input_path,
 )
 from xvt.pipeline.semantic import (
@@ -90,6 +94,7 @@ __all__ = [
     "complete_agent_polished_outputs",
     "complete_acknowledged_semantic_review",
     "complete_translated_outputs",
+    "ensure_semantic_review_inputs",
     "inspect_input",
     "ensure_translation_review_input",
     "interrupt_running_stage",
@@ -116,5 +121,8 @@ __all__ = [
     "semantic_review_approved",
     "semantic_review_satisfied",
     "semantic_review_waiting",
+    "source_review_input_path",
+    "source_review_supported",
+    "source_suspect_cue_ids",
     "agent_semantic_review_waiting",
 ]
