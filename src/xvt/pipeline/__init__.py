@@ -25,7 +25,11 @@ from xvt.pipeline.polish import (
 )
 from xvt.pipeline.resegment import ResegmentationResult, resegment_translation
 from xvt.pipeline.retranslate import apply_cue_retranslation, retranslate_cues
-from xvt.pipeline.review import acknowledge_subtitle_review, acknowledge_translation_review
+from xvt.pipeline.review import (
+    acknowledge_subtitle_review,
+    acknowledge_translation_review,
+    finalize_acknowledged_subtitle_review,
+)
 from xvt.pipeline.revision import (
     apply_source_review_fixes,
     apply_translation_review_fixes,
@@ -95,6 +99,7 @@ __all__ = [
     "complete_acknowledged_semantic_review",
     "complete_translated_outputs",
     "ensure_semantic_review_inputs",
+    "finalize_acknowledged_subtitle_review",
     "inspect_input",
     "ensure_translation_review_input",
     "interrupt_running_stage",

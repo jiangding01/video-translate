@@ -33,6 +33,7 @@ from xvt.pipeline import (
     complete_agent_polished_outputs,
     complete_translated_outputs,
     ensure_semantic_review_inputs,
+    finalize_acknowledged_subtitle_review,
     is_subtitle_input,
     resume_job,
     resume_remote_transcription,
@@ -772,11 +773,16 @@ def _advance_workflow(
             event_sink=event_sink,
         )
 
-    if goals.needs_translation and not _translation_satisfied(job, config):
-        waiting = _ensure_translation(path, job, config, event_sink=event_sink)
-        if waiting is not None:
-            return waiting
-        job = load_job(path)
+    if goals.needs_translation:
+        if not _translation_satisfied(job, config):
+            waiting = _ensure_translation(path, job, config, event_sink=event_sink)
+            if waiting is not None:
+                return waiting
+            job = load_job(path)
+        # 字幕 QA needs_review 已被确认且译文产物齐备时，清掉确认前留下的过期
+        # translate 失败记录；旧 Job 也在这里收口。
+        if finalize_acknowledged_subtitle_review(path, event_sink=event_sink):
+            job = load_job(path)
 
     # 翻译副作用之后重新判定：不可使用入口处缓存的 plan 步骤表。
     if goals.needs_burn and not _burn_satisfied(job, config):

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from xvt.job_store import create_job, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.qa import check_subtitles, display_width, display_width_limit
-from xvt.recovery import file_checksum
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.segment import SegmentationConfig, segment_transcript
 
 
@@ -202,6 +202,51 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(
             all(event.data["source"] == "stored_acknowledgment" for event in acknowledged[1:])
         )
+
+    def test_acknowledged_continue_finalizes_stale_translate_failure(self) -> None:
+        """字幕 QA needs_review 确认后，continue 必须清掉 translate 上的过期阻断错误。"""
+        from xvt.pipeline import acknowledge_subtitle_review
+        from xvt.pipeline.common import SUBTITLE_REVIEW_REQUIRED_MESSAGE
+        from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:20,000\nShort source\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:20,000\n这是一条明显超过单行显示宽度限制的中文字幕\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "needs_review"):
+                run_workflow(
+                    WorkflowOptions(
+                        input=str(source),
+                        output=root / "output",
+                        language="en",
+                        target_language="zh-CN",
+                        translation_subtitles=translated,
+                    )
+                )
+            job_file = next((root / "output" / "jobs").glob("*/job.json"))
+            acknowledge_subtitle_review(job_file)
+
+            # 语义复核腿在译文 QA 阻断时会把 translate 记为 failed；确认后这条错误已过期。
+            job = load_job(job_file)
+            job.stages[StageName.TRANSLATE].status = StageStatus.FAILED
+            job.stages[StageName.TRANSLATE].error = SUBTITLE_REVIEW_REQUIRED_MESSAGE
+            save_job(job)
+
+            result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            updated = load_job(job_file)
+            self.assertEqual(updated.stages[StageName.TRANSLATE].status, StageStatus.SUCCEEDED)
+            self.assertIsNone(updated.stages[StageName.TRANSLATE].error)
+            self.assertIsNotNone(valid_artifact_path(updated, "bilingual_srt"))
 
     def test_acknowledge_rejects_error_level_reports(self) -> None:
         from xvt.errors import UserInputError

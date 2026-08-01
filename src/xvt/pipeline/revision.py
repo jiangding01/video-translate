@@ -13,7 +13,13 @@ from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job, utc_now
 from xvt.models import Artifact, Job, StageName, StageStatus
-from xvt.pipeline.common import _artifact_checksum_for, _checksum, _load_cues, _write_json
+from xvt.pipeline.common import (
+    SUBTITLE_REVIEW_REQUIRED_MESSAGE,
+    _artifact_checksum_for,
+    _checksum,
+    _load_cues,
+    _write_json,
+)
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
 from xvt.subtitles import save_subtitles
@@ -267,10 +273,7 @@ def apply_source_review_fixes(
             Artifact("source_srt", str(source_srt_path), _checksum(source_srt_path))
         )
     elif report.status == "needs_review":
-        qa_message = (
-            "subtitle QA needs_review; inspect the QA artifact, then run "
-            "xvt continue <job> --acknowledge-subtitle-review"
-        )
+        qa_message = SUBTITLE_REVIEW_REQUIRED_MESSAGE
     else:
         qa_message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
 
