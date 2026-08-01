@@ -86,6 +86,58 @@ def _job_command(command: str, job_file: Path, *arguments: str) -> str:
     return " ".join(parts)
 
 
+def _semantic_review_options(
+    job: Job,
+    job_file: Path,
+    *,
+    acknowledgment_command: str,
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+    from xvt.pipeline.revision import (
+        source_review_input_path,
+        source_review_supported,
+        source_suspect_cue_ids,
+        translation_review_input_path,
+    )
+
+    translation_input = translation_review_input_path(job)
+    translation_command = (
+        _job_command(
+            "apply-translation-review-fixes",
+            job_file,
+            shlex.quote(str(translation_input)),
+        )
+        if translation_input is not None
+        else _job_command("continue", job_file)
+    )
+    source_ids = source_suspect_cue_ids(job)
+    source_supported = source_review_supported(job)
+    source_input = (
+        source_review_input_path(job, list(source_ids)) if source_ids and source_supported else None
+    )
+    input_paths = tuple(str(path) for path in (source_input, translation_input) if path is not None)
+    if source_ids and source_supported:
+        if source_input is not None:
+            primary = _job_command(
+                "apply-source-review-fixes",
+                job_file,
+                shlex.quote(str(source_input)),
+            )
+        else:
+            primary = _job_command("continue", job_file)
+        return (
+            "语义校对发现源文可能有误；优先修订源文，也可只修订译文或显式确认。",
+            primary,
+            (translation_command, acknowledgment_command),
+            input_paths,
+        )
+    return (
+        "语义校对仍有 review 问题；可编辑修订模板后回填，或显式确认当前译文。",
+        translation_command,
+        (acknowledgment_command,),
+        input_paths,
+    )
+
+
 def _load_qa_report(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -359,8 +411,6 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         )
 
     if semantic_review_waiting(job):
-        from xvt.pipeline.revision import translation_review_input_path
-
         report_kind = (
             "translation_semantic_qa_reviewed"
             if "translation_semantic_qa_reviewed" in valid_artifacts
@@ -368,18 +418,17 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             if "translation_semantic_qa_final" in valid_artifacts
             else "translation_semantic_qa"
         )
-        review_input = translation_review_input_path(job)
-        fix_command = (
-            _job_command("apply-translation-review-fixes", job_file, str(review_input))
-            if review_input is not None
-            else _job_command("continue", job_file)
+        reason, primary, alternatives, inputs = _semantic_review_options(
+            job,
+            job_file,
+            acknowledgment_command=_job_command("acknowledge-translation-review", job_file),
         )
         return plan(
             "awaiting_input",
-            "语义校对仍有 review 问题；可编辑修订模板后回填，或显式确认当前译文。",
-            primary_command=fix_command,
-            alternative_commands=(_job_command("acknowledge-translation-review", job_file),),
-            input_paths=((str(review_input),) if review_input is not None else ()),
+            reason,
+            primary_command=primary,
+            alternative_commands=alternatives,
+            input_paths=inputs,
             report_paths=(str(valid_artifacts[report_kind]),),
         )
 
@@ -514,26 +563,21 @@ def _recovery_for_workflow(
         )
 
     if steps[0] == "await_translation_review":
-        from xvt.pipeline.revision import translation_review_input_path
-
-        review_input = translation_review_input_path(job)
-        fix_command = (
-            _job_command("apply-translation-review-fixes", job_file, str(review_input))
-            if review_input is not None
-            else _job_command("continue", job_file)
+        reason, primary, alternatives, inputs = _semantic_review_options(
+            job,
+            job_file,
+            acknowledgment_command=_job_command(
+                "continue",
+                job_file,
+                "--acknowledge-translation-review",
+            ),
         )
         return plan(
             "awaiting_input",
-            "语义校对仍有 review 问题；可编辑修订模板后回填，或显式确认当前译文。",
-            primary_command=fix_command,
-            alternative_commands=(
-                _job_command(
-                    "continue",
-                    job_file,
-                    "--acknowledge-translation-review",
-                ),
-            ),
-            input_paths=((str(review_input),) if review_input is not None else ()),
+            reason,
+            primary_command=primary,
+            alternative_commands=alternatives,
+            input_paths=inputs,
             report_paths=tuple(
                 str(valid_artifacts[kind])
                 for kind in (

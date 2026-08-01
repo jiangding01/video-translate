@@ -15,6 +15,7 @@ from xvt.pipeline import (
     apply_agent_semantic_review,
     apply_translation_review_fixes,
     complete_acknowledged_semantic_review,
+    ensure_semantic_review_inputs,
     ensure_translation_review_input,
     prepare_agent_semantic_review,
     run_subtitle_transcription,
@@ -22,6 +23,7 @@ from xvt.pipeline import (
     semantic_review_approved,
     semantic_review_satisfied,
     semantic_review_waiting,
+    source_review_input_path,
     translation_review_input_path,
 )
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
@@ -344,6 +346,36 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             )
             self.assertTrue(semantic_review_waiting(job))
 
+    def test_mixed_final_review_separates_source_and_translation_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            source_issue = SemanticIssue("source_suspect", (1,), "review", "check source", ())
+            repair_issue = SemanticIssue("omission", (2,), "review", "missing", ())
+            final_issue = SemanticIssue("awkward_join", (2,), "review", "still awkward", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    side_effect=[(source_issue, repair_issue), (final_issue,)],
+                ),
+                patch(
+                    "xvt.pipeline.semantic.semantic_repair_batch",
+                    return_value={2: "世界。"},
+                ),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "awaiting_review")
+            job = load_job(job_file)
+            source_template = source_review_input_path(job, [1])
+            translation_template = translation_review_input_path(job)
+            assert source_template is not None
+            assert translation_template is not None
+            source_payload = json.loads(source_template.read_text(encoding="utf-8"))
+            translation_payload = json.loads(translation_template.read_text(encoding="utf-8"))
+            self.assertEqual([item["id"] for item in source_payload["items"]], [1])
+            self.assertEqual([item["id"] for item in translation_payload["items"]], [1, 2])
+
     def test_source_suspect_waits_for_bound_acknowledgment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_file = self._job(Path(directory))
@@ -361,6 +393,14 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 result = run_translation_semantic_review(job_file)
 
             self.assertEqual(result.status, "awaiting_review")
+            self.assertEqual(
+                {path.name.split("-")[0] for path in result.paths[-2:]},
+                {"source", "translation"},
+            )
+            source_template = source_review_input_path(load_job(job_file), [1])
+            assert source_template is not None
+            source_payload = json.loads(source_template.read_text(encoding="utf-8"))
+            self.assertEqual(source_payload["items"], [{"id": 1, "text": "Hello."}])
             self.assertIsNone(
                 next(
                     (
@@ -375,6 +415,59 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             complete_acknowledged_semantic_review(job_file)
             self.assertTrue(semantic_review_satisfied(load_job(job_file)))
 
+    def test_legacy_waiting_job_lazily_recreates_source_review_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            issue = SemanticIssue("source_suspect", (1,), "review", "check source", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+
+            source_template = source_review_input_path(load_job(job_file), [1])
+            assert source_template is not None
+            source_template.unlink()
+            before_prepare = job_file.read_bytes()
+            inputs = ensure_semantic_review_inputs(job_file)
+
+            self.assertEqual(
+                {path.name.split("-")[0] for path in inputs}, {"source", "translation"}
+            )
+            self.assertTrue(source_template.exists())
+            self.assertEqual(job_file.read_bytes(), before_prepare)
+            self.assertIsNotNone(source_review_input_path(load_job(job_file), [1]))
+
+    def test_imported_translation_workflow_suppresses_source_review_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            job = load_job(job_file)
+            set_workflow_config(
+                job,
+                WorkflowConfig(
+                    target_language="zh-CN",
+                    translation_quality="polished",
+                    provider="openai-compatible",
+                    base_url="https://example.com/v1",
+                    model="model",
+                    api_key_env="TEST_TRANSLATION_API_KEY",
+                    translation_subtitles="/tmp/translated.srt",
+                ),
+            )
+            save_job(job)
+            issue = SemanticIssue("source_suspect", (1,), "review", "check source", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            job = load_job(job_file)
+            translation_template = translation_review_input_path(job)
+            self.assertEqual(result.status, "awaiting_review")
+            self.assertIsNotNone(translation_template)
+            self.assertIsNone(source_review_input_path(job, [1]))
+
     def test_human_revision_is_bound_and_runs_review_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -387,16 +480,22 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 result = run_translation_semantic_review(job_file)
 
             template = translation_review_input_path(load_job(job_file))
+            source_template = source_review_input_path(load_job(job_file), [1])
             self.assertEqual(result.status, "awaiting_review")
             self.assertIsNotNone(template)
+            self.assertIsNotNone(source_template)
             job = load_job(job_file)
             workflow = job.config.pop("workflow")
             job.config["target_language"] = "zh-CN"
             save_job(job)
             before_status = job_file.read_bytes()
             recovery = build_recovery_plan(load_job(job_file))
-            self.assertEqual(recovery.input_paths, (str(template),))
-            self.assertIn("apply-translation-review-fixes", recovery.primary_command or "")
+            self.assertEqual(recovery.input_paths, (str(source_template), str(template)))
+            self.assertIn("apply-source-review-fixes", recovery.primary_command or "")
+            self.assertIn(
+                "apply-translation-review-fixes",
+                " ".join(recovery.alternative_commands),
+            )
             self.assertIn(
                 "acknowledge-translation-review",
                 " ".join(recovery.alternative_commands),
@@ -884,7 +983,9 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             result = apply_agent_semantic_review(job_file, response)
 
             self.assertEqual(result.status, "awaiting_review")
-            self.assertTrue(semantic_review_waiting(load_job(job_file)))
+            job = load_job(job_file)
+            self.assertTrue(semantic_review_waiting(job))
+            self.assertIsNotNone(source_review_input_path(job, [1]))
 
     def test_agent_manifest_is_bound_to_current_task_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

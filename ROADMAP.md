@@ -14,7 +14,7 @@
     - ~~Q4：语义组翻译，避免 provider 批次和中文表达在错误边界断开。~~ 已完成：确定性组按完整组装箱，批次外相邻组只读上下文，prompt/grouping version 保护恢复；默认保持 `faithful`。
     - ~~Q5：可恢复字幕润色。~~ 已完成：Q5a 支持旧译文显式补跑、API checkpoint、Agent 回填和工作流恢复；Q5b 接入新 Job 的 `standard|polished` 质量参数、API draft -> polish 和一次 Agent 翻译+润色。专项设计见 [Q5 可恢复字幕润色技术方案](docs/Q5_TRANSLATION_POLISH_PLAN.md)。
     - ~~Q6：语义校对、最多一次定向修复和独立人工确认。~~ 已完成：polished 候选经结构化语义校对、完整语义组一次修复与最终复查；API/Agent 均可恢复，人工确认绑定候选和报告且不能绕过确定性 QA。专项设计见 [Q6 技术方案](docs/Q6_SEMANTIC_REVIEW_PLAN.md)。
-    - Q6.1：人工校对交互。~~Q6.1a 译文修订~~ 已完成；Q6.1b 核心已增加显式源文模板、严格回填、源 QA 与完整下游失效，后续补 `source_suspect` 自动模板和 status 多路径引导；Q6.1c 提示词加固随后推进。专项设计见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
+    - Q6.1：人工校对交互。~~Q6.1a 译文修订~~、~~Q6.1b 源文修订与 `source_suspect` 多路径引导~~ 已完成；下一步为 Q6.1c 提示词加固。专项设计见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 - 上述质量闭环通过真实 E2E 后，增加可视化校对界面，消费 CLI 的 JSONL 事件和 `job.json`，不复制媒体处理逻辑。
 
 ## 中期

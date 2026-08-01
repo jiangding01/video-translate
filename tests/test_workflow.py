@@ -14,9 +14,11 @@ from xvt.pipeline import (
     prepare_agent_semantic_review,
     prepare_agent_translation,
     run_subtitle_transcription,
+    source_review_input_path,
+    translation_review_input_path,
 )
-from xvt.recovery import file_checksum
-from xvt.translate import GlossaryTerm, TranslationPolicy
+from xvt.recovery import build_recovery_plan, file_checksum
+from xvt.translate import GlossaryTerm, SemanticIssue, TranslationPolicy
 from xvt.workflow import (
     WorkflowOptions,
     _burn_satisfied,
@@ -86,6 +88,65 @@ class WorkflowTest(unittest.TestCase):
             translate.assert_called_once()
             polish.assert_called_once()
             semantic_review.assert_called_once()
+
+    def test_source_suspect_workflow_exposes_source_first_recovery_and_lazy_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nCloud Code.\n",
+                encoding="utf-8",
+            )
+            issue = SemanticIssue("source_suspect", (1,), "review", "check source", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.translation.translate_batch", return_value={1: "Cloud Code。"}),
+                patch("xvt.pipeline.polish.polish_batch", return_value={1: "Cloud Code。"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                result = run_workflow(
+                    WorkflowOptions(
+                        input=str(source),
+                        output=root / "output",
+                        target_language="zh-CN",
+                        translation_quality="polished",
+                        provider="openai-compatible",
+                        base_url="https://example.com/v1",
+                        model="model",
+                        api_key_env="TEST_TRANSLATION_API_KEY",
+                    )
+                )
+
+            job = load_job(result.job_file)
+            source_input = source_review_input_path(job, [1])
+            translation_input = translation_review_input_path(job)
+            assert source_input is not None
+            assert translation_input is not None
+            plan = build_recovery_plan(job)
+            self.assertEqual(result.status, "awaiting_input")
+            self.assertEqual(plan.input_paths, (str(source_input), str(translation_input)))
+            self.assertIn("apply-source-review-fixes", plan.primary_command or "")
+            self.assertIn(
+                "apply-translation-review-fixes",
+                " ".join(plan.alternative_commands),
+            )
+            self.assertIn(
+                "--acknowledge-translation-review",
+                " ".join(plan.alternative_commands),
+            )
+
+            source_input.unlink()
+            before_status = result.job_file.read_bytes()
+            legacy_plan = build_recovery_plan(result.job_file)
+            self.assertIn("continue", legacy_plan.primary_command or "")
+            self.assertNotIn("--cue", legacy_plan.primary_command or "")
+            self.assertFalse(source_input.exists())
+            self.assertEqual(result.job_file.read_bytes(), before_status)
+
+            continued = continue_workflow(result.job_file)
+
+            self.assertEqual(continued.status, "awaiting_input")
+            self.assertIsNotNone(source_review_input_path(load_job(result.job_file), [1]))
 
     def test_polished_options_validate_and_plan_two_translation_phases(self) -> None:
         options = WorkflowOptions(

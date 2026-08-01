@@ -879,9 +879,9 @@ def run_translation_semantic_review(
                     event_sink,
                     extras={"phase": "semantic_review"},
                 )
-                from xvt.pipeline.revision import ensure_translation_review_input
+                from xvt.pipeline.revision import ensure_semantic_review_inputs
 
-                paths.append(ensure_translation_review_input(job_file, event_sink=event_sink))
+                paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
                 return SemanticRunResult("awaiting_review", mode, tuple(paths))
             rendered = _finalize_candidate(job, candidate_path, event_sink)
             return SemanticRunResult("completed", mode, (*paths, *rendered))
@@ -938,9 +938,9 @@ def run_translation_semantic_review(
                 event_sink,
                 extras={"phase": "semantic_review"},
             )
-            from xvt.pipeline.revision import ensure_translation_review_input
+            from xvt.pipeline.revision import ensure_semantic_review_inputs
 
-            paths.append(ensure_translation_review_input(job_file, event_sink=event_sink))
+            paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
             return SemanticRunResult("awaiting_review", mode, tuple(paths))
         rendered = _finalize_candidate(job, candidate_path, event_sink)
         return SemanticRunResult("completed", mode, (*paths, *rendered))
@@ -1247,9 +1247,9 @@ def apply_agent_semantic_review(
             event_sink,
             extras={"phase": "semantic_review"},
         )
-        from xvt.pipeline.revision import ensure_translation_review_input
+        from xvt.pipeline.revision import ensure_semantic_review_inputs
 
-        paths.append(ensure_translation_review_input(job_file, event_sink=event_sink))
+        paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
         return SemanticRunResult("awaiting_review", "agent", tuple(paths))
     rendered = _finalize_candidate(job, candidate_path, event_sink)
     return SemanticRunResult("completed", "agent", (*paths, *rendered))
