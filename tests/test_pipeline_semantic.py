@@ -27,6 +27,7 @@ from xvt.pipeline import (
     translation_review_input_path,
 )
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
+from xvt.subtitles import save_subtitles
 from xvt.translate import SemanticIssue, SemanticSuggestedItem
 from xvt.translation_provider import ProviderResponseError
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
@@ -223,9 +224,46 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             self.assertEqual(result.status, "awaiting_review")
             self.assertFalse(semantic_review_approved(job))
             self.assertNotIn("translated_cues", {item.kind for item in job.artifacts})
+
+            # 模拟语义复核前已经生成译文产物，但此前的字幕 QA 失败仍残留在 translate stage。
+            candidate_artifact = next(
+                item for item in job.artifacts if item.kind == "translation_repaired_cues"
+            )
+            candidate_path = Path(candidate_artifact.path)
+            translated_path = candidate_path.with_name("translated-cues.json")
+            translated_path.write_bytes(candidate_path.read_bytes())
+            candidate = [
+                Cue(**item) for item in json.loads(candidate_path.read_text(encoding="utf-8"))
+            ]
+            translated_srt = save_subtitles(
+                candidate,
+                translated_path.with_name("translated.srt"),
+                mode="translated",
+            )
+            bilingual_srt = save_subtitles(
+                candidate,
+                translated_path.with_name("bilingual.srt"),
+                mode="bilingual",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact(
+                        "translated_cues", str(translated_path), file_checksum(translated_path)
+                    ),
+                    Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
+                    Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                ]
+            )
+            job.stages[StageName.TRANSLATE].status = StageStatus.FAILED
+            job.stages[StageName.TRANSLATE].error = "subtitle QA needs_review"
+            save_job(job)
+
             acknowledge_translation_review(job_file)
             complete_acknowledged_semantic_review(job_file)
-            self.assertTrue(semantic_review_satisfied(load_job(job_file)))
+            updated = load_job(job_file)
+            self.assertTrue(semantic_review_satisfied(updated))
+            self.assertEqual(updated.stages[StageName.TRANSLATE].status, StageStatus.SUCCEEDED)
+            self.assertIsNone(updated.stages[StageName.TRANSLATE].error)
 
     def test_api_review_resumes_after_completed_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

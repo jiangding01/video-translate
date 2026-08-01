@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.job_store import create_job, load_job, save_job
-from xvt.models import Artifact, Cue, Transcript, Word
+from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.qa import check_subtitles, display_width, display_width_limit
 from xvt.recovery import file_checksum
 from xvt.segment import SegmentationConfig, segment_transcript
@@ -193,6 +193,7 @@ class PipelineTest(unittest.TestCase):
             kinds = {artifact.kind for artifact in updated.artifacts}
             self.assertIn("source_srt", kinds)
             self.assertIn("bilingual_srt", kinds)
+            self.assertEqual(updated.stages[StageName.TRANSLATE].status, StageStatus.SUCCEEDED)
 
         acknowledged = [event for event in events if event.type == "subtitle_review_acknowledged"]
         # 一次显式确认 + 两道 QA 门（源字幕 QA 与译文 QA）各一次复用放行。
