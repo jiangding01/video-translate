@@ -61,7 +61,7 @@
 
 ### R1.4 包内共享符号公有化（F4）
 
-- 把确实被跨模块引用的 `_` 前缀符号去掉下划线（`set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等），原名保留一个赋值别名过渡一版后删除。
+- 把确实被跨模块引用的 `_` 前缀符号去掉下划线（`set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等）。包内符号无外部消费者，一次性完成定义处、所有 import 处与调用处改名，不保留旧名别名。
 - 纯模块内私有的保持现状。这是纯重命名，注意测试中 `mock.patch` 字符串目标需同步（正是 F11 描述的脆弱点，本项顺带减少一批此类目标）。
 - 验收：`grep -rn 'import _' src/xvt/pipeline/` 无跨模块私有引用；全量测试通过。
 

@@ -42,7 +42,7 @@ def is_subtitle_input(input_value: str) -> bool:
     return not parsed.scheme and Path(input_value).suffix.lower() in SUPPORTED_SUBTITLE_EXTENSIONS
 
 
-def _media_info_from_remote_metadata(url: str, duration_ms: int) -> MediaInfo:
+def media_info_from_remote_metadata(url: str, duration_ms: int) -> MediaInfo:
     return MediaInfo(
         path=url,
         duration_ms=duration_ms,
@@ -75,11 +75,11 @@ _STAGE_EVENT_TYPES: dict[StageStatus, EventType] = {
 }
 
 
-def _error_category(error: Exception) -> str:
+def error_category(error: Exception) -> str:
     return getattr(error, "category", "workflow")
 
 
-def _set_stage(
+def set_stage(
     job: Job,
     stage: StageName,
     status: StageStatus,
@@ -127,7 +127,7 @@ def interrupt_running_stage(
         job = load_job(job_file)
         if job.stages[stage_name].status is not StageStatus.RUNNING:
             return False
-        _set_stage(
+        set_stage(
             job,
             stage_name,
             StageStatus.FAILED,
@@ -139,13 +139,13 @@ def interrupt_running_stage(
     return True
 
 
-def _write_json(path: Path, data: Any) -> None:
+def write_json(path: Path, data: Any) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
 
-def _checksum(path: Path) -> str:
+def checksum(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
@@ -153,8 +153,8 @@ def _checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _add_artifact(job: Job, kind: str, path: Path, event_sink: EventSink | None) -> None:
-    artifact = Artifact(kind=kind, path=str(path), checksum=_checksum(path))
+def add_artifact(job: Job, kind: str, path: Path, event_sink: EventSink | None) -> None:
+    artifact = Artifact(kind=kind, path=str(path), checksum=checksum(path))
     job.artifacts = [item for item in job.artifacts if item.kind != kind]
     job.artifacts.append(artifact)
     save_job(job)
@@ -169,12 +169,12 @@ def _add_artifact(job: Job, kind: str, path: Path, event_sink: EventSink | None)
         )
 
 
-def _artifact_checksum_for(job: Job, kind: str) -> str | None:
+def artifact_checksum_for(job: Job, kind: str) -> str | None:
     artifact = next((item for item in job.artifacts if item.kind == kind), None)
     return artifact.checksum if artifact else None
 
 
-def _invalidate_rendered_artifacts(job: Job) -> None:
+def invalidate_rendered_artifacts(job: Job) -> None:
     # 失效集合由依赖图闭包推导：translated_cues 的全部下游产物。
     invalidated_kinds = downstream_of(ArtifactKind.TRANSLATED_CUES)
     job.artifacts = [
@@ -189,7 +189,7 @@ def _invalidate_rendered_artifacts(job: Job) -> None:
         record.error = None
 
 
-def _invalidate_preview_artifacts(job: Job) -> None:
+def invalidate_preview_artifacts(job: Job) -> None:
     # preview_ass 自身及其下游（preview_video）。
     invalidated_kinds = downstream_of(ArtifactKind.PREVIEW_ASS) | {ArtifactKind.PREVIEW_ASS}
     job.artifacts = [
@@ -197,14 +197,14 @@ def _invalidate_preview_artifacts(job: Job) -> None:
     ]
 
 
-def _artifact_path(job: Job, kind: str) -> Path:
+def artifact_path(job: Job, kind: str) -> Path:
     artifact = next((item for item in job.artifacts if item.kind == kind), None)
     if artifact is None:
         raise ValueError(f"job has no {kind} artifact")
     return Path(artifact.path)
 
 
-def _load_cues(path: Path) -> list[Cue]:
+def load_cues(path: Path) -> list[Cue]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError("cue artifact must contain a JSON array")

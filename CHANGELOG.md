@@ -32,6 +32,7 @@
 
 ### Changed
 
+- `pipeline` 包内确实被跨模块引用的 `_` 前缀符号去掉下划线并公有化（如 `set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等）；纯重命名，不保留旧名别名，不改变任何行为。
 - 烧录与预览输出路径安全统一到 `xvt.paths`：允许写到 Job 目录外的绝对路径，但写入前拒绝覆盖源媒体、`job.json` 与除「正在写入的同 kind」外的已登记 artifact（含 hardlink/`samefile`）；同 kind 重烧/重预览允许。冲突抛 `UserInputError`，且烧录在 RENDER/BURN 记账前校验、不把路径错误记成 stage failed。
 - ASR / `asr_resegmented` 来源的 `low_timing_confidence` 由 `review` 降为 `warning`，避免端到端几乎必卡人工确认；`aligned` 与用户导入字幕仍为 `review`。硬显示超限（`line_too_wide` / `bilingual_overflow_risk`）与跨门 display_width 确认族映射不变。
 - YouTube/远程视频下载格式选择改为 `bv*+ba/b/18/best`（分离流失败时可回退渐进式 360p 与 best）；HTTP 403 时给出可操作提示（`continue` 重试、更新 yt-dlp、显式 `--cookies-from-browser`），仍不默认读取浏览器 Cookie。

@@ -22,13 +22,13 @@ from xvt.media import probe_media
 from xvt.models import StageName, StageStatus
 from xvt.paths import assert_safe_output, protected_job_paths, resolve_absolute_output
 from xvt.pipeline.common import (
-    _add_artifact,
-    _artifact_path,
-    _error_category,
-    _invalidate_preview_artifacts,
-    _load_cues,
-    _set_stage,
-    _write_json,
+    add_artifact,
+    artifact_path,
+    error_category,
+    invalidate_preview_artifacts,
+    load_cues,
+    set_stage,
+    write_json,
 )
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
@@ -104,7 +104,7 @@ def preview_translated_job(
     if media_info.duration_ms <= 0:
         raise ValueError("preview requires media with a known positive duration")
 
-    translated = _load_cues(translated_path)
+    translated = load_cues(translated_path)
     selected_cue = None
     if start_seconds is None:
         if cue_id is None:
@@ -160,7 +160,7 @@ def preview_translated_job(
         ),
         label="preview output",
     )
-    _invalidate_preview_artifacts(job)
+    invalidate_preview_artifacts(job)
     if event_sink:
         event_sink(
             create_event(
@@ -177,7 +177,7 @@ def preview_translated_job(
         video_height=media_info.height,
         options=AssStyleOptions(target_font=target_font, source_font=source_font),
     )
-    _add_artifact(job, "preview_ass", ass_path, event_sink)
+    add_artifact(job, "preview_ass", ass_path, event_sink)
     preview_path = burn_subtitles(
         media_path,
         ass_path,
@@ -204,7 +204,7 @@ def preview_translated_job(
         issues.append("preview duration differs by more than 500ms")
     if issues:
         raise RuntimeError(f"preview video failed media QA: {', '.join(issues)}")
-    _add_artifact(job, "preview_video", preview_path, event_sink)
+    add_artifact(job, "preview_video", preview_path, event_sink)
     if event_sink:
         event_sink(
             create_event(
@@ -249,7 +249,7 @@ def burn_translated_job(
                         proxy=proxy,
                         event_sink=event_sink,
                     )
-                    _add_artifact(job, "source_video", media_path, event_sink)
+                    add_artifact(job, "source_video", media_path, event_sink)
             else:
                 media_path = Path(job.input).expanduser()
         if not media_path.is_file():
@@ -259,7 +259,7 @@ def burn_translated_job(
         if not media_info.has_video or not media_info.width or not media_info.height:
             raise ValueError("burn-in requires a video stream with known dimensions")
 
-        translated = _load_cues(_artifact_path(job, "translated_cues"))
+        translated = load_cues(artifact_path(job, "translated_cues"))
         # 路径校验放在 RENDER/BURN 记账之前，避免错误输出先留下半成品 stage 状态。
         artifacts_directory = get_job_directory(job) / "artifacts"
         ass_path = artifacts_directory / "bilingual.ass"
@@ -278,7 +278,7 @@ def burn_translated_job(
             label="burn output",
         )
 
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
         ass_path = save_bilingual_ass(
             translated,
             ass_path,
@@ -286,11 +286,11 @@ def burn_translated_job(
             video_height=media_info.height,
             options=AssStyleOptions(target_font=target_font, source_font=source_font),
         )
-        _add_artifact(job, "bilingual_ass", ass_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "bilingual_ass", ass_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
         current_stage = StageName.BURN
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
         burned_path = burn_subtitles(
             media_path,
             ass_path,
@@ -300,11 +300,11 @@ def burn_translated_job(
             duration_ms=media_info.duration_ms,
             event_sink=event_sink,
         )
-        _add_artifact(job, "burned_video", burned_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "burned_video", burned_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
         current_stage = StageName.MEDIA_QA
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
         burned_info = probe_media(burned_path)
         duration_delta_ms = abs(burned_info.duration_ms - media_info.duration_ms)
         media_report = {
@@ -327,22 +327,22 @@ def burn_translated_job(
         if media_report["issues"]:
             media_report["status"] = "failed"
         report_path = get_job_directory(job) / "artifacts" / "media-qa.json"
-        _write_json(report_path, media_report)
-        _add_artifact(job, "media_qa", report_path, event_sink)
+        write_json(report_path, media_report)
+        add_artifact(job, "media_qa", report_path, event_sink)
         if media_report["status"] == "failed":
             raise RuntimeError("burned video failed media QA")
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         return burned_path
     except UserInputError:
         # 输出路径冲突属于用户输入错误，不把当前 stage 记成 failed。
         raise
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise

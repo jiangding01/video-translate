@@ -278,7 +278,7 @@ class PipelineTest(unittest.TestCase):
                 acknowledge_subtitle_review(job_file)
 
     def test_acknowledgment_invalidated_when_subtitles_change(self) -> None:
-        from xvt.pipeline.review import _acknowledged_review_issues
+        from xvt.pipeline.review import acknowledged_review_issues
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -292,15 +292,15 @@ class PipelineTest(unittest.TestCase):
                 "source_cues_checksum": file_checksum(cues_path),
                 "acknowledged_issues": [["line_too_wide", 1]],
             }
-            self.assertEqual(_acknowledged_review_issues(job), {("display_width", 1)})
+            self.assertEqual(acknowledged_review_issues(job), {("display_width", 1)})
 
             # 字幕内容变化（checksum 改变）后确认失效。
             cues_path.write_text("[{}]", encoding="utf-8")
             job.artifacts[-1] = Artifact("source_cues", str(cues_path), file_checksum(cues_path))
-            self.assertIsNone(_acknowledged_review_issues(job))
+            self.assertIsNone(acknowledged_review_issues(job))
 
     def test_new_review_issue_blocks_despite_acknowledgment(self) -> None:
-        from xvt.pipeline.review import _complete_qa_stage
+        from xvt.pipeline.review import complete_qa_stage
         from xvt.qa import SubtitleIssue, SubtitleQaReport
 
         with tempfile.TemporaryDirectory() as directory:
@@ -325,7 +325,7 @@ class PipelineTest(unittest.TestCase):
                 ),
             )
             with self.assertRaisesRegex(RuntimeError, "needs_review"):
-                _complete_qa_stage(job, report, None)
+                complete_qa_stage(job, report, None)
 
 
 if __name__ == "__main__":

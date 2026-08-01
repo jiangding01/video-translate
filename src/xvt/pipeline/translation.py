@@ -1,6 +1,6 @@
 """翻译主链：批次构建、兼容 API 调用、断点进度、Agent 回填、导入译文与统一收尾。
 
-`_finalize_translation` 是三条译文回填路径（局部重译、Agent/API 响应、导入译文
+`finalize_translation` 是三条译文回填路径（局部重译、Agent/API 响应、导入译文
 字幕）共用的收尾：写译文 cue → 失效旧下游产物 → 译文 QA → 渲染。
 """
 
@@ -22,16 +22,16 @@ from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
-    _add_artifact,
-    _artifact_path,
-    _checksum,
-    _error_category,
-    _invalidate_preview_artifacts,
-    _load_cues,
-    _set_stage,
-    _write_json,
+    add_artifact,
+    artifact_path,
+    checksum,
+    error_category,
+    invalidate_preview_artifacts,
+    load_cues,
+    set_stage,
+    write_json,
 )
-from xvt.pipeline.review import _complete_qa_stage
+from xvt.pipeline.review import complete_qa_stage
 from xvt.process import raise_if_cancelled
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
@@ -79,7 +79,7 @@ class TranslationRunResult:
     fallback_reason: str | None = None
 
 
-def _translate_batch_with_retries(
+def translate_batch_with_retries(
     batch: TranslationBatch | PolishBatch | SemanticReviewBatch | SemanticRepairBatch,
     provider_config: CompatibleProviderConfig,
     *,
@@ -132,7 +132,7 @@ def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
     return tuple((term.source, term.target) for term in policy.terms)
 
 
-def _load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
+def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
     response = json.loads(Path(response_file).read_text(encoding="utf-8"))
     items = response.get("items") if isinstance(response, dict) else None
     if not isinstance(items, list):
@@ -218,9 +218,9 @@ def _atomic_draft_matches_translation_progress(
         items = data.get("items")
         if not isinstance(items, list):
             return None
-        translations = _load_translation_response(progress_path, expected_ids)
+        translations = load_translation_response(progress_path, expected_ids)
         expected = apply_translations(cues, translations, target_language=target_language)
-        return draft_path if _load_cues(draft_path) == expected else None
+        return draft_path if load_cues(draft_path) == expected else None
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         return None
 
@@ -256,7 +256,7 @@ def _agent_polished_manifest(job: Job) -> dict[str, Any] | None:
     if (
         source_path is None
         or manifest.get("job_id") != job.id
-        or manifest.get("source_cues_checksum") != _checksum(source_path)
+        or manifest.get("source_cues_checksum") != checksum(source_path)
         or manifest.get("target_language") != target_language
         or manifest.get("policy") != policy
         or not isinstance(source_language, str)
@@ -272,7 +272,7 @@ def _agent_polished_manifest(job: Job) -> dict[str, Any] | None:
     ):
         return None
     expected_batches = build_translation_batches(
-        _load_cues(source_path),
+        load_cues(source_path),
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
@@ -418,7 +418,7 @@ def _agent_polished_cues(job: Job) -> list[Cue]:
     if not isinstance(target_language, str) or not target_language:
         raise ValueError("translate_and_polish manifest has no target language")
     return apply_translations(
-        _load_cues(source_path),
+        load_cues(source_path),
         progress[1],
         target_language=target_language,
     )
@@ -428,7 +428,7 @@ def agent_translation_polish_core_satisfied(job: Job) -> bool:
     try:
         expected = _agent_polished_cues(job)
         polished_path = valid_artifact_path(job, "translation_polished_cues")
-        return polished_path is not None and _load_cues(polished_path) == expected
+        return polished_path is not None and load_cues(polished_path) == expected
     except (OSError, TypeError, ValueError):
         return False
 
@@ -442,7 +442,7 @@ def complete_agent_polished_outputs(
     expected = _agent_polished_cues(job)
     artifacts_directory = get_job_directory(job) / "artifacts"
     polished_path = valid_artifact_path(job, "translation_polished_cues")
-    if polished_path is None or _load_cues(polished_path) != expected:
+    if polished_path is None or load_cues(polished_path) != expected:
         invalidated = downstream_of(ArtifactKind.TRANSLATION_POLISHED_CUES)
         job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in invalidated]
         clear_burn_fingerprint(job)
@@ -453,9 +453,9 @@ def complete_agent_polished_outputs(
             record.completed_at = None
             record.error = None
         polished_path = artifacts_directory / "translation-polished-cues.json"
-        _write_json(polished_path, [asdict(cue) for cue in expected])
-        _add_artifact(job, "translation_polished_cues", polished_path, event_sink)
-    _set_stage(
+        write_json(polished_path, [asdict(cue) for cue in expected])
+        add_artifact(job, "translation_polished_cues", polished_path, event_sink)
+    set_stage(
         job,
         StageName.TRANSLATE,
         StageStatus.SUCCEEDED,
@@ -465,7 +465,7 @@ def complete_agent_polished_outputs(
     return (polished_path,)
 
 
-def _finalize_translation(
+def finalize_translation(
     job: Job,
     translated: list[Cue],
     event_sink: EventSink | None,
@@ -483,8 +483,8 @@ def _finalize_translation(
         artifacts_directory = get_job_directory(job) / "artifacts"
         if resolve_translation_quality(job) == "polished" and not polished_result:
             draft_path = artifacts_directory / "translation-draft-cues.json"
-            _write_json(draft_path, [asdict(cue) for cue in translated])
-            _add_artifact(job, "translation_draft_cues", draft_path, event_sink)
+            write_json(draft_path, [asdict(cue) for cue in translated])
+            add_artifact(job, "translation_draft_cues", draft_path, event_sink)
             invalidated = downstream_of(ArtifactKind.TRANSLATION_DRAFT_CUES)
             job.artifacts = [
                 artifact for artifact in job.artifacts if artifact.kind not in invalidated
@@ -505,18 +505,18 @@ def _finalize_translation(
             save_job(job)
             return (draft_path,)
         translated_cues_path = artifacts_directory / "translated-cues.json"
-        _write_json(translated_cues_path, [asdict(cue) for cue in translated])
+        write_json(translated_cues_path, [asdict(cue) for cue in translated])
         invalidate(job)
-        _add_artifact(job, "translated_cues", translated_cues_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "translated_cues", translated_cues_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
     # QA/渲染失败由 _qa_and_render_translation 记账，勿回写 TRANSLATE=failed。
@@ -533,7 +533,7 @@ def complete_translated_outputs(
     用于 ``needs_review`` 确认后的 continue：cues 已落盘但 SRT/ASS 尚未写出的断点。
     """
     job = load_job(job_file)
-    translated = _load_cues(_artifact_path(job, "translated_cues"))
+    translated = load_cues(artifact_path(job, "translated_cues"))
     return _qa_and_render_translation(job, translated, event_sink)
 
 
@@ -546,7 +546,7 @@ def _qa_and_render_translation(
     current_stage = StageName.SUBTITLE_QA
     try:
         artifacts_directory = get_job_directory(job) / "artifacts"
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -563,12 +563,12 @@ def _qa_and_render_translation(
             required_terms=_required_glossary_terms(job),
         )
         qa_path = artifacts_directory / "qa-translated.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
+        write_json(qa_path, asdict(report))
+        add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
+        complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -576,17 +576,17 @@ def _qa_and_render_translation(
             extras={"detail": "translated"},
         )
         paths = _render_translated_outputs(job, translated, media_data, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         return paths
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
-            _set_stage(
+            set_stage(
                 job,
                 current_stage,
                 StageStatus.FAILED,
                 event_sink,
                 error=str(error),
-                error_category=_error_category(error),
+                error_category=error_category(error),
             )
         raise
 
@@ -594,7 +594,7 @@ def _qa_and_render_translation(
 def _media_data(job: Job) -> dict[str, Any]:
     if job.config.get("input_kind") == "subtitle":
         return {}
-    media_path = _artifact_path(job, "media_info")
+    media_path = artifact_path(job, "media_info")
     return json.loads(media_path.read_text(encoding="utf-8"))
 
 
@@ -620,8 +620,8 @@ def _render_translated_outputs(
         artifacts_directory / "bilingual.srt",
         mode="bilingual",
     )
-    _add_artifact(job, "translated_srt", translated_path, event_sink)
-    _add_artifact(job, "bilingual_srt", bilingual_path, event_sink)
+    add_artifact(job, "translated_srt", translated_path, event_sink)
+    add_artifact(job, "bilingual_srt", bilingual_path, event_sink)
     paths = [translated_path, bilingual_path]
 
     width = int(media_data.get("width") or 0)
@@ -633,7 +633,7 @@ def _render_translated_outputs(
             video_width=width,
             video_height=height,
         )
-        _add_artifact(job, "bilingual_ass", ass_path, event_sink)
+        add_artifact(job, "bilingual_ass", ass_path, event_sink)
         paths.append(ass_path)
     return tuple(paths)
 
@@ -667,7 +667,7 @@ def prepare_agent_translation(
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise ValueError("translation requires checksum-valid source_cues")
-    cues = _load_cues(source_path)
+    cues = load_cues(source_path)
     batches = build_translation_batches(
         cues,
         source_language=source_language,
@@ -675,7 +675,7 @@ def prepare_agent_translation(
         batch_size=batch_size,
         policy=resolved_policy,
     )
-    _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
+    set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     try:
         output_path = get_job_directory(job) / "artifacts" / "translation-batches.json"
         manifest: dict[str, Any] = {
@@ -691,17 +691,17 @@ def prepare_agent_translation(
             manifest.update(
                 {
                     "batch_size": batch_size,
-                    "source_cues_checksum": _checksum(source_path),
+                    "source_cues_checksum": checksum(source_path),
                     "task": "translate_and_polish",
                     "task_version": TRANSLATE_AND_POLISH_TASK_VERSION,
                 }
             )
             manifest["fingerprint"] = agent_translation_manifest_fingerprint(manifest)
-        _write_json(
+        write_json(
             output_path,
             manifest,
         )
-        _add_artifact(job, "translation_batches", output_path, event_sink)
+        add_artifact(job, "translation_batches", output_path, event_sink)
         job.config["target_language"] = target_language
         job.config["source_language"] = source_language
         job.config["translation_policy"] = resolved_policy.to_dict()
@@ -709,16 +709,16 @@ def prepare_agent_translation(
             job.config["translation_quality"] = quality
             save_job(job)
         if await_input:
-            _set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
+            set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return output_path
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
 
@@ -760,7 +760,7 @@ def run_translation(
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise ValueError("translation requires checksum-valid source_cues")
-    cues = _load_cues(source_path)
+    cues = load_cues(source_path)
     source_language = next(
         (cue.source_language for cue in cues if cue.source_language),
         job.config.get("source_language", "auto"),
@@ -783,7 +783,7 @@ def run_translation(
             policy=resolved_policy,
         )
         translation_fingerprint = _translation_fingerprint(
-            source_cues_checksum=_checksum(source_path),
+            source_cues_checksum=checksum(source_path),
             source_language=source_language,
             target_language=target_language,
             provider=mode,
@@ -831,7 +831,7 @@ def run_translation(
     job = load_job(job_file)
     if batches is None or translation_fingerprint is None:
         raise RuntimeError("translation batches were not resolved")
-    _set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
+    set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     if event_sink:
         event_sink(
             create_event(
@@ -902,7 +902,7 @@ def run_translation(
                         )
                     )
 
-            translated_batch = _translate_batch_with_retries(
+            translated_batch = translate_batch_with_retries(
                 batch,
                 provider_config,
                 max_retries=max_retries,
@@ -910,7 +910,7 @@ def run_translation(
             )
             translations.update(translated_batch)
             completed_batches.add(batch.id)
-            _write_json(
+            write_json(
                 progress_output,
                 {
                     "fingerprint": translation_fingerprint,
@@ -921,7 +921,7 @@ def run_translation(
                     ],
                 },
             )
-            _add_artifact(job, "translation_progress", progress_output, event_sink)
+            add_artifact(job, "translation_progress", progress_output, event_sink)
             if event_sink:
                 event_sink(
                     create_event(
@@ -933,22 +933,22 @@ def run_translation(
                     )
                 )
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
 
     response_path = artifacts_directory / "translation-response.json"
-    _write_json(
+    write_json(
         response_path,
         {"items": [{"id": cue_id, "text": text} for cue_id, text in sorted(translations.items())]},
     )
-    _add_artifact(job, "translation_response", response_path, event_sink)
+    add_artifact(job, "translation_response", response_path, event_sink)
     rendered = apply_agent_translation(
         job_file,
         response_path,
@@ -1000,7 +1000,7 @@ def apply_agent_translation(
             progress_path = (
                 get_job_directory(job) / "artifacts" / "translation-polish-progress.json"
             )
-            _write_json(
+            write_json(
                 progress_path,
                 {
                     "fingerprint": polished_manifest["fingerprint"],
@@ -1011,10 +1011,10 @@ def apply_agent_translation(
                     ],
                 },
             )
-            _add_artifact(job, "translation_polish_progress", progress_path, event_sink)
+            add_artifact(job, "translation_polish_progress", progress_path, event_sink)
         elif current_progress[1] != translations:
             raise ValueError("translation response differs from completed polished progress")
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.RUNNING,
@@ -1024,20 +1024,20 @@ def apply_agent_translation(
         try:
             return complete_agent_polished_outputs(job_file, event_sink=event_sink)
         except Exception as error:
-            _set_stage(
+            set_stage(
                 job,
                 StageName.TRANSLATE,
                 StageStatus.FAILED,
                 event_sink,
                 error=str(error),
-                error_category=_error_category(error),
+                error_category=error_category(error),
                 extras={"phase": "polish"},
             )
             raise
     current_stage = StageName.TRANSLATE
-    _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+    set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
-        cues = _load_cues(_artifact_path(job, "source_cues"))
+        cues = load_cues(artifact_path(job, "source_cues"))
         response = json.loads(Path(response_file).read_text(encoding="utf-8"))
         items = response.get("items") if isinstance(response, dict) else None
         if not isinstance(items, list):
@@ -1053,17 +1053,17 @@ def apply_agent_translation(
             translations[cue_id] = text.strip()
         translated = apply_translations(cues, translations, target_language=target_language)
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
-    return _finalize_translation(
-        job, translated, event_sink, invalidate=_invalidate_preview_artifacts
+    return finalize_translation(
+        job, translated, event_sink, invalidate=invalidate_preview_artifacts
     )
 
 
@@ -1087,9 +1087,9 @@ def apply_subtitle_translation(
     if workflow is None and job.config.get("target_language") not in {None, target_language}:
         raise ValueError("target language must match the persisted atomic job goal")
     current_stage = StageName.TRANSLATE
-    _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+    set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
-        source_cues = _load_cues(_artifact_path(job, "source_cues"))
+        source_cues = load_cues(artifact_path(job, "source_cues"))
         subtitle_path = Path(subtitle_file).expanduser()
         translated_cues = load_subtitles(
             subtitle_path,
@@ -1106,21 +1106,21 @@ def apply_subtitle_translation(
         imported_path = artifacts_directory / f"input-translation{subtitle_path.suffix.lower()}"
         if subtitle_path.resolve() != imported_path.resolve():
             shutil.copy2(subtitle_path, imported_path)
-        _add_artifact(job, "input_translation_subtitles", imported_path, event_sink)
+        add_artifact(job, "input_translation_subtitles", imported_path, event_sink)
         mapping_path = artifacts_directory / "translation-mapping.json"
-        _write_json(mapping_path, mapping_report)
-        _add_artifact(job, "translation_mapping", mapping_path, event_sink)
+        write_json(mapping_path, mapping_report)
+        add_artifact(job, "translation_mapping", mapping_path, event_sink)
         job.config["target_language"] = target_language
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
-    return _finalize_translation(
-        job, translated, event_sink, invalidate=_invalidate_preview_artifacts
+    return finalize_translation(
+        job, translated, event_sink, invalidate=invalidate_preview_artifacts
     )

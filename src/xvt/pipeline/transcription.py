@@ -32,16 +32,16 @@ from xvt.job_store import create_job, get_job_directory, get_job_file, load_job,
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.pipeline.common import (
-    _add_artifact,
-    _artifact_checksum_for,
-    _error_category,
-    _load_cues,
-    _media_info_from_remote_metadata,
-    _set_stage,
-    _write_json,
+    add_artifact,
+    artifact_checksum_for,
+    error_category,
     is_subtitle_input,
+    load_cues,
+    media_info_from_remote_metadata,
+    set_stage,
+    write_json,
 )
-from xvt.pipeline.review import _complete_qa_stage
+from xvt.pipeline.review import complete_qa_stage
 from xvt.process import run_command
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
@@ -113,7 +113,7 @@ def _record_candidate_qa(
     event_sink: EventSink | None,
 ) -> Path:
     path = get_job_directory(job) / "artifacts" / "source-candidate-qa.json"
-    _write_json(
+    write_json(
         path,
         {
             "candidate_kind": evaluation.kind.value,
@@ -121,7 +121,7 @@ def _record_candidate_qa(
             "repairs": [asdict(repair) for repair in evaluation.repairs],
         },
     )
-    _add_artifact(job, "source_candidate_qa", path, event_sink)
+    add_artifact(job, "source_candidate_qa", path, event_sink)
     return path
 
 
@@ -136,11 +136,11 @@ def _record_source_selection(
     alignment_confidence: float | None,
     event_sink: EventSink | None,
 ) -> Path:
-    source_checksum = _artifact_checksum_for(job, "source_cues")
+    source_checksum = artifact_checksum_for(job, "source_cues")
     if source_checksum is None:
         raise RuntimeError("source selection requires a registered source_cues artifact")
     path = get_job_directory(job) / "artifacts" / "source-selection.json"
-    _write_json(
+    write_json(
         path,
         {
             "strategy": strategy.value,
@@ -152,7 +152,7 @@ def _record_source_selection(
             "source_cues_checksum": source_checksum,
         },
     )
-    _add_artifact(job, "source_selection", path, event_sink)
+    add_artifact(job, "source_selection", path, event_sink)
     if event_sink:
         event_sink(
             create_event(
@@ -211,7 +211,7 @@ def _recover_source_selection(
 
 def _source_selection_matches(job: Job) -> bool:
     path = valid_artifact_path(job, "source_selection")
-    source_checksum = _artifact_checksum_for(job, "source_cues")
+    source_checksum = artifact_checksum_for(job, "source_cues")
     if path is None or source_checksum is None:
         return False
     try:
@@ -257,7 +257,7 @@ def _normalize_audio_and_transcribe(
         raise RuntimeError("audio acquisition is required for transcription or alignment")
     audio_path = valid_artifact_path(job, "normalized_audio")
     if audio_path is None:
-        _set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.RUNNING, event_sink)
+        set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.RUNNING, event_sink)
         audio_path = artifacts_directory / "audio.wav"
         run_command(
             [
@@ -278,10 +278,10 @@ def _normalize_audio_and_transcribe(
         )
         if not audio_path.is_file():
             raise RuntimeError("FFmpeg completed without producing normalized audio")
-        _add_artifact(job, "normalized_audio", audio_path, event_sink)
-    _set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "normalized_audio", audio_path, event_sink)
+    set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SUCCEEDED, event_sink)
 
-    _set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
+    set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
     transcript = transcribe_audio(
         audio_path,
         engine=engine,
@@ -290,9 +290,9 @@ def _normalize_audio_and_transcribe(
         total_ms=media_info.duration_ms,
     )
     transcript_path = artifacts_directory / "words.json"
-    _write_json(transcript_path, asdict(transcript))
-    _add_artifact(job, "word_transcript", transcript_path, event_sink)
-    _set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
+    write_json(transcript_path, asdict(transcript))
+    add_artifact(job, "word_transcript", transcript_path, event_sink)
+    set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
     return transcript
 
 
@@ -315,7 +315,7 @@ def _process_adaptive_media(
     artifacts_directory = job_directory / "artifacts"
     artifacts_directory.mkdir(parents=True, exist_ok=True)
     for stage in TRAILING_TRANSCRIPTION_SKIPS:
-        _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
+        set_stage(job, stage, StageStatus.SKIPPED, event_sink)
 
     current_stage = StageName.IMPORT_SUBTITLES
     candidate_kind = candidate.kind if candidate else SourceCandidateKind.NONE
@@ -323,16 +323,16 @@ def _process_adaptive_media(
     evaluation: SourceCandidateEvaluation | None = None
     try:
         if candidate is None:
-            _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SKIPPED, event_sink)
+            set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SKIPPED, event_sink)
         else:
-            _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.RUNNING, event_sink)
+            set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.RUNNING, event_sink)
             if not candidate.path.is_file():
                 raise ValueError(f"subtitle file does not exist: {candidate.path}")
             imported_path = artifacts_directory / f"input-subtitles{candidate.path.suffix.lower()}"
             if candidate.path.resolve() != imported_path.resolve():
                 shutil.copy2(candidate.path, imported_path)
-            _add_artifact(job, "input_subtitles", imported_path, event_sink)
-            _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SUCCEEDED, event_sink)
+            add_artifact(job, "input_subtitles", imported_path, event_sink)
+            set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SUCCEEDED, event_sink)
             try:
                 imported_cues = load_subtitles(
                     imported_path,
@@ -396,7 +396,7 @@ def _process_adaptive_media(
             )
         else:
             for stage in (StageName.NORMALIZE_AUDIO, StageName.TRANSCRIBE):
-                _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
+                set_stage(job, stage, StageStatus.SKIPPED, event_sink)
 
         alignment_confidence: float | None = None
         selected_kind = "subtitles"
@@ -406,12 +406,12 @@ def _process_adaptive_media(
             if imported_cues is None or transcript is None:
                 raise RuntimeError("subtitle alignment requires subtitle cues and a transcript")
             current_stage = StageName.ALIGN
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             alignment = align_source_cues(imported_cues, transcript)
             alignment_confidence = alignment.confidence
             alignment_path = artifacts_directory / "alignment.json"
-            _write_json(alignment_path, asdict(alignment))
-            _add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
+            write_json(alignment_path, asdict(alignment))
+            add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
             aligned_cues = list(alignment.cues)
             aligned_report = check_subtitles(
                 aligned_cues,
@@ -440,7 +440,7 @@ def _process_adaptive_media(
                 selection_reason = "manual_subtitles_aligned"
             else:
                 current_stage = StageName.SEGMENT
-                _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+                set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
                 cues = segment_transcript(
                     transcript,
                     segmentation_config_for_preset(
@@ -450,7 +450,7 @@ def _process_adaptive_media(
                 )
                 if not cues:
                     raise RuntimeError("transcription produced no subtitle cues")
-                _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+                set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
                 selected_kind = "asr"
                 reference_allowed = False
                 selection_reason = (
@@ -458,13 +458,13 @@ def _process_adaptive_media(
                     if alignment.confidence < minimum_alignment_confidence
                     else "alignment_post_qa_failed"
                 )
-            _set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
+            set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
             if selected_kind == "aligned_subtitles":
-                _set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
+                set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
         elif plan.action is SourceSelectionAction.ASR:
-            _set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
+            set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
             current_stage = StageName.SEGMENT
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             cues = segment_transcript(
                 transcript,
                 segmentation_config_for_preset(
@@ -474,18 +474,18 @@ def _process_adaptive_media(
             )
             if not cues:
                 raise RuntimeError("transcription produced no subtitle cues")
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
             selected_kind = "asr"
         else:
             if imported_cues is None:
                 raise RuntimeError("subtitle selection requires imported subtitle cues")
             cues = imported_cues
-            _set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
-            _set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
+            set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
+            set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
 
         cues_path = artifacts_directory / "source-cues.json"
-        _write_json(cues_path, [asdict(cue) for cue in cues])
-        _add_artifact(job, "source_cues", cues_path, event_sink)
+        write_json(cues_path, [asdict(cue) for cue in cues])
+        add_artifact(job, "source_cues", cues_path, event_sink)
         _record_source_selection(
             job,
             strategy=strategy,
@@ -498,7 +498,7 @@ def _process_adaptive_media(
         )
 
         current_stage = StageName.SUBTITLE_QA
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -512,12 +512,12 @@ def _process_adaptive_media(
             video_height=media_info.height,
         )
         qa_path = artifacts_directory / "qa.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
+        write_json(qa_path, asdict(report))
+        add_artifact(job, "subtitle_qa", qa_path, event_sink)
+        complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -525,17 +525,17 @@ def _process_adaptive_media(
             extras={"detail": "source"},
         )
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-        _add_artifact(job, "source_srt", subtitle_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "source_srt", subtitle_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
-            _set_stage(
+            set_stage(
                 job,
                 current_stage,
                 StageStatus.FAILED,
                 event_sink,
                 error=str(error),
-                error_category=_error_category(error),
+                error_category=error_category(error),
             )
         raise
 
@@ -573,12 +573,12 @@ def _process_acquired_media(
         ),
         *TRAILING_TRANSCRIPTION_SKIPS,
     ):
-        _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
+        set_stage(job, stage, StageStatus.SKIPPED, event_sink)
     current_stage = StageName.IMPORT_SUBTITLES
     try:
         imported_cues = None
         if subtitles:
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             subtitle_path = Path(subtitles).expanduser()
             if not subtitle_path.is_file():
                 raise ValueError(f"subtitle file does not exist: {subtitle_path}")
@@ -592,15 +592,15 @@ def _process_acquired_media(
             )
             if not imported_cues:
                 raise ValueError("subtitle file contains no usable cues")
-            _add_artifact(job, "input_subtitles", imported_path, event_sink)
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+            add_artifact(job, "input_subtitles", imported_path, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
         transcript = None
         if imported_cues is None or align_subtitles:
             if source is None:
                 raise RuntimeError("audio acquisition is required for transcription or alignment")
             current_stage = StageName.NORMALIZE_AUDIO
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             audio_path = artifacts_directory / "audio.wav"
             run_command(
                 [
@@ -621,11 +621,11 @@ def _process_acquired_media(
             )
             if not audio_path.is_file():
                 raise RuntimeError("FFmpeg completed without producing normalized audio")
-            _add_artifact(job, "normalized_audio", audio_path, event_sink)
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+            add_artifact(job, "normalized_audio", audio_path, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
             current_stage = StageName.TRANSCRIBE
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             transcript = transcribe_audio(
                 audio_path,
                 engine=engine,
@@ -634,18 +634,18 @@ def _process_acquired_media(
                 total_ms=media_info.duration_ms,
             )
             words_path = artifacts_directory / "words.json"
-            _write_json(words_path, asdict(transcript))
-            _add_artifact(job, "word_transcript", words_path, event_sink)
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+            write_json(words_path, asdict(transcript))
+            add_artifact(job, "word_transcript", words_path, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
         if imported_cues is not None and align_subtitles:
             current_stage = StageName.ALIGN
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             alignment = align_source_cues(imported_cues, transcript)
             cues = list(alignment.cues)
             alignment_path = artifacts_directory / "alignment.json"
-            _write_json(alignment_path, asdict(alignment))
-            _add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
+            write_json(alignment_path, asdict(alignment))
+            add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
             if (
                 not allow_low_confidence_alignment
                 and alignment.confidence < minimum_alignment_confidence
@@ -654,12 +654,12 @@ def _process_acquired_media(
                     "subtitle alignment confidence is below the required threshold "
                     f"({alignment.confidence:.3f} < {minimum_alignment_confidence:.3f})"
                 )
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         elif imported_cues is not None:
             cues = imported_cues
         else:
             current_stage = StageName.SEGMENT
-            _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             cues = segment_transcript(
                 transcript,
                 segmentation_config_for_preset(
@@ -669,14 +669,14 @@ def _process_acquired_media(
             )
             if not cues:
                 raise RuntimeError("transcription produced no subtitle cues")
-            _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
         cues_path = artifacts_directory / "source-cues.json"
-        _write_json(cues_path, [asdict(cue) for cue in cues])
-        _add_artifact(job, "source_cues", cues_path, event_sink)
+        write_json(cues_path, [asdict(cue) for cue in cues])
+        add_artifact(job, "source_cues", cues_path, event_sink)
 
         current_stage = StageName.SUBTITLE_QA
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -690,12 +690,12 @@ def _process_acquired_media(
             video_height=media_info.height,
         )
         qa_path = artifacts_directory / "qa.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
+        write_json(qa_path, asdict(report))
+        add_artifact(job, "subtitle_qa", qa_path, event_sink)
+        complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -703,17 +703,17 @@ def _process_acquired_media(
             extras={"detail": "source"},
         )
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-        _add_artifact(job, "source_srt", subtitle_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "source_srt", subtitle_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
-            _set_stage(
+            set_stage(
                 job,
                 current_stage,
                 StageStatus.FAILED,
                 event_sink,
                 error=str(error),
-                error_category=_error_category(error),
+                error_category=error_category(error),
             )
         raise
 
@@ -773,22 +773,22 @@ def run_local_transcription(
 
     current_stage = StageName.INSPECT
     try:
-        _set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+        set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
         media_info = probe_media(source)
         media_path = get_job_directory(job) / "artifacts" / "media.json"
         media_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(media_path, asdict(media_info))
-        _add_artifact(job, "media_info", media_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
-        _set_stage(job, StageName.ACQUIRE, StageStatus.SKIPPED, event_sink)
+        write_json(media_path, asdict(media_info))
+        add_artifact(job, "media_info", media_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.ACQUIRE, StageStatus.SKIPPED, event_sink)
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
     if "source_strategy" in job.config:
@@ -834,8 +834,8 @@ def _finish_subtitle_job(
 ) -> Job:
     artifacts_directory = get_job_directory(job) / "artifacts"
     cues_path = artifacts_directory / "source-cues.json"
-    _write_json(cues_path, [asdict(cue) for cue in cues])
-    _add_artifact(job, "source_cues", cues_path, event_sink)
+    write_json(cues_path, [asdict(cue) for cue in cues])
+    add_artifact(job, "source_cues", cues_path, event_sink)
     if record_source_selection:
         _record_source_selection(
             job,
@@ -848,11 +848,11 @@ def _finish_subtitle_job(
             event_sink=event_sink,
         )
     if job.stages[StageName.TRANSLATE].status is StageStatus.PENDING:
-        _set_stage(job, StageName.TRANSLATE, StageStatus.SKIPPED, event_sink)
+        set_stage(job, StageName.TRANSLATE, StageStatus.SKIPPED, event_sink)
 
     current_stage = StageName.SUBTITLE_QA
     try:
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -861,12 +861,12 @@ def _finish_subtitle_job(
         )
         report = check_subtitles(cues)
         qa_path = artifacts_directory / "qa.json"
-        _write_json(qa_path, asdict(report))
-        _add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        _complete_qa_stage(job, report, event_sink)
+        write_json(qa_path, asdict(report))
+        add_artifact(job, "subtitle_qa", qa_path, event_sink)
+        complete_qa_stage(job, report, event_sink)
 
         current_stage = StageName.RENDER
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.RUNNING,
@@ -874,19 +874,19 @@ def _finish_subtitle_job(
             extras={"detail": "source"},
         )
         subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-        _add_artifact(job, "source_srt", subtitle_path, event_sink)
-        _set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "source_srt", subtitle_path, event_sink)
+        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
         for stage in (StageName.BURN, StageName.MEDIA_QA):
-            _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
+            set_stage(job, stage, StageStatus.SKIPPED, event_sink)
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
-            _set_stage(
+            set_stage(
                 job,
                 current_stage,
                 StageStatus.FAILED,
                 event_sink,
                 error=str(error),
-                error_category=_error_category(error),
+                error_category=error_category(error),
             )
         raise
     return job
@@ -932,8 +932,8 @@ def run_subtitle_transcription(
 
     try:
         for stage in SUBTITLE_INPUT_SKIPS:
-            _set_stage(job, stage, StageStatus.SKIPPED, event_sink)
-        _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.RUNNING, event_sink)
+            set_stage(job, stage, StageStatus.SKIPPED, event_sink)
+        set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.RUNNING, event_sink)
         artifacts_directory = get_job_directory(job) / "artifacts"
         artifacts_directory.mkdir(parents=True, exist_ok=True)
         imported_path = artifacts_directory / f"input-subtitles{source.suffix.lower()}"
@@ -945,16 +945,16 @@ def run_subtitle_transcription(
         )
         if not cues:
             raise ValueError("subtitle file contains no usable cues")
-        _add_artifact(job, "input_subtitles", imported_path, event_sink)
-        _set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SUCCEEDED, event_sink)
+        add_artifact(job, "input_subtitles", imported_path, event_sink)
+        set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SUCCEEDED, event_sink)
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             StageName.IMPORT_SUBTITLES,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
 
@@ -1035,13 +1035,13 @@ def run_remote_transcription(
             if job.stages[StageName.INSPECT].status is StageStatus.RUNNING
             else StageName.ACQUIRE
         )
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
     if "source_strategy" in job.config:
@@ -1095,7 +1095,7 @@ def _acquire_remote_job(
     url = job.input
     remote_path = valid_artifact_path(job, "remote_info")
     if remote_path is None:
-        _set_stage(job, StageName.INSPECT, StageStatus.RUNNING, event_sink)
+        set_stage(job, StageName.INSPECT, StageStatus.RUNNING, event_sink)
         remote_info = inspect_remote(
             url,
             cookies_from_browser=cookies_from_browser,
@@ -1103,11 +1103,11 @@ def _acquire_remote_job(
         )
         remote_path = get_job_directory(job) / "artifacts" / "remote.json"
         remote_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(remote_path, asdict(remote_info))
-        _add_artifact(job, "remote_info", remote_path, event_sink)
+        write_json(remote_path, asdict(remote_info))
+        add_artifact(job, "remote_info", remote_path, event_sink)
     else:
         remote_info = _load_remote_info(remote_path)
-    _set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
+    set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
 
     candidate: AcquiredSubtitleCandidate | None = None
     selected_subtitles = valid_artifact_path(job, "input_subtitles") or job.config.get("subtitles")
@@ -1145,7 +1145,7 @@ def _acquire_remote_job(
             )
         selected_language = manual_language or automatic_language
         if selected_language:
-            _set_stage(
+            set_stage(
                 job,
                 StageName.ACQUIRE,
                 StageStatus.RUNNING,
@@ -1161,7 +1161,7 @@ def _acquire_remote_job(
                 proxy=proxy,
             )
             acquired_subtitles = True
-            _add_artifact(job, "downloaded_subtitles", selected_subtitles, event_sink)
+            add_artifact(job, "downloaded_subtitles", selected_subtitles, event_sink)
             candidate = AcquiredSubtitleCandidate(
                 Path(selected_subtitles),
                 (
@@ -1182,10 +1182,10 @@ def _acquire_remote_job(
 
     preflight_evaluation: SourceCandidateEvaluation | None = None
     if "source_strategy" in job.config and candidate:
-        provisional_media_info = _media_info_from_remote_metadata(url, remote_info.duration_ms)
+        provisional_media_info = media_info_from_remote_metadata(url, remote_info.duration_ms)
         media_path = get_job_directory(job) / "artifacts" / "media.json"
-        _write_json(media_path, asdict(provisional_media_info))
-        _add_artifact(job, "media_info", media_path, event_sink)
+        write_json(media_path, asdict(provisional_media_info))
+        add_artifact(job, "media_info", media_path, event_sink)
         try:
             candidate_cues = load_subtitles(
                 candidate.path,
@@ -1238,7 +1238,7 @@ def _acquire_remote_job(
     if source is None and download_for_burn:
         source = valid_artifact_path(job, "downloaded_media")
     if needs_audio or download_for_burn:
-        _set_stage(
+        set_stage(
             job,
             StageName.ACQUIRE,
             StageStatus.RUNNING,
@@ -1254,19 +1254,19 @@ def _acquire_remote_job(
                 proxy=proxy,
                 event_sink=event_sink,
             )
-            _add_artifact(job, "downloaded_media", source, event_sink)
+            add_artifact(job, "downloaded_media", source, event_sink)
         media_info = probe_media(source)
         if download_for_burn and valid_artifact_path(job, "source_video") is None:
-            _add_artifact(job, "source_video", source, event_sink)
-        _set_stage(job, StageName.ACQUIRE, StageStatus.SUCCEEDED, event_sink)
+            add_artifact(job, "source_video", source, event_sink)
+        set_stage(job, StageName.ACQUIRE, StageStatus.SUCCEEDED, event_sink)
     else:
         source = None
-        media_info = _media_info_from_remote_metadata(url, remote_info.duration_ms)
+        media_info = media_info_from_remote_metadata(url, remote_info.duration_ms)
         status = StageStatus.SUCCEEDED if acquired_subtitles else StageStatus.SKIPPED
-        _set_stage(job, StageName.ACQUIRE, status, event_sink)
+        set_stage(job, StageName.ACQUIRE, status, event_sink)
     media_path = get_job_directory(job) / "artifacts" / "media.json"
-    _write_json(media_path, asdict(media_info))
-    _add_artifact(job, "media_info", media_path, event_sink)
+    write_json(media_path, asdict(media_info))
+    add_artifact(job, "media_info", media_path, event_sink)
     return source, media_info, candidate
 
 
@@ -1294,13 +1294,13 @@ def resume_remote_transcription(
             if job.stages[StageName.INSPECT].status is StageStatus.RUNNING
             else StageName.ACQUIRE
         )
-        _set_stage(
+        set_stage(
             job,
             current_stage,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
         )
         raise
     if "source_strategy" in job.config:
@@ -1450,8 +1450,8 @@ def _finish_resumed_source(
 ) -> Job:
     artifacts_directory = get_job_directory(job) / "artifacts"
     cues_path = artifacts_directory / "source-cues.json"
-    _write_json(cues_path, [asdict(cue) for cue in cues])
-    _add_artifact(job, "source_cues", cues_path, event_sink)
+    write_json(cues_path, [asdict(cue) for cue in cues])
+    add_artifact(job, "source_cues", cues_path, event_sink)
     if "source_strategy" in job.config and not _source_selection_matches(job):
         candidate = _candidate_from_job(job)
         if candidate is not None and valid_artifact_path(job, "source_candidate_qa") is None:
@@ -1485,7 +1485,7 @@ def _finish_resumed_source(
             _record_candidate_qa(job, evaluation, event_sink)
         _recover_source_selection(job, cues, event_sink)
 
-    _set_stage(
+    set_stage(
         job,
         StageName.SUBTITLE_QA,
         StageStatus.RUNNING,
@@ -1499,11 +1499,11 @@ def _finish_resumed_source(
         video_height=media_info.height,
     )
     qa_path = artifacts_directory / "qa.json"
-    _write_json(qa_path, asdict(report))
-    _add_artifact(job, "subtitle_qa", qa_path, event_sink)
-    _complete_qa_stage(job, report, event_sink)
+    write_json(qa_path, asdict(report))
+    add_artifact(job, "subtitle_qa", qa_path, event_sink)
+    complete_qa_stage(job, report, event_sink)
 
-    _set_stage(
+    set_stage(
         job,
         StageName.RENDER,
         StageStatus.RUNNING,
@@ -1511,8 +1511,8 @@ def _finish_resumed_source(
         extras={"detail": "source"},
     )
     subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-    _add_artifact(job, "source_srt", subtitle_path, event_sink)
-    _set_stage(job, StageName.RENDER, StageStatus.SUCCEEDED, event_sink)
+    add_artifact(job, "source_srt", subtitle_path, event_sink)
+    set_stage(job, StageName.RENDER, StageStatus.SUCCEEDED, event_sink)
     if event_sink:
         event_sink(
             create_event(EventType.JOB_RESUMED, **job_event_fields(job.id, get_job_file(job)))
@@ -1527,7 +1527,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         if cues_path:
             resumed = _finish_subtitle_job(
                 job,
-                _load_cues(cues_path),
+                load_cues(cues_path),
                 event_sink=event_sink,
                 record_source_selection=(
                     "source_strategy" in job.config and not _source_selection_matches(job)
@@ -1570,7 +1570,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
 
     cues_path = valid_artifact_path(job, "source_cues")
     if cues_path:
-        return _finish_resumed_source(job, _load_cues(cues_path), media_info, event_sink)
+        return _finish_resumed_source(job, load_cues(cues_path), media_info, event_sink)
 
     if "source_strategy" in job.config:
         candidate = _candidate_from_job(job)
@@ -1603,7 +1603,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         audio_path = valid_artifact_path(job, "normalized_audio")
         if audio_path is None:
             raise ValueError("job has no valid resumable checkpoint; run the job again")
-        _set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
+        set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
         language = job.config.get("source_language")
         transcript = transcribe_audio(
             audio_path,
@@ -1613,9 +1613,9 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             total_ms=media_info.duration_ms,
         )
         transcript_path = get_job_directory(job) / "artifacts" / "words.json"
-        _write_json(transcript_path, asdict(transcript))
-        _add_artifact(job, "word_transcript", transcript_path, event_sink)
-        _set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
+        write_json(transcript_path, asdict(transcript))
+        add_artifact(job, "word_transcript", transcript_path, event_sink)
+        set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
 
     if job.config.get("align_subtitles"):
         subtitle_path = valid_artifact_path(job, "input_subtitles")
@@ -1626,11 +1626,11 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             role="source",
             source_language=job.config.get("source_language"),
         )
-        _set_stage(job, StageName.ALIGN, StageStatus.RUNNING, event_sink)
+        set_stage(job, StageName.ALIGN, StageStatus.RUNNING, event_sink)
         alignment = align_source_cues(imported_cues, transcript)
         alignment_path = get_job_directory(job) / "artifacts" / "alignment.json"
-        _write_json(alignment_path, asdict(alignment))
-        _add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
+        write_json(alignment_path, asdict(alignment))
+        add_artifact(job, "subtitle_alignment", alignment_path, event_sink)
         minimum_confidence = float(
             job.config.get("minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE)
         )
@@ -1638,7 +1638,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             not job.config.get("allow_low_confidence_alignment", False)
             and alignment.confidence < minimum_confidence
         ):
-            _set_stage(
+            set_stage(
                 job,
                 StageName.ALIGN,
                 StageStatus.FAILED,
@@ -1646,10 +1646,10 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
                 error="subtitle alignment confidence is below the required threshold",
             )
             raise ValueError("subtitle alignment confidence is below the required threshold")
-        _set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
         cues = list(alignment.cues)
     else:
-        _set_stage(job, StageName.SEGMENT, StageStatus.RUNNING, event_sink)
+        set_stage(job, StageName.SEGMENT, StageStatus.RUNNING, event_sink)
         try:
             cues = segment_transcript(
                 transcript,
@@ -1659,17 +1659,17 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
                 media_duration_ms=media_info.duration_ms,
             )
         except ValueError as error:
-            _set_stage(
+            set_stage(
                 job,
                 StageName.SEGMENT,
                 StageStatus.FAILED,
                 event_sink,
                 error=str(error),
-                error_category=_error_category(error),
+                error_category=error_category(error),
             )
             raise
         if not cues:
-            _set_stage(
+            set_stage(
                 job,
                 StageName.SEGMENT,
                 StageStatus.FAILED,
@@ -1677,7 +1677,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
                 error="transcription produced no subtitle cues",
             )
             raise RuntimeError("transcription produced no subtitle cues")
-        _set_stage(job, StageName.SEGMENT, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.SEGMENT, StageStatus.SUCCEEDED, event_sink)
     return _finish_resumed_source(job, cues, media_info, event_sink)
 
 
@@ -1747,8 +1747,8 @@ def rebuild_source(
         if source.is_file() and not has_checkpoint:
             probed = probe_media(source)
             media_info = get_job_directory(job) / "artifacts" / "media.json"
-            _write_json(media_info, asdict(probed))
-            _add_artifact(job, "media_info", media_info, event_sink)
+            write_json(media_info, asdict(probed))
+            add_artifact(job, "media_info", media_info, event_sink)
 
     invalidated_kinds = downstream_of(ArtifactKind.SOURCE_CUES) | {
         ArtifactKind.SOURCE_CANDIDATE_QA,
@@ -1822,18 +1822,18 @@ def rebuild_source(
 
     if reusable_remote_media_info is not None:
         media_info = get_job_directory(job) / "artifacts" / "media.json"
-        _write_json(media_info, asdict(reusable_remote_media_info))
-        _add_artifact(job, "media_info", media_info, event_sink)
+        write_json(media_info, asdict(reusable_remote_media_info))
+        add_artifact(job, "media_info", media_info, event_sink)
 
     has_transcription_checkpoint = media_info is not None and (
         word_transcript is not None or normalized_audio is not None
     )
     if not is_remote and media_info is not None:
-        _set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
-        _set_stage(job, StageName.ACQUIRE, StageStatus.SKIPPED, event_sink)
+        set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.ACQUIRE, StageStatus.SKIPPED, event_sink)
     elif is_remote and (has_transcription_checkpoint or reusable_remote_media is not None):
-        _set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
-        _set_stage(job, StageName.ACQUIRE, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.ACQUIRE, StageStatus.SUCCEEDED, event_sink)
 
     if has_transcription_checkpoint:
         rebuilt = resume_job(requested_job_file, event_sink=event_sink)
