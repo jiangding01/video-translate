@@ -24,6 +24,7 @@
 - 翻译提供方连接在 `urlopen` 或响应读取阶段抛出的 `RemoteDisconnected`、连接重置等 `ConnectionError` 统一归类为可重试传输故障；其他 `OSError` 与 401/403 等不可重试 HTTP 错误仍立即失败。
 - 翻译重试拆分为独立预算：传输故障默认最多重试 4 次并遵循最长 30 秒的有效 `Retry-After` / 指数退避，结构性无效响应固定只做 1 次携带纠正提示的重试；传输重试不再误带结构纠正提示。主翻译与局部重译共用同一重试实现和 retry 事件语义。
 - 译文 QA `needs_review` 确认后续跑不再漏写 `translated.srt` / `bilingual.srt`：翻译满足度要求 cue 与两份 SRT 均有效；已有 `translated_cues` 时经 `complete_translated_outputs` 只补 QA+渲染，不重打翻译 API。`plan_advance_steps` 新增 `render` 步骤。
+- 语义复核确认后的译文收尾会将 `translate` stage 正确收口为 `succeeded`，清除此前 QA 阻断留下的旧错误，避免字幕 QA、媒体 QA 和烧录均完成后恢复计划仍显示译文失败。
 - `needs_review` 恢复引导：`status` / recovery / `continue` 入口闸区分 review 与 error；review 给出 `xvt continue JOB --acknowledge-subtitle-review`，不再笼统要求「修字幕」。
 
 ### Changed

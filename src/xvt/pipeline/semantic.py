@@ -611,12 +611,20 @@ def _finalize_candidate(
             valid_artifact_path(job, kind) is not None
             for kind in ("translated_srt", "bilingual_srt")
         ):
+            record = job.stages[StageName.TRANSLATE]
+            if record.status is not StageStatus.SUCCEEDED or record.error is not None:
+                _set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
             return tuple(
                 path
                 for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
                 if (path := valid_artifact_path(job, kind)) is not None
             )
-        return complete_translated_outputs(get_job_file(job), event_sink=event_sink)
+        rendered = complete_translated_outputs(get_job_file(job), event_sink=event_sink)
+        refreshed = load_job(get_job_file(job))
+        record = refreshed.stages[StageName.TRANSLATE]
+        if record.status is not StageStatus.SUCCEEDED or record.error is not None:
+            _set_stage(refreshed, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
+        return rendered
     return _finalize_translation(
         job,
         candidate,
