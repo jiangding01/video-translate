@@ -624,8 +624,13 @@ def _burn_recovery_reason(job: Job, valid_artifacts: dict[str, Path]) -> str:
     """烧录未完成时的人类可读原因；媒体 QA 文案与历史 status 输出保持一致。"""
 
     media_qa_status = job.stages[StageName.MEDIA_QA].status
-    if "burned_video" not in valid_artifacts or media_qa_status is not StageStatus.SUCCEEDED:
+    if media_qa_status is not StageStatus.SUCCEEDED:
         return "烧录尚未通过媒体 QA，可以重新烧录并检查输出视频。"
+    if "burned_video" not in valid_artifacts:
+        return (
+            "媒体 QA 已通过，但烧录成品已不在登记路径或内容已变化（checksum 失效）；"
+            "若已自行保存成品可忽略，需要重新产出时运行 continue。"
+        )
     return "烧录派生指纹已失效，可以重新烧录并检查输出视频。"
 
 

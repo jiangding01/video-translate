@@ -317,6 +317,27 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("媒体 QA", plan.reason)
         self.assertEqual(plan.advance_steps, ("burn",))
 
+    def test_recovery_plan_retries_burn_when_artifact_missing_after_media_qa_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "translated_cues")
+            self._add_artifact(job, root, "translated_srt", content="1\n")
+            self._add_artifact(job, root, "bilingual_srt", content="1\n")
+            job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+            job_file = save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertIn("媒体 QA 已通过", plan.reason)
+        self.assertIn("成品", plan.reason)
+        self.assertNotIn("指纹", plan.reason)
+        self.assertEqual(plan.advance_steps, ("burn",))
+
     def test_recovery_plan_retries_burn_when_fingerprint_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
