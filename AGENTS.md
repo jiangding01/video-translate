@@ -107,6 +107,8 @@ uv run --no-sync xvt doctor
 uv build
 ```
 
+发版流程：升 `pyproject.toml` 与 `src/xvt/__init__.py` 版本号 → CHANGELOG 落版本节 → `uv build` → 合并 `main` 后打 annotated tag `vX.Y.Z` 并推送。历史版本 tag 已补齐（`v0.1.0`、`v0.1.1`）。
+
 真实 YouTube、翻译 API 和整段烧录验收需要用户授权，并使用公开素材和用户自己的凭据。不要把这类测试加入默认测试套件。
 
 ## 完成标准
