@@ -574,6 +574,8 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             job_file = self._job(root, provider="agent")
             manifest_path = prepare_agent_semantic_review(job_file)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["review_prompt_version"], 2)
+            self.assertEqual(manifest["repair_prompt_version"], 2)
             response = root / "semantic-response.json"
             response.write_text(
                 json.dumps(
@@ -987,31 +989,36 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             self.assertTrue(semantic_review_waiting(job))
             self.assertIsNotNone(source_review_input_path(job, [1]))
 
-    def test_agent_manifest_is_bound_to_current_task_version(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            job_file = self._job(root, provider="agent")
-            manifest_path = prepare_agent_semantic_review(job_file)
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["task_version"] = 999
-            canonical = {key: value for key, value in manifest.items() if key != "fingerprint"}
-            manifest["fingerprint"] = hashlib.sha256(
-                json.dumps(
-                    canonical,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8")
-            ).hexdigest()
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            job = load_job(job_file)
-            artifact = next(
-                item for item in job.artifacts if item.kind == "translation_semantic_qa"
-            )
-            artifact.checksum = file_checksum(manifest_path)
-            save_job(job)
+    def test_agent_manifest_is_bound_to_current_contract_versions(self) -> None:
+        for field, value in (
+            ("task_version", 999),
+            ("review_prompt_version", 1),
+            ("repair_prompt_version", 1),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                job_file = self._job(root, provider="agent")
+                manifest_path = prepare_agent_semantic_review(job_file)
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest[field] = value
+                canonical = {key: value for key, value in manifest.items() if key != "fingerprint"}
+                manifest["fingerprint"] = hashlib.sha256(
+                    json.dumps(
+                        canonical,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                job = load_job(job_file)
+                artifact = next(
+                    item for item in job.artifacts if item.kind == "translation_semantic_qa"
+                )
+                artifact.checksum = file_checksum(manifest_path)
+                save_job(job)
 
-            self.assertFalse(agent_semantic_review_waiting(load_job(job_file)))
+                self.assertFalse(agent_semantic_review_waiting(load_job(job_file)))
 
     def test_final_report_requires_complete_repair_artifact_chain(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

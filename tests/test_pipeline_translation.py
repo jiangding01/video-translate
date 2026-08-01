@@ -76,7 +76,7 @@ class TranslationPipelineTest(unittest.TestCase):
             self.assertEqual(item["id"], 1)
             self.assertEqual(item["duration_ms"], 950)
             self.assertEqual(item["max_target_characters"], 8)
-            self.assertEqual(batch_data["prompt_version"], 3)
+            self.assertEqual(batch_data["prompt_version"], 4)
             self.assertEqual(batch_data["semantic_grouping_version"], 1)
             self.assertEqual(batch_data["batches"][0]["semantic_groups"], [[1]])
             self.assertEqual(
