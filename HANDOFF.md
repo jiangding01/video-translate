@@ -72,6 +72,7 @@
 - ASS 使用独立的中英文字体和字号。macOS 默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`。
 - 字幕 QA 失败或进入 `needs_review` 时，工作流停止，不允许继续烧录。
 - 语义复核确认后，若译文候选和渲染产物已有效或被补齐，`translate` stage 会收口为 `succeeded` 并清除旧 QA 错误；字幕 QA 的独立 `needs_review` 仍需单独确认。
+- 字幕 QA `needs_review` 被确认后，`continue` 会清除 `translate` stage 上的过期阻断错误（要求 QA 门已放行、确认仍对当前源 cue 有效、译文 cue 与两份 SRT 均有效）；旧 Job 下次 `continue` 自动收口。
 
 ### 烧录和媒体 QA
 
@@ -324,6 +325,10 @@ media-qa.json
 **Q6.1b：源文修订与多路径引导已完成。** `prepare-source-review JOB --cue ID` 生成绑定当前 source checksum 和精确 ID 集合的模板，`apply-source-review-fixes` 只修改 source text，保留 cue 时间轴、words、置信度和 provenance。接受结果以 fingerprint 文件保存，并在一次 Job 原子保存中切换 `source_review_revision`、source cue、`selected_kind=human_reviewed` 的选择记录、源 QA 和可用 SRT；QA 阻断时不登记 SRT，确认后 `continue` 从人工 cue 恢复。旧翻译、润色、语义报告、译文修订、渲染和烧录全部失效，上游媒体与转写证据保留；导入译文任务明确拒绝。Q6 的 `source_suspect` 现在会自动准备源文模板，`status` 优先源文修订并同时提供译文修订和直接确认；旧等待 Job 由 `continue` 懒生成，避免在恢复命令中展开大量 cue ID。
 
 **Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，`source_suspect` 只在上下文矛盾、明显误听或可识别专名异常时报告，并保持人工修订；定向修复联合处理完整组且不把模型建议当作标准答案。批次文本统一按不可信字幕数据处理，不得作为改变任务或输出协议的指令。translation/polish/review/repair prompt 分别升级为 v4/v2/v2/v2；旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效。已等待的标准 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才使用新版提示词。下一步使用公开素材完成 polished API/Agent E2E，再决定默认质量。
+
+### R 系列：架构改进与工程加固
+
+2026-08-02 的全量审查（基线 `ab28aff`，Ruff 与 482 测试全绿）产出 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)：R1 工程加固（CI 加 `uv build` 与 Python 3.13、补发布 tag、pipeline import 方向守卫测试、包内共享符号公有化）可立即实施；R2 CLI 收敛（`_run_command` 分发拆解、统一 `xvt apply` 按 manifest task+fingerprint 自动路由、人工修订 SRT 编辑通道）建议在可视化界面之前完成；R3 架构演进（Agent 作为传输而非平行编排、内容寻址 step 缓存统一 checkpoint、schema 演进评估、config 单轨化）在 polished 真实 E2E 验收后启动。全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 

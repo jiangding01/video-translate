@@ -25,6 +25,8 @@
 - 翻译重试拆分为独立预算：传输故障默认最多重试 4 次并遵循最长 30 秒的有效 `Retry-After` / 指数退避，结构性无效响应固定只做 1 次携带纠正提示的重试；传输重试不再误带结构纠正提示。主翻译与局部重译共用同一重试实现和 retry 事件语义。
 - 译文 QA `needs_review` 确认后续跑不再漏写 `translated.srt` / `bilingual.srt`：翻译满足度要求 cue 与两份 SRT 均有效；已有 `translated_cues` 时经 `complete_translated_outputs` 只补 QA+渲染，不重打翻译 API。`plan_advance_steps` 新增 `render` 步骤。
 - 语义复核确认后的译文收尾会将 `translate` stage 正确收口为 `succeeded`，清除此前 QA 阻断留下的旧错误，避免字幕 QA、媒体 QA 和烧录均完成后恢复计划仍显示译文失败。
+- 字幕 QA `needs_review` 经 `--acknowledge-subtitle-review` 确认后，`continue` 会把语义复核腿留在 `translate` stage 上的过期阻断错误收口为 `succeeded`，旧 Job 下次 `continue` 自动修正，不再出现 stage 显示 `failed` 而恢复计划显示 complete 的矛盾状态。收口要求 QA 门已放行、确认记录对当前源 cue 仍有效且译文 cue 与两份 SRT 均 checksum 有效，不会绕过 error 级 QA 问题。
+- 烧录恢复原因文案拆分：媒体 QA 已通过但烧录成品缺失或 checksum 已失效时，不再复用「烧录尚未通过媒体 QA」误导文案，改为提示成品已不在登记路径或内容已变化，避免与 `verify` 的 `artifact file is missing` 诊断矛盾；媒体 QA 未通过与指纹失效两种文案保持不变。
 - `needs_review` 恢复引导：`status` / recovery / `continue` 入口闸区分 review 与 error；review 给出 `xvt continue JOB --acknowledge-subtitle-review`，不再笼统要求「修字幕」。
 
 ### Changed

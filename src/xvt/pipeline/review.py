@@ -14,7 +14,11 @@ from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_file, load_job, save_job, utc_now
 from xvt.models import Job, StageName, StageStatus
-from xvt.pipeline.common import _artifact_checksum_for, _set_stage
+from xvt.pipeline.common import (
+    SUBTITLE_REVIEW_REQUIRED_MESSAGE,
+    _artifact_checksum_for,
+    _set_stage,
+)
 from xvt.recovery import valid_artifact_path
 
 # 同一「显示宽度超限」风险在源字幕 QA 与双语 QA 中使用不同 code：
@@ -81,10 +85,7 @@ def _complete_qa_stage(
             return
     if report.status in {"failed", "needs_review"}:
         if report.status == "needs_review":
-            message = (
-                "subtitle QA needs_review; inspect the QA artifact, then run "
-                "xvt continue <job> --acknowledge-subtitle-review"
-            )
+            message = SUBTITLE_REVIEW_REQUIRED_MESSAGE
         else:
             message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
         _set_stage(
@@ -163,6 +164,34 @@ def acknowledge_subtitle_review(
             )
         )
     return report_path
+
+
+def finalize_acknowledged_subtitle_review(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> bool:
+    """字幕 QA `needs_review` 被确认且译文产物齐备后，收口 `translate` stage。
+
+    只处理确认前留下的过期阻断错误：要求 QA 门已放行、确认记录仍对当前 source cue
+    有效、译文 cue 与两份 SRT 均 checksum 有效。任何一项不满足都保持原状，
+    确认通道不会因此绕过 error 级 QA 问题。
+    """
+    job = load_job(job_file)
+    record = job.stages[StageName.TRANSLATE]
+    if record.status is not StageStatus.FAILED or record.error != SUBTITLE_REVIEW_REQUIRED_MESSAGE:
+        return False
+    if job.stages[StageName.SUBTITLE_QA].status is not StageStatus.SUCCEEDED:
+        return False
+    if _acknowledged_review_issues(job) is None:
+        return False
+    if any(
+        valid_artifact_path(job, kind) is None
+        for kind in ("translated_cues", "translated_srt", "bilingual_srt")
+    ):
+        return False
+    _set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
+    return True
 
 
 def _semantic_issue_keys(report: dict[str, Any]) -> tuple[tuple[str, tuple[int, ...]], ...]:

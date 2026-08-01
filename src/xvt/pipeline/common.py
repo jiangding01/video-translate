@@ -58,6 +58,14 @@ def _media_info_from_remote_metadata(url: str, duration_ms: int) -> MediaInfo:
     )
 
 
+# 字幕 QA needs_review 的阻断文案：QA 门与源字幕修订共用同一份，
+# 确认后的 stage 收口按这条消息识别过期错误。
+SUBTITLE_REVIEW_REQUIRED_MESSAGE = (
+    "subtitle QA needs_review; inspect the QA artifact, then run "
+    "xvt continue <job> --acknowledge-subtitle-review"
+)
+
+
 _STAGE_EVENT_TYPES: dict[StageStatus, EventType] = {
     StageStatus.RUNNING: EventType.STAGE_STARTED,
     StageStatus.AWAITING_INPUT: EventType.STAGE_WAITING,

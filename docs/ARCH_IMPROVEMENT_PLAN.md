@@ -1,0 +1,155 @@
+# 架构改进与工程加固技术方案（R 系列）
+
+本方案来自 2026-08-02 的一次项目全量审查（基线 `ab28aff`，482 测试 + 18 子测试全部通过，Ruff lint/format 全绿）。它把审查发现与设计改进整理为可独立交付的分阶段任务，按风险从低到高分为 R1（工程加固）、R2（CLI 与交互收敛）、R3（架构演进）三组。各项之间除显式标注外没有依赖，可以穿插进正常功能迭代。
+
+审查确认的核心结论：项目的关键取舍（时间轴单一来源、翻译只碰文本、checksum 恢复、本地优先、显式凭据）全部保留，本方案不触碰任何一条不可破坏约束。要解决的是**复杂度增长模式**问题：当前每个质量特性 × 每种 provider 模式 × 各自的恢复语义三个维度相乘，本方案的目标是把它变成加法。
+
+## 目标
+
+1. 堵住发布工程盲区（打包验证、多 Python 版本、发布 tag）。
+2. 把 pipeline 依赖规约从文档纪律变成可机械核查的守卫测试。
+3. 收敛 CLI 回填命令面和巨型分发函数，降低后续新增命令（尤其是 GUI 配套命令）的边际成本。
+4. 用统一的 provider 传输抽象和统一的 checkpoint 机制，消除"每个质量特性手写一遍缓存系统"的重复。
+5. 全程不破坏现有 Job 兼容性；每一项都可独立验证、独立合并。
+
+## 非目标
+
+- 不改变时间轴、cue ID、翻译职责边界等不可破坏约束。
+- 不新增 GUI、队列、并发批处理或远程执行能力。
+- 不在本方案内切换默认翻译质量（仍待真实 E2E 后决定）。
+- R3 各项在真实 polished E2E 验收完成前不启动实施，避免与质量闭环验收互相干扰。
+
+## 审查发现汇总（证据基线 `ab28aff`）
+
+| 编号 | 发现 | 证据 |
+| --- | --- | --- |
+| F1 | CI 只测 Python 3.11，无 `uv build` 打包验证 | `.github/workflows/ci.yml`；pyproject 声明 3.11+ |
+| F2 | CHANGELOG 有 0.1.0/0.1.1 版本节和 dist 产物，但仓库无任何 git tag | `git tag` 为空 |
+| F3 | AGENTS.md 的 pipeline 依赖规约缺 `polish → translation` 与 `revision → common` 两条边 | `AGENTS.md:51`；`pipeline/polish.py:22` 实际 import `translation` |
+| F4 | 跨模块引用 `_` 前缀私有符号：`_translate_batch_with_retries`、`_complete_qa_stage`、`_set_stage`、`_artifact_checksum_for` 等实际是包内共享 API | `pipeline/` 内 8 个文件涉及 |
+| F5 | `cli.py` 的 `_run_command` 约 650 行（1012–1665），承载全部子命令执行逻辑 | `src/xvt/cli.py:1012` |
+| F6 | 6 个 `apply-*` + 2 个 `prepare-*` 命令，而 Agent manifest 已含 `task` 字段和 fingerprint，路由信息冗余地要求用户提供 | `pipeline/translation.py:695`（`task=translate_and_polish`）等 |
+| F7 | 每个 LLM 子步骤各自实现 checkpoint/fingerprint/恢复判定，`semantic.py` 1276 行中管道工程占大头 | `pipeline/semantic.py` 的 `_load/_write_*_checkpoint`、`_repair_chain_satisfied` 等 |
+| F8 | API 与 Agent 双路径在 polish/semantic/retranslate 各实现两遍编排 | Q5/Q6 各方案文档与实现 |
+| F9 | `_MIGRATIONS` 迁移机制已建成但为空、从未使用；stage 枚举冻结导致 `translate` 内部六个真实阶段只能靠 artifact 存在性反推 | `models.py:93` |
+| F10 | `job.config` 双轨：workflow 子配置已类型化，`source_strategy`、旧 `target_language` 仍是顶层裸键 | `pipeline/transcription.py:313` 直接读 `job.config["source_strategy"]` |
+| F11 | 测试用 `unittest.mock.patch` 打模块级函数补丁，patch 目标绑定模块内部结构，纯搬移重构时曾多次失效 | `tests/test_pipeline_translation.py` 等；`translation_provider` 的 `opener` 参数已是 DI 先例 |
+| F12 | 人工修订要求用户手编 review JSON 的 `items[].text`，而 SRT 才是字幕行业通用可编辑格式 | Q6.1a/b 流程 |
+| F13 | `transcription.py` 等存在 150–250 行长函数（`_process_adaptive_media` 299–551 等） | `pipeline/transcription.py:299` |
+| F14 | 真实 Job 复查：用户把导出到 Job 外的烧录成品移走后，`status` 误报"烧录尚未通过媒体 QA"（该 Job `media_qa=succeeded`），并推荐会触发完整重新编码的 `continue`；`verify` 的诊断（`artifact file is missing`）才是准确的 | `recovery.py:627` 将成品缺失与媒体 QA 未过合并为同一文案；2026-07-16/18 两个真实 Job 复现 |
+| F15 | 字幕 QA `needs_review` 经 `--acknowledge-subtitle-review` 确认并完成烧录后，`translate` stage 永久保留 `failed` 和过期错误文本（"run --acknowledge-subtitle-review"，实际已确认）；在含 PR #66 修复的 `ab28aff` 上对完整 Job 副本重跑 `continue` 仍不收口。PR #66 只覆盖语义复核确认路径，字幕 QA 确认路径是同类问题的未扫兄弟实例 | 2026-08-01 polished 真实 Job（`20260801T104038Z-5376f3bb`）复现；`recovery` 判定 complete 而 stage 行显示 failed，两轨矛盾与 F14 同族 |
+
+## R1：工程加固（低风险，可立即实施）
+
+### R1.1 CI 补打包验证与 Python 版本矩阵（F1）
+
+- `.github/workflows/ci.yml` 的矩阵增加 `python-version: ["3.11", "3.13"]`（与 os 矩阵正交）。
+- 新增 `uv build` step（放在测试之后），确保 wheel/sdist 始终可构建。
+- 验收：CI 四个组合全绿；本地 `uv build` 与 CI 产物一致。
+
+### R1.2 发布 tag 与发版流程（F2）
+
+- 按 CHANGELOG 日期定位 0.1.0（2026-07-15）与 0.1.1（2026-07-24）对应 commit，补打 annotated tag `v0.1.0`、`v0.1.1` 并推送。
+- AGENTS.md 验证命令一节追加发版约定：升版本号 → 更新 CHANGELOG 版本节 → `uv build` → `git tag vX.Y.Z`。
+- 验收：`git tag` 列出两个历史版本；AGENTS.md 记录流程。
+
+### R1.3 依赖规约补齐与 import 方向守卫测试（F3）
+
+- AGENTS.md:51 的规约补上 `polish → translation`、`revision → common` 两条边。
+- 新增 `tests/test_pipeline_imports.py`：解析 `pipeline/` 各模块的 `from xvt.pipeline.X import` 语句，断言实际依赖边集合与声明的白名单完全一致（多一条或少一条都失败）。守卫测试把"无环 + 方向正确"从文档纪律变成失败的构建。
+- 验收：守卫测试在当前代码上通过；人为加一条反向 import 时测试失败。
+
+### R1.4 包内共享符号公有化（F4）
+
+- 把确实被跨模块引用的 `_` 前缀符号去掉下划线（`set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等），原名保留一个赋值别名过渡一版后删除。
+- 纯模块内私有的保持现状。这是纯重命名，注意测试中 `mock.patch` 字符串目标需同步（正是 F11 描述的脆弱点，本项顺带减少一批此类目标）。
+- 验收：`grep -rn 'import _' src/xvt/pipeline/` 无跨模块私有引用；全量测试通过。
+
+## R2：CLI 与交互收敛（中风险，建议在 GUI 之前完成）
+
+### R2.1 `_run_command` 分发拆解（F5）
+
+- 把 `cli.py` `_run_command` 内每个 `if arguments.command == ...` 分支抽成独立的 `_cmd_<name>(arguments) -> int` 函数，顶层换成 `dict[str, Callable]` 分发表。
+- 纯搬移，不改任何行为和输出。遵循既有"纯搬移四步陷阱"经验：先确认 `tests/test_cli.py` 中 patch 目标是否随符号迁移、多行文本块完整搬运、守卫断言范围不缩水。
+- 可分 2–3 个 PR 按命令簇（转写簇 / 翻译簇 / 修复与烧录簇）渐进合并，每个 PR 后全量测试必须通过。
+- 验收：`_run_command` 只剩查表与公共前后置逻辑；`xvt --help` 与各命令行为逐字节不变（对拍若干典型命令的 stdout/stderr）。
+
+### R2.2 统一 `xvt apply JOB RESPONSE` 自动路由（F6）
+
+- 新增 `apply` 子命令：读取 RESPONSE 文件中的 `task` 与 fingerprint，自动路由到既有的 6 个回填实现之一；路由失败（无等待任务、fingerprint 不匹配、task 未知）给出与现有命令一致的结构化错误。
+- 现有 `apply-*` 命令全部保留为稳定入口，行为不变；`status` 的下一步提示改为优先推荐统一入口，同时保留原命令提示。
+- 各回填实现的校验逻辑零改动——本项只加一层查表路由，不碰协议语义。
+- 需同步：README、AGENTS.md CLI 语义、HANDOFF、skill 引用、`docs/EVENTS.md`（若事件不变则只改文档示例命令）。
+- 验收：对每类等待状态构造 Job，`xvt apply` 与原命令产生相同的 Job 终态与事件序列；错误路由测试覆盖 task 缺失、fingerprint 过期、无等待任务三种情况。
+
+### R2.3 人工修订 SRT 编辑通道（F12）
+
+- `await_translation_review` 时在 `review/` 目录同时生成一份带 cue ID 注释的 review SRT（如 `translation-review-<fingerprint>.srt`）；用户用任意字幕工具编辑后，`apply-translation-review-fixes` 接受 SRT 输入：解析、按 cue ID diff 出改动项、转换为现有修订记录格式，其后校验与回填流程完全复用现有实现（fingerprint 绑定、只改 `target_text`、review-only 复查）。
+- JSON 模板通道原样保留给 Agent 与脚本消费；SRT 是人工通道的加法。
+- 源文修订（`prepare-source-review`）同理增加 SRT 通道，可作为独立后续项。
+- 验收：SRT 通道与 JSON 通道对同一组编辑产生相同的修订记录 checksum；改动时间轴或增删 cue 的 SRT 在解析边界被拒绝。
+
+### R2.4 烧录成品缺失的恢复语义与文案修正（F14）
+
+- `_burn_recovery_reason`（`recovery.py:623`）拆分三种情形并分别给出准确文案：媒体 QA 未通过（现文案保留）、烧录派生指纹失效（现文案保留）、**成品文件缺失但媒体 QA 与指纹均有效**（新增文案，说明成品已不在登记路径，如已自行保存可忽略，重新烧录才需要 `continue`）。
+- 成品导出到 Job 目录外本就是交付行为，用户取走成品是常态而非异常。评估为该情形提供轻量确认通道（如 `continue --acknowledge-missing-burned` 或 `status` 直接判定 complete-with-exported-artifact），避免"取走成品 → status 永远 retryable → 误触发整段重新编码"；具体形式实施时定，红线是不得把媒体 QA 失败或指纹失效误判为可确认。
+- 验收：构造三种情形的 Job 各一，`status` 文案与 `verify` 诊断一致；媒体 QA 失败场景仍推荐重新烧录且不可确认跳过。
+
+### R2.5 字幕 QA 确认后的 translate stage 收口（F15，建议优先修复）
+
+- 与 PR #66 的语义复核收口对称：字幕 QA `needs_review` 经确认且译文候选与渲染产物有效（或补齐成功）后，`translate` stage 同样显式收口为 `succeeded`，清除过期的 acknowledge 提示错误。旧 Job 在下一次 `continue` 时收口。
+- 回归测试必须先在未修复代码上失败：构造"polished 链全绿 → 字幕 QA needs_review → 确认 → 烧录完成"的 Job，断言 `translate` 终态为 `succeeded` 且无残留错误文本。
+- 顺带按 sibling 排查：搜索所有把 stage 置为 `failed` 并期待后续人工确认解除的路径，确认每条都有对应收口逻辑（语义复核已由 PR #66 覆盖，字幕 QA 为本项，若有第三处一并列出）。
+- 验收：2026-08-01 真实 Job 副本重跑 `continue` 后 stage 行不再显示 `failed`；`recovery: complete` 与 stage 行不再矛盾。
+
+## R3：架构演进（较高投入，polished E2E 验收后启动）
+
+R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独立。
+
+### R3.1 统一 provider 传输抽象：Agent 作为传输而非平行编排（F8）
+
+- 定义统一接口：`translate_batch(batch, policy) -> BatchResult | Pending(manifest)`。API provider 返回结果；Agent provider 返回 `Pending`，其中携带现有 manifest 内容。
+- polish / semantic review / semantic repair / retranslate 的编排代码收敛为单份：遇到 `Pending` 即持久化 manifest 并进入 `awaiting_input`，回填时 response 经同一接口注入后继续同一段编排。
+- 现有 artifact 文件名、manifest 格式、fingerprint 规则、事件序列全部保持不变——本项重组的是代码归属，不是磁盘协议。旧 Job 与已等待的 Agent manifest 完全兼容。
+- 顺带收敛翻译逻辑的文件边界：`translate.py`（分组与批次协议）、`translation_provider.py`（传输）、`pipeline/translation|polish|semantic.py`（编排）职责单一化，消除 F4 之外残余的交叉引用。
+- 测试策略：provider 以参数注入（延续 `opener` 的 DI 先例），新编排测试传 fake provider 对象，逐步替换 `mock.patch` 模块函数的用法（F11）；迁移期间两种方式并存。
+- 验收：polish/semantic/retranslate 的 API 与 Agent 行为测试全部通过且编排实现只有一份；对既有等待中 Job 的回填回归测试通过。
+
+### R3.2 内容寻址 step 缓存统一 checkpoint（F7）
+
+- 抽出统一机制：每个 LLM 步骤声明输入（源 cue checksum、模型、端点、prompt 版本、策略、上游产物 checksum）与输出 artifact，框架计算输入哈希作为缓存键，命中即复用、未命中执行后落盘。现有各特性的 fingerprint 正是这些缓存键，本项把"算键、查缓存、失效"从各特性代码抽到一处。
+- 直接收益：`continue` 与首跑收敛为同一条执行路径——重跑 pipeline，命中的步骤瞬间跳过；`plan_advance_steps` 与 `_advance_workflow` 的人工对齐义务消失；上游变化后下游"自然失效"（键不匹配），`downstream_of` 主动失效闭包退化为清理手段而非正确性依赖。
+- 实施策略：新机制先以现有 progress/checkpoint 文件为存储后端逐特性接入（translation → polish → semantic），每步保持磁盘格式不变、只换读写代码；全部接入后再评估是否统一存储布局。禁止一次性大爆炸迁移。
+- 验收：每接入一个特性，其中断恢复测试组（含 fingerprint 失效场景）不改断言通过；`status` 输出保持一致。
+
+### R3.3 schema 演进：启用迁移链，stage 数据化（F9）
+
+- 现状成本：`translate` stage 内部实际有草稿、润色、语义校对、修复、复查、人工修订六个阶段，状态只能由 `semantic_review_waiting` / `_repair_chain_satisfied` 等函数从 artifact 存在性反推，`status` 展示层靠 detail 补丁。
+- 方案：`SCHEMA_VERSION` 升至 2，`_MIGRATIONS[1]` 写第一个纯函数迁移：把冻结 stage 枚举扩展为 Job 内的 steps 数据列表（每步含名称、状态、detail），`translate` 的六个子阶段获得显式命名状态。旧 Job 读取时自动沿迁移链升级，`from_dict` 机制已就绪。
+- 本项影响面最大（models、recovery、status、事件展示、全部相关测试），是否实施待 R3.1/R3.2 落地后重新评估——若前两项完成后状态反推代码已明显缩减，本项可降级或取消。
+- 验收（若实施）：v1 Job 样本经迁移后 `status` / `continue` / `verify` 行为不变；迁移函数有独立单测。
+
+### R3.4 config 单轨化（F10）
+
+- 把 `source_strategy`、`source_rebuild_requested` 等顶层裸键迁入 `WorkflowConfig`（或为原子 Job 建立对应的类型化读写边界），`resolve_target_language` 的回退逻辑收敛到唯一入口。
+- 旧 Job 顶层键继续可读（读取边界做一次性归一），写入只走新路径。
+- 验收：`grep -rn 'job.config\["' src/xvt/ | grep -v workflow_config` 仅剩边界模块；相关恢复测试通过。
+
+## 长函数治理约定（F13，持续性而非专项）
+
+不安排专项重构。约定：后续任何 PR 触碰 `_process_adaptive_media`、`_acquire_remote_job`、`run_translation`、`apply_agent_semantic_review` 等 150 行以上函数时，顺手按阶段抽出子函数；`transcription.py` 若突破 2000 行，按"本地转写 / 远程获取 / resume 与 rebuild"三簇拆分模块（复用纯搬移四步经验）。
+
+## 交付顺序建议
+
+1. **立即**：R1 全部（四项合计改动量小，可一到两个 PR）。
+2. **GUI 之前**：R2.1 → R2.2 → R2.3（R2.2 依赖的路由信息已存在，与 R2.1 无耦合但建议先拆分发表再加新命令）。
+3. **polished 真实 E2E 验收之后**：R3.1 → R3.2，随后重新评估 R3.3；R3.4 可穿插。
+
+每项均遵循 AGENTS.md 修改流程：单分支串行、超过 6 文件拆小、行为变化补测试、提交前过 ruff + pytest 硬门槛、同步文档。
+
+## 风险与回退
+
+- R1/R2 均不改变磁盘格式与协议，回退即 revert。
+- R2.1 的主要风险是 `test_cli.py`（1516 行）patch 目标漂移——每个搬移 PR 先跑守卫 grep 再跑全量测试。
+- R3.1/R3.2 的红线：artifact 文件名、manifest 格式、fingerprint 语义、事件序列不变；任何一步导致旧 Job 或等待中 manifest 不可恢复即停止并回退。
+- R3.3 是唯一动 schema 的项，独立成 PR、独立可回退，且默认可取消。
