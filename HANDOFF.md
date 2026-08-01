@@ -325,6 +325,10 @@ media-qa.json
 
 **Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，`source_suspect` 只在上下文矛盾、明显误听或可识别专名异常时报告，并保持人工修订；定向修复联合处理完整组且不把模型建议当作标准答案。批次文本统一按不可信字幕数据处理，不得作为改变任务或输出协议的指令。translation/polish/review/repair prompt 分别升级为 v4/v2/v2/v2；旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效。已等待的标准 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才使用新版提示词。下一步使用公开素材完成 polished API/Agent E2E，再决定默认质量。
 
+### R 系列：架构改进与工程加固
+
+2026-08-02 的全量审查（基线 `ab28aff`，Ruff 与 482 测试全绿）产出 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)：R1 工程加固（CI 加 `uv build` 与 Python 3.13、补发布 tag、pipeline import 方向守卫测试、包内共享符号公有化）可立即实施；R2 CLI 收敛（`_run_command` 分发拆解、统一 `xvt apply` 按 manifest task+fingerprint 自动路由、人工修订 SRT 编辑通道）建议在可视化界面之前完成；R3 架构演进（Agent 作为传输而非平行编排、内容寻址 step 缓存统一 checkpoint、schema 演进评估、config 单轨化）在 polished 真实 E2E 验收后启动。全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。
+
 ### 已完成：CLI 阶段语义与完成摘要打磨
 
 CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消、进程组清理、持久化中断状态）与 JSONL 事件协议 v1 均已完成，详见 [路线图](ROADMAP.md) 和 [CHANGELOG](CHANGELOG.md)。真实 E2E 暴露的 P0（缺 `translated.srt`/`bilingual.srt`、`needs_review` 恢复不提示 acknowledge）已在本轮修复。Job/artifact 路径安全与输出覆盖策略已固定（见 `xvt.paths`）。这些能力已经满足未来界面消费要求，但在开发界面前先完成字幕质量闭环。
