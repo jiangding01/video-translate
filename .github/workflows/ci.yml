@@ -15,6 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +30,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies
         run: uv sync --extra dev
@@ -45,3 +46,6 @@ jobs:
 
       - name: CLI smoke test
         run: uv run --no-sync xvt --help
+
+      - name: Build package (uv build)
+        run: uv build

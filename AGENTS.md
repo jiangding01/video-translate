@@ -48,7 +48,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
 | `tests/` | 与源码模块对应的单元和流程测试 |
 
-`workflow.py` 只负责编排，不应复制 `pipeline` 包的媒体或字幕算法。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。`pipeline` 包内依赖方向保持无环：`common ← review ← {transcription, translation}`，`semantic` 与 `retranslate` 依赖 `translation`，`resegment` 与 `burnin` 只依赖 `common`；新增子模块时不得引入反向依赖，公共入口一律经 `__init__` re-export。
+`workflow.py` 只负责编排，不应复制 `pipeline` 包的媒体或字幕算法。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。`pipeline` 包内依赖方向保持无环：`common ← review ← {transcription, translation}`，`semantic` 与 `retranslate` 依赖 `translation`，`resegment` 与 `burnin` 只依赖 `common`，`polish` 依赖 `translation`，`revision` 只依赖 `common`；新增子模块时不得引入反向依赖，公共入口一律经 `__init__` re-export。
 
 ## CLI 语义
 
