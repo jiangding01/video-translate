@@ -7,7 +7,7 @@ Q6 的自动语义校对仍可能留下需要人判断的术语、误听或中�
 本阶段分三步串行交付：
 
 1. **Q6.1a 译文修订**：生成可编辑模板，严格回填译文，并仅重新执行语义复查。
-2. **Q6.1b 源文修订**：以后单独设计源 cue、下游失效和重新翻译规则；Q6.1a 不修改源文。
+2. **Q6.1b 源文修订**：显式选择并修正源 cue，只改文字，重新执行源字幕 QA，并使翻译及全部下游产物失效。
 3. **Q6.1c 提示词加固**：根据真实修订样本优化术语和表达；不与人工修订协议耦合。
 
 ## Q6.1a 用户流程
@@ -75,3 +75,21 @@ Q6 的自动语义校对仍可能留下需要人判断的术语、误听或中�
 - API/Agent 人工候选都只复查，不再次自动修复。
 - 多轮修订、直接确认、`status` 只读和 `continue` 懒生成模板可恢复。
 - 修订后 cue ID、数量、顺序和时间码逐项不变，确定性字幕 QA 仍可阻断烧录。
+
+## Q6.1b 源文修订核心流程
+
+用户可为任意 checksum 有效的 source cue 生成独立模板：
+
+```bash
+xvt prepare-source-review JOB --cue 13 --cue 14
+xvt apply-source-review-fixes JOB REVIEW.json
+xvt continue JOB
+```
+
+模板使用 `task=source_review_fixes`、`scope=source`，fingerprint 绑定 Job ID、当前 `source_cues` checksum 和精确 cue ID 集合。回填必须完整保留模板 ID 集合，只允许修改非空 `items[].text`；过期 source、未知或重复 ID、错误 scope 和无实际变化均拒绝。cue ID、数量、顺序、时间码、words、语言、置信度、warnings 和 provenance 逐项保持。
+
+接受修订后登记 `source_review_revision`、新的 `source_cues`、`source_selection`、`subtitle_qa`，QA 通过时同时登记新的 `source_srt`。所有替换文件使用 fingerprint 区分路径，写完后通过一次 Job 原子保存切换登记，避免覆盖旧文件后保存失败破坏原 checkpoint。新的选择记录使用 `selected_kind=human_reviewed`、绑定新 source checksum，并嵌入上一份选择记录供追溯；cue 自身 provenance 不改写。
+
+源字幕修订会清除字幕与语义确认，并失效旧 source SRT/QA/selection、翻译批次与 checkpoint、润色、语义校对、译文修订、字幕渲染、预览、烧录和媒体 QA。下载字幕、候选 QA、对齐、词级转写、音频和媒体证据保留。确定性源字幕 QA 在修订命令内执行：`failed` 或 `needs_review` 会保存新 source 证据链但不登记 source SRT，从而阻断翻译；人工确认后 `continue` 从新 source cue 恢复，不重新导入旧源字幕。
+
+配置了导入译文字幕的任务首版拒绝源文修订，避免静默复用与新源文不匹配的旧译文。Q6.1b 的 `source_suspect` 自动模板和 `status` 多路径引导在后续独立阶段接入；当前核心命令已经可单独使用。

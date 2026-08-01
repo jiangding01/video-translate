@@ -145,7 +145,11 @@ def resegment_translation(
         }
     ) | {
         # input_translation_subtitles 是被 resegment 作废的用户输入而非派生产物，显式并入。
-        ArtifactKind.INPUT_TRANSLATION_SUBTITLES
+        ArtifactKind.INPUT_TRANSLATION_SUBTITLES,
+        # 人工源文修订记录绑定重分段前的 cue 集合，不能继续作为当前来源证据。
+        ArtifactKind.SOURCE_REVIEW_REVISION,
+        # 人工译文修订记录同样绑定旧 source checksum。
+        ArtifactKind.TRANSLATION_REVIEW_REVISION,
     }
     replacement_artifacts = [
         Artifact("source_cues", str(source_output), _checksum(source_output)),

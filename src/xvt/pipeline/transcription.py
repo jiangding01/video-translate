@@ -220,6 +220,18 @@ def _source_selection_matches(job: Job) -> bool:
         return False
     if not isinstance(data, dict) or data.get("source_cues_checksum") != source_checksum:
         return False
+    if data.get("selected_kind") == "human_reviewed":
+        revision_path = valid_artifact_path(job, "source_review_revision")
+        if revision_path is None:
+            return False
+        try:
+            revision = json.loads(revision_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(revision, dict)
+            and revision.get("reviewed_source_cues_checksum") == source_checksum
+        )
     return (
         data.get("candidate_kind") == SourceCandidateKind.NONE
         or job.config.get("input_kind") == "subtitle"
@@ -1741,8 +1753,10 @@ def rebuild_source(
     invalidated_kinds = downstream_of(ArtifactKind.SOURCE_CUES) | {
         ArtifactKind.SOURCE_CANDIDATE_QA,
         ArtifactKind.SOURCE_CUES,
+        ArtifactKind.SOURCE_REVIEW_REVISION,
         ArtifactKind.SUBTITLE_ALIGNMENT,
         ArtifactKind.TRANSLATION_RESEGMENTATION,
+        ArtifactKind.TRANSLATION_REVIEW_REVISION,
     }
     invalidated = [artifact for artifact in job.artifacts if artifact.kind in invalidated_kinds]
     job.artifacts = [

@@ -30,6 +30,7 @@ class ArtifactKind(StrEnum):
     SOURCE_SRT = "source_srt"
     SUBTITLE_QA = "subtitle_qa"
     TRANSLATION_RESEGMENTATION = "translation_resegmentation"
+    SOURCE_REVIEW_REVISION = "source_review_revision"
     TRANSLATION_BATCHES = "translation_batches"
     TRANSLATION_MAPPING = "translation_mapping"
     TRANSLATION_PROGRESS = "translation_progress"
@@ -68,6 +69,7 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.INPUT_SUBTITLES: frozenset(),
     ArtifactKind.INPUT_TRANSLATION_SUBTITLES: frozenset(),
     ArtifactKind.TRANSLATION_RESEGMENTATION: frozenset(),
+    ArtifactKind.SOURCE_REVIEW_REVISION: frozenset(),
     ArtifactKind.TRANSLATION_REVIEW_REVISION: frozenset(),
     # 下载与源媒体。
     ArtifactKind.DOWNLOADED_MEDIA: frozenset({ArtifactKind.REMOTE_INFO}),
@@ -101,6 +103,7 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
             ArtifactKind.TRANSLATION_RESEGMENTATION,
             ArtifactKind.DOWNLOADED_SUBTITLES,
             ArtifactKind.SOURCE_CANDIDATE_QA,
+            ArtifactKind.SOURCE_REVIEW_REVISION,
         }
     ),
     # 选择报告在最终 source cues 写入后登记，记录可校验的最终选择与可选对齐结果。
