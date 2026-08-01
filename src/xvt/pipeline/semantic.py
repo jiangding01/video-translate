@@ -13,18 +13,18 @@ from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
-    _add_artifact,
-    _checksum,
-    _error_category,
-    _invalidate_rendered_artifacts,
-    _load_cues,
-    _set_stage,
-    _write_json,
+    add_artifact,
+    checksum,
+    error_category,
+    invalidate_rendered_artifacts,
+    load_cues,
+    set_stage,
+    write_json,
 )
 from xvt.pipeline.translation import (
-    _finalize_translation,
-    _translate_batch_with_retries,
     complete_translated_outputs,
+    finalize_translation,
+    translate_batch_with_retries,
 )
 from xvt.process import raise_if_cancelled
 from xvt.recovery import valid_artifact_path
@@ -99,7 +99,7 @@ def _candidate_path(job: Job) -> Path:
 
 
 def _reviewed_report_filename(candidate_path: Path) -> str:
-    return f"translation-semantic-qa-reviewed-{_checksum(candidate_path)[:12]}.json"
+    return f"translation-semantic-qa-reviewed-{checksum(candidate_path)[:12]}.json"
 
 
 def _source_language(job: Job, source: list[Cue]) -> str:
@@ -115,10 +115,10 @@ def _review_batches(
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None or config.target_language is None:
         raise ValueError("semantic review requires valid source cues and a target language")
-    source = _load_cues(source_path)
+    source = load_cues(source_path)
     return build_semantic_review_batches(
         source,
-        _load_cues(candidate_path),
+        load_cues(candidate_path),
         source_language=_source_language(job, source),
         target_language=config.target_language,
         batch_size=config.batch_size,
@@ -142,8 +142,8 @@ def _fingerprint(
     if source_path is None:
         raise ValueError("semantic review fingerprint requires valid source cues")
     payload = {
-        "source_cues_checksum": _checksum(source_path),
-        "candidate_cues_checksum": _checksum(candidate_path),
+        "source_cues_checksum": checksum(source_path),
+        "candidate_cues_checksum": checksum(candidate_path),
         "target_language": config.target_language,
         "provider": mode,
         "base_url": base_url,
@@ -284,7 +284,7 @@ def _write_review_checkpoint(
         _validate_unique_issues([issue for value in results.values() for issue in value]),
         preserved_issues if complete else (),
     )
-    _write_json(
+    write_json(
         path,
         {
             "task": task,
@@ -307,7 +307,7 @@ def _write_review_checkpoint(
             ),
         },
     )
-    _add_artifact(job, kind, path, event_sink)
+    add_artifact(job, kind, path, event_sink)
     return path
 
 
@@ -365,7 +365,7 @@ def _run_review_phase(
                 reason=reason,
             )
 
-        results[batch.id] = _translate_batch_with_retries(
+        results[batch.id] = translate_batch_with_retries(
             batch,
             provider_config,
             max_retries=config.max_retries,
@@ -460,7 +460,7 @@ def _write_repair_checkpoint(
     mode: str,
     event_sink: EventSink | None,
 ) -> Path:
-    _write_json(
+    write_json(
         path,
         {
             "task": "semantic_repair",
@@ -481,7 +481,7 @@ def _write_repair_checkpoint(
             "status": "completed" if len(completed) == len(batches) else "running",
         },
     )
-    _add_artifact(job, "translation_semantic_repair", path, event_sink)
+    add_artifact(job, "translation_semantic_repair", path, event_sink)
     return path
 
 
@@ -499,8 +499,8 @@ def _run_repair_phase(
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None or config.target_language is None:
         raise ValueError("semantic repair requires valid source cues and target language")
-    source = _load_cues(source_path)
-    candidate = _load_cues(candidate_path)
+    source = load_cues(source_path)
+    candidate = load_cues(candidate_path)
     batches = build_semantic_repair_batches(
         source,
         candidate,
@@ -518,7 +518,7 @@ def _run_repair_phase(
         mode=mode,
         base_url=provider_config.base_url,
         model=provider_config.model,
-        report_checksum=_checksum(report_path),
+        report_checksum=checksum(report_path),
     )
     reusable, completed, repaired = _load_repair_checkpoint(job, batches, fingerprint)
     if not reusable and any(
@@ -552,7 +552,7 @@ def _run_repair_phase(
                 reason=reason,
             )
 
-        values = _translate_batch_with_retries(
+        values = translate_batch_with_retries(
             batch,
             provider_config,
             max_retries=config.max_retries,
@@ -594,8 +594,8 @@ def _run_repair_phase(
     expected_ids = {item.id for batch in batches for item in batch.items}
     repaired_cues = apply_semantic_repairs(candidate, repaired, expected_ids)
     repaired_path = get_job_directory(job) / "artifacts" / "translation-repaired-cues.json"
-    _write_json(repaired_path, [asdict(cue) for cue in repaired_cues])
-    _add_artifact(job, "translation_repaired_cues", repaired_path, event_sink)
+    write_json(repaired_path, [asdict(cue) for cue in repaired_cues])
+    add_artifact(job, "translation_repaired_cues", repaired_path, event_sink)
     return progress_path, repaired_path
 
 
@@ -604,16 +604,16 @@ def _finalize_candidate(
     candidate_path: Path,
     event_sink: EventSink | None,
 ) -> tuple[Path, ...]:
-    candidate = _load_cues(candidate_path)
+    candidate = load_cues(candidate_path)
     translated_path = valid_artifact_path(job, "translated_cues")
-    if translated_path is not None and _load_cues(translated_path) == candidate:
+    if translated_path is not None and load_cues(translated_path) == candidate:
         if all(
             valid_artifact_path(job, kind) is not None
             for kind in ("translated_srt", "bilingual_srt")
         ):
             record = job.stages[StageName.TRANSLATE]
             if record.status is not StageStatus.SUCCEEDED or record.error is not None:
-                _set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
+                set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
             return tuple(
                 path
                 for kind in ("translated_srt", "bilingual_srt", "bilingual_ass")
@@ -623,13 +623,13 @@ def _finalize_candidate(
         refreshed = load_job(get_job_file(job))
         record = refreshed.stages[StageName.TRANSLATE]
         if record.status is not StageStatus.SUCCEEDED or record.error is not None:
-            _set_stage(refreshed, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
+            set_stage(refreshed, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
         return rendered
-    return _finalize_translation(
+    return finalize_translation(
         job,
         candidate,
         event_sink,
-        invalidate=_invalidate_rendered_artifacts,
+        invalidate=invalidate_rendered_artifacts,
         polished_result=True,
     )
 
@@ -704,8 +704,8 @@ def _repair_chain_satisfied(
         all_issues = _validate_unique_issues(
             [issue for value in issues.values() for issue in value]
         )
-        source = _load_cues(source_path)
-        candidate = _load_cues(polished_path)
+        source = load_cues(source_path)
+        candidate = load_cues(polished_path)
         repair_batches = build_semantic_repair_batches(
             source,
             candidate,
@@ -725,7 +725,7 @@ def _repair_chain_satisfied(
         return bool(
             reusable
             and completed == {batch.id for batch in repair_batches}
-            and _load_cues(repaired_path)
+            and load_cues(repaired_path)
             == apply_semantic_repairs(candidate, repaired, expected_ids)
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
@@ -792,7 +792,7 @@ def semantic_review_satisfied(job: Job) -> bool:
         return False
     _report, expected = target
     try:
-        return _load_cues(expected) == _load_cues(translated)
+        return load_cues(expected) == load_cues(translated)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
@@ -856,7 +856,7 @@ def run_translation_semantic_review(
         return SemanticRunResult("awaiting_agent", mode, (manifest,), fallback_reason)
     if provider_config is None:
         raise RuntimeError("semantic review provider configuration was not resolved")
-    _set_stage(
+    set_stage(
         job,
         StageName.TRANSLATE,
         StageStatus.RUNNING,
@@ -880,7 +880,7 @@ def run_translation_semantic_review(
             )
             paths.append(report_path)
             if issues:
-                _set_stage(
+                set_stage(
                     job,
                     StageName.TRANSLATE,
                     StageStatus.AWAITING_INPUT,
@@ -939,7 +939,7 @@ def run_translation_semantic_review(
             candidate_path = repaired_path
             issues = final_issues
         if issues:
-            _set_stage(
+            set_stage(
                 job,
                 StageName.TRANSLATE,
                 StageStatus.AWAITING_INPUT,
@@ -953,13 +953,13 @@ def run_translation_semantic_review(
         rendered = _finalize_candidate(job, candidate_path, event_sink)
         return SemanticRunResult("completed", mode, (*paths, *rendered))
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
             extras={"phase": "semantic_review"},
         )
         raise
@@ -999,8 +999,8 @@ def prepare_agent_semantic_review(
         "job_id": job.id,
         "task": "semantic_review_only" if reviewed_candidate else "semantic_review_and_repair",
         "task_version": SEMANTIC_AGENT_TASK_VERSION,
-        "source_cues_checksum": _checksum(source_path),
-        "candidate_cues_checksum": _checksum(candidate_path),
+        "source_cues_checksum": checksum(source_path),
+        "candidate_cues_checksum": checksum(candidate_path),
         "target_language": resolved.target_language,
         "review_prompt_version": SEMANTIC_REVIEW_PROMPT_VERSION,
         "repair_prompt_version": SEMANTIC_REPAIR_PROMPT_VERSION,
@@ -1017,9 +1017,9 @@ def prepare_agent_semantic_review(
         else "translation-semantic-qa.json"
     )
     path = get_job_directory(job) / "artifacts" / filename
-    _write_json(path, payload)
-    _add_artifact(job, report_kind.value, path, event_sink)
-    _set_stage(
+    write_json(path, payload)
+    add_artifact(job, report_kind.value, path, event_sink)
+    set_stage(
         job,
         StageName.TRANSLATE,
         StageStatus.AWAITING_INPUT,
@@ -1063,8 +1063,8 @@ def _validated_agent_manifest(
             else "semantic_review_and_repair"
         )
         and data.get("task_version") == SEMANTIC_AGENT_TASK_VERSION
-        and data.get("source_cues_checksum") == _checksum(source_path)
-        and data.get("candidate_cues_checksum") == _checksum(candidate_path)
+        and data.get("source_cues_checksum") == checksum(source_path)
+        and data.get("candidate_cues_checksum") == checksum(candidate_path)
         and data.get("target_language") == resolved.target_language
         and data.get("review_prompt_version") == SEMANTIC_REVIEW_PROMPT_VERSION
         and data.get("repair_prompt_version") == SEMANTIC_REPAIR_PROMPT_VERSION
@@ -1134,8 +1134,8 @@ def apply_agent_semantic_review(
         source_path = valid_artifact_path(job, "source_cues")
         if source_path is None or resolved.target_language is None:
             raise ValueError("Agent semantic repair requires valid source cues")
-        source = _load_cues(source_path)
-        candidate = _load_cues(candidate_path)
+        source = load_cues(source_path)
+        candidate = load_cues(candidate_path)
         repair_batches = build_semantic_repair_batches(
             source,
             candidate,
@@ -1230,8 +1230,8 @@ def apply_agent_semantic_review(
             event_sink,
         )
         repaired_path = get_job_directory(job) / "artifacts" / "translation-repaired-cues.json"
-        _write_json(repaired_path, [asdict(cue) for cue in repaired_cues])
-        _add_artifact(job, "translation_repaired_cues", repaired_path, event_sink)
+        write_json(repaired_path, [asdict(cue) for cue in repaired_cues])
+        add_artifact(job, "translation_repaired_cues", repaired_path, event_sink)
         final_path = get_job_directory(job) / "artifacts" / "translation-semantic-qa-final.json"
         _write_review_checkpoint(
             job,
@@ -1248,7 +1248,7 @@ def apply_agent_semantic_review(
         candidate_path = repaired_path
         paths.extend((repair_path, repaired_path, final_path))
     if final_issues:
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.AWAITING_INPUT,

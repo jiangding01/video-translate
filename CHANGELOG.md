@@ -6,6 +6,7 @@
 
 ### Added
 
+- CI 新增 Python 版本矩阵（3.11、3.13，与 os 矩阵正交）与 `uv build` 打包验证 step，确保多版本、多平台均可正常构建 wheel/sdist；AGENTS.md 补全 `pipeline` 包依赖规约（`polish → translation`、`revision → common`），并新增 `tests/test_pipeline_imports.py` 以 `ast` 解析各模块顶层 import 断言依赖方向与硬编码白名单完全一致，把包内无环约束从文档纪律变成失败的构建。
 - Q6.1c 提示词加固：API 与 Agent 统一以完整语义组处理目标语言表达，减少逐 cue 直译、悬空片段和生硬拼接；强化专名、产品名和代码标识符保护，细化语义问题分类及 `source_suspect` 证据门槛，并要求完整组联合修复。translation、polish、semantic review、semantic repair prompt 分别升级为 v4、v2、v2、v2，使旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效；已等待的标准 Agent Job 继续按严格 ID 契约兼容回填，重新准备批次后使用新版提示词。不改变 cue、时间轴、Job schema 或事件协议。
 - Q6.1b 收尾：Q6 语义报告包含 `source_suspect` 时，API、Agent 和 `continue` 等待路径自动为相关 cue 生成源文修订模板；`status` 保持只读并优先展示源文回填，同时保留译文回填和直接确认。旧等待 Job 缺模板时引导 `continue` 懒生成，避免展开超长 cue 参数；导入译文任务不生成或推荐不可提交的源文修订。复用现有 stage、artifact 和事件协议，不升级 Job schema。
 - Q6.1b 源文修订核心：新增 `prepare-source-review` 与 `apply-source-review-fixes`，以 source checksum 和精确 cue ID 集合绑定可编辑模板；回填只修改源文，保留 ID、时间轴、words 与 provenance。接受后立即执行源字幕 QA，以 fingerprint 文件和一次 Job 原子保存切换修订、source cue、选择、QA 与 SRT 证据链，并失效旧翻译、语义校对、渲染和烧录产物。新增 `source_review_input_ready` / `source_review_revised` 事件，事件不包含字幕正文；导入译文任务首版明确拒绝。
@@ -31,6 +32,7 @@
 
 ### Changed
 
+- `pipeline` 包内确实被跨模块引用的 `_` 前缀符号去掉下划线并公有化（如 `set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等）；纯重命名，不保留旧名别名，不改变任何行为。
 - 烧录与预览输出路径安全统一到 `xvt.paths`：允许写到 Job 目录外的绝对路径，但写入前拒绝覆盖源媒体、`job.json` 与除「正在写入的同 kind」外的已登记 artifact（含 hardlink/`samefile`）；同 kind 重烧/重预览允许。冲突抛 `UserInputError`，且烧录在 RENDER/BURN 记账前校验、不把路径错误记成 stage failed。
 - ASR / `asr_resegmented` 来源的 `low_timing_confidence` 由 `review` 降为 `warning`，避免端到端几乎必卡人工确认；`aligned` 与用户导入字幕仍为 `review`。硬显示超限（`line_too_wide` / `bilingual_overflow_risk`）与跨门 display_width 确认族映射不变。
 - YouTube/远程视频下载格式选择改为 `bv*+ba/b/18/best`（分离流失败时可回退渐进式 360p 与 best）；HTTP 403 时给出可操作提示（`continue` 重试、更新 yt-dlp、显式 `--cookies-from-browser`），仍不默认读取浏览器 Cookie。

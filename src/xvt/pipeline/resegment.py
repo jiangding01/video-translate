@@ -16,9 +16,9 @@ from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline.common import (
-    _checksum,
-    _load_cues,
-    _write_json,
+    checksum,
+    load_cues,
+    write_json,
 )
 from xvt.qa import display_width, display_width_review_limit, target_overflow_cue_ids
 from xvt.recovery import valid_artifact_path
@@ -59,8 +59,8 @@ def resegment_translation(
             "re-segmentation requires valid source_cues, translated_cues, and media_info"
         )
 
-    source_cues = _load_cues(source_path)
-    translated_cues = _load_cues(translated_path)
+    source_cues = load_cues(source_path)
+    translated_cues = load_cues(translated_path)
     source_ids = {cue.id for cue in source_cues}
     if len(source_ids) != len(source_cues):
         raise ValueError("source_cues contains duplicate cue ids")
@@ -120,10 +120,10 @@ def resegment_translation(
 
     artifacts_directory = get_job_directory(job) / "artifacts"
     source_output = artifacts_directory / "source-cues.json"
-    _write_json(source_output, [asdict(cue) for cue in resegmented])
+    write_json(source_output, [asdict(cue) for cue in resegmented])
     source_srt_output = save_subtitles(resegmented, artifacts_directory / "source.srt")
     report_output = artifacts_directory / "translation-resegmentation.json"
-    _write_json(
+    write_json(
         report_output,
         {
             "source_cue_count": len(source_cues),
@@ -152,9 +152,9 @@ def resegment_translation(
         ArtifactKind.TRANSLATION_REVIEW_REVISION,
     }
     replacement_artifacts = [
-        Artifact("source_cues", str(source_output), _checksum(source_output)),
-        Artifact("source_srt", str(source_srt_output), _checksum(source_srt_output)),
-        Artifact("translation_resegmentation", str(report_output), _checksum(report_output)),
+        Artifact("source_cues", str(source_output), checksum(source_output)),
+        Artifact("source_srt", str(source_srt_output), checksum(source_srt_output)),
+        Artifact("translation_resegmentation", str(report_output), checksum(report_output)),
     ]
     replacement_kinds = {artifact.kind for artifact in replacement_artifacts}
     invalidated = [artifact for artifact in job.artifacts if artifact.kind in invalidated_kinds]

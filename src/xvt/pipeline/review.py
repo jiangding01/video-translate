@@ -16,8 +16,8 @@ from xvt.job_store import get_job_file, load_job, save_job, utc_now
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline.common import (
     SUBTITLE_REVIEW_REQUIRED_MESSAGE,
-    _artifact_checksum_for,
-    _set_stage,
+    artifact_checksum_for,
+    set_stage,
 )
 from xvt.recovery import valid_artifact_path
 
@@ -33,7 +33,7 @@ def _canonical_review_issue(code: str, cue_id: int) -> tuple[str, int]:
     return (_REVIEW_CODE_FAMILIES.get(code, code), cue_id)
 
 
-def _acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
+def acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
     """返回仍然有效的已确认 review 问题集合；确认不存在或已失效时返回 None。
 
     有效性绑定 source_cues 的 checksum：字幕内容变化后旧确认自动失效。
@@ -41,7 +41,7 @@ def _acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
     record = job.config.get("subtitle_review_acknowledgment")
     if not isinstance(record, dict):
         return None
-    if record.get("source_cues_checksum") != _artifact_checksum_for(job, "source_cues"):
+    if record.get("source_cues_checksum") != artifact_checksum_for(job, "source_cues"):
         return None
     issues = record.get("acknowledged_issues")
     if not isinstance(issues, list):
@@ -57,7 +57,7 @@ def _acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
     return acknowledged
 
 
-def _complete_qa_stage(
+def complete_qa_stage(
     job: Job,
     report: Any,
     event_sink: EventSink | None,
@@ -65,7 +65,7 @@ def _complete_qa_stage(
     if report.status == "needs_review":
         # 人工确认通道：仅当当前报告的全部 review 级问题都是用户已确认集合的
         # 子集时放行；出现任何新的 review 问题仍然阻断，error 级永不放行。
-        acknowledged = _acknowledged_review_issues(job)
+        acknowledged = acknowledged_review_issues(job)
         review_issues = {
             _canonical_review_issue(issue.code, issue.cue_id)
             for issue in report.issues
@@ -81,14 +81,14 @@ def _complete_qa_stage(
                         source="stored_acknowledgment",
                     )
                 )
-            _set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
+            set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
             return
     if report.status in {"failed", "needs_review"}:
         if report.status == "needs_review":
             message = SUBTITLE_REVIEW_REQUIRED_MESSAGE
         else:
             message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
-        _set_stage(
+        set_stage(
             job,
             StageName.SUBTITLE_QA,
             StageStatus.FAILED,
@@ -96,7 +96,7 @@ def _complete_qa_stage(
             error=message,
         )
         raise RuntimeError(message)
-    _set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
+    set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
 
 
 def acknowledge_subtitle_review(
@@ -142,8 +142,8 @@ def acknowledge_subtitle_review(
     )
     job.config["subtitle_review_acknowledgment"] = {
         "report_kind": report_kind,
-        "report_checksum": _artifact_checksum_for(job, report_kind or "subtitle_qa"),
-        "source_cues_checksum": _artifact_checksum_for(job, "source_cues"),
+        "report_checksum": artifact_checksum_for(job, report_kind or "subtitle_qa"),
+        "source_cues_checksum": artifact_checksum_for(job, "source_cues"),
         "acknowledged_issues": review_issues,
         "acknowledged_at": utc_now(),
     }
@@ -183,14 +183,14 @@ def finalize_acknowledged_subtitle_review(
         return False
     if job.stages[StageName.SUBTITLE_QA].status is not StageStatus.SUCCEEDED:
         return False
-    if _acknowledged_review_issues(job) is None:
+    if acknowledged_review_issues(job) is None:
         return False
     if any(
         valid_artifact_path(job, kind) is None
         for kind in ("translated_cues", "translated_srt", "bilingual_srt")
     ):
         return False
-    _set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
+    set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, event_sink)
     return True
 
 
@@ -243,9 +243,9 @@ def translation_review_acknowledged(job: Job, report_path: Path) -> bool:
     except (OSError, json.JSONDecodeError, UserInputError):
         return False
     return bool(
-        record.get("source_cues_checksum") == _artifact_checksum_for(job, "source_cues")
-        and record.get("candidate_cues_checksum") == _artifact_checksum_for(job, candidate_kind)
-        and record.get("report_checksum") == _artifact_checksum_for(job, report_kind)
+        record.get("source_cues_checksum") == artifact_checksum_for(job, "source_cues")
+        and record.get("candidate_cues_checksum") == artifact_checksum_for(job, candidate_kind)
+        and record.get("report_checksum") == artifact_checksum_for(job, report_kind)
         and record.get("prompt_version") == report.get("prompt_version")
         and record.get("acknowledged_issues")
         == [[category, list(cue_ids)] for category, cue_ids in issue_keys]
@@ -281,9 +281,9 @@ def acknowledge_translation_review(
     issue_keys = _semantic_issue_keys(report)
     job.config["translation_review_acknowledgment"] = {
         "report_kind": report_kind,
-        "report_checksum": _artifact_checksum_for(job, report_kind),
-        "source_cues_checksum": _artifact_checksum_for(job, "source_cues"),
-        "candidate_cues_checksum": _artifact_checksum_for(job, candidate_kind),
+        "report_checksum": artifact_checksum_for(job, report_kind),
+        "source_cues_checksum": artifact_checksum_for(job, "source_cues"),
+        "candidate_cues_checksum": artifact_checksum_for(job, candidate_kind),
         "prompt_version": report.get("prompt_version"),
         "acknowledged_issues": [[category, list(cue_ids)] for category, cue_ids in issue_keys],
         "acknowledged_at": utc_now(),

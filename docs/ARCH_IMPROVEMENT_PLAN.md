@@ -39,29 +39,34 @@
 | F14 | 真实 Job 复查：用户把导出到 Job 外的烧录成品移走后，`status` 误报"烧录尚未通过媒体 QA"（该 Job `media_qa=succeeded`），并推荐会触发完整重新编码的 `continue`；`verify` 的诊断（`artifact file is missing`）才是准确的 | `recovery.py:627` 将成品缺失与媒体 QA 未过合并为同一文案；2026-07-16/18 两个真实 Job 复现 |
 | F15 | 字幕 QA `needs_review` 经 `--acknowledge-subtitle-review` 确认并完成烧录后，`translate` stage 永久保留 `failed` 和过期错误文本（"run --acknowledge-subtitle-review"，实际已确认）；在含 PR #66 修复的 `ab28aff` 上对完整 Job 副本重跑 `continue` 仍不收口。PR #66 只覆盖语义复核确认路径，字幕 QA 确认路径是同类问题的未扫兄弟实例 | 2026-08-01 polished 真实 Job（`20260801T104038Z-5376f3bb`）复现；`recovery` 判定 complete 而 stage 行显示 failed，两轨矛盾与 F14 同族 |
 
+## 实施进度（2026-08-02 更新）
+
+- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。
+- **待做**：R2.1（_run_command 拆分）、R2.2（统一 apply 路由）、R2.3（SRT 修订通道）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
+
 ## R1：工程加固（低风险，可立即实施）
 
-### R1.1 CI 补打包验证与 Python 版本矩阵（F1）
+### R1.1 CI 补打包验证与 Python 版本矩阵（F1）——已完成（PR #68）
 
 - `.github/workflows/ci.yml` 的矩阵增加 `python-version: ["3.11", "3.13"]`（与 os 矩阵正交）。
 - 新增 `uv build` step（放在测试之后），确保 wheel/sdist 始终可构建。
 - 验收：CI 四个组合全绿；本地 `uv build` 与 CI 产物一致。
 
-### R1.2 发布 tag 与发版流程（F2）
+### R1.2 发布 tag 与发版流程（F2）——已完成（v0.1.0 / v0.1.1 已推送，AGENTS 已记录流程）
 
 - 按 CHANGELOG 日期定位 0.1.0（2026-07-15）与 0.1.1（2026-07-24）对应 commit，补打 annotated tag `v0.1.0`、`v0.1.1` 并推送。
 - AGENTS.md 验证命令一节追加发版约定：升版本号 → 更新 CHANGELOG 版本节 → `uv build` → `git tag vX.Y.Z`。
 - 验收：`git tag` 列出两个历史版本；AGENTS.md 记录流程。
 
-### R1.3 依赖规约补齐与 import 方向守卫测试（F3）
+### R1.3 依赖规约补齐与 import 方向守卫测试（F3）——已完成（PR #68）
 
 - AGENTS.md:51 的规约补上 `polish → translation`、`revision → common` 两条边。
 - 新增 `tests/test_pipeline_imports.py`：解析 `pipeline/` 各模块的 `from xvt.pipeline.X import` 语句，断言实际依赖边集合与声明的白名单完全一致（多一条或少一条都失败）。守卫测试把"无环 + 方向正确"从文档纪律变成失败的构建。
 - 验收：守卫测试在当前代码上通过；人为加一条反向 import 时测试失败。
 
-### R1.4 包内共享符号公有化（F4）
+### R1.4 包内共享符号公有化（F4）——已完成（PR #68，16 个符号，无别名）
 
-- 把确实被跨模块引用的 `_` 前缀符号去掉下划线（`set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等），原名保留一个赋值别名过渡一版后删除。
+- 把确实被跨模块引用的 `_` 前缀符号去掉下划线（`set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等）。包内符号无外部消费者，一次性完成定义处、所有 import 处与调用处改名，不保留旧名别名。
 - 纯模块内私有的保持现状。这是纯重命名，注意测试中 `mock.patch` 字符串目标需同步（正是 F11 描述的脆弱点，本项顺带减少一批此类目标）。
 - 验收：`grep -rn 'import _' src/xvt/pipeline/` 无跨模块私有引用；全量测试通过。
 
@@ -89,13 +94,13 @@
 - 源文修订（`prepare-source-review`）同理增加 SRT 通道，可作为独立后续项。
 - 验收：SRT 通道与 JSON 通道对同一组编辑产生相同的修订记录 checksum；改动时间轴或增删 cue 的 SRT 在解析边界被拒绝。
 
-### R2.4 烧录成品缺失的恢复语义与文案修正（F14）
+### R2.4 烧录成品缺失的恢复语义与文案修正（F14）——文案拆分已完成（PR #67），确认通道待评估
 
 - `_burn_recovery_reason`（`recovery.py:623`）拆分三种情形并分别给出准确文案：媒体 QA 未通过（现文案保留）、烧录派生指纹失效（现文案保留）、**成品文件缺失但媒体 QA 与指纹均有效**（新增文案，说明成品已不在登记路径，如已自行保存可忽略，重新烧录才需要 `continue`）。
 - 成品导出到 Job 目录外本就是交付行为，用户取走成品是常态而非异常。评估为该情形提供轻量确认通道（如 `continue --acknowledge-missing-burned` 或 `status` 直接判定 complete-with-exported-artifact），避免"取走成品 → status 永远 retryable → 误触发整段重新编码"；具体形式实施时定，红线是不得把媒体 QA 失败或指纹失效误判为可确认。
 - 验收：构造三种情形的 Job 各一，`status` 文案与 `verify` 诊断一致；媒体 QA 失败场景仍推荐重新烧录且不可确认跳过。
 
-### R2.5 字幕 QA 确认后的 translate stage 收口（F15，建议优先修复）
+### R2.5 字幕 QA 确认后的 translate stage 收口（F15）——已完成（PR #67，真实 Job 实证收口）
 
 - 与 PR #66 的语义复核收口对称：字幕 QA `needs_review` 经确认且译文候选与渲染产物有效（或补齐成功）后，`translate` stage 同样显式收口为 `succeeded`，清除过期的 acknowledge 提示错误。旧 Job 在下一次 `continue` 时收口。
 - 回归测试必须先在未修复代码上失败：构造"polished 链全绿 → 字幕 QA needs_review → 确认 → 烧录完成"的 Job，断言 `translate` 终态为 `succeeded` 且无残留错误文本。

@@ -12,14 +12,14 @@ from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
-    _add_artifact,
-    _checksum,
-    _error_category,
-    _load_cues,
-    _set_stage,
-    _write_json,
+    add_artifact,
+    checksum,
+    error_category,
+    load_cues,
+    set_stage,
+    write_json,
 )
-from xvt.pipeline.translation import TranslationRunResult, _translate_batch_with_retries
+from xvt.pipeline.translation import TranslationRunResult, translate_batch_with_retries
 from xvt.process import raise_if_cancelled
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
@@ -147,7 +147,7 @@ def _prepare_draft(
         raise ValueError("translation polishing requires valid translated_cues")
     draft_path = get_job_directory(job) / "artifacts" / "translation-draft-cues.json"
     draft_path.write_bytes(translated_path.read_bytes())
-    _add_artifact(job, "translation_draft_cues", draft_path, event_sink)
+    add_artifact(job, "translation_draft_cues", draft_path, event_sink)
     set_workflow_config(job, polished_config)
     _reset_for_polish(job)
     save_job(job)
@@ -163,8 +163,8 @@ def _build_batches(
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise ValueError("translation polishing requires checksum-valid source_cues")
-    source = _load_cues(source_path)
-    draft = _load_cues(draft_path)
+    source = load_cues(source_path)
+    draft = load_cues(draft_path)
     policy = config.translation_policy or translation_policy_from_dict(
         job.config.get("translation_policy")
     )
@@ -194,10 +194,10 @@ def _fingerprint(
     policy = config.translation_policy or translation_policy_from_dict(
         job.config.get("translation_policy")
     )
-    source_language = _source_language(job, _load_cues(source_path))
+    source_language = _source_language(job, load_cues(source_path))
     payload = {
-        "source_cues_checksum": _checksum(source_path),
-        "draft_cues_checksum": _checksum(draft_path),
+        "source_cues_checksum": checksum(source_path),
+        "draft_cues_checksum": checksum(draft_path),
         "source_language": source_language,
         "target_language": config.target_language,
         "provider": mode,
@@ -219,7 +219,7 @@ def _write_batches(
     event_sink: EventSink | None,
 ) -> Path:
     path = get_job_directory(job) / "artifacts" / "translation-polish-batches.json"
-    _write_json(
+    write_json(
         path,
         {
             "job_id": job.id,
@@ -229,7 +229,7 @@ def _write_batches(
             "batches": [batch.to_dict() for batch in batches],
         },
     )
-    _add_artifact(job, "translation_polish_batches", path, event_sink)
+    add_artifact(job, "translation_polish_batches", path, event_sink)
     return path
 
 
@@ -347,8 +347,8 @@ def translation_polish_satisfied(
             ):
                 return False
             translations[cue_id] = text.strip()
-        expected = apply_polish_translations(_load_cues(draft_path), translations)
-        polished = _load_cues(polished_path)
+        expected = apply_polish_translations(load_cues(draft_path), translations)
+        polished = load_cues(polished_path)
         return polished == expected
     except (KeyError, OSError, TypeError, ValueError):
         return False
@@ -362,7 +362,7 @@ def _write_progress(
     translations: dict[int, str],
     event_sink: EventSink | None,
 ) -> None:
-    _write_json(
+    write_json(
         path,
         {
             "fingerprint": fingerprint,
@@ -372,7 +372,7 @@ def _write_progress(
             ],
         },
     )
-    _add_artifact(job, "translation_polish_progress", path, event_sink)
+    add_artifact(job, "translation_polish_progress", path, event_sink)
 
 
 def _finalize_polish(
@@ -392,9 +392,9 @@ def _finalize_polish(
         record.completed_at = None
         record.error = None
     path = get_job_directory(job) / "artifacts" / "translation-polished-cues.json"
-    _write_json(path, [asdict(cue) for cue in polished])
-    _add_artifact(job, "translation_polished_cues", path, event_sink)
-    _set_stage(
+    write_json(path, [asdict(cue) for cue in polished])
+    add_artifact(job, "translation_polished_cues", path, event_sink)
+    set_stage(
         job,
         StageName.TRANSLATE,
         StageStatus.SUCCEEDED,
@@ -436,7 +436,7 @@ def _run_translation_polish(
         )
         return TranslationRunResult("reused", paths)
     batches_path = _write_batches(job, batches, fingerprint, event_sink)
-    _set_stage(
+    set_stage(
         job,
         StageName.TRANSLATE,
         StageStatus.RUNNING,
@@ -444,7 +444,7 @@ def _run_translation_polish(
         extras={"phase": "polish"},
     )
     if mode == "agent":
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.AWAITING_INPUT,
@@ -510,7 +510,7 @@ def _run_translation_polish(
                     )
 
             translations.update(
-                _translate_batch_with_retries(
+                translate_batch_with_retries(
                     batch,
                     provider_config,
                     max_retries=config.max_retries,
@@ -531,17 +531,17 @@ def _run_translation_polish(
                     )
                 )
     except Exception as error:
-        _set_stage(
+        set_stage(
             job,
             StageName.TRANSLATE,
             StageStatus.FAILED,
             event_sink,
             error=str(error),
-            error_category=_error_category(error),
+            error_category=error_category(error),
             extras={"phase": "polish"},
         )
         raise
-    rendered = _finalize_polish(job, _load_cues(draft_path), translations, event_sink)
+    rendered = _finalize_polish(job, load_cues(draft_path), translations, event_sink)
     return TranslationRunResult(mode, (progress_path, *rendered))
 
 
@@ -673,7 +673,7 @@ def apply_agent_translation_polish(
     if set(translations) != expected_ids:
         raise ValueError("polish response must cover every requested cue id exactly once")
 
-    _set_stage(
+    set_stage(
         job,
         StageName.TRANSLATE,
         StageStatus.RUNNING,
@@ -689,4 +689,4 @@ def apply_agent_translation_polish(
         translations,
         event_sink,
     )
-    return _finalize_polish(job, _load_cues(draft_path), translations, event_sink)
+    return _finalize_polish(job, load_cues(draft_path), translations, event_sink)
