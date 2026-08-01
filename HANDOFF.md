@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-08-01
+更新时间：2026-08-02
 
 ## 当前快照
 
@@ -12,10 +12,10 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 482 个测试、18 个子测试，全部通过 |
+| 自动化测试 | 485 个测试、18 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
-| CI | GitHub Actions（ubuntu + macos 矩阵）跑 ruff、pytest 与 CLI 冒烟 |
+| CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
 | Git | 功能修改使用 `codex/` 开发分支，Review 通过后以 PR 合并 `main` |
 | 默认 CLI 路径 | `run` → `status` → `continue`（批处理 `batch` / `batch-continue`） |
 
@@ -328,7 +328,13 @@ media-qa.json
 
 ### R 系列：架构改进与工程加固
 
-2026-08-02 的全量审查（基线 `ab28aff`，Ruff 与 482 测试全绿）产出 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)：R1 工程加固（CI 加 `uv build` 与 Python 3.13、补发布 tag、pipeline import 方向守卫测试、包内共享符号公有化）可立即实施；R2 CLI 收敛（`_run_command` 分发拆解、统一 `xvt apply` 按 manifest task+fingerprint 自动路由、人工修订 SRT 编辑通道）建议在可视化界面之前完成；R3 架构演进（Agent 作为传输而非平行编排、内容寻址 step 缓存统一 checkpoint、schema 演进评估、config 单轨化）在 polished 真实 E2E 验收后启动。全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。
+2026-08-02 的全量审查（基线 `ab28aff`）产出 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)，含 F1–F15 审查发现与 R1/R2/R3 分阶段任务。当前进度：
+
+- **已完成（PR #67）**：真实 Job 复现的两个恢复语义矛盾——R2.5 字幕 QA 确认后 `translate` stage 收口（2026-08-01 polished E2E Job 复现并实证修复）、R2.4 烧录成品缺失误报"媒体 QA 未过"的文案拆分（2026-07-16/18 Job 复现）。
+- **已完成（PR #68，堆叠于 #67）**：R1 全部四项——CI 增加 Python 3.11/3.13 矩阵与 `uv build`、补打并推送 `v0.1.0` / `v0.1.1` tag 且 AGENTS 记录发版流程、`tests/test_pipeline_imports.py` 守卫 pipeline 依赖方向、16 个跨模块 `_` 前缀符号公有化。R1.3 落地时发现 semantic ↔ review/revision 存在函数级惰性 import 打破加载期循环，留待 R3.1 一并消解。
+- **待做**：R2.1 `_run_command` 分发拆解、R2.2 统一 `xvt apply` 路由、R2.3 人工修订 SRT 通道、R2.4 确认通道评估（GUI 之前）；R3 架构演进（polished E2E 验收后）。
+
+全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 
