@@ -4,6 +4,7 @@
 
 - ``common``：输入探测、stage 记账、原子 JSON 写入、artifact 登记与失效。
 - ``review``：字幕 QA ``needs_review`` 的人工确认通道。
+- ``revision``：语义校对后的人工译文修订与严格回填。
 - ``transcription``：素材获取、音频规范化、Whisper 转写、分段、对齐与恢复。
 - ``translation``：翻译批次、兼容 API 调用、Agent 回填、导入译文与统一收尾。
 - ``polish``：已有译文的可恢复 API/Agent 润色（依赖 ``translation`` 的收尾）。
@@ -25,6 +26,11 @@ from xvt.pipeline.polish import (
 from xvt.pipeline.resegment import ResegmentationResult, resegment_translation
 from xvt.pipeline.retranslate import apply_cue_retranslation, retranslate_cues
 from xvt.pipeline.review import acknowledge_subtitle_review, acknowledge_translation_review
+from xvt.pipeline.revision import (
+    apply_translation_review_fixes,
+    ensure_translation_review_input,
+    translation_review_input_path,
+)
 from xvt.pipeline.semantic import (
     SemanticRunResult,
     agent_semantic_review_waiting,
@@ -76,11 +82,13 @@ __all__ = [
     "apply_agent_translation_polish",
     "apply_cue_retranslation",
     "apply_subtitle_translation",
+    "apply_translation_review_fixes",
     "burn_translated_job",
     "complete_agent_polished_outputs",
     "complete_acknowledged_semantic_review",
     "complete_translated_outputs",
     "inspect_input",
+    "ensure_translation_review_input",
     "interrupt_running_stage",
     "is_subtitle_input",
     "prepare_agent_translation",
@@ -100,6 +108,7 @@ __all__ = [
     "run_translation_semantic_review",
     "run_translation_polish",
     "translation_polish_satisfied",
+    "translation_review_input_path",
     "semantic_review_approved",
     "semantic_review_satisfied",
     "semantic_review_waiting",

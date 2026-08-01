@@ -29,7 +29,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与读写边界 |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
 | `src/xvt/artifacts.py` | artifact kind 枚举、派生依赖图与失效闭包 |
-| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 与人工确认）、`transcription`（转写与恢复）、`translation`（翻译与收尾）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
+| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
 | `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |

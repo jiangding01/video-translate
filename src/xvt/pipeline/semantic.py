@@ -89,10 +89,17 @@ def _config_for_job(job: Job, config: WorkflowConfig | None) -> WorkflowConfig:
 
 
 def _candidate_path(job: Job) -> Path:
+    reviewed = valid_artifact_path(job, "translation_reviewed_cues")
+    if reviewed is not None:
+        return reviewed
     path = valid_artifact_path(job, "translation_polished_cues")
     if path is None:
         raise ValueError("semantic review requires checksum-valid polished translation cues")
     return path
+
+
+def _reviewed_report_filename(candidate_path: Path) -> str:
+    return f"translation-semantic-qa-reviewed-{_checksum(candidate_path)[:12]}.json"
 
 
 def _source_language(job: Job, source: list[Cue]) -> str:
@@ -718,6 +725,14 @@ def _repair_chain_satisfied(
 
 
 def semantic_review_target(job: Job) -> tuple[Path, Path] | None:
+    reviewed = valid_artifact_path(job, "translation_reviewed_cues")
+    reviewed_report = valid_artifact_path(job, "translation_semantic_qa_reviewed")
+    if (
+        reviewed is not None
+        and reviewed_report is not None
+        and _report_matches_candidate(job, reviewed_report, reviewed)
+    ):
+        return reviewed_report, reviewed
     polished = valid_artifact_path(job, "translation_polished_cues")
     initial = valid_artifact_path(job, "translation_semantic_qa")
     if polished is None or initial is None or not _report_matches_candidate(job, initial, polished):
@@ -797,6 +812,7 @@ def run_translation_semantic_review(
     if resolved.translation_quality != "polished":
         raise ValueError("semantic review requires polished translation quality")
     candidate_path = _candidate_path(job)
+    reviewed_candidate = valid_artifact_path(job, "translation_reviewed_cues") == candidate_path
     completed_target = semantic_review_target(job)
     if completed_target is not None and semantic_review_satisfied(job):
         _report_path, completed_candidate_path = completed_target
@@ -808,6 +824,9 @@ def run_translation_semantic_review(
                 "translation_semantic_repair",
                 "translation_repaired_cues",
                 "translation_semantic_qa_final",
+                "translation_review_revision",
+                "translation_reviewed_cues",
+                "translation_semantic_qa_reviewed",
             )
             if (path := valid_artifact_path(job, kind)) is not None
         )
@@ -838,6 +857,34 @@ def run_translation_semantic_review(
     )
     paths: list[Path] = []
     try:
+        if reviewed_candidate:
+            report_path, issues = _run_review_phase(
+                job,
+                resolved,
+                candidate_path,
+                kind="translation_semantic_qa_reviewed",
+                filename=_reviewed_report_filename(candidate_path),
+                task="semantic_review_human_revision",
+                phase="semantic_review",
+                mode=mode,
+                provider_config=provider_config,
+                event_sink=event_sink,
+            )
+            paths.append(report_path)
+            if issues:
+                _set_stage(
+                    job,
+                    StageName.TRANSLATE,
+                    StageStatus.AWAITING_INPUT,
+                    event_sink,
+                    extras={"phase": "semantic_review"},
+                )
+                from xvt.pipeline.revision import ensure_translation_review_input
+
+                paths.append(ensure_translation_review_input(job_file, event_sink=event_sink))
+                return SemanticRunResult("awaiting_review", mode, tuple(paths))
+            rendered = _finalize_candidate(job, candidate_path, event_sink)
+            return SemanticRunResult("completed", mode, (*paths, *rendered))
         report_path, issues = _run_review_phase(
             job,
             resolved,
@@ -891,6 +938,9 @@ def run_translation_semantic_review(
                 event_sink,
                 extras={"phase": "semantic_review"},
             )
+            from xvt.pipeline.revision import ensure_translation_review_input
+
+            paths.append(ensure_translation_review_input(job_file, event_sink=event_sink))
             return SemanticRunResult("awaiting_review", mode, tuple(paths))
         rendered = _finalize_candidate(job, candidate_path, event_sink)
         return SemanticRunResult("completed", mode, (*paths, *rendered))
@@ -926,14 +976,20 @@ def prepare_agent_semantic_review(
     job = load_job(job_file)
     resolved = _config_for_job(job, config)
     candidate_path = _candidate_path(job)
+    reviewed_candidate = valid_artifact_path(job, "translation_reviewed_cues") == candidate_path
     batches = _review_batches(job, candidate_path, resolved)
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise ValueError("Agent semantic review requires valid source cues")
-    _invalidate_semantic_downstream(job, ArtifactKind.TRANSLATION_SEMANTIC_QA)
+    report_kind = (
+        ArtifactKind.TRANSLATION_SEMANTIC_QA_REVIEWED
+        if reviewed_candidate
+        else ArtifactKind.TRANSLATION_SEMANTIC_QA
+    )
+    _invalidate_semantic_downstream(job, report_kind)
     payload: dict[str, Any] = {
         "job_id": job.id,
-        "task": "semantic_review_and_repair",
+        "task": "semantic_review_only" if reviewed_candidate else "semantic_review_and_repair",
         "task_version": SEMANTIC_AGENT_TASK_VERSION,
         "source_cues_checksum": _checksum(source_path),
         "candidate_cues_checksum": _checksum(candidate_path),
@@ -947,9 +1003,14 @@ def prepare_agent_semantic_review(
     if fallback_reason:
         payload["fallback_reason"] = fallback_reason
     payload["fingerprint"] = _agent_manifest_fingerprint(payload)
-    path = get_job_directory(job) / "artifacts" / "translation-semantic-qa.json"
+    filename = (
+        _reviewed_report_filename(candidate_path)
+        if reviewed_candidate
+        else "translation-semantic-qa.json"
+    )
+    path = get_job_directory(job) / "artifacts" / filename
     _write_json(path, payload)
-    _add_artifact(job, "translation_semantic_qa", path, event_sink)
+    _add_artifact(job, report_kind.value, path, event_sink)
     _set_stage(
         job,
         StageName.TRANSLATE,
@@ -961,7 +1022,9 @@ def prepare_agent_semantic_review(
 
 
 def agent_semantic_review_waiting(job: Job) -> bool:
-    path = valid_artifact_path(job, "translation_semantic_qa")
+    path = valid_artifact_path(job, "translation_semantic_qa_reviewed") or valid_artifact_path(
+        job, "translation_semantic_qa"
+    )
     if path is None:
         return False
     try:
@@ -985,7 +1048,12 @@ def _validated_agent_manifest(
     fingerprint = data.get("fingerprint")
     if not (
         data.get("job_id") == job.id
-        and data.get("task") == "semantic_review_and_repair"
+        and data.get("task")
+        == (
+            "semantic_review_only"
+            if valid_artifact_path(job, "translation_reviewed_cues") == candidate_path
+            else "semantic_review_and_repair"
+        )
         and data.get("task_version") == SEMANTIC_AGENT_TASK_VERSION
         and data.get("source_cues_checksum") == _checksum(source_path)
         and data.get("candidate_cues_checksum") == _checksum(candidate_path)
@@ -1030,7 +1098,9 @@ def apply_agent_semantic_review(
     event_sink: EventSink | None = None,
 ) -> SemanticRunResult:
     job = load_job(job_file)
-    manifest_path = valid_artifact_path(job, "translation_semantic_qa")
+    manifest_path = valid_artifact_path(
+        job, "translation_semantic_qa_reviewed"
+    ) or valid_artifact_path(job, "translation_semantic_qa")
     if manifest_path is None:
         raise ValueError("job has no valid Agent semantic review manifest")
     manifest, resolved, candidate_path, review_batches = _validated_agent_manifest(
@@ -1045,13 +1115,14 @@ def apply_agent_semantic_review(
     initial_issues = _validate_unique_issues(
         [issue for value in initial_results.values() for issue in value]
     )
+    review_only = manifest.get("task") == "semantic_review_only"
     repairable = tuple(
         issue for issue in initial_issues if issue.category in SEMANTIC_REPAIR_CATEGORIES
     )
     preserved = tuple(issue for issue in initial_issues if issue.category == "source_suspect")
     final_issues = initial_issues
     repair_state = None
-    if repairable:
+    if repairable and not review_only:
         source_path = valid_artifact_path(job, "source_cues")
         if source_path is None or resolved.target_language is None:
             raise ValueError("Agent semantic repair requires valid source cues")
@@ -1117,11 +1188,12 @@ def apply_agent_semantic_review(
     ):
         raise ValueError("Agent semantic response must not repair when no repairable issue exists")
 
+    report_kind = "translation_semantic_qa_reviewed" if review_only else "translation_semantic_qa"
     _write_review_checkpoint(
         job,
-        kind="translation_semantic_qa",
+        kind=report_kind,
         path=manifest_path,
-        task="semantic_review",
+        task="semantic_review_human_revision" if review_only else "semantic_review",
         batches=review_batches,
         fingerprint=str(manifest["fingerprint"]),
         results=initial_results,
@@ -1175,6 +1247,9 @@ def apply_agent_semantic_review(
             event_sink,
             extras={"phase": "semantic_review"},
         )
+        from xvt.pipeline.revision import ensure_translation_review_input
+
+        paths.append(ensure_translation_review_input(job_file, event_sink=event_sink))
         return SemanticRunResult("awaiting_review", "agent", tuple(paths))
     rendered = _finalize_candidate(job, candidate_path, event_sink)
     return SemanticRunResult("completed", "agent", (*paths, *rendered))

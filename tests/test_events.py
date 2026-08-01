@@ -218,6 +218,20 @@ class EventPayloadContractTest(unittest.TestCase):
                 reason="manual_subtitles_passed",
                 report_path="/tmp/source-selection.json",
             ),
+            EventType.TRANSLATION_REVIEW_INPUT_READY: create_event(
+                EventType.TRANSLATION_REVIEW_INPUT_READY,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                path="/tmp/translation-review.json",
+                scope="translation",
+                item_count=2,
+            ),
+            EventType.TRANSLATION_REVIEW_REVISED: create_event(
+                EventType.TRANSLATION_REVIEW_REVISED,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                scope="translation",
+                item_count=2,
+                checksum="abc123",
+            ),
             EventType.TRANSLATION_BATCH_STARTED: create_event(
                 EventType.TRANSLATION_BATCH_STARTED,
                 **job_event_fields("job-1", "/tmp/job.json"),

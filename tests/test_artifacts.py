@@ -62,6 +62,9 @@ LEGACY_RESEGMENT_INVALIDATION = {
     "translation_semantic_repair",
     "translation_repaired_cues",
     "translation_semantic_qa_final",
+    # Q6.1：人工修订候选与其复审报告同样绑定 source_cues。
+    "translation_reviewed_cues",
+    "translation_semantic_qa_reviewed",
 }
 
 

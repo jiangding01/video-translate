@@ -235,6 +235,8 @@ uv run --no-sync xvt run INPUT --output OUTPUT \
 
 `run`、`batch`、`translate` 和 `prepare-translation` 都支持 `standard|polished`。API 模式的 `polished` 先保存完整翻译草稿，再逐批润色；Agent 模式生成带 `task=translate_and_polish` 和 fingerprint 的单个 `translation-batches.json`。润色候选随后必须经过 Q6 语义校对；API 对可修复问题按完整语义组最多修复一次并复查，Agent 生成 `task=semantic_review_and_repair` manifest，使用 `apply-semantic-review JOB RESPONSE` 回填。旧 Job 或旧 batch 缺质量字段时继续按 `standard`。`--translation-subtitles` 不能与新 Job 的 `polished` 同时使用，应先导入译文再执行 `polish-translation`。
 
+语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板。编辑其中的 `items[].text` 后运行 `xvt apply-translation-review-fixes JOB REVIEW.json`，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。`status` 会把修订作为首选路径，同时保留 `--acknowledge-translation-review` 直接确认作为备选。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
+
 已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
 
 ```bash
@@ -248,9 +250,12 @@ uv run --no-sync xvt apply-polish-translation "/path/to/job.json" RESPONSE.json
 uv run --no-sync xvt continue "/path/to/job.json"
 ```
 
-润色响应必须回传当前 `translation-polish-batches.json` 的 `fingerprint`、精确覆盖全部请求 ID，并且只能替换译文文本；旧响应不能用于新的 draft。`continue` 随后进入语义校对。如果语义报告仍有问题，`status` 会要求检查报告并执行：
+润色响应必须回传当前 `translation-polish-batches.json` 的 `fingerprint`、精确覆盖全部请求 ID，并且只能替换译文文本；旧响应不能用于新的 draft。`continue` 随后进入语义校对。如果语义报告仍有问题，`status` 会优先给出可编辑模板与回填命令：
 
 ```bash
+uv run --no-sync xvt apply-translation-review-fixes "/path/to/job.json" "/path/to/review.json"
+uv run --no-sync xvt continue "/path/to/job.json"
+# 或在确认当前问题可接受时：
 uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-review
 ```
 
@@ -404,6 +409,8 @@ uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C（SIGINT）或向进程发送 SIGTERM 时，外部命令的整个进程组会被清理，当前运行阶段记录为失败，CLI 分别返回退出码 130 和 143 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。 对 `needs_review` 级的报告（例如导入字幕折叠后超宽），确认可接受后可用 `xvt continue JOB --acknowledge-subtitle-review` 显式放行：确认记录绑定当前字幕内容与具体问题集合，字幕变化或出现新的 review 问题后自动失效；error 级问题（时间轴无效、缺失译文、术语违规等）永远不能通过该通道放行。当前 schema 的 Job 缺少必填字段、stage 或正确字段类型时会返回无效输入错误，不输出 Python traceback。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
 `run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply-translation`、`polish-translation`、`apply-polish-translation`、`apply-semantic-review`、`acknowledge-translation-review`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
+
+`apply-translation-review-fixes` 同样支持 `--events-jsonl`，并通过 `translation_review_input_ready` / `translation_review_revised` 表达模板准备和修订接受；事件不会携带字幕正文。
 
 ## 退出码
 

@@ -6,6 +6,7 @@
 
 ### Added
 
+- Q6.1a 人工译文修订：语义复查仍有 review 问题时生成 fingerprint 绑定的可编辑模板；`apply-translation-review-fixes` 严格校验并只修改既有 cue 的译文，保存修订记录、独立候选和复查报告。API/Agent 都只重新复查，不增加自动修复预算；`status` 展示修订首选命令和直接确认备选命令，旧等待 Job 可由 `continue` 补生成模板。新增 `translation_review_input_ready` 与 `translation_review_revised` 事件，事件不包含字幕正文。
 - Q6 polished 译文语义校对：润色候选先生成结构化语义报告，对 `meaning_error`、`omission`、`terminology`、`awkward_join` 按完整语义组最多修复一次并最终复查，`source_suspect` 只进入人工确认且在无关修复后继续保留。API 各阶段逐批 checkpoint，并使用阶段对应的结构纠错契约；Agent manifest 严格绑定当前 Job、候选、版本和批次，完整响应校验通过后才持久化。新增四类 checksum artifact、`apply-semantic-review`、`acknowledge-translation-review`、`continue --acknowledge-translation-review`、恢复步骤与 `translation_review_acknowledged` 事件；初次可修复报告不能提前确认，最终报告必须绑定完整有效的修复链，确认也不能绕过确定性字幕 QA。默认仍为 `standard + faithful`。
 - Q5b 新 Job 翻译质量模式：`run`、`batch`、`translate` 和 `prepare-translation` 新增 `--translation-quality standard|polished`，默认保持 `standard + faithful`。兼容 API 的 polished 路径按 draft -> polish 分阶段 checkpoint；Agent 以带 task/version/fingerprint 的单个 manifest 完成一次翻译+润色回填，并可从完整 progress 确定性补齐中断的最终 cue、QA 和渲染。旧 Job、旧 batch 和旧 Agent manifest 继续按 `standard`。
 - Q5a 可恢复译文润色：新增 `polish-translation` 与 `apply-polish-translation`，为已有端到端 Job 保存不可变草稿，API 逐批 checkpoint、Agent 以 fingerprint 和完整 ID 严格回填，并由 `status` / `continue` / `batch-continue` 恢复。新增 draft、batch、progress、polished 四类 checksum artifact；润色只改译文文本，完成后仍经确定性 QA 与渲染。旧 Job 缺质量字段继续按 `standard`。

@@ -73,3 +73,5 @@ For repairable issues, return every repair batch exactly once in `repair_results
   "final_results": [{"batch": 1, "issues": []}]
 }
 ```
+
+When a semantic manifest has `task=semantic_review_only`, review the human-revised candidate once. Copy its fingerprint and return every batch exactly once in `initial_results`; omit `repair_results` and `final_results` (or return empty arrays). Human revision does not grant another automatic repair pass.

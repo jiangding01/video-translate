@@ -13,18 +13,26 @@ from xvt.pipeline import (
     acknowledge_translation_review,
     agent_semantic_review_waiting,
     apply_agent_semantic_review,
+    apply_translation_review_fixes,
     complete_acknowledged_semantic_review,
+    ensure_translation_review_input,
     prepare_agent_semantic_review,
     run_subtitle_transcription,
     run_translation_semantic_review,
     semantic_review_approved,
     semantic_review_satisfied,
     semantic_review_waiting,
+    translation_review_input_path,
 )
-from xvt.recovery import file_checksum
+from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
 from xvt.translate import SemanticIssue, SemanticSuggestedItem
 from xvt.translation_provider import ProviderResponseError
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
+
+
+def _load_target_text(path: Path, cue_id: int) -> str | None:
+    cues = json.loads(path.read_text(encoding="utf-8"))
+    return next(item["target_text"] for item in cues if item["id"] == cue_id)
 
 
 class SemanticReviewPipelineTest(unittest.TestCase):
@@ -366,6 +374,313 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             acknowledge_translation_review(job_file)
             complete_acknowledged_semantic_review(job_file)
             self.assertTrue(semantic_review_satisfied(load_job(job_file)))
+
+    def test_human_revision_is_bound_and_runs_review_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1,), "review", "awkward", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            template = translation_review_input_path(load_job(job_file))
+            self.assertEqual(result.status, "awaiting_review")
+            self.assertIsNotNone(template)
+            job = load_job(job_file)
+            workflow = job.config.pop("workflow")
+            job.config["target_language"] = "zh-CN"
+            save_job(job)
+            before_status = job_file.read_bytes()
+            recovery = build_recovery_plan(load_job(job_file))
+            self.assertEqual(recovery.input_paths, (str(template),))
+            self.assertIn("apply-translation-review-fixes", recovery.primary_command or "")
+            self.assertIn(
+                "acknowledge-translation-review",
+                " ".join(recovery.alternative_commands),
+            )
+            self.assertEqual(job_file.read_bytes(), before_status)
+            job = load_job(job_file)
+            job.config.pop("target_language")
+            job.config["workflow"] = workflow
+            save_job(job)
+            template.unlink()
+            ensure_translation_review_input(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            self.assertIsNotNone(template)
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 1, "text": "你好，朋友。"}]
+            response = root / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            before_revision = load_job(job_file)
+            original_candidate = next(
+                Path(item.path)
+                for item in before_revision.artifacts
+                if item.kind == "translation_polished_cues"
+            )
+            original_cues = json.loads(original_candidate.read_text(encoding="utf-8"))
+
+            apply_translation_review_fixes(job_file, response)
+            job = load_job(job_file)
+            self.assertIsNone(translation_review_input_path(job))
+            reviewed = next(
+                Path(item.path)
+                for item in job.artifacts
+                if item.kind == "translation_reviewed_cues"
+            )
+            self.assertEqual(_load_target_text(reviewed, 1), "你好，朋友。")
+            reviewed_cues = json.loads(reviewed.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [
+                    (cue["id"], cue["start_ms"], cue["end_ms"], cue["source_text"])
+                    for cue in reviewed_cues
+                ],
+                [
+                    (cue["id"], cue["start_ms"], cue["end_ms"], cue["source_text"])
+                    for cue in original_cues
+                ],
+            )
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    return_value=(SemanticIssue("terminology", (2,), "review", "term", ()),),
+                ) as review,
+                patch("xvt.pipeline.semantic.semantic_repair_batch") as repair,
+            ):
+                reviewed_result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(reviewed_result.status, "awaiting_review")
+            self.assertTrue(review.called)
+            repair.assert_not_called()
+            second_template = translation_review_input_path(load_job(job_file))
+            self.assertNotEqual(second_template, template)
+            second_payload = json.loads(second_template.read_text(encoding="utf-8"))
+            second_payload["items"] = [{"id": 2, "text": "世界，你好。"}]
+            response.write_text(json.dumps(second_payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, response)
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+            ):
+                completed = run_translation_semantic_review(job_file)
+            self.assertEqual(completed.status, "completed")
+            self.assertTrue(semantic_review_satisfied(load_job(job_file)))
+
+    def test_agent_human_revision_manifest_disables_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root, provider="agent")
+            manifest_path = prepare_agent_semantic_review(job_file)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            response = root / "semantic-response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "initial_results": [
+                            {
+                                "batch": batch["id"],
+                                "issues": (
+                                    [
+                                        {
+                                            "category": "source_suspect",
+                                            "cue_ids": [1],
+                                            "severity": "review",
+                                            "message": "check",
+                                            "suggested_items": [],
+                                        }
+                                    ]
+                                    if index == 0
+                                    else []
+                                ),
+                            }
+                            for index, batch in enumerate(manifest["batches"])
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_agent_semantic_review(job_file, response)
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 1, "text": "人工译文。"}]
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, response)
+
+            reviewed_manifest_path = prepare_agent_semantic_review(job_file)
+            reviewed_manifest = json.loads(reviewed_manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(reviewed_manifest["task"], "semantic_review_only")
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": reviewed_manifest["fingerprint"],
+                        "initial_results": [
+                            {"batch": batch["id"], "issues": []}
+                            for batch in reviewed_manifest["batches"]
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = apply_agent_semantic_review(job_file, response)
+            self.assertEqual(completed.status, "completed")
+            self.assertTrue(semantic_review_satisfied(load_job(job_file)))
+
+    def test_reviewed_candidate_can_be_explicitly_acknowledged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1,), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 1, "text": "确认后的译文。"}]
+            response = root / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, response)
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+
+            report = acknowledge_translation_review(job_file)
+            self.assertTrue(report.name.startswith("translation-semantic-qa-reviewed-"))
+            complete_acknowledged_semantic_review(job_file)
+            self.assertTrue(semantic_review_satisfied(load_job(job_file)))
+
+    def test_stale_human_revision_does_not_mutate_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1,), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["revision_fingerprint"] = "stale"
+            response = root / "stale-response.json"
+            response.write_text(json.dumps(payload), encoding="utf-8")
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "stale"):
+                apply_translation_review_fixes(job_file, response)
+
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_failed_second_revision_keeps_previous_checkpoint_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            first_issue = SemanticIssue("source_suspect", (1,), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    return_value=(first_issue,),
+                ),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 1, "text": "第一轮人工译文。"}]
+            response = root / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, response)
+
+            second_issue = SemanticIssue("terminology", (2,), "review", "term", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    return_value=(second_issue,),
+                ),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 2, "text": "第二轮人工译文。"}]
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            before = job_file.read_bytes()
+
+            with (
+                patch("xvt.pipeline.revision.save_job", side_effect=OSError("disk full")),
+                self.assertRaisesRegex(OSError, "disk full"),
+            ):
+                apply_translation_review_fixes(job_file, response)
+
+            self.assertEqual(job_file.read_bytes(), before)
+            persisted = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(persisted, "translation_review_revision"))
+            self.assertIsNotNone(valid_artifact_path(persisted, "translation_reviewed_cues"))
+            self.assertIsNotNone(valid_artifact_path(persisted, "translation_semantic_qa_reviewed"))
+
+    def test_human_revision_clears_stale_subtitle_review_acknowledgment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1,), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+            job = load_job(job_file)
+            job.config["subtitle_review_acknowledgment"] = {
+                "source_cues_checksum": next(
+                    artifact.checksum
+                    for artifact in job.artifacts
+                    if artifact.kind == "source_cues"
+                ),
+                "acknowledged_issues": [["display_width", 1]],
+            }
+            save_job(job)
+            template = translation_review_input_path(job)
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 1, "text": "修改后的译文。"}]
+            response = root / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            apply_translation_review_fixes(job_file, response)
+
+            self.assertNotIn("subtitle_review_acknowledgment", load_job(job_file).config)
+
+    def test_invalid_human_revision_items_do_not_mutate_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1,), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            base = json.loads(template.read_text(encoding="utf-8"))
+            invalid_payloads = (
+                {**base, "scope": "source"},
+                {**base, "items": [{"id": 999, "text": "未知"}]},
+                {**base, "items": [{"id": 1, "text": "一"}, {"id": 1, "text": "二"}]},
+                {**base, "items": [{"id": 1, "text": "  "}]},
+                base,
+            )
+            before = job_file.read_bytes()
+            response = root / "invalid-response.json"
+            for payload in invalid_payloads:
+                response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                with self.assertRaises(UserInputError):
+                    apply_translation_review_fixes(job_file, response)
+                self.assertEqual(job_file.read_bytes(), before)
 
     def test_acknowledgment_invalidates_when_candidate_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
