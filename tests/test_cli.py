@@ -462,6 +462,34 @@ class CliTest(unittest.TestCase):
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
         self.assertIn("xvt continue /tmp/job.json", output.getvalue())
 
+    def test_prepare_source_review_forwards_cues_and_prints_apply_command(self) -> None:
+        path = Path("/tmp/source-review.json")
+        output = StringIO()
+        with (
+            patch("xvt.cli.prepare_source_review", return_value=path) as prepare,
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                ["prepare-source-review", "/tmp/job.json", "--cue", "3", "--cue", "5"]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(prepare.call_args.args[:2], ("/tmp/job.json", [3, 5]))
+        self.assertIn("apply-source-review-fixes", output.getvalue())
+
+    def test_apply_source_review_fixes_forwards_response_and_prints_continue(self) -> None:
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed-cues.json"))
+        output = StringIO()
+        with (
+            patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+            redirect_stdout(output),
+        ):
+            return_code = main(["apply-source-review-fixes", "/tmp/job.json", "/tmp/response.json"])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
+        self.assertIn("xvt continue /tmp/job.json", output.getvalue())
+
     def test_inspect_prints_json(self) -> None:
         output = StringIO()
         with (

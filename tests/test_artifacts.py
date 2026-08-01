@@ -28,6 +28,8 @@ LEGACY_RENDERED_INVALIDATION = {
 LEGACY_PREVIEW_INVALIDATION = {"preview_ass", "preview_video"}
 LEGACY_RESEGMENT_INVALIDATION = {
     "input_translation_subtitles",
+    "source_review_revision",
+    "translation_review_revision",
     "translation_mapping",
     "translation_batches",
     "translation_progress",
@@ -132,7 +134,11 @@ def test_resegment_invalidation_matches_legacy() -> None:
     computed = {
         kind.value
         for kind in (downstream_of(ArtifactKind.SOURCE_CUES) - {ArtifactKind.SOURCE_SRT})
-        | {ArtifactKind.INPUT_TRANSLATION_SUBTITLES}
+        | {
+            ArtifactKind.INPUT_TRANSLATION_SUBTITLES,
+            ArtifactKind.SOURCE_REVIEW_REVISION,
+            ArtifactKind.TRANSLATION_REVIEW_REVISION,
+        }
     }
     assert computed == LEGACY_RESEGMENT_INVALIDATION
 

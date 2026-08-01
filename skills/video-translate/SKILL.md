@@ -97,6 +97,8 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    When `status` provides an editable `translation-review-*.json`, prefer correcting its `items[].text` and run `apply-translation-review-fixes JOB REVIEW`, followed by `continue`. Do not change IDs or add timing/source fields. An Agent manifest with `task=semantic_review_only` returns complete review results and must not request another repair. Use acknowledgment only when the user explicitly accepts the remaining issues unchanged.
 
+   When the source cue itself contains an ASR or proper-name error, prepare an explicit source review with `prepare-source-review JOB --cue ID`, edit only `items[].text`, then run `apply-source-review-fixes JOB REVIEW` and `continue`. This preserves IDs, timing, words, and provenance, re-runs source QA, and invalidates all old translation/render/burn outputs. Do not use it with a workflow that imports translated subtitles; create a task with a matching translation instead.
+
 8. Before a full burn, generate a short preview when the user wants to inspect subtitle layout or timing:
 
    ```bash

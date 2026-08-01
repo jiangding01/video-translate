@@ -237,6 +237,17 @@ uv run --no-sync xvt run INPUT --output OUTPUT \
 
 语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板。编辑其中的 `items[].text` 后运行 `xvt apply-translation-review-fixes JOB REVIEW.json`，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。`status` 会把修订作为首选路径，同时保留 `--acknowledge-translation-review` 直接确认作为备选。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 
+源字幕存在误听或专名错误时，可显式生成源文修订模板。该路径只修改指定 cue 的源文字段，立即重新执行确定性源字幕 QA，并使旧翻译、润色、语义报告、渲染和烧录结果失效；ID、时间轴、词级时间戳和 provenance 保持不变：
+
+```bash
+uv run --no-sync xvt prepare-source-review JOB --cue 13 --cue 14
+# 编辑命令输出的 source-review-*.json 中 items[].text
+uv run --no-sync xvt apply-source-review-fixes JOB REVIEW.json
+uv run --no-sync xvt continue JOB
+```
+
+源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；应创建任务并提供匹配的新译文。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁。
+
 已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
 
 ```bash

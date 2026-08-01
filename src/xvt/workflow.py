@@ -221,6 +221,18 @@ def _source_selection_satisfied(job: Job) -> bool:
         return False
     if not isinstance(data, dict) or data.get("source_cues_checksum") != source_checksum:
         return False
+    if data.get("selected_kind") == "human_reviewed":
+        revision_path = valid_artifact_path(job, "source_review_revision")
+        if revision_path is None:
+            return False
+        try:
+            revision = json.loads(revision_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(revision, dict)
+            and revision.get("reviewed_source_cues_checksum") == source_checksum
+        )
     return (
         data.get("candidate_kind") == "none"
         or job.config.get("input_kind") == "subtitle"

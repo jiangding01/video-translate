@@ -232,6 +232,21 @@ class EventPayloadContractTest(unittest.TestCase):
                 item_count=2,
                 checksum="abc123",
             ),
+            EventType.SOURCE_REVIEW_INPUT_READY: create_event(
+                EventType.SOURCE_REVIEW_INPUT_READY,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                path="/tmp/source-review.json",
+                scope="source",
+                item_count=2,
+            ),
+            EventType.SOURCE_REVIEW_REVISED: create_event(
+                EventType.SOURCE_REVIEW_REVISED,
+                **job_event_fields("job-1", "/tmp/job.json"),
+                scope="source",
+                item_count=2,
+                checksum="def456",
+                qa_status="warning",
+            ),
             EventType.TRANSLATION_BATCH_STARTED: create_event(
                 EventType.TRANSLATION_BATCH_STARTED,
                 **job_event_fields("job-1", "/tmp/job.json"),

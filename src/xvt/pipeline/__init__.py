@@ -4,7 +4,7 @@
 
 - ``common``：输入探测、stage 记账、原子 JSON 写入、artifact 登记与失效。
 - ``review``：字幕 QA ``needs_review`` 的人工确认通道。
-- ``revision``：语义校对后的人工译文修订与严格回填。
+- ``revision``：人工源文/译文修订与严格回填。
 - ``transcription``：素材获取、音频规范化、Whisper 转写、分段、对齐与恢复。
 - ``translation``：翻译批次、兼容 API 调用、Agent 回填、导入译文与统一收尾。
 - ``polish``：已有译文的可恢复 API/Agent 润色（依赖 ``translation`` 的收尾）。
@@ -27,8 +27,10 @@ from xvt.pipeline.resegment import ResegmentationResult, resegment_translation
 from xvt.pipeline.retranslate import apply_cue_retranslation, retranslate_cues
 from xvt.pipeline.review import acknowledge_subtitle_review, acknowledge_translation_review
 from xvt.pipeline.revision import (
+    apply_source_review_fixes,
     apply_translation_review_fixes,
     ensure_translation_review_input,
+    prepare_source_review,
     translation_review_input_path,
 )
 from xvt.pipeline.semantic import (
@@ -82,6 +84,7 @@ __all__ = [
     "apply_agent_translation_polish",
     "apply_cue_retranslation",
     "apply_subtitle_translation",
+    "apply_source_review_fixes",
     "apply_translation_review_fixes",
     "burn_translated_job",
     "complete_agent_polished_outputs",
@@ -93,6 +96,7 @@ __all__ = [
     "is_subtitle_input",
     "prepare_agent_translation",
     "prepare_agent_semantic_review",
+    "prepare_source_review",
     "preview_translated_job",
     "rebuild_source",
     "resegment_translation",

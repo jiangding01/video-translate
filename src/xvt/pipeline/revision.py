@@ -11,12 +11,324 @@ from typing import Any
 from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
-from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
+from xvt.job_store import get_job_directory, get_job_file, load_job, save_job, utc_now
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline.common import _artifact_checksum_for, _checksum, _load_cues, _write_json
+from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
+from xvt.subtitles import save_subtitles
 from xvt.translation_provider import SEMANTIC_REVIEW_PROMPT_VERSION
-from xvt.workflow_config import clear_burn_fingerprint
+from xvt.workflow_config import (
+    clear_burn_fingerprint,
+    get_workflow_config,
+    resolve_target_language,
+)
+
+
+def _source_revision_fingerprint(job: Job, cue_ids: list[int]) -> str:
+    source_checksum = _artifact_checksum_for(job, "source_cues")
+    if source_checksum is None:
+        raise UserInputError("source review requires valid source cues")
+    payload = {
+        "job_id": job.id,
+        "source_cues_checksum": source_checksum,
+        "cue_ids": sorted(cue_ids),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def prepare_source_review(
+    job_file: str | Path,
+    cue_ids: list[int],
+    *,
+    event_sink: EventSink | None = None,
+) -> Path:
+    job = load_job(job_file)
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        raise UserInputError("source review requires valid source cues")
+    if not cue_ids or any(isinstance(cue_id, bool) or cue_id <= 0 for cue_id in cue_ids):
+        raise UserInputError("source review requires positive cue ids")
+    if len(set(cue_ids)) != len(cue_ids):
+        raise UserInputError("source review cue ids must not contain duplicates")
+
+    cues = _load_cues(source_path)
+    by_id = {cue.id: cue for cue in cues}
+    if len(by_id) != len(cues):
+        raise UserInputError("source cues contain duplicate cue ids")
+    unknown = sorted(set(cue_ids) - by_id.keys())
+    if unknown:
+        raise UserInputError(f"source review contains unknown cue ids: {unknown}")
+
+    fingerprint = _source_revision_fingerprint(job, cue_ids)
+    path = get_job_directory(job) / "review" / f"source-review-{fingerprint[:12]}.json"
+    if path.is_file():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        path,
+        {
+            "task": "source_review_fixes",
+            "revision_fingerprint": fingerprint,
+            "scope": "source",
+            "items": [
+                {"id": cue_id, "text": by_id[cue_id].source_text} for cue_id in sorted(cue_ids)
+            ],
+        },
+    )
+    if event_sink:
+        event_sink(
+            create_event(
+                EventType.SOURCE_REVIEW_INPUT_READY,
+                **job_event_fields(job.id, get_job_file(job)),
+                path=str(path),
+                scope="source",
+                item_count=len(cue_ids),
+            )
+        )
+    return path
+
+
+def _load_previous_source_selection(job: Job) -> dict[str, Any] | None:
+    path = valid_artifact_path(job, "source_selection")
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    fields = (
+        "strategy",
+        "candidate_kind",
+        "selected_kind",
+        "reason",
+        "reference_allowed",
+        "alignment_confidence",
+        "source_cues_checksum",
+    )
+    return {field: data[field] for field in fields if field in data}
+
+
+def _source_qa_context(job: Job) -> dict[str, int | None]:
+    media_path = valid_artifact_path(job, "media_info")
+    if media_path is None:
+        return {}
+    try:
+        data = json.loads(media_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "media_duration_ms": data.get("duration_ms"),
+        "video_width": data.get("width"),
+        "video_height": data.get("height"),
+    }
+
+
+def apply_source_review_fixes(
+    job_file: str | Path,
+    response_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, ...]:
+    job = load_job(job_file)
+    workflow = get_workflow_config(job)
+    if (workflow is not None and workflow.translation_subtitles) or valid_artifact_path(
+        job, "input_translation_subtitles"
+    ) is not None:
+        raise UserInputError(
+            "cannot revise source cues while reusing imported translation subtitles; "
+            "provide a matching translated subtitle file in a new job"
+        )
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        raise UserInputError("source review requires valid source cues")
+    try:
+        response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise UserInputError(f"cannot read source review response: {error}") from error
+    if not isinstance(response, dict):
+        raise UserInputError("source review response must be a JSON object")
+    if response.get("task") != "source_review_fixes" or response.get("scope") != "source":
+        raise UserInputError("source review response task or scope is invalid")
+    items = response.get("items")
+    if not isinstance(items, list) or not items:
+        raise UserInputError("source review response items must be a non-empty array")
+
+    changes: dict[int, str] = {}
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {"id", "text"}:
+            raise UserInputError("source review items may contain only id and text")
+        cue_id = item.get("id") if isinstance(item, dict) else None
+        text = item.get("text") if isinstance(item, dict) else None
+        if (
+            not isinstance(cue_id, int)
+            or isinstance(cue_id, bool)
+            or cue_id in changes
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            raise UserInputError("source review response contains an invalid or duplicate item")
+        changes[cue_id] = text.strip()
+
+    expected_fingerprint = _source_revision_fingerprint(job, list(changes))
+    if response.get("revision_fingerprint") != expected_fingerprint:
+        raise UserInputError("source review response is stale for the current source cues")
+    source_cues = _load_cues(source_path)
+    by_id = {cue.id: cue for cue in source_cues}
+    if len(by_id) != len(source_cues):
+        raise UserInputError("source cues contain duplicate cue ids")
+    unknown = sorted(changes.keys() - by_id.keys())
+    if unknown:
+        raise UserInputError(f"source review contains unknown cue ids: {unknown}")
+    changed_ids = {cue_id for cue_id, text in changes.items() if by_id[cue_id].source_text != text}
+    if not changed_ids:
+        raise UserInputError("source review response does not change any cue text")
+    reviewed = [
+        replace(cue, source_text=changes.get(cue.id, cue.source_text)) for cue in source_cues
+    ]
+
+    artifacts_dir = get_job_directory(job) / "artifacts"
+    suffix = expected_fingerprint[:12]
+    revision_path = artifacts_dir / f"source-review-revision-{suffix}.json"
+    reviewed_path = artifacts_dir / f"source-reviewed-cues-{suffix}.json"
+    qa_path = artifacts_dir / f"source-review-qa-{suffix}.json"
+    source_srt_path = artifacts_dir / f"source-reviewed-{suffix}.srt"
+    selection_path = artifacts_dir / f"source-selection-reviewed-{suffix}.json"
+    _write_json(reviewed_path, [asdict(cue) for cue in reviewed])
+    reviewed_checksum = _checksum(reviewed_path)
+    _write_json(
+        revision_path,
+        {
+            "task": "source_review_fixes",
+            "revision_fingerprint": expected_fingerprint,
+            "scope": "source",
+            "previous_source_cues_checksum": _artifact_checksum_for(job, "source_cues"),
+            "reviewed_source_cues_checksum": reviewed_checksum,
+            "changed_ids": sorted(changed_ids),
+            "items": [{"id": cue.id, "text": cue.source_text} for cue in reviewed],
+        },
+    )
+    report = check_subtitles(reviewed, **_source_qa_context(job))
+    _write_json(qa_path, asdict(report))
+    previous_selection = _load_previous_source_selection(job)
+    _write_json(
+        selection_path,
+        {
+            "selected_kind": "human_reviewed",
+            "reason": "human_source_revision",
+            "source_cues_checksum": reviewed_checksum,
+            "previous_selection": previous_selection,
+        },
+    )
+
+    invalidated_kinds = downstream_of(ArtifactKind.SOURCE_CUES) | {
+        ArtifactKind.SOURCE_CUES,
+        ArtifactKind.SOURCE_REVIEW_REVISION,
+        ArtifactKind.TRANSLATION_RESEGMENTATION,
+        ArtifactKind.TRANSLATION_REVIEW_REVISION,
+    }
+    invalidated = [artifact for artifact in job.artifacts if artifact.kind in invalidated_kinds]
+    replacements = [
+        Artifact("source_review_revision", str(revision_path), _checksum(revision_path)),
+        Artifact("source_cues", str(reviewed_path), reviewed_checksum),
+        Artifact("source_selection", str(selection_path), _checksum(selection_path)),
+        Artifact("subtitle_qa", str(qa_path), _checksum(qa_path)),
+    ]
+    qa_message = None
+    if report.status not in {"failed", "needs_review"}:
+        save_subtitles(reviewed, source_srt_path)
+        replacements.append(
+            Artifact("source_srt", str(source_srt_path), _checksum(source_srt_path))
+        )
+    elif report.status == "needs_review":
+        qa_message = (
+            "subtitle QA needs_review; inspect the QA artifact, then run "
+            "xvt continue <job> --acknowledge-subtitle-review"
+        )
+    else:
+        qa_message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
+
+    replacement_kinds = {artifact.kind for artifact in replacements}
+    job.artifacts = [
+        artifact
+        for artifact in job.artifacts
+        if artifact.kind not in invalidated_kinds | replacement_kinds
+    ]
+    job.artifacts.extend(replacements)
+    job.config.pop("translation_review_acknowledgment", None)
+    job.config.pop("subtitle_review_acknowledgment", None)
+    clear_burn_fingerprint(job)
+    now = utc_now()
+    for stage in (
+        StageName.TRANSLATE,
+        StageName.SUBTITLE_QA,
+        StageName.RENDER,
+        StageName.BURN,
+        StageName.MEDIA_QA,
+    ):
+        record = job.stages[stage]
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
+    translate_record = job.stages[StageName.TRANSLATE]
+    if resolve_target_language(job) is None:
+        translate_record.status = StageStatus.SKIPPED
+        translate_record.completed_at = now
+    burn_requested = bool(workflow is not None and workflow.burn)
+    if not burn_requested:
+        for stage in (StageName.BURN, StageName.MEDIA_QA):
+            record = job.stages[stage]
+            record.status = StageStatus.SKIPPED
+            record.completed_at = now
+    qa_record = job.stages[StageName.SUBTITLE_QA]
+    qa_record.status = StageStatus.SUCCEEDED if qa_message is None else StageStatus.FAILED
+    qa_record.completed_at = now
+    qa_record.error = qa_message
+    if qa_message is None:
+        render_record = job.stages[StageName.RENDER]
+        render_record.status = StageStatus.SUCCEEDED
+        render_record.completed_at = now
+    save_job(job)
+
+    if event_sink:
+        for artifact in invalidated:
+            event_sink(
+                create_event(
+                    EventType.ARTIFACT_INVALIDATED,
+                    **job_event_fields(job.id, get_job_file(job)),
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
+        for artifact in replacements:
+            event_sink(
+                create_event(
+                    EventType.ARTIFACT_CREATED,
+                    **job_event_fields(job.id, get_job_file(job)),
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
+        event_sink(
+            create_event(
+                EventType.SOURCE_REVIEW_REVISED,
+                **job_event_fields(job.id, get_job_file(job)),
+                scope="source",
+                item_count=len(changed_ids),
+                checksum=reviewed_checksum,
+                qa_status=report.status,
+            )
+        )
+    if qa_message is not None:
+        raise RuntimeError(qa_message)
+    return tuple(Path(artifact.path) for artifact in replacements)
 
 
 def _target_kinds(job: Job) -> tuple[str, str, Path, Path] | None:

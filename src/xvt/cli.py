@@ -36,6 +36,7 @@ from xvt.pipeline import (
     apply_agent_translation,
     apply_agent_translation_polish,
     apply_cue_retranslation,
+    apply_source_review_fixes,
     apply_subtitle_translation,
     apply_translation_review_fixes,
     burn_translated_job,
@@ -43,6 +44,7 @@ from xvt.pipeline import (
     inspect_input,
     interrupt_running_stage,
     prepare_agent_translation,
+    prepare_source_review,
     preview_translated_job,
     rebuild_source,
     resegment_translation,
@@ -374,6 +376,24 @@ def build_parser() -> argparse.ArgumentParser:
     apply_review_fixes_parser.add_argument("job_file")
     apply_review_fixes_parser.add_argument("response_file")
     apply_review_fixes_parser.add_argument("--events-jsonl", action="store_true")
+
+    prepare_source_review_parser = subparsers.add_parser(
+        "prepare-source-review",
+        help="Prepare an editable source cue review file",
+    )
+    prepare_source_review_parser.add_argument("job_file")
+    prepare_source_review_parser.add_argument(
+        "--cue", dest="cue_ids", type=int, action="append", required=True
+    )
+    prepare_source_review_parser.add_argument("--events-jsonl", action="store_true")
+
+    apply_source_review_parser = subparsers.add_parser(
+        "apply-source-review-fixes",
+        help="Apply human source cue edits, re-run source QA, then continue",
+    )
+    apply_source_review_parser.add_argument("job_file")
+    apply_source_review_parser.add_argument("response_file")
+    apply_source_review_parser.add_argument("--events-jsonl", action="store_true")
 
     acknowledge_translation_parser = subparsers.add_parser(
         "acknowledge-translation-review",
@@ -1429,6 +1449,38 @@ def _run_command(arguments: argparse.Namespace) -> int:
             print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
         return 0
 
+    if arguments.command == "prepare-source-review":
+        event_sink = _event_sink(arguments)
+        path = prepare_source_review(
+            arguments.job_file,
+            arguments.cue_ids,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path)])
+        else:
+            print(path)
+            print(
+                "next: xvt apply-source-review-fixes "
+                f"{shlex.quote(str(arguments.job_file))} {shlex.quote(str(path))}"
+            )
+        return 0
+
+    if arguments.command == "apply-source-review-fixes":
+        event_sink = _event_sink(arguments)
+        paths = apply_source_review_fixes(
+            arguments.job_file,
+            arguments.response_file,
+            event_sink=event_sink,
+        )
+        if arguments.events_jsonl:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+        else:
+            for path in paths:
+                print(path)
+            print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
+        return 0
+
     if arguments.command == "acknowledge-translation-review":
         event_sink = _event_sink(arguments)
         report_path = acknowledge_translation_review(
@@ -1595,6 +1647,8 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "apply-polish-translation",
         "apply-semantic-review",
         "apply-translation-review-fixes",
+        "prepare-source-review",
+        "apply-source-review-fixes",
         "acknowledge-translation-review",
         "prepare-translation",
         "apply-translation",

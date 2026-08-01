@@ -174,6 +174,31 @@ stage 状态迁移（`pipeline/common.py`），由 `StageStatus → EventType` �
 | `item_count` | int | 本次提交修改的 cue 数量 |
 | `checksum` | string | 新候选 artifact checksum |
 
+### `source_review_input_ready`
+
+指定源 cue 的可编辑修订模板已经准备完成。模板不是 artifact；事件只公布路径和数量，不包含字幕正文。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
+| `path` | string | 当前源文修订模板路径 |
+| `scope` | string | 当前固定为 `source` |
+| `item_count` | int | 模板涉及的 cue 数量 |
+
+### `source_review_revised`
+
+用户源文修订已通过严格校验，确定性源字幕 QA 已执行，并保存为新的完整 source cue 候选。事件不包含字幕正文。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
+| `scope` | string | 当前固定为 `source` |
+| `item_count` | int | 本次提交修改的 cue 数量 |
+| `checksum` | string | 新 source cue artifact checksum |
+| `qa_status` | string | 确定性源字幕 QA 状态 |
+
 ## 下载
 
 yt-dlp 下载进度（`download.py`）。
