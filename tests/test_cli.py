@@ -577,6 +577,36 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(return_code, 0)
         self.assertIn("not_a_real_task", errors.getvalue())
 
+    def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
+        """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
+        paths = (Path("/tmp/revision.json"),)
+        completed = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "source_review_fixes"})
+            with (
+                patch("xvt.cli.apply_source_review_fixes", return_value=paths),
+                redirect_stdout(completed),
+            ):
+                main(["apply", "/tmp/job.json", response, "--events-jsonl"])
+
+            failed = StringIO()
+            with (
+                patch(
+                    "xvt.cli.apply_source_review_fixes",
+                    side_effect=ValueError("bad revision"),
+                ),
+                redirect_stdout(failed),
+                redirect_stderr(StringIO()),
+            ):
+                main(["apply", "/tmp/job.json", response, "--events-jsonl"])
+
+        success_event = json.loads(completed.getvalue())
+        failure_event = json.loads(failed.getvalue())
+        self.assertEqual(success_event["type"], "cli_completed")
+        self.assertEqual(failure_event["type"], "cli_failed")
+        self.assertEqual(success_event["data"]["command"], "apply")
+        self.assertEqual(failure_event["data"]["command"], "apply")
+
     def test_apply_rejects_atomic_job_without_workflow_goal(self) -> None:
         job = Job("job-1", "", "", "input", "/tmp", {})
         errors = StringIO()

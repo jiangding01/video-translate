@@ -1685,8 +1685,9 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
                 "run xvt status to see the current next step"
             )
 
+    # 不改写 command：cli_completed 与 cli_failed 都必须报用户实际执行的子命令名
+    # （EVENTS.md 契约），否则同一次调用在成功与失败两条路径上报出两个身份。
     routed = argparse.Namespace(**vars(arguments))
-    routed.command = route
     if route == "apply-translation":
         target_language = resolve_target_language(job or load_job(arguments.job_file))
         if target_language is None:
