@@ -12,14 +12,22 @@ from unittest.mock import patch
 
 from xvt import cancellation
 from xvt.batch import BatchResult
-from xvt.cli import main
+from xvt.cli import _STEP_ROUTES, _TASK_ROUTES, main
 from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
-from xvt.pipeline import RebuildSourceResult, ResegmentationResult, TranslationRunResult
+from xvt.pipeline import (
+    RebuildSourceResult,
+    ResegmentationResult,
+    TranslationRunResult,
+    prepare_agent_translation,
+    run_subtitle_transcription,
+)
+from xvt.pipeline.revision import SOURCE_REVIEW_TASK, TRANSLATION_REVIEW_TASK
 from xvt.process import CommandCancelled
-from xvt.workflow import WorkflowResult
+from xvt.workflow import AWAIT_STEPS, WorkflowResult
+from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 class CliTest(unittest.TestCase):
@@ -637,6 +645,69 @@ class CliTest(unittest.TestCase):
 
         self.assertNotEqual(return_code, 0)
         self.assertIn("not awaiting Agent input", errors.getvalue())
+
+    def test_apply_reports_unreadable_response_as_user_input_error(self) -> None:
+        """缺文件 / 喂字幕都是用户输入错误，不能落到 dependency_or_process。"""
+        errors = StringIO()
+        with redirect_stderr(errors):
+            missing_code = main(["apply", "/tmp/job.json", "/tmp/does-not-exist.json"])
+        self.assertEqual(missing_code, 2)
+
+        subtitle_errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "translated.srt"
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好。\n",
+                encoding="utf-8",
+            )
+            with redirect_stderr(subtitle_errors):
+                return_code = main(["apply", "/tmp/job.json", str(subtitle)])
+
+        self.assertEqual(return_code, 2)
+        self.assertIn("import-translation", subtitle_errors.getvalue())
+
+    def test_apply_routes_real_agent_translation_job_end_to_end(self) -> None:
+        """不 mock 任何路由/实现，验证 _STEP_ROUTES 的 key 与真实 planner 对得上。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n"
+                "\n2\n00:00:01,000 --> 00:00:02,000\nGoodbye.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN"),
+            )
+            save_job(job)
+            job_file = str(get_job_file(job))
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            cue_ids = [item["id"] for batch in manifest["batches"] for item in batch["items"]]
+            self.assertTrue(cue_ids)
+            response = self._write_response(
+                directory,
+                {"items": [{"id": cue_id, "text": f"译文 {cue_id}"} for cue_id in cue_ids]},
+            )
+
+            with redirect_stdout(StringIO()):
+                return_code = main(["apply", job_file, response])
+
+            self.assertEqual(return_code, 0)
+            applied = load_job(job_file)
+            self.assertIn("translated_cues", {artifact.kind for artifact in applied.artifacts})
+
+    def test_step_routes_keys_match_workflow_await_steps(self) -> None:
+        """路由表的 key 必须与真实实现同源，避免改名后静默失配。"""
+        self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS))
+        self.assertIn(SOURCE_REVIEW_TASK, _TASK_ROUTES)
+        self.assertIn(TRANSLATION_REVIEW_TASK, _TASK_ROUTES)
 
     def test_inspect_prints_json(self) -> None:
         output = StringIO()

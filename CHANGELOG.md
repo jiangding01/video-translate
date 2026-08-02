@@ -6,7 +6,7 @@
 
 ### Added
 
-- 新增统一回填入口 `xvt apply JOB RESPONSE`：优先按 RESPONSE 的 `task` 字段路由到对应的 `apply-*` 实现，缺 `task` 时按 Job 当前等待的推进步骤路由，两条路都不成立时报结构化错误而不猜测；`--target-language` 由 Job 配置自动解析。各 `apply-*` 命令保留为稳定入口且行为不变，回填实现的校验逻辑零改动。`status` 的 `before:` 改为推荐统一入口，原命令降为 `alternative:`。需额外参数的 `apply-cue-retranslation` 与输入为字幕文件的 `import-translation` 不纳入路由。
+- 新增统一回填入口 `xvt apply JOB RESPONSE`：人工修订模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由到对应的 `apply-*` 实现；Agent 翻译/润色/语义校对响应契约不含 `task` 字段，按 Job 当前等待的推进步骤路由。原子 Job（无持久化 `config.workflow` 目标）不受统一入口支持，仍需使用显式 `apply-*` 命令；路由不出来时报结构化错误而不猜测。`--target-language` 由 Job 配置自动解析。各 `apply-*` 命令保留为稳定入口且行为不变，回填实现的校验逻辑零改动。`status` 的 `before:` 改为推荐统一入口，原命令降为 `alternative:`。需额外参数的 `apply-cue-retranslation` 与输入为字幕文件的 `import-translation` 不纳入路由。
 - CI 新增 Python 版本矩阵（3.11、3.13，与 os 矩阵正交）与 `uv build` 打包验证 step，确保多版本、多平台均可正常构建 wheel/sdist；AGENTS.md 补全 `pipeline` 包依赖规约（`polish → translation`、`revision → common`），并新增 `tests/test_pipeline_imports.py` 以 `ast` 解析各模块顶层 import 断言依赖方向与硬编码白名单完全一致，把包内无环约束从文档纪律变成失败的构建。
 - Q6.1c 提示词加固：API 与 Agent 统一以完整语义组处理目标语言表达，减少逐 cue 直译、悬空片段和生硬拼接；强化专名、产品名和代码标识符保护，细化语义问题分类及 `source_suspect` 证据门槛，并要求完整组联合修复。translation、polish、semantic review、semantic repair prompt 分别升级为 v4、v2、v2、v2，使旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效；已等待的标准 Agent Job 继续按严格 ID 契约兼容回填，重新准备批次后使用新版提示词。不改变 cue、时间轴、Job schema 或事件协议。
 - Q6.1b 收尾：Q6 语义报告包含 `source_suspect` 时，API、Agent 和 `continue` 等待路径自动为相关 cue 生成源文修订模板；`status` 保持只读并优先展示源文回填，同时保留译文回填和直接确认。旧等待 Job 缺模板时引导 `continue` 懒生成，避免展开超长 cue 参数；导入译文任务不生成或推荐不可提交的源文修订。复用现有 stage、artifact 和事件协议，不升级 Job schema。

@@ -41,7 +41,7 @@
 
 ## 实施进度（2026-08-02 更新）
 
-- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：task 字段优先、Job 等待步骤回退的两级路由，原 `apply-*` 命令全部保留。
+- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：人工修订模板按 task 字段路由、Agent 响应（无 task 字段）按 Job 等待步骤路由的两级路由，仅支持有 `config.workflow` 目标的端到端 Job，原 `apply-*` 命令全部保留。
 - **待做**：R2.3（SRT 修订通道）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
 
 ## R1：工程加固（低风险，可立即实施）
@@ -84,9 +84,11 @@
 - 新增 `apply` 子命令：优先读取 RESPONSE 文件中的 `task` 字段路由（`source_review_fixes`、`translation_review_fixes`、`semantic_review_only`、`semantic_review_and_repair`、`translate_and_polish`）；缺 `task` 时回退到按 Job 的 `plan_advance_steps` 首步路由（`await_agent_translation`、`await_agent_polish`、`await_agent_semantic_review`、`await_translation_review`）。两条路都不成立时报结构化错误，不猜测。
 - `apply-translation` 需要的 `--target-language` 由 `resolve_target_language(job)` 从 Job 中解析，用户无需重复提供。
 - 现有 `apply-*` 命令全部保留为稳定入口，行为不变；`status` 的 `before:` 改为推荐 `xvt apply`，原命令降为 `alternative:`。
-- 各回填实现的校验逻辑零改动——本项只加一层查表路由，不碰协议语义。stage / artifact 事件序列与原命令完全一致；终态事件的 `command` 字段按 EVENTS.md 契约报用户实际执行的 `apply`，成功（`cli_completed`）与失败（`cli_failed`）两条路径报同一个名字。
-- 不纳入统一路由：`apply-cue-retranslation`（需额外 `--cue` 参数）、`import-translation`（输入是字幕文件而非 JSON response）。
-- 验收：9 个新增 CLI 测试覆盖四类 task 路由、步骤回退路由、终态事件命令名一致性，以及未知 task、原子 Job 无工作流目标、非等待态三类错误；494 测试全部通过。
+- 各回填实现的校验逻辑零改动——本项只加一层查表路由，不碰协议语义。response 内容非法但 JSON 可解析时，stage / artifact 事件序列与原命令一致；response 文件不存在或不可解析时，`apply` 在触碰 Job 之前即失败，只发出 `cli_failed`，stage 保持 `awaiting`（不像原命令会把 stage 打成 `failed`）——这是刻意保留的更优行为，不是与原命令的等价性缺口。终态事件的 `command` 字段按 EVENTS.md 契约报用户实际执行的 `apply`，成功（`cli_completed`）与失败（`cli_failed`）两条路径报同一个名字。
+- manifest 侧的三个 task key（`semantic_review_only`、`semantic_review_and_repair`、`translate_and_polish`）是为前向兼容保留的路由分支：Agent 回填响应的协议契约（`translation-protocol.md`）本身不含 `task` 字段，真实 Agent 响应不会命中这三个 key，而是统一走 Job 等待步骤回退路由；只有人工修订模板（`source_review_fixes`、`translation_review_fixes`）会真正按 `task` 字段路由。
+- 不纳入统一路由：`apply-cue-retranslation`（需额外 `--cue` 参数）、`import-translation`（输入是字幕文件而非 JSON response）。原子 Job（无持久化 `config.workflow` 目标）同样不受统一路由支持，只能用显式 `apply-*` 命令。
+- 验收：12 个新增 CLI 测试覆盖四类 task 路由、步骤回退路由、终态事件命令名一致性、不可读文件的用户输入错误归类、真实 Job 零 mock 端到端路由、路由表与实现常量同源的守卫，以及未知 task、原子 Job 无工作流目标、非等待态三类错误；497 测试全部通过。
+- 已决策：`await_translation_review` 与源文修订等待态的 `status` 提示保留显式命令（不换成统一入口），因为这两条提示嵌入了真实模板文件路径，比通用 RESPONSE 占位符更有引导价值；`xvt apply` 对这两类模板文件同样可用（携带 `task` 字段，按 task 路由），只是不作为 `status` 的首选提示。
 
 ### R2.3 人工修订 SRT 编辑通道（F12）
 

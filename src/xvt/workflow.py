@@ -56,6 +56,16 @@ from xvt.workflow_config import (
     require_workflow_config,
 )
 
+# plan_advance_steps 可能返回的全部 Agent 等待步骤名。CLI 的回填路由表以此为准。
+AWAIT_STEPS: frozenset[str] = frozenset(
+    {
+        "await_agent_translation",
+        "await_agent_polish",
+        "await_agent_semantic_review",
+        "await_translation_review",
+    }
+)
+
 
 def _translation_policy(config: WorkflowConfig) -> TranslationPolicy:
     """缺失策略快照时与历史行为一致，回退为默认 TranslationPolicy。"""
@@ -730,17 +740,7 @@ def _advance_workflow(
 
     # 与 planner 共用等待判定：Agent 等待是终态快照，不得继续烧录。
     advance_steps = plan_advance_steps(job, config)
-    if (
-        goals.needs_translation
-        and advance_steps
-        and advance_steps[0]
-        in {
-            "await_agent_translation",
-            "await_agent_polish",
-            "await_agent_semantic_review",
-            "await_translation_review",
-        }
-    ):
+    if goals.needs_translation and advance_steps and advance_steps[0] in AWAIT_STEPS:
         polishing = advance_steps[0] == "await_agent_polish"
         semantic_reviewing = advance_steps[0] in {
             "await_agent_semantic_review",

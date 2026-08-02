@@ -23,7 +23,7 @@ from xvt.config import (
     DEFAULT_TRANSLATION_STYLE,
 )
 from xvt.doctor import run_doctor
-from xvt.errors import ExitCode, XvtError
+from xvt.errors import ExitCode, UserInputError, XvtError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import get_job_file, load_job
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
@@ -275,6 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     continue_parser.add_argument("--events-jsonl", action="store_true")
 
+    unified_apply_parser = subparsers.add_parser(
+        "apply",
+        help="Auto-route an Agent response to the correct apply command",
+    )
+    unified_apply_parser.add_argument("job_file")
+    unified_apply_parser.add_argument("response_file")
+    unified_apply_parser.add_argument("--events-jsonl", action="store_true")
+
     prepare_parser = subparsers.add_parser(
         "prepare-translation",
         help="[advanced] Create deterministic translation batches for an agent",
@@ -459,14 +467,6 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser.add_argument("--target-font")
     preview_parser.add_argument("--source-font")
     preview_parser.add_argument("--events-jsonl", action="store_true")
-
-    unified_apply_parser = subparsers.add_parser(
-        "apply",
-        help="Auto-route an Agent response to the correct apply command",
-    )
-    unified_apply_parser.add_argument("job_file")
-    unified_apply_parser.add_argument("response_file")
-    unified_apply_parser.add_argument("--events-jsonl", action="store_true")
 
     burn_parser = subparsers.add_parser(
         "burn",
@@ -1640,6 +1640,13 @@ def _cmd_preview(arguments: argparse.Namespace) -> int:
     return 0
 
 
+# response JSON 的 task 字段路由表。两类 key 的真实来源不同：
+# - source_review_fixes / translation_review_fixes：CLI 生成修订模板时写入 task，用户编辑后
+#   原样提交，因此这两个 key 会真实命中（模板写入点见 xvt.pipeline.revision）。
+# - semantic_review_only / semantic_review_and_repair / translate_and_polish：当前只出现在
+#   CLI 生成的 manifest 里；Agent 回填响应契约
+#   （skills/video-translate/references/translation-protocol.md）不含 task 字段，所以真实
+#   Agent 响应走下面的 _STEP_ROUTES 步骤回退。保留这三个 key 只为前向兼容。
 _TASK_ROUTES: dict[str, str] = {
     "source_review_fixes": "apply-source-review-fixes",
     "translation_review_fixes": "apply-translation-review-fixes",
@@ -1659,9 +1666,18 @@ _STEP_ROUTES: dict[str, str] = {
 def _cmd_apply(arguments: argparse.Namespace) -> int:
     # 先在原 Namespace 上建 sink，路由副本才能继承它，让失败路径仍能取到恢复计划。
     _event_sink(arguments)
-    response_data = json.loads(Path(arguments.response_file).read_text(encoding="utf-8"))
+    # 读不出/解析不了都是用户输入错误（含把 SRT 当 response 喂进来），不能逃逸成
+    # OSError/JSONDecodeError 被顶层归到 dependency_or_process。
+    try:
+        response_data = json.loads(Path(arguments.response_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise UserInputError(
+            f"cannot read response file: {error}; "
+            "xvt apply only accepts a JSON response file — "
+            "for subtitle files (SRT etc.) use xvt import-translation"
+        ) from error
     if not isinstance(response_data, dict):
-        raise ValueError("response file must contain a JSON object")
+        raise UserInputError("response file must contain a JSON object")
 
     task = response_data.get("task")
     job = None

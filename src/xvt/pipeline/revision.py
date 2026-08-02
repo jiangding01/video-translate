@@ -30,6 +30,10 @@ from xvt.workflow_config import (
     resolve_target_language,
 )
 
+# 修订模板写入 / 校验共用的 task 值，也是 CLI `xvt apply` task 路由表的真实来源。
+SOURCE_REVIEW_TASK = "source_review_fixes"
+TRANSLATION_REVIEW_TASK = "translation_review_fixes"
+
 
 def _source_revision_fingerprint(job: Job, cue_ids: list[int]) -> str:
     source_checksum = artifact_checksum_for(job, "source_cues")
@@ -102,7 +106,7 @@ def prepare_source_review(
     write_json(
         path,
         {
-            "task": "source_review_fixes",
+            "task": SOURCE_REVIEW_TASK,
             "revision_fingerprint": fingerprint,
             "scope": "source",
             "items": [
@@ -180,7 +184,7 @@ def apply_source_review_fixes(
         raise UserInputError(f"cannot read source review response: {error}") from error
     if not isinstance(response, dict):
         raise UserInputError("source review response must be a JSON object")
-    if response.get("task") != "source_review_fixes" or response.get("scope") != "source":
+    if response.get("task") != SOURCE_REVIEW_TASK or response.get("scope") != "source":
         raise UserInputError("source review response task or scope is invalid")
     items = response.get("items")
     if not isinstance(items, list) or not items:
@@ -231,7 +235,7 @@ def apply_source_review_fixes(
     write_json(
         revision_path,
         {
-            "task": "source_review_fixes",
+            "task": SOURCE_REVIEW_TASK,
             "revision_fingerprint": expected_fingerprint,
             "scope": "source",
             "previous_source_cues_checksum": artifact_checksum_for(job, "source_cues"),
@@ -510,7 +514,7 @@ def ensure_translation_review_input(
     write_json(
         path,
         {
-            "task": "translation_review_fixes",
+            "task": TRANSLATION_REVIEW_TASK,
             "revision_fingerprint": fingerprint,
             "scope": "translation",
             "report": str(report_path),
@@ -564,7 +568,7 @@ def apply_translation_review_fixes(
         raise UserInputError(f"cannot read translation review response: {error}") from error
     if not isinstance(response, dict):
         raise UserInputError("translation review response must be a JSON object")
-    if response.get("task") != "translation_review_fixes" or response.get("scope") != "translation":
+    if response.get("task") != TRANSLATION_REVIEW_TASK or response.get("scope") != "translation":
         raise UserInputError("translation review response task or scope is invalid")
     if response.get("revision_fingerprint") != expected_fingerprint:
         raise UserInputError("translation review response is stale for the current report")
@@ -603,7 +607,7 @@ def apply_translation_review_fixes(
     write_json(
         revision_path,
         {
-            "task": "translation_review_fixes",
+            "task": TRANSLATION_REVIEW_TASK,
             "revision_fingerprint": expected_fingerprint,
             "scope": "translation",
             "source_report_kind": report_kind,
