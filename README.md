@@ -42,9 +42,11 @@ xvt continue JOB.json
 Agent 等待输入时：
 
 ```text
-xvt apply-translation JOB.json RESPONSE --target-language LANG
+xvt apply JOB.json RESPONSE
 xvt continue JOB.json
 ```
+
+`xvt apply` 会读取 RESPONSE 的 `task` 字段，或在没有该字段时按 Job 当前等待的步骤，自动路由到对应的回填命令。各 `apply-*` 命令仍是稳定入口，行为不变。
 
 目录批处理：
 

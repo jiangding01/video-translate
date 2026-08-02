@@ -41,8 +41,8 @@
 
 ## 实施进度（2026-08-02 更新）
 
-- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。
-- **待做**：R2.2（统一 apply 路由）、R2.3（SRT 修订通道）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
+- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：task 字段优先、Job 等待步骤回退的两级路由，原 `apply-*` 命令全部保留。
+- **待做**：R2.3（SRT 修订通道）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
 
 ## R1：工程加固（低风险，可立即实施）
 
@@ -79,13 +79,14 @@
 - 最终以单 PR 一步到位完成：26 个 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 从 622 行缩减至 4 行。485 测试全部通过。
 - 验收：`_run_command` 只剩查表与公共前后置逻辑；`xvt --help` 与各命令行为逐字节不变。
 
-### R2.2 统一 `xvt apply JOB RESPONSE` 自动路由（F6）
+### R2.2 统一 `xvt apply JOB RESPONSE` 自动路由（F6）——已完成
 
-- 新增 `apply` 子命令：读取 RESPONSE 文件中的 `task` 与 fingerprint，自动路由到既有的 6 个回填实现之一；路由失败（无等待任务、fingerprint 不匹配、task 未知）给出与现有命令一致的结构化错误。
-- 现有 `apply-*` 命令全部保留为稳定入口，行为不变；`status` 的下一步提示改为优先推荐统一入口，同时保留原命令提示。
-- 各回填实现的校验逻辑零改动——本项只加一层查表路由，不碰协议语义。
-- 需同步：README、AGENTS.md CLI 语义、HANDOFF、skill 引用、`docs/EVENTS.md`（若事件不变则只改文档示例命令）。
-- 验收：对每类等待状态构造 Job，`xvt apply` 与原命令产生相同的 Job 终态与事件序列；错误路由测试覆盖 task 缺失、fingerprint 过期、无等待任务三种情况。
+- 新增 `apply` 子命令：优先读取 RESPONSE 文件中的 `task` 字段路由（`source_review_fixes`、`translation_review_fixes`、`semantic_review_only`、`semantic_review_and_repair`、`translate_and_polish`）；缺 `task` 时回退到按 Job 的 `plan_advance_steps` 首步路由（`await_agent_translation`、`await_agent_polish`、`await_agent_semantic_review`、`await_translation_review`）。两条路都不成立时报结构化错误，不猜测。
+- `apply-translation` 需要的 `--target-language` 由 `resolve_target_language(job)` 从 Job 中解析，用户无需重复提供。
+- 现有 `apply-*` 命令全部保留为稳定入口，行为不变；`status` 的 `before:` 改为推荐 `xvt apply`，原命令降为 `alternative:`。
+- 各回填实现的校验逻辑零改动——本项只加一层查表路由，不碰协议语义。事件序列与原命令一致（路由后的 Namespace 携带目标命令名）。
+- 不纳入统一路由：`apply-cue-retranslation`（需额外 `--cue` 参数）、`import-translation`（输入是字幕文件而非 JSON response）。
+- 验收：7 个新增 CLI 测试覆盖五类 task 路由、步骤回退路由、未知 task 与无等待任务两类错误；492 测试全部通过。
 
 ### R2.3 人工修订 SRT 编辑通道（F12）
 

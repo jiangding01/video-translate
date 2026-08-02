@@ -490,6 +490,108 @@ class CliTest(unittest.TestCase):
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
         self.assertIn("xvt continue /tmp/job.json", output.getvalue())
 
+    def _write_response(self, directory: str, payload: dict[str, object]) -> str:
+        path = Path(directory) / "response.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return str(path)
+
+    def test_apply_routes_source_review_fixes_by_task(self) -> None:
+        paths = (Path("/tmp/revision.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "source_review_fixes"})
+            with (
+                patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_routes_translation_review_fixes_by_task(self) -> None:
+        paths = (Path("/tmp/revision.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "translation_review_fixes"})
+            with (
+                patch("xvt.cli.apply_translation_review_fixes", return_value=paths) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_routes_semantic_review_by_task(self) -> None:
+        result = SimpleNamespace(status="completed", paths=(Path("/tmp/reviewed.json"),))
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "semantic_review_and_repair"})
+            with (
+                patch("xvt.cli.apply_agent_semantic_review", return_value=result) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_routes_polished_translation_and_resolves_target_language(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        job.config["target_language"] = "zh"
+        paths = (Path("/tmp/translated.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "translate_and_polish"})
+            with (
+                patch("xvt.cli.apply_agent_translation", return_value=paths) as apply,
+                patch("xvt.cli.load_job", return_value=job),
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.kwargs["target_language"], "zh")
+
+    def test_apply_routes_by_advance_step_when_response_has_no_task(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        paths = (Path("/tmp/polished.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"fingerprint": "abc", "items": []})
+            with (
+                patch("xvt.cli.apply_agent_translation_polish", return_value=paths) as apply,
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.plan_advance_steps", return_value=("await_agent_polish",)),
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_rejects_unknown_task(self) -> None:
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "not_a_real_task"})
+            with redirect_stderr(errors):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertNotEqual(return_code, 0)
+        self.assertIn("not_a_real_task", errors.getvalue())
+
+    def test_apply_rejects_when_job_is_not_awaiting_input(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"items": []})
+            with (
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=None),
+                redirect_stderr(errors),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertNotEqual(return_code, 0)
+        self.assertIn("cannot determine apply target", errors.getvalue())
+
     def test_inspect_prints_json(self) -> None:
         output = StringIO()
         with (

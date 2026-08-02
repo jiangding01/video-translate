@@ -64,7 +64,7 @@ from xvt.recovery import (
 )
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.translate import translation_policy_from_dict
-from xvt.workflow import WorkflowOptions, continue_workflow, run_workflow
+from xvt.workflow import WorkflowOptions, continue_workflow, plan_advance_steps, run_workflow
 from xvt.workflow_config import (
     WorkflowConfig,
     get_workflow_config,
@@ -80,10 +80,10 @@ recommended path:
   xvt continue JOB.json
 
 when status says awaiting Agent input:
-  xvt apply-translation JOB.json RESPONSE --target-language LANG
-  # or: xvt apply-polish-translation JOB.json RESPONSE
-  # or: xvt apply-semantic-review JOB.json RESPONSE
+  xvt apply JOB.json RESPONSE          # auto-routes to the right apply command
   xvt continue JOB.json
+  # explicit alternatives: apply-translation / apply-polish-translation /
+  # apply-semantic-review / apply-translation-review-fixes / apply-source-review-fixes
 
 batch:
   xvt batch DIR --output DIR [--target-language LANG] [--translation-quality standard|polished]
@@ -459,6 +459,14 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser.add_argument("--target-font")
     preview_parser.add_argument("--source-font")
     preview_parser.add_argument("--events-jsonl", action="store_true")
+
+    unified_apply_parser = subparsers.add_parser(
+        "apply",
+        help="Auto-route an Agent response to the correct apply command",
+    )
+    unified_apply_parser.add_argument("job_file")
+    unified_apply_parser.add_argument("response_file")
+    unified_apply_parser.add_argument("--events-jsonl", action="store_true")
 
     burn_parser = subparsers.add_parser(
         "burn",
@@ -1631,6 +1639,60 @@ def _cmd_preview(arguments: argparse.Namespace) -> int:
     return 0
 
 
+_TASK_ROUTES: dict[str, str] = {
+    "source_review_fixes": "apply-source-review-fixes",
+    "translation_review_fixes": "apply-translation-review-fixes",
+    "semantic_review_only": "apply-semantic-review",
+    "semantic_review_and_repair": "apply-semantic-review",
+    "translate_and_polish": "apply-translation",
+}
+
+_STEP_ROUTES: dict[str, str] = {
+    "await_agent_translation": "apply-translation",
+    "await_agent_polish": "apply-polish-translation",
+    "await_agent_semantic_review": "apply-semantic-review",
+    "await_translation_review": "apply-translation-review-fixes",
+}
+
+
+def _cmd_apply(arguments: argparse.Namespace) -> int:
+    # 先在原 Namespace 上建 sink，路由副本才能继承它，让失败路径仍能取到恢复计划。
+    _event_sink(arguments)
+    response_data = json.loads(Path(arguments.response_file).read_text(encoding="utf-8"))
+    if not isinstance(response_data, dict):
+        raise ValueError("response file must contain a JSON object")
+
+    task = response_data.get("task")
+    route: str | None = None
+    if isinstance(task, str):
+        route = _TASK_ROUTES.get(task)
+        if route is None:
+            raise ValueError(f"unknown task in response file: {task}")
+    else:
+        job = load_job(arguments.job_file)
+        workflow = get_workflow_config(job)
+        if workflow is not None:
+            steps = plan_advance_steps(job, workflow)
+            if steps:
+                route = _STEP_ROUTES.get(steps[0])
+        if route is None:
+            raise ValueError(
+                "cannot determine apply target: response file has no task field "
+                "and job is not awaiting Agent input"
+            )
+
+    routed = argparse.Namespace(**vars(arguments))
+    routed.command = route
+    if route == "apply-translation":
+        job = load_job(arguments.job_file)
+        target_language = resolve_target_language(job)
+        if target_language is None:
+            raise ValueError("job has no target language configured")
+        routed.target_language = target_language
+    handler = _COMMAND_DISPATCH[route]
+    return handler(routed)
+
+
 def _cmd_burn(arguments: argparse.Namespace) -> int:
     event_sink = _event_sink(arguments)
     path = burn_translated_job(
@@ -1676,6 +1738,7 @@ _COMMAND_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "resegment-translation": _cmd_resegment_translation,
     "retranslate-cues": _cmd_retranslate_cues,
     "apply-cue-retranslation": _cmd_apply_cue_retranslation,
+    "apply": _cmd_apply,
     "preview": _cmd_preview,
     "burn": _cmd_burn,
 }
@@ -1693,6 +1756,7 @@ def _run_command(arguments: argparse.Namespace) -> int:
 # `continue` 的窗口将在 run 统一为 continue 特例后由同一锁点收口。
 _JOB_MUTATING_COMMANDS = frozenset(
     {
+        "apply",
         "continue",
         "resume",
         "rebuild-source",

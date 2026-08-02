@@ -390,7 +390,8 @@ class RecoveryTest(unittest.TestCase):
             plan = build_recovery_plan(job_file)
 
         self.assertEqual(plan.category, "awaiting_input")
-        self.assertIn("apply-translation", plan.prerequisite_commands[0])
+        self.assertIn("xvt apply ", plan.prerequisite_commands[0])
+        self.assertIn("apply-translation", plan.alternative_commands[0])
         self.assertIn("continue", plan.primary_command or "")
         self.assertEqual(plan.advance_steps, ("await_agent_translation",))
 
@@ -411,7 +412,8 @@ class RecoveryTest(unittest.TestCase):
             plan = build_recovery_plan(job_file)
 
         self.assertEqual(plan.category, "awaiting_input")
-        self.assertIn("apply-polish-translation", plan.prerequisite_commands[0])
+        self.assertIn("xvt apply ", plan.prerequisite_commands[0])
+        self.assertIn("apply-polish-translation", plan.alternative_commands[0])
         self.assertEqual(plan.advance_steps, ("await_agent_polish",))
 
     def test_recovery_plan_blocks_when_polished_draft_is_invalid(self) -> None:
