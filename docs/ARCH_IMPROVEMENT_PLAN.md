@@ -41,8 +41,8 @@
 
 ## 实施进度（2026-08-02 更新）
 
-- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。
-- **待做**：R2.1（_run_command 拆分）、R2.2（统一 apply 路由）、R2.3（SRT 修订通道）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
+- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。
+- **待做**：R2.2（统一 apply 路由）、R2.3（SRT 修订通道）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
 
 ## R1：工程加固（低风险，可立即实施）
 
@@ -72,12 +72,12 @@
 
 ## R2：CLI 与交互收敛（中风险，建议在 GUI 之前完成）
 
-### R2.1 `_run_command` 分发拆解（F5）
+### R2.1 `_run_command` 分发拆解（F5）——已完成
 
 - 把 `cli.py` `_run_command` 内每个 `if arguments.command == ...` 分支抽成独立的 `_cmd_<name>(arguments) -> int` 函数，顶层换成 `dict[str, Callable]` 分发表。
 - 纯搬移，不改任何行为和输出。遵循既有"纯搬移四步陷阱"经验：先确认 `tests/test_cli.py` 中 patch 目标是否随符号迁移、多行文本块完整搬运、守卫断言范围不缩水。
-- 可分 2–3 个 PR 按命令簇（转写簇 / 翻译簇 / 修复与烧录簇）渐进合并，每个 PR 后全量测试必须通过。
-- 验收：`_run_command` 只剩查表与公共前后置逻辑；`xvt --help` 与各命令行为逐字节不变（对拍若干典型命令的 stdout/stderr）。
+- 最终以单 PR 一步到位完成：26 个 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 从 622 行缩减至 4 行。485 测试全部通过。
+- 验收：`_run_command` 只剩查表与公共前后置逻辑；`xvt --help` 与各命令行为逐字节不变。
 
 ### R2.2 统一 `xvt apply JOB RESPONSE` 自动路由（F6）
 

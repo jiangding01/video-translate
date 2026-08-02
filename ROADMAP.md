@@ -15,7 +15,7 @@
     - ~~Q5：可恢复字幕润色。~~ 已完成：Q5a 支持旧译文显式补跑、API checkpoint、Agent 回填和工作流恢复；Q5b 接入新 Job 的 `standard|polished` 质量参数、API draft -> polish 和一次 Agent 翻译+润色。专项设计见 [Q5 可恢复字幕润色技术方案](docs/Q5_TRANSLATION_POLISH_PLAN.md)。
     - ~~Q6：语义校对、最多一次定向修复和独立人工确认。~~ 已完成：polished 候选经结构化语义校对、完整语义组一次修复与最终复查；API/Agent 均可恢复，人工确认绑定候选和报告且不能绕过确定性 QA。专项设计见 [Q6 技术方案](docs/Q6_SEMANTIC_REVIEW_PLAN.md)。
     - ~~Q6.1：人工校对交互与提示词加固。~~ 已完成：译文修订、源文修订与 `source_suspect` 多路径引导、API/Agent 语义组表达与校对契约加固。专项设计见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
-- 按 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)（R 系列）推进：~~R1 工程加固（CI 打包验证与多 Python 版本、发布 tag、依赖守卫测试、共享符号公有化）~~ 已完成（PR #68）；~~真实 Job 复现的 R2.4 恢复文案与 R2.5 stage 收口~~ 已完成（PR #67）；剩余 R2 CLI 收敛（`_run_command` 拆分、统一 `apply` 路由、人工修订 SRT 通道、R2.4 确认通道评估）在可视化界面之前完成；R3 架构演进（统一 provider 传输、内容寻址 step 缓存、schema 演进评估、config 单轨化）在 polished 真实 E2E 验收后启动。
+- 按 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)（R 系列）推进：~~R1 工程加固（CI 打包验证与多 Python 版本、发布 tag、依赖守卫测试、共享符号公有化）~~ 已完成（PR #68）；~~真实 Job 复现的 R2.4 恢复文案与 R2.5 stage 收口~~ 已完成（PR #67）；~~R2.1 `_run_command` 分发拆解~~ 已完成；剩余 R2 CLI 收敛（统一 `apply` 路由、人工修订 SRT 通道、R2.4 确认通道评估）在可视化界面之前完成；R3 架构演进（统一 provider 传输、内容寻址 step 缓存、schema 演进评估、config 单轨化）在 polished 真实 E2E 验收后启动。
 - 上述质量闭环通过真实 E2E 后，增加可视化校对界面，消费 CLI 的 JSONL 事件和 `job.json`，不复制媒体处理逻辑。
 
 ## 中期
