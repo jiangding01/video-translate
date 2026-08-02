@@ -524,18 +524,20 @@ def _recovery_for_workflow(
 
     if steps[0] == "await_agent_translation":
         target = workflow.target_language or "LANGUAGE"
-        apply_command = _job_command(
-            "apply-translation",
-            job_file,
-            "RESPONSE",
-            "--target-language",
-            target,
-        )
         return plan(
             "awaiting_input",
             "任务正在等待翻译结果回填。",
             primary_command=_job_command("continue", job_file),
-            prerequisite_commands=(apply_command,),
+            prerequisite_commands=(_job_command("apply", job_file, "RESPONSE"),),
+            alternative_commands=(
+                _job_command(
+                    "apply-translation",
+                    job_file,
+                    "RESPONSE",
+                    "--target-language",
+                    target,
+                ),
+            ),
             advance_steps=steps,
         )
 
@@ -544,7 +546,8 @@ def _recovery_for_workflow(
             "awaiting_input",
             "任务正在等待译文润色结果回填。",
             primary_command=_job_command("continue", job_file),
-            prerequisite_commands=(_job_command("apply-polish-translation", job_file, "RESPONSE"),),
+            prerequisite_commands=(_job_command("apply", job_file, "RESPONSE"),),
+            alternative_commands=(_job_command("apply-polish-translation", job_file, "RESPONSE"),),
             advance_steps=steps,
         )
 
@@ -553,7 +556,8 @@ def _recovery_for_workflow(
             "awaiting_input",
             "任务正在等待 Agent 语义校对与一次修复结果回填。",
             primary_command=_job_command("continue", job_file),
-            prerequisite_commands=(_job_command("apply-semantic-review", job_file, "RESPONSE"),),
+            prerequisite_commands=(_job_command("apply", job_file, "RESPONSE"),),
+            alternative_commands=(_job_command("apply-semantic-review", job_file, "RESPONSE"),),
             report_paths=tuple(
                 str(valid_artifacts[kind])
                 for kind in ("translation_semantic_qa", "translation_semantic_qa_final")

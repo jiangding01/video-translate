@@ -71,7 +71,13 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
    For a new polished translation, add `--translation-quality polished`. The generated manifest uses `task=translate_and_polish`; translate, polish, and self-check in one pass, then return the manifest fingerprint and every requested ID exactly once. Do not create a second polish response for this path.
 
 6. Read `artifacts/translation-batches.json`, including each batch's `semantic_groups`. Translate every item according to [translation-protocol.md](references/translation-protocol.md): use a complete group to keep the expression natural, but return only the existing `items` IDs in one response JSON. Never merge, split, renumber, or move text across cue IDs.
-7. Apply the response:
+7. Apply the response. Prefer the unified entry point, which auto-resolves the target language from the Job:
+
+   ```bash
+   uv run --no-sync xvt apply "/path/to/job.json" "/path/to/translation-response.json"
+   ```
+
+   The explicit command remains available when you need to state the target language yourself:
 
    ```bash
    uv run --no-sync xvt apply-translation "/path/to/job.json" "/path/to/translation-response.json" --target-language zh-CN
@@ -137,7 +143,7 @@ uv run --no-sync xvt rebuild-source "/path/to/job.json" --strategy asr
 
 Pass `--cookies-from-browser` or `--proxy` only when remote access requires it. This command reuses checksum-valid word/audio checkpoints or downloaded media when possible, invalidates the old candidate QA, source timeline, and all derived translation/render/burn artifacts, and preserves a valid imported translation artifact for remapping onto the rebuilt cues. It is not supported for pure-subtitle Jobs, and `continue` never triggers it implicitly. If the repair is interrupted, follow the explicit `rebuild-source` command from `status`; after success, use `continue` for workflow Jobs or the `translate` command printed by the CLI for legacy atomic Jobs. Do not repeat the same rebuild when the rebuilt ASR cues themselves fail QA; that requires manual subtitle repair or a different segmentation decision.
 
-Optionally run `uv run --no-sync xvt verify "/path/to/job.json" --json` when integrity is in doubt. `continue` can retry remote inspection or acquisition in the same Job, resume API translation, polish, or semantic-review batches, and retry missing translation or burn outputs (including stale burn fingerprints). Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. Translation waiting states require `apply-translation`, `import-translation`, `apply-polish-translation`, `apply-semantic-review`, or `apply-translation-review-fixes` as directed by `status` before `continue`. Keep `xvt resume` for transcription checkpoints only (advanced). Prefer `run`/`continue` over atomic `translate`/`burn` for end-to-end goals. Never bypass a missing-file or checksum-mismatch result.
+Optionally run `uv run --no-sync xvt verify "/path/to/job.json" --json` when integrity is in doubt. `continue` can retry remote inspection or acquisition in the same Job, resume API translation, polish, or semantic-review batches, and retry missing translation or burn outputs (including stale burn fingerprints). Pass `--cookies-from-browser` or `--proxy` again when remote access requires them. For end-to-end Jobs, a translation waiting state can generally be resolved with the unified `apply JOB RESPONSE` entry point, following the `before:` command `status` prints; it routes to the correct step by the Job's current waiting step. Use the specific `apply-translation`, `apply-polish-translation`, `apply-semantic-review`, or `apply-translation-review-fixes` command instead when you need explicit control, or when working with an atomic Job (no persisted `config.workflow`), which `apply` does not support. `import-translation` (importing an existing translated subtitle file) does not go through the unified entry point; use it directly. Keep `xvt resume` for transcription checkpoints only (advanced). Prefer `run`/`continue` over atomic `translate`/`burn` for end-to-end goals. Never bypass a missing-file or checksum-mismatch result.
 
 For a directory batch, use `uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl`. Read each incomplete item's `recovery_plan` before claiming the batch is recoverable: retryable Jobs continue automatically, Agent waits still require translation application, and manual or unrecoverable items remain blocked. Completed items are skipped only when their Job recovery plan confirms checksum-valid outputs.
 

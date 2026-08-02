@@ -12,14 +12,22 @@ from unittest.mock import patch
 
 from xvt import cancellation
 from xvt.batch import BatchResult
-from xvt.cli import main
+from xvt.cli import _STEP_ROUTES, _TASK_ROUTES, main
 from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
-from xvt.pipeline import RebuildSourceResult, ResegmentationResult, TranslationRunResult
+from xvt.pipeline import (
+    RebuildSourceResult,
+    ResegmentationResult,
+    TranslationRunResult,
+    prepare_agent_translation,
+    run_subtitle_transcription,
+)
+from xvt.pipeline.revision import SOURCE_REVIEW_TASK, TRANSLATION_REVIEW_TASK
 from xvt.process import CommandCancelled
-from xvt.workflow import WorkflowResult
+from xvt.workflow import AWAIT_STEPS, WorkflowResult
+from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 class CliTest(unittest.TestCase):
@@ -489,6 +497,217 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
         self.assertIn("xvt continue /tmp/job.json", output.getvalue())
+
+    def _write_response(self, directory: str, payload: dict[str, object]) -> str:
+        path = Path(directory) / "response.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return str(path)
+
+    def test_apply_routes_source_review_fixes_by_task(self) -> None:
+        paths = (Path("/tmp/revision.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "source_review_fixes"})
+            with (
+                patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_routes_translation_review_fixes_by_task(self) -> None:
+        paths = (Path("/tmp/revision.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "translation_review_fixes"})
+            with (
+                patch("xvt.cli.apply_translation_review_fixes", return_value=paths) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_routes_semantic_review_by_task(self) -> None:
+        result = SimpleNamespace(status="completed", paths=(Path("/tmp/reviewed.json"),))
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "semantic_review_and_repair"})
+            with (
+                patch("xvt.cli.apply_agent_semantic_review", return_value=result) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_routes_polished_translation_and_resolves_target_language(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        job.config["target_language"] = "zh"
+        paths = (Path("/tmp/translated.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "translate_and_polish"})
+            with (
+                patch("xvt.cli.apply_agent_translation", return_value=paths) as apply,
+                patch("xvt.cli.load_job", return_value=job),
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.kwargs["target_language"], "zh")
+
+    def test_apply_routes_by_advance_step_when_response_has_no_task(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        paths = (Path("/tmp/polished.json"),)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"fingerprint": "abc", "items": []})
+            with (
+                patch("xvt.cli.apply_agent_translation_polish", return_value=paths) as apply,
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.plan_advance_steps", return_value=("await_agent_polish",)),
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_rejects_unknown_task(self) -> None:
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "not_a_real_task"})
+            with redirect_stderr(errors):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertNotEqual(return_code, 0)
+        self.assertIn("not_a_real_task", errors.getvalue())
+
+    def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
+        """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
+        paths = (Path("/tmp/revision.json"),)
+        completed = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "source_review_fixes"})
+            with (
+                patch("xvt.cli.apply_source_review_fixes", return_value=paths),
+                redirect_stdout(completed),
+            ):
+                main(["apply", "/tmp/job.json", response, "--events-jsonl"])
+
+            failed = StringIO()
+            with (
+                patch(
+                    "xvt.cli.apply_source_review_fixes",
+                    side_effect=ValueError("bad revision"),
+                ),
+                redirect_stdout(failed),
+                redirect_stderr(StringIO()),
+            ):
+                main(["apply", "/tmp/job.json", response, "--events-jsonl"])
+
+        success_event = json.loads(completed.getvalue())
+        failure_event = json.loads(failed.getvalue())
+        self.assertEqual(success_event["type"], "cli_completed")
+        self.assertEqual(failure_event["type"], "cli_failed")
+        self.assertEqual(success_event["data"]["command"], "apply")
+        self.assertEqual(failure_event["data"]["command"], "apply")
+
+    def test_apply_rejects_atomic_job_without_workflow_goal(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"items": []})
+            with (
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=None),
+                redirect_stderr(errors),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertNotEqual(return_code, 0)
+        self.assertIn("no persisted workflow goal", errors.getvalue())
+
+    def test_apply_rejects_when_job_is_not_awaiting_input(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"items": []})
+            with (
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.plan_advance_steps", return_value=("burn",)),
+                redirect_stderr(errors),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertNotEqual(return_code, 0)
+        self.assertIn("not awaiting Agent input", errors.getvalue())
+
+    def test_apply_reports_unreadable_response_as_user_input_error(self) -> None:
+        """缺文件 / 喂字幕都是用户输入错误，不能落到 dependency_or_process。"""
+        errors = StringIO()
+        with redirect_stderr(errors):
+            missing_code = main(["apply", "/tmp/job.json", "/tmp/does-not-exist.json"])
+        self.assertEqual(missing_code, 2)
+
+        subtitle_errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "translated.srt"
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好。\n",
+                encoding="utf-8",
+            )
+            with redirect_stderr(subtitle_errors):
+                return_code = main(["apply", "/tmp/job.json", str(subtitle)])
+
+        self.assertEqual(return_code, 2)
+        self.assertIn("import-translation", subtitle_errors.getvalue())
+
+    def test_apply_routes_real_agent_translation_job_end_to_end(self) -> None:
+        """不 mock 任何路由/实现，验证 _STEP_ROUTES 的 key 与真实 planner 对得上。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n"
+                "\n2\n00:00:01,000 --> 00:00:02,000\nGoodbye.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN"),
+            )
+            save_job(job)
+            job_file = str(get_job_file(job))
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            cue_ids = [item["id"] for batch in manifest["batches"] for item in batch["items"]]
+            self.assertTrue(cue_ids)
+            response = self._write_response(
+                directory,
+                {"items": [{"id": cue_id, "text": f"译文 {cue_id}"} for cue_id in cue_ids]},
+            )
+
+            with redirect_stdout(StringIO()):
+                return_code = main(["apply", job_file, response])
+
+            self.assertEqual(return_code, 0)
+            applied = load_job(job_file)
+            self.assertIn("translated_cues", {artifact.kind for artifact in applied.artifacts})
+
+    def test_step_routes_keys_match_workflow_await_steps(self) -> None:
+        """路由表的 key 必须与真实实现同源，避免改名后静默失配。"""
+        self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS))
+        self.assertIn(SOURCE_REVIEW_TASK, _TASK_ROUTES)
+        self.assertIn(TRANSLATION_REVIEW_TASK, _TASK_ROUTES)
 
     def test_inspect_prints_json(self) -> None:
         output = StringIO()

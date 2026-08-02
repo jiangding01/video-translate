@@ -62,7 +62,8 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 - `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
 - `xvt prepare-source-review JOB --cue ID` / `apply-source-review-fixes JOB REVIEW` 显式修订源 cue 文本，保留 ID、时间轴、words 和 provenance，立即重跑源字幕 QA，并失效旧翻译及全部下游；导入译文工作流不支持。
 - `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
-- Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先运行 `apply-translation` 或 `import-translation`，再运行 `continue`。
+- Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先回填再运行 `continue`。
+- `xvt apply JOB RESPONSE` 是统一回填入口，但路由规则依响应类型而不同：人工修订模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；Agent 翻译/润色/语义校对响应契约（见 `translation-protocol.md`）不含 `task` 字段，按 Job 当前等待步骤路由——仅支持有持久化 `config.workflow` 目标的端到端 Job。原子 Job（无 `config.workflow`，例如单独 `xvt translate` 创建的等待）不受统一入口支持，路由不出来时报错而不猜测，需改用对应的显式 `apply-*` 命令。各 `apply-*` 命令保留为稳定入口，语义零改动。需要额外参数的 `apply-cue-retranslation` 与输入非 JSON 的 `import-translation` 不纳入统一路由。
 - `--translation-quality polished` 在润色候选后必须完成 Q6 语义校对；API 最多修复一次并复查，Agent 使用 `apply-semantic-review` 回填合并响应。仍有 review 问题时运行 `continue --acknowledge-translation-review`；确认不能绕过确定性字幕 QA。
 - `xvt polish-translation JOB` 为已有端到端 Job 显式补跑润色；API 模式逐批 checkpoint，Agent 模式必须先运行 `apply-polish-translation`，再由 `continue` 进入语义校对。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。
