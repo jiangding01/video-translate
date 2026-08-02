@@ -577,7 +577,7 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(return_code, 0)
         self.assertIn("not_a_real_task", errors.getvalue())
 
-    def test_apply_rejects_when_job_is_not_awaiting_input(self) -> None:
+    def test_apply_rejects_atomic_job_without_workflow_goal(self) -> None:
         job = Job("job-1", "", "", "input", "/tmp", {})
         errors = StringIO()
         with tempfile.TemporaryDirectory() as directory:
@@ -590,7 +590,23 @@ class CliTest(unittest.TestCase):
                 return_code = main(["apply", "/tmp/job.json", response])
 
         self.assertNotEqual(return_code, 0)
-        self.assertIn("cannot determine apply target", errors.getvalue())
+        self.assertIn("no persisted workflow goal", errors.getvalue())
+
+    def test_apply_rejects_when_job_is_not_awaiting_input(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"items": []})
+            with (
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.plan_advance_steps", return_value=("burn",)),
+                redirect_stderr(errors),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response])
+
+        self.assertNotEqual(return_code, 0)
+        self.assertIn("not awaiting Agent input", errors.getvalue())
 
     def test_inspect_prints_json(self) -> None:
         output = StringIO()

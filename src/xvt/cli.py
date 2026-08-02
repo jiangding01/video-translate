@@ -1164,6 +1164,7 @@ def _cmd_status(arguments: argparse.Namespace) -> int:
         if plan.primary_command:
             print(f"next: {plan.primary_command}")
         elif plan.category in {"manual_fix", "awaiting_input"}:
+            # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
             print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
         for command in plan.alternative_commands:
             print(f"alternative: {command}")
@@ -1663,7 +1664,7 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         raise ValueError("response file must contain a JSON object")
 
     task = response_data.get("task")
-    route: str | None = None
+    job = None
     if isinstance(task, str):
         route = _TASK_ROUTES.get(task)
         if route is None:
@@ -1671,26 +1672,27 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
     else:
         job = load_job(arguments.job_file)
         workflow = get_workflow_config(job)
-        if workflow is not None:
-            steps = plan_advance_steps(job, workflow)
-            if steps:
-                route = _STEP_ROUTES.get(steps[0])
+        if workflow is None:
+            raise ValueError(
+                "response file has no task field, and this job has no persisted workflow goal; "
+                "run xvt status to see the explicit apply-* command for it"
+            )
+        steps = plan_advance_steps(job, workflow)
+        route = _STEP_ROUTES.get(steps[0]) if steps else None
         if route is None:
             raise ValueError(
-                "cannot determine apply target: response file has no task field "
-                "and job is not awaiting Agent input"
+                "response file has no task field, and the job is not awaiting Agent input; "
+                "run xvt status to see the current next step"
             )
 
     routed = argparse.Namespace(**vars(arguments))
     routed.command = route
     if route == "apply-translation":
-        job = load_job(arguments.job_file)
-        target_language = resolve_target_language(job)
+        target_language = resolve_target_language(job or load_job(arguments.job_file))
         if target_language is None:
             raise ValueError("job has no target language configured")
         routed.target_language = target_language
-    handler = _COMMAND_DISPATCH[route]
-    return handler(routed)
+    return _COMMAND_DISPATCH[route](routed)
 
 
 def _cmd_burn(arguments: argparse.Namespace) -> int:

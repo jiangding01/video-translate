@@ -86,7 +86,7 @@
 - 现有 `apply-*` 命令全部保留为稳定入口，行为不变；`status` 的 `before:` 改为推荐 `xvt apply`，原命令降为 `alternative:`。
 - 各回填实现的校验逻辑零改动——本项只加一层查表路由，不碰协议语义。事件序列与原命令一致（路由后的 Namespace 携带目标命令名）。
 - 不纳入统一路由：`apply-cue-retranslation`（需额外 `--cue` 参数）、`import-translation`（输入是字幕文件而非 JSON response）。
-- 验收：7 个新增 CLI 测试覆盖五类 task 路由、步骤回退路由、未知 task 与无等待任务两类错误；492 测试全部通过。
+- 验收：8 个新增 CLI 测试覆盖四类 task 路由、步骤回退路由，以及未知 task、原子 Job 无工作流目标、非等待态三类错误；493 测试全部通过。
 
 ### R2.3 人工修订 SRT 编辑通道（F12）
 
