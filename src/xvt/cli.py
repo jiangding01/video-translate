@@ -3,7 +3,7 @@ import json
 import shlex
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from time import monotonic
 from typing import TextIO
@@ -1009,628 +1009,682 @@ def _print_workflow_result(result: object) -> None:
         print(f"translation is awaiting input: {message}")
 
 
-def _run_command(arguments: argparse.Namespace) -> int:
-    if arguments.command == "inspect":
-        result = inspect_input(arguments.input)
-        if arguments.json:
-            _print_json(result)
-        else:
-            print(f"{result['kind']}: {result.get('title') or result.get('path')}")
-        return 0
+def _cmd_inspect(arguments: argparse.Namespace) -> int:
+    result = inspect_input(arguments.input)
+    if arguments.json:
+        _print_json(result)
+    else:
+        print(f"{result['kind']}: {result.get('title') or result.get('path')}")
+    return 0
 
-    if arguments.command == "doctor":
-        report = run_doctor(arguments.output)
-        if arguments.json:
-            _print_json(report)
-        else:
-            for check in report["checks"]:
-                print(f"{check['status'].upper():4} {check['name']}: {check['message']}")
-            print(f"overall: {report['status']}")
-        return ExitCode.OK if report["status"] == "pass" else ExitCode.DEPENDENCY_ERROR
 
-    if arguments.command == "run":
-        event_sink = _event_sink(arguments)
-        result = run_workflow(
-            WorkflowOptions(
-                input=arguments.input,
-                output=arguments.output,
-                engine=arguments.engine,
-                language=arguments.language,
-                subtitles=arguments.subtitles,
-                source_strategy=arguments.source_strategy,
-                align_subtitles=arguments.align_subtitles,
-                minimum_alignment_confidence=arguments.min_alignment_confidence,
-                allow_low_confidence_alignment=arguments.allow_low_confidence_alignment,
-                cookies_from_browser=arguments.cookies_from_browser,
-                proxy=arguments.proxy,
-                youtube_subtitles=arguments.youtube_subtitles,
-                subtitle_language=arguments.subtitle_language,
-                allow_auto_subtitles=arguments.allow_auto_subtitles,
-                translation_subtitles=arguments.translation_subtitles,
-                target_language=arguments.target_language,
-                translation_quality=arguments.translation_quality,
-                provider=arguments.provider,
-                base_url=arguments.base_url,
-                model=arguments.model,
-                api_key_env=arguments.api_key_env,
-                batch_size=arguments.batch_size,
-                max_retries=arguments.max_retries,
-                timeout_seconds=arguments.timeout_seconds,
-                glossary=arguments.glossary,
-                translation_style=arguments.translation_style,
-                segmentation_preset=arguments.segmentation_preset,
-                burn=arguments.burn,
-                burn_media=arguments.burn_media,
-                burn_output=arguments.burn_output,
-                hardware_encoding=not arguments.software,
-                target_font=arguments.target_font,
-                source_font=arguments.source_font,
-            ),
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl and result.status == "completed":
-            _complete(
-                arguments,
-                job_file=str(result.job_file),
-                artifacts=[str(path) for path in result.artifacts],
-            )
-        elif not arguments.events_jsonl:
-            _print_workflow_result(result)
-        return 0
+def _cmd_doctor(arguments: argparse.Namespace) -> int:
+    report = run_doctor(arguments.output)
+    if arguments.json:
+        _print_json(report)
+    else:
+        for check in report["checks"]:
+            print(f"{check['status'].upper():4} {check['name']}: {check['message']}")
+        print(f"overall: {report['status']}")
+    return ExitCode.OK if report["status"] == "pass" else ExitCode.DEPENDENCY_ERROR
 
-    if arguments.command == "batch":
-        event_sink = _event_sink(arguments)
-        result = run_batch(
-            arguments.input_directory,
-            WorkflowOptions(
-                input="",
-                output=arguments.output,
-                engine=arguments.engine,
-                language=arguments.language,
-                source_strategy=arguments.source_strategy,
-                target_language=arguments.target_language,
-                translation_quality=arguments.translation_quality,
-                provider=arguments.provider,
-                base_url=arguments.base_url,
-                model=arguments.model,
-                api_key_env=arguments.api_key_env,
-                batch_size=arguments.batch_size,
-                max_retries=arguments.max_retries,
-                timeout_seconds=arguments.timeout_seconds,
-                glossary=arguments.glossary,
-                translation_style=arguments.translation_style,
-                segmentation_preset=arguments.segmentation_preset,
-                burn=arguments.burn,
-                hardware_encoding=not arguments.software,
-                target_font=arguments.target_font,
-                source_font=arguments.source_font,
-            ),
-            recursive=arguments.recursive,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            if result.status == "completed":
-                _complete(arguments, batch_file=str(result.batch_file), status=result.status)
-        else:
-            _print_batch_result(result)
-        return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
 
-    if arguments.command == "batch-continue":
-        event_sink = _event_sink(arguments)
-        result = continue_batch(arguments.batch_file, event_sink=event_sink)
-        if arguments.events_jsonl:
-            if result.status == "completed":
-                _complete(arguments, batch_file=str(result.batch_file), status=result.status)
-        else:
-            _print_batch_result(result)
-        return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
-
-    if arguments.command == "status":
-        job = load_job(arguments.job_file)
-        plan = build_recovery_plan(job)
-        next_action = plan.primary_command or plan.reason
-        if arguments.json:
-            data = job.to_dict()
-            data["next_action"] = next_action
-            data["recovery_plan"] = plan.to_dict()
-            _print_json(data)
-        else:
-            stages = ", ".join(
-                f"{name}={_format_stage_status_for_display(job, name, record.status)}"
-                for name, record in job.stages.items()
-            )
-            print(f"{job.id}: {stages}")
-            print(f"recovery: {plan.category} - {plan.reason}")
-            if plan.advance_steps:
-                print(f"steps: {', '.join(plan.advance_steps)}")
-            for path in plan.report_paths:
-                print(f"report: {path}")
-            for path in plan.input_paths:
-                print(f"input: {path}")
-            for command in plan.prerequisite_commands:
-                print(f"before: {command}")
-            if plan.primary_command:
-                print(f"next: {plan.primary_command}")
-            elif plan.category in {"manual_fix", "awaiting_input"}:
-                # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
-                print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
-            for command in plan.alternative_commands:
-                print(f"alternative: {command}")
-        return 0
-
-    if arguments.command == "verify":
-        report = verify_job(arguments.job_file)
-        if arguments.json:
-            _print_json(report)
-        else:
-            for artifact in report["artifacts"]:
-                print(f"{artifact['status'].upper():4} {artifact['kind']}: {artifact['message']}")
-            print(f"overall: {report['status']}")
-        return ExitCode.OK if report["status"] == "pass" else ExitCode.VERIFY_FAILED
-
-    if arguments.command == "resume":
-        event_sink = _event_sink(arguments)
-        job = resume_job(arguments.job_file, event_sink=event_sink)
-        if arguments.events_jsonl:
-            _complete(arguments, job_file=str(get_job_file(job)))
-        else:
-            print(get_job_file(job))
-        return 0
-
-    if arguments.command == "rebuild-source":
-        event_sink = _event_sink(arguments)
-        result = rebuild_source(
-            arguments.job_file,
-            strategy=arguments.strategy,
+def _cmd_run(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = run_workflow(
+        WorkflowOptions(
+            input=arguments.input,
+            output=arguments.output,
+            engine=arguments.engine,
+            language=arguments.language,
+            subtitles=arguments.subtitles,
+            source_strategy=arguments.source_strategy,
+            align_subtitles=arguments.align_subtitles,
+            minimum_alignment_confidence=arguments.min_alignment_confidence,
+            allow_low_confidence_alignment=arguments.allow_low_confidence_alignment,
             cookies_from_browser=arguments.cookies_from_browser,
             proxy=arguments.proxy,
-            event_sink=event_sink,
-        )
-        artifacts = [
-            result.source_cues_path,
-            result.source_srt_path,
-            result.qa_path,
-            result.selection_path,
-        ]
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in artifacts])
-        else:
-            print(f"已使用 ASR 重建源字幕: {result.source_cues_path}")
-            print(f"源字幕文件: {result.source_srt_path}")
-            print(f"质量报告: {result.qa_path}")
-            job = load_job(arguments.job_file)
-            quoted_job_file = shlex.quote(str(Path(arguments.job_file).expanduser().resolve()))
-            if get_workflow_config(job) is not None:
-                print(f"继续任务: xvt continue {quoted_job_file}")
-            else:
-                target_language = resolve_target_language(job)
-                if target_language:
-                    print(
-                        f"继续翻译: xvt translate {quoted_job_file} "
-                        f"--target-language {shlex.quote(target_language)}"
-                    )
-        return 0
-
-    if arguments.command == "continue":
-        event_sink = _event_sink(arguments)
-        if arguments.acknowledge_subtitle_review:
-            report_path = acknowledge_subtitle_review(arguments.job_file, event_sink=event_sink)
-            if not arguments.events_jsonl:
-                print(f"已确认字幕 QA 复核报告: {report_path}", file=sys.stderr)
-        if arguments.acknowledge_translation_review:
-            report_path = acknowledge_translation_review(arguments.job_file, event_sink=event_sink)
-            if not arguments.events_jsonl:
-                print(f"已确认译文语义复核报告: {report_path}", file=sys.stderr)
-        result = continue_workflow(
-            arguments.job_file,
-            cookies_from_browser=arguments.cookies_from_browser,
-            proxy=arguments.proxy,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl and result.status == "completed":
-            _complete(
-                arguments,
-                job_file=str(result.job_file),
-                artifacts=[str(path) for path in result.artifacts],
-            )
-        elif not arguments.events_jsonl:
-            _print_workflow_result(result)
-        return 0
-
-    if arguments.command == "prepare-translation":
-        event_sink = _event_sink(arguments)
-        path = prepare_agent_translation(
-            arguments.job_file,
-            source_language=arguments.source_language,
+            youtube_subtitles=arguments.youtube_subtitles,
+            subtitle_language=arguments.subtitle_language,
+            allow_auto_subtitles=arguments.allow_auto_subtitles,
+            translation_subtitles=arguments.translation_subtitles,
             target_language=arguments.target_language,
+            translation_quality=arguments.translation_quality,
+            provider=arguments.provider,
+            base_url=arguments.base_url,
+            model=arguments.model,
+            api_key_env=arguments.api_key_env,
             batch_size=arguments.batch_size,
+            max_retries=arguments.max_retries,
+            timeout_seconds=arguments.timeout_seconds,
             glossary=arguments.glossary,
             translation_style=arguments.translation_style,
-            translation_quality=arguments.translation_quality,
-            event_sink=event_sink,
+            segmentation_preset=arguments.segmentation_preset,
+            burn=arguments.burn,
+            burn_media=arguments.burn_media,
+            burn_output=arguments.burn_output,
+            hardware_encoding=not arguments.software,
+            target_font=arguments.target_font,
+            source_font=arguments.source_font,
+        ),
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl and result.status == "completed":
+        _complete(
+            arguments,
+            job_file=str(result.job_file),
+            artifacts=[str(path) for path in result.artifacts],
         )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path)])
-        else:
-            print(path)
-        return 0
+    elif not arguments.events_jsonl:
+        _print_workflow_result(result)
+    return 0
 
-    if arguments.command == "apply-translation":
-        event_sink = _event_sink(arguments)
-        paths = apply_agent_translation(
-            arguments.job_file,
-            arguments.response_file,
+
+def _cmd_batch(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = run_batch(
+        arguments.input_directory,
+        WorkflowOptions(
+            input="",
+            output=arguments.output,
+            engine=arguments.engine,
+            language=arguments.language,
+            source_strategy=arguments.source_strategy,
             target_language=arguments.target_language,
+            translation_quality=arguments.translation_quality,
+            provider=arguments.provider,
+            base_url=arguments.base_url,
+            model=arguments.model,
+            api_key_env=arguments.api_key_env,
+            batch_size=arguments.batch_size,
+            max_retries=arguments.max_retries,
+            timeout_seconds=arguments.timeout_seconds,
+            glossary=arguments.glossary,
+            translation_style=arguments.translation_style,
+            segmentation_preset=arguments.segmentation_preset,
+            burn=arguments.burn,
+            hardware_encoding=not arguments.software,
+            target_font=arguments.target_font,
+            source_font=arguments.source_font,
+        ),
+        recursive=arguments.recursive,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        if result.status == "completed":
+            _complete(arguments, batch_file=str(result.batch_file), status=result.status)
+    else:
+        _print_batch_result(result)
+    return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
+
+
+def _cmd_batch_continue(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = continue_batch(arguments.batch_file, event_sink=event_sink)
+    if arguments.events_jsonl:
+        if result.status == "completed":
+            _complete(arguments, batch_file=str(result.batch_file), status=result.status)
+    else:
+        _print_batch_result(result)
+    return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
+
+
+def _cmd_status(arguments: argparse.Namespace) -> int:
+    job = load_job(arguments.job_file)
+    plan = build_recovery_plan(job)
+    next_action = plan.primary_command or plan.reason
+    if arguments.json:
+        data = job.to_dict()
+        data["next_action"] = next_action
+        data["recovery_plan"] = plan.to_dict()
+        _print_json(data)
+    else:
+        stages = ", ".join(
+            f"{name}={_format_stage_status_for_display(job, name, record.status)}"
+            for name, record in job.stages.items()
+        )
+        print(f"{job.id}: {stages}")
+        print(f"recovery: {plan.category} - {plan.reason}")
+        if plan.advance_steps:
+            print(f"steps: {', '.join(plan.advance_steps)}")
+        for path in plan.report_paths:
+            print(f"report: {path}")
+        for path in plan.input_paths:
+            print(f"input: {path}")
+        for command in plan.prerequisite_commands:
+            print(f"before: {command}")
+        if plan.primary_command:
+            print(f"next: {plan.primary_command}")
+        elif plan.category in {"manual_fix", "awaiting_input"}:
+            print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
+        for command in plan.alternative_commands:
+            print(f"alternative: {command}")
+    return 0
+
+
+def _cmd_verify(arguments: argparse.Namespace) -> int:
+    report = verify_job(arguments.job_file)
+    if arguments.json:
+        _print_json(report)
+    else:
+        for artifact in report["artifacts"]:
+            print(f"{artifact['status'].upper():4} {artifact['kind']}: {artifact['message']}")
+        print(f"overall: {report['status']}")
+    return ExitCode.OK if report["status"] == "pass" else ExitCode.VERIFY_FAILED
+
+
+def _cmd_resume(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    job = resume_job(arguments.job_file, event_sink=event_sink)
+    if arguments.events_jsonl:
+        _complete(arguments, job_file=str(get_job_file(job)))
+    else:
+        print(get_job_file(job))
+    return 0
+
+
+def _cmd_rebuild_source(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = rebuild_source(
+        arguments.job_file,
+        strategy=arguments.strategy,
+        cookies_from_browser=arguments.cookies_from_browser,
+        proxy=arguments.proxy,
+        event_sink=event_sink,
+    )
+    artifacts = [
+        result.source_cues_path,
+        result.source_srt_path,
+        result.qa_path,
+        result.selection_path,
+    ]
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in artifacts])
+    else:
+        print(f"已使用 ASR 重建源字幕: {result.source_cues_path}")
+        print(f"源字幕文件: {result.source_srt_path}")
+        print(f"质量报告: {result.qa_path}")
+        job = load_job(arguments.job_file)
+        quoted_job_file = shlex.quote(str(Path(arguments.job_file).expanduser().resolve()))
+        if get_workflow_config(job) is not None:
+            print(f"继续任务: xvt continue {quoted_job_file}")
+        else:
+            target_language = resolve_target_language(job)
+            if target_language:
+                print(
+                    f"继续翻译: xvt translate {quoted_job_file} "
+                    f"--target-language {shlex.quote(target_language)}"
+                )
+    return 0
+
+
+def _cmd_continue(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    if arguments.acknowledge_subtitle_review:
+        report_path = acknowledge_subtitle_review(arguments.job_file, event_sink=event_sink)
+        if not arguments.events_jsonl:
+            print(f"已确认字幕 QA 复核报告: {report_path}", file=sys.stderr)
+    if arguments.acknowledge_translation_review:
+        report_path = acknowledge_translation_review(arguments.job_file, event_sink=event_sink)
+        if not arguments.events_jsonl:
+            print(f"已确认译文语义复核报告: {report_path}", file=sys.stderr)
+    result = continue_workflow(
+        arguments.job_file,
+        cookies_from_browser=arguments.cookies_from_browser,
+        proxy=arguments.proxy,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl and result.status == "completed":
+        _complete(
+            arguments,
+            job_file=str(result.job_file),
+            artifacts=[str(path) for path in result.artifacts],
+        )
+    elif not arguments.events_jsonl:
+        _print_workflow_result(result)
+    return 0
+
+
+def _cmd_prepare_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    path = prepare_agent_translation(
+        arguments.job_file,
+        source_language=arguments.source_language,
+        target_language=arguments.target_language,
+        batch_size=arguments.batch_size,
+        glossary=arguments.glossary,
+        translation_style=arguments.translation_style,
+        translation_quality=arguments.translation_quality,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path)])
+    else:
+        print(path)
+    return 0
+
+
+def _cmd_apply_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    paths = apply_agent_translation(
+        arguments.job_file,
+        arguments.response_file,
+        target_language=arguments.target_language,
+        event_sink=event_sink,
+    )
+    job = load_job(arguments.job_file)
+    if get_workflow_config(job) is None and resolve_translation_quality(job) == "polished":
+        semantic = run_translation_semantic_review(
+            arguments.job_file,
             event_sink=event_sink,
         )
+        paths = semantic.paths
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
+            print(path)
+    return 0
+
+
+def _cmd_import_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    paths = apply_subtitle_translation(
+        arguments.job_file,
+        arguments.subtitle_file,
+        target_language=arguments.target_language,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
+            print(path)
+    return 0
+
+
+def _cmd_translate(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = run_translation(
+        arguments.job_file,
+        target_language=arguments.target_language,
+        provider=arguments.provider,
+        base_url=arguments.base_url,
+        model=arguments.model,
+        api_key_env=arguments.api_key_env,
+        batch_size=arguments.batch_size,
+        max_retries=arguments.max_retries,
+        timeout_seconds=arguments.timeout_seconds,
+        glossary=arguments.glossary,
+        translation_style=arguments.translation_style,
+        translation_quality=arguments.translation_quality,
+        event_sink=event_sink,
+    )
+    if (
+        result.mode != "agent"
+        and resolve_translation_quality(load_job(arguments.job_file)) == "polished"
+    ):
         job = load_job(arguments.job_file)
-        if get_workflow_config(job) is None and resolve_translation_quality(job) == "polished":
-            semantic = run_translation_semantic_review(
+        if get_workflow_config(job) is not None:
+            result = run_translation_polish(arguments.job_file, event_sink=event_sink)
+        else:
+            result = run_atomic_translation_polish(
                 arguments.job_file,
+                target_language=arguments.target_language,
+                provider=arguments.provider,
+                base_url=arguments.base_url,
+                model=arguments.model,
+                api_key_env=arguments.api_key_env,
+                batch_size=arguments.batch_size,
+                max_retries=arguments.max_retries,
+                timeout_seconds=arguments.timeout_seconds,
                 event_sink=event_sink,
             )
-            paths = semantic.paths
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
-        else:
-            for path in paths:
-                print(path)
-        return 0
-
-    if arguments.command == "import-translation":
-        event_sink = _event_sink(arguments)
-        paths = apply_subtitle_translation(
-            arguments.job_file,
-            arguments.subtitle_file,
-            target_language=arguments.target_language,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
-        else:
-            for path in paths:
-                print(path)
-        return 0
-
-    if arguments.command == "translate":
-        event_sink = _event_sink(arguments)
-        result = run_translation(
-            arguments.job_file,
-            target_language=arguments.target_language,
-            provider=arguments.provider,
-            base_url=arguments.base_url,
-            model=arguments.model,
-            api_key_env=arguments.api_key_env,
-            batch_size=arguments.batch_size,
-            max_retries=arguments.max_retries,
-            timeout_seconds=arguments.timeout_seconds,
-            glossary=arguments.glossary,
-            translation_style=arguments.translation_style,
-            translation_quality=arguments.translation_quality,
-            event_sink=event_sink,
-        )
-        if (
-            result.mode != "agent"
-            and resolve_translation_quality(load_job(arguments.job_file)) == "polished"
-        ):
+        if result.mode != "agent":
             job = load_job(arguments.job_file)
-            if get_workflow_config(job) is not None:
-                result = run_translation_polish(arguments.job_file, event_sink=event_sink)
-            else:
-                result = run_atomic_translation_polish(
-                    arguments.job_file,
-                    target_language=arguments.target_language,
-                    provider=arguments.provider,
-                    base_url=arguments.base_url,
-                    model=arguments.model,
-                    api_key_env=arguments.api_key_env,
-                    batch_size=arguments.batch_size,
-                    max_retries=arguments.max_retries,
-                    timeout_seconds=arguments.timeout_seconds,
-                    event_sink=event_sink,
-                )
-            if result.mode != "agent":
-                job = load_job(arguments.job_file)
-                workflow = get_workflow_config(job)
-                semantic_config = workflow or WorkflowConfig(
-                    target_language=arguments.target_language,
-                    provider=arguments.provider,
-                    base_url=arguments.base_url,
-                    model=arguments.model,
-                    api_key_env=arguments.api_key_env,
-                    batch_size=arguments.batch_size,
-                    max_retries=arguments.max_retries,
-                    timeout_seconds=arguments.timeout_seconds,
-                    translation_policy=translation_policy_from_dict(
-                        job.config.get("translation_policy")
-                    ),
-                    translation_quality="polished",
-                )
-                semantic = run_translation_semantic_review(
-                    arguments.job_file,
-                    config=semantic_config,
-                    event_sink=event_sink,
-                )
-                result = TranslationRunResult(
-                    semantic.mode,
-                    semantic.paths,
-                    semantic.fallback_reason,
-                )
-        if arguments.events_jsonl:
-            _complete(
-                arguments,
-                mode=result.mode,
-                artifacts=[str(path) for path in result.paths],
-            )
-        else:
-            if result.fallback_reason:
-                print(
-                    f"translation provider unavailable ({result.fallback_reason}); using Agent mode"
-                )
-            print(f"mode: {result.mode}")
-            for path in result.paths:
-                print(path)
-        return 0
-
-    if arguments.command == "polish-translation":
-        event_sink = _event_sink(arguments)
-        result = run_translation_polish(
-            arguments.job_file,
-            provider=arguments.provider,
-            base_url=arguments.base_url,
-            model=arguments.model,
-            api_key_env=arguments.api_key_env,
-            batch_size=arguments.batch_size,
-            max_retries=arguments.max_retries,
-            timeout_seconds=arguments.timeout_seconds,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(
-                arguments,
-                mode=result.mode,
-                artifacts=[str(path) for path in result.paths],
-            )
-        else:
-            if result.fallback_reason:
-                print(
-                    f"translation provider unavailable ({result.fallback_reason}); using Agent mode"
-                )
-            print(f"mode: {result.mode}")
-            for path in result.paths:
-                print(path)
-        return 0
-
-    if arguments.command == "apply-polish-translation":
-        event_sink = _event_sink(arguments)
-        paths = apply_agent_translation_polish(
-            arguments.job_file,
-            arguments.response_file,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
-        else:
-            for path in paths:
-                print(path)
-        return 0
-
-    if arguments.command == "apply-semantic-review":
-        event_sink = _event_sink(arguments)
-        result = apply_agent_semantic_review(
-            arguments.job_file,
-            arguments.response_file,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(
-                arguments,
-                status=result.status,
-                artifacts=[str(path) for path in result.paths],
-            )
-        else:
-            print(f"status: {result.status}")
-            for path in result.paths:
-                print(path)
-        return 0
-
-    if arguments.command == "apply-translation-review-fixes":
-        event_sink = _event_sink(arguments)
-        paths = apply_translation_review_fixes(
-            arguments.job_file,
-            arguments.response_file,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
-        else:
-            for path in paths:
-                print(path)
-            print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
-        return 0
-
-    if arguments.command == "prepare-source-review":
-        event_sink = _event_sink(arguments)
-        path = prepare_source_review(
-            arguments.job_file,
-            arguments.cue_ids,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path)])
-        else:
-            print(path)
-            print(
-                "next: xvt apply-source-review-fixes "
-                f"{shlex.quote(str(arguments.job_file))} {shlex.quote(str(path))}"
-            )
-        return 0
-
-    if arguments.command == "apply-source-review-fixes":
-        event_sink = _event_sink(arguments)
-        paths = apply_source_review_fixes(
-            arguments.job_file,
-            arguments.response_file,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
-        else:
-            for path in paths:
-                print(path)
-            print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
-        return 0
-
-    if arguments.command == "acknowledge-translation-review":
-        event_sink = _event_sink(arguments)
-        report_path = acknowledge_translation_review(
-            arguments.job_file,
-            event_sink=event_sink,
-        )
-        paths = (report_path,)
-        if get_workflow_config(load_job(arguments.job_file)) is None:
-            paths = (
-                report_path,
-                *complete_acknowledged_semantic_review(
-                    arguments.job_file,
-                    event_sink=event_sink,
+            workflow = get_workflow_config(job)
+            semantic_config = workflow or WorkflowConfig(
+                target_language=arguments.target_language,
+                provider=arguments.provider,
+                base_url=arguments.base_url,
+                model=arguments.model,
+                api_key_env=arguments.api_key_env,
+                batch_size=arguments.batch_size,
+                max_retries=arguments.max_retries,
+                timeout_seconds=arguments.timeout_seconds,
+                translation_policy=translation_policy_from_dict(
+                    job.config.get("translation_policy")
                 ),
+                translation_quality="polished",
             )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
-        else:
-            for path in paths:
-                print(path)
-        return 0
-
-    if arguments.command == "resegment-translation":
-        event_sink = _event_sink(arguments)
-        result = resegment_translation(arguments.job_file, event_sink=event_sink)
-        if arguments.events_jsonl:
-            _complete(
-                arguments,
-                changed=result.changed,
-                artifacts=[
-                    str(path)
-                    for path in (result.source_cues_path, result.report_path)
-                    if path is not None
-                ],
+            semantic = run_translation_semantic_review(
+                arguments.job_file,
+                config=semantic_config,
+                event_sink=event_sink,
             )
-        elif not result.changed:
-            print("没有译文 cue 超过硬显示阈值，任务未改动。")
-        else:
-            print(f"已重切源字幕: {result.source_cues_path}")
-            print(f"审计报告: {result.report_path}")
-            job = load_job(arguments.job_file)
-            if get_workflow_config(job) is not None:
-                print(f'继续重翻译: xvt continue "{arguments.job_file}"')
-            else:
-                target_language = resolve_target_language(job)
-                if target_language:
-                    print(
-                        f'重新翻译: xvt translate "{arguments.job_file}" '
-                        f"--target-language {target_language}"
-                    )
-        return 0
-
-    if arguments.command == "retranslate-cues":
-        event_sink = _event_sink(arguments)
-        result = retranslate_cues(
-            arguments.job_file,
-            cue_ids=tuple(arguments.cue_ids),
-            target_language=arguments.target_language,
-            provider=arguments.provider,
-            base_url=arguments.base_url,
-            model=arguments.model,
-            api_key_env=arguments.api_key_env,
-            max_retries=arguments.max_retries,
-            timeout_seconds=arguments.timeout_seconds,
-            event_sink=event_sink,
+            result = TranslationRunResult(
+                semantic.mode,
+                semantic.paths,
+                semantic.fallback_reason,
+            )
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            mode=result.mode,
+            artifacts=[str(path) for path in result.paths],
         )
-        if arguments.events_jsonl:
-            _complete(
-                arguments,
-                mode=result.mode,
-                artifacts=[str(path) for path in result.paths],
-            )
+    else:
+        if result.fallback_reason:
+            print(f"translation provider unavailable ({result.fallback_reason}); using Agent mode")
+        print(f"mode: {result.mode}")
+        for path in result.paths:
+            print(path)
+    return 0
+
+
+def _cmd_polish_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = run_translation_polish(
+        arguments.job_file,
+        provider=arguments.provider,
+        base_url=arguments.base_url,
+        model=arguments.model,
+        api_key_env=arguments.api_key_env,
+        batch_size=arguments.batch_size,
+        max_retries=arguments.max_retries,
+        timeout_seconds=arguments.timeout_seconds,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            mode=result.mode,
+            artifacts=[str(path) for path in result.paths],
+        )
+    else:
+        if result.fallback_reason:
+            print(f"translation provider unavailable ({result.fallback_reason}); using Agent mode")
+        print(f"mode: {result.mode}")
+        for path in result.paths:
+            print(path)
+    return 0
+
+
+def _cmd_apply_polish_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    paths = apply_agent_translation_polish(
+        arguments.job_file,
+        arguments.response_file,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
+            print(path)
+    return 0
+
+
+def _cmd_apply_semantic_review(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = apply_agent_semantic_review(
+        arguments.job_file,
+        arguments.response_file,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            status=result.status,
+            artifacts=[str(path) for path in result.paths],
+        )
+    else:
+        print(f"status: {result.status}")
+        for path in result.paths:
+            print(path)
+    return 0
+
+
+def _cmd_apply_translation_review_fixes(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    paths = apply_translation_review_fixes(
+        arguments.job_file,
+        arguments.response_file,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
+            print(path)
+        print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
+    return 0
+
+
+def _cmd_prepare_source_review(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    path = prepare_source_review(
+        arguments.job_file,
+        arguments.cue_ids,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path)])
+    else:
+        print(path)
+        print(
+            "next: xvt apply-source-review-fixes "
+            f"{shlex.quote(str(arguments.job_file))} {shlex.quote(str(path))}"
+        )
+    return 0
+
+
+def _cmd_apply_source_review_fixes(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    paths = apply_source_review_fixes(
+        arguments.job_file,
+        arguments.response_file,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
+            print(path)
+        print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
+    return 0
+
+
+def _cmd_acknowledge_translation_review(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    report_path = acknowledge_translation_review(
+        arguments.job_file,
+        event_sink=event_sink,
+    )
+    paths = (report_path,)
+    if get_workflow_config(load_job(arguments.job_file)) is None:
+        paths = (
+            report_path,
+            *complete_acknowledged_semantic_review(
+                arguments.job_file,
+                event_sink=event_sink,
+            ),
+        )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
+            print(path)
+    return 0
+
+
+def _cmd_resegment_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = resegment_translation(arguments.job_file, event_sink=event_sink)
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            changed=result.changed,
+            artifacts=[
+                str(path)
+                for path in (result.source_cues_path, result.report_path)
+                if path is not None
+            ],
+        )
+    elif not result.changed:
+        print("没有译文 cue 超过硬显示阈值，任务未改动。")
+    else:
+        print(f"已重切源字幕: {result.source_cues_path}")
+        print(f"审计报告: {result.report_path}")
+        job = load_job(arguments.job_file)
+        if get_workflow_config(job) is not None:
+            print(f'继续重翻译: xvt continue "{arguments.job_file}"')
         else:
-            print(f"mode: {result.mode}")
-            for path in result.paths:
-                print(path)
-            if result.mode == "agent":
-                cues = " ".join(f"--cue {cue_id}" for cue_id in arguments.cue_ids)
-                print("完成 Agent 翻译后执行：")
+            target_language = resolve_target_language(job)
+            if target_language:
                 print(
-                    "xvt apply-cue-retranslation "
-                    f'"{arguments.job_file}" RESPONSE {cues} '
-                    f"--target-language {arguments.target_language}"
+                    f'重新翻译: xvt translate "{arguments.job_file}" '
+                    f"--target-language {target_language}"
                 )
-            else:
-                job = load_job(arguments.job_file)
-                workflow = get_workflow_config(job)
-                if workflow is not None and workflow.burn:
-                    print(f'继续烧录: xvt continue "{arguments.job_file}"')
-        return 0
+    return 0
 
-    if arguments.command == "apply-cue-retranslation":
-        event_sink = _event_sink(arguments)
-        paths = apply_cue_retranslation(
-            arguments.job_file,
-            arguments.response_file,
-            cue_ids=tuple(arguments.cue_ids),
-            target_language=arguments.target_language,
-            event_sink=event_sink,
+
+def _cmd_retranslate_cues(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = retranslate_cues(
+        arguments.job_file,
+        cue_ids=tuple(arguments.cue_ids),
+        target_language=arguments.target_language,
+        provider=arguments.provider,
+        base_url=arguments.base_url,
+        model=arguments.model,
+        api_key_env=arguments.api_key_env,
+        max_retries=arguments.max_retries,
+        timeout_seconds=arguments.timeout_seconds,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            mode=result.mode,
+            artifacts=[str(path) for path in result.paths],
         )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        print(f"mode: {result.mode}")
+        for path in result.paths:
+            print(path)
+        if result.mode == "agent":
+            cues = " ".join(f"--cue {cue_id}" for cue_id in arguments.cue_ids)
+            print("完成 Agent 翻译后执行：")
+            print(
+                "xvt apply-cue-retranslation "
+                f'"{arguments.job_file}" RESPONSE {cues} '
+                f"--target-language {arguments.target_language}"
+            )
         else:
-            for path in paths:
-                print(path)
             job = load_job(arguments.job_file)
             workflow = get_workflow_config(job)
             if workflow is not None and workflow.burn:
                 print(f'继续烧录: xvt continue "{arguments.job_file}"')
-        return 0
+    return 0
 
-    if arguments.command == "preview":
-        event_sink = _event_sink(arguments)
-        path = preview_translated_job(
-            arguments.job_file,
-            cue_id=arguments.cue,
-            start_seconds=arguments.start,
-            duration_seconds=arguments.duration,
-            media=arguments.media,
-            output=arguments.output,
-            hardware_encoding=(None if arguments.software is None else False),
-            target_font=arguments.target_font,
-            source_font=arguments.source_font,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path)])
-        else:
+
+def _cmd_apply_cue_retranslation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    paths = apply_cue_retranslation(
+        arguments.job_file,
+        arguments.response_file,
+        cue_ids=tuple(arguments.cue_ids),
+        target_language=arguments.target_language,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path) for path in paths])
+    else:
+        for path in paths:
             print(path)
-        return 0
+        job = load_job(arguments.job_file)
+        workflow = get_workflow_config(job)
+        if workflow is not None and workflow.burn:
+            print(f'继续烧录: xvt continue "{arguments.job_file}"')
+    return 0
 
-    if arguments.command == "burn":
-        event_sink = _event_sink(arguments)
-        path = burn_translated_job(
-            arguments.job_file,
-            media=arguments.media,
-            output=arguments.output,
-            hardware_encoding=not arguments.software,
-            cookies_from_browser=arguments.cookies_from_browser,
-            proxy=arguments.proxy,
-            target_font=arguments.target_font,
-            source_font=arguments.source_font,
-            event_sink=event_sink,
-        )
-        if arguments.events_jsonl:
-            _complete(arguments, artifacts=[str(path)])
-        else:
-            print(path)
-        return 0
 
+def _cmd_preview(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    path = preview_translated_job(
+        arguments.job_file,
+        cue_id=arguments.cue,
+        start_seconds=arguments.start,
+        duration_seconds=arguments.duration,
+        media=arguments.media,
+        output=arguments.output,
+        hardware_encoding=(None if arguments.software is None else False),
+        target_font=arguments.target_font,
+        source_font=arguments.source_font,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path)])
+    else:
+        print(path)
+    return 0
+
+
+def _cmd_burn(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    path = burn_translated_job(
+        arguments.job_file,
+        media=arguments.media,
+        output=arguments.output,
+        hardware_encoding=not arguments.software,
+        cookies_from_browser=arguments.cookies_from_browser,
+        proxy=arguments.proxy,
+        target_font=arguments.target_font,
+        source_font=arguments.source_font,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(arguments, artifacts=[str(path)])
+    else:
+        print(path)
+    return 0
+
+
+_COMMAND_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
+    "inspect": _cmd_inspect,
+    "doctor": _cmd_doctor,
+    "run": _cmd_run,
+    "batch": _cmd_batch,
+    "batch-continue": _cmd_batch_continue,
+    "status": _cmd_status,
+    "verify": _cmd_verify,
+    "resume": _cmd_resume,
+    "rebuild-source": _cmd_rebuild_source,
+    "continue": _cmd_continue,
+    "prepare-translation": _cmd_prepare_translation,
+    "apply-translation": _cmd_apply_translation,
+    "import-translation": _cmd_import_translation,
+    "translate": _cmd_translate,
+    "polish-translation": _cmd_polish_translation,
+    "apply-polish-translation": _cmd_apply_polish_translation,
+    "apply-semantic-review": _cmd_apply_semantic_review,
+    "apply-translation-review-fixes": _cmd_apply_translation_review_fixes,
+    "prepare-source-review": _cmd_prepare_source_review,
+    "apply-source-review-fixes": _cmd_apply_source_review_fixes,
+    "acknowledge-translation-review": _cmd_acknowledge_translation_review,
+    "resegment-translation": _cmd_resegment_translation,
+    "retranslate-cues": _cmd_retranslate_cues,
+    "apply-cue-retranslation": _cmd_apply_cue_retranslation,
+    "preview": _cmd_preview,
+    "burn": _cmd_burn,
+}
+
+
+def _run_command(arguments: argparse.Namespace) -> int:
+    handler = _COMMAND_DISPATCH.get(arguments.command)
+    if handler is not None:
+        return handler(arguments)
     return 0
 
 
