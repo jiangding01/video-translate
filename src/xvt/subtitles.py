@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pysubs2
@@ -7,6 +8,10 @@ import pysubs2
 from xvt.models import Cue
 
 SUPPORTED_SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass", ".ssa"})
+
+# 人工修订 SRT 每条正文的首行 cue ID 注释，供用户与语义报告的 cue_ids 对照。
+# 只匹配整行的 `#<数字>`，正常译文不会以这种形式独占一行。
+_REVIEW_ID_MARKER = re.compile(r"^#(\d+)$")
 
 
 def normalize_display_text(text: str) -> str:
@@ -97,3 +102,59 @@ def save_subtitles(
     subtitle_path.parent.mkdir(parents=True, exist_ok=True)
     subtitles.save(str(subtitle_path), encoding="utf-8")
     return subtitle_path
+
+
+def save_review_srt(cues: list[Cue], path: str | Path) -> Path:
+    """写出人工修订用的 SRT：每条正文为 ``#<cue id>`` 注释行加当前译文。
+
+    只包含传入的 cue（通常是语义报告命中的子集），时间轴原样保留。回填时按时间轴
+    映射回 cue ID，注释行仅供人工对照。
+    """
+
+    subtitle_path = Path(path).expanduser()
+    if subtitle_path.suffix.lower() != ".srt":
+        raise ValueError(f"review subtitles must be .srt: {subtitle_path.suffix}")
+
+    subtitles = pysubs2.SSAFile()
+    for cue in cues:
+        if cue.end_ms <= cue.start_ms:
+            raise ValueError(f"cue {cue.id} has an invalid timestamp")
+        subtitles.events.append(
+            pysubs2.SSAEvent(
+                start=cue.start_ms,
+                end=cue.end_ms,
+                text=f"#{cue.id}\n{cue.target_text or ''}",
+            )
+        )
+
+    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+    subtitles.save(str(subtitle_path), encoding="utf-8")
+    return subtitle_path
+
+
+def load_review_srt(path: str | Path) -> list[tuple[int | None, int, int, str]]:
+    """解析人工修订 SRT，返回 ``(注释 cue ID 或 None, 起始毫秒, 结束毫秒, 译文)``。
+
+    注释行缺失时返回 ``None``，由调用方按时间轴确定 cue ID。不在此处判定归属或
+    完整性，只做格式解析。
+    """
+
+    subtitle_path = Path(path).expanduser()
+    if not subtitle_path.is_file():
+        raise ValueError(f"subtitle file does not exist: {subtitle_path}")
+    if subtitle_path.suffix.lower() != ".srt":
+        raise ValueError(f"review subtitles must be .srt: {subtitle_path.suffix}")
+
+    entries: list[tuple[int | None, int, int, str]] = []
+    for event in pysubs2.load(str(subtitle_path), encoding="utf-8"):
+        if event.is_comment:
+            continue
+        if event.end <= event.start:
+            raise ValueError(f"invalid subtitle timestamp: {event.start} --> {event.end}")
+        lines = event.plaintext.splitlines()
+        marker = _REVIEW_ID_MARKER.match(lines[0].strip()) if lines else None
+        if marker is not None:
+            lines = lines[1:]
+        text = "\n".join(line.strip() for line in lines if line.strip())
+        entries.append((int(marker.group(1)) if marker else None, event.start, event.end, text))
+    return entries

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from xvt import cancellation
 from xvt.batch import BatchResult
-from xvt.cli import _STEP_ROUTES, _TASK_ROUTES, main
+from xvt.cli import _REVIEW_SRT_NAME, _STEP_ROUTES, _TASK_ROUTES, main
 from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
@@ -24,7 +24,11 @@ from xvt.pipeline import (
     prepare_agent_translation,
     run_subtitle_transcription,
 )
-from xvt.pipeline.revision import SOURCE_REVIEW_TASK, TRANSLATION_REVIEW_TASK
+from xvt.pipeline.revision import (
+    SOURCE_REVIEW_TASK,
+    TRANSLATION_REVIEW_TASK,
+    translation_review_stem,
+)
 from xvt.process import CommandCancelled
 from xvt.workflow import AWAIT_STEPS, WorkflowResult
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
@@ -666,6 +670,25 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 2)
         self.assertIn("import-translation", subtitle_errors.getvalue())
 
+    def test_apply_routes_review_srt_by_its_generated_name(self) -> None:
+        """人工修订 SRT 是修订通道的载体，必须按固定文件名路由而不是当译文字幕拒掉。"""
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed.json"))
+        with tempfile.TemporaryDirectory() as directory:
+            stem = translation_review_stem("0123456789abcdef0123456789abcdef")
+            review = Path(directory) / f"{stem}.srt"
+            review.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n#1\n你好，朋友。\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("xvt.cli.apply_translation_review_fixes", return_value=paths) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", str(review)])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", str(review)))
+
     def test_apply_routes_real_agent_translation_job_end_to_end(self) -> None:
         """不 mock 任何路由/实现，验证 _STEP_ROUTES 的 key 与真实 planner 对得上。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -708,6 +731,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS))
         self.assertIn(SOURCE_REVIEW_TASK, _TASK_ROUTES)
         self.assertIn(TRANSLATION_REVIEW_TASK, _TASK_ROUTES)
+
+    def test_review_srt_pattern_matches_generated_stem(self) -> None:
+        """统一入口的形状正则必须认得模板真实写出的文件名，改名不能静默失配。"""
+        stem = translation_review_stem("0123456789abcdef0123456789abcdef")
+        self.assertIsNotNone(_REVIEW_SRT_NAME.match(stem))
+        self.assertIsNone(_REVIEW_SRT_NAME.match(f"{stem}-extra"))
 
     def test_inspect_prints_json(self) -> None:
         output = StringIO()

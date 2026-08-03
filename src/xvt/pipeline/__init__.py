@@ -31,6 +31,8 @@ from xvt.pipeline.review import (
     finalize_acknowledged_subtitle_review,
 )
 from xvt.pipeline.revision import (
+    REVISION_FINGERPRINT_LENGTH,
+    TRANSLATION_REVIEW_STEM_PREFIX,
     apply_source_review_fixes,
     apply_translation_review_fixes,
     ensure_semantic_review_inputs,
@@ -77,6 +79,8 @@ from xvt.pipeline.translation import (
 )
 
 __all__ = [
+    "REVISION_FINGERPRINT_LENGTH",
+    "TRANSLATION_REVIEW_STEM_PREFIX",
     "ResegmentationResult",
     "RebuildSourceResult",
     "SemanticRunResult",

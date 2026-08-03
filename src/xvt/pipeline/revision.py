@@ -12,7 +12,7 @@ from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job, utc_now
-from xvt.models import Artifact, Job, StageName, StageStatus
+from xvt.models import Artifact, Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
     SUBTITLE_REVIEW_REQUIRED_MESSAGE,
     artifact_checksum_for,
@@ -22,7 +22,7 @@ from xvt.pipeline.common import (
 )
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
-from xvt.subtitles import save_subtitles
+from xvt.subtitles import load_review_srt, save_review_srt, save_subtitles
 from xvt.translation_provider import SEMANTIC_REVIEW_PROMPT_VERSION
 from xvt.workflow_config import (
     clear_burn_fingerprint,
@@ -33,6 +33,18 @@ from xvt.workflow_config import (
 # 修订模板写入 / 校验共用的 task 值，也是 CLI `xvt apply` task 路由表的真实来源。
 SOURCE_REVIEW_TASK = "source_review_fixes"
 TRANSLATION_REVIEW_TASK = "translation_review_fixes"
+
+# 译文修订模板的文件名主干。SRT 载体没有 `revision_fingerprint` 字段，fingerprint 全靠
+# 文件名承载，所以这个命名同时是「写模板」和「校验回填」的唯一来源；CLI 统一入口识别
+# 修订 SRT 用的形状正则也从这两个常量派生，不再各自硬编码。
+TRANSLATION_REVIEW_STEM_PREFIX = "translation-review-"
+REVISION_FINGERPRINT_LENGTH = 12
+
+
+def translation_review_stem(fingerprint: str) -> str:
+    """译文修订模板（JSON 与 SRT 共用）的文件名主干。"""
+
+    return f"{TRANSLATION_REVIEW_STEM_PREFIX}{fingerprint[:REVISION_FINGERPRINT_LENGTH]}"
 
 
 def _source_revision_fingerprint(job: Job, cue_ids: list[int]) -> str:
@@ -476,6 +488,25 @@ def _revision_fingerprint(
     ).hexdigest()
 
 
+def _review_item_ids(template_path: Path) -> set[int]:
+    """读出既有 JSON 模板覆盖的 cue ID 集合，供补生成 SRT 时对齐同一范围。"""
+
+    try:
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    items = template.get("items") if isinstance(template, dict) else None
+    if not isinstance(items, list):
+        return set()
+    return {
+        item["id"]
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), int)
+        and not isinstance(item.get("id"), bool)
+    }
+
+
 def translation_review_input_path(job: Job) -> Path | None:
     target = _target_kinds(job)
     if target is None:
@@ -484,7 +515,8 @@ def translation_review_input_path(job: Job) -> Path | None:
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
-        path = get_job_directory(job) / "review" / f"translation-review-{fingerprint[:12]}.json"
+        review_dir = get_job_directory(job) / "review"
+        path = review_dir / f"{translation_review_stem(fingerprint)}.json"
         return path if path.is_file() else None
     except (OSError, TypeError, ValueError, json.JSONDecodeError, UserInputError):
         return None
@@ -499,6 +531,18 @@ def ensure_translation_review_input(
     job = load_job(job_file)
     existing = translation_review_input_path(job)
     if existing is not None:
+        # 旧 Job 可能只有 JSON 模板；SRT 是后加的人工通道，缺失时按同一 fingerprint 补齐。
+        srt_path = existing.with_suffix(".srt")
+        if not srt_path.is_file():
+            target = _target_kinds(job)
+            if target is not None:
+                _, _, _, candidate_path = target
+                affected = _review_item_ids(existing)
+                if affected:
+                    save_review_srt(
+                        [cue for cue in load_cues(candidate_path) if cue.id in affected],
+                        srt_path,
+                    )
         return existing
     target = _target_kinds(job)
     if target is None:
@@ -509,7 +553,7 @@ def ensure_translation_review_input(
     fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
     cues = load_cues(candidate_path)
     affected = {cue_id for issue in issues for cue_id in issue["cue_ids"]}
-    path = get_job_directory(job) / "review" / f"translation-review-{fingerprint[:12]}.json"
+    path = get_job_directory(job) / "review" / f"{translation_review_stem(fingerprint)}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(
         path,
@@ -524,6 +568,8 @@ def ensure_translation_review_input(
             ],
         },
     )
+    # SRT 与 JSON 同名同 fingerprint，供人工用任意字幕工具编辑；两条通道等价。
+    save_review_srt([cue for cue in cues if cue.id in affected], path.with_suffix(".srt"))
     if event_sink:
         event_sink(
             create_event(
@@ -549,21 +595,11 @@ def ensure_semantic_review_inputs(
     return source_input, translation_input
 
 
-def apply_translation_review_fixes(
-    job_file: str | Path,
-    response_file: str | Path,
-    *,
-    event_sink: EventSink | None = None,
-) -> tuple[Path, Path]:
-    job = load_job(job_file)
-    target = _target_kinds(job)
-    if target is None:
-        raise UserInputError("no current semantic review report is available for revision")
-    report_kind, candidate_kind, report_path, candidate_path = target
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    expected_fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
+def _json_review_changes(response_file: Path, expected_fingerprint: str) -> dict[int, str]:
+    """解析 JSON 修订模板，返回 ``{cue id: 新译文}``。供 Agent 与脚本消费。"""
+
     try:
-        response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+        response = json.loads(response_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise UserInputError(f"cannot read translation review response: {error}") from error
     if not isinstance(response, dict):
@@ -590,7 +626,96 @@ def apply_translation_review_fixes(
                 "translation review response contains an invalid or duplicate item"
             )
         changes[cue_id] = text.strip()
+    return changes
+
+
+def _srt_review_changes(
+    response_file: Path,
+    candidate: list[Cue],
+    affected: set[int],
+    expected_fingerprint: str,
+) -> dict[int, str]:
+    """解析人工编辑过的修订 SRT，返回 ``{cue id: 新译文}``。
+
+    SRT 不带 fingerprint 字段，改由文件名承载：要求文件名主干与模板生成时的
+    ``translation_review_stem`` 完全一致（改名即视为过期），等价于 JSON 通道的
+    ``revision_fingerprint`` 字段校验。
+
+    cue ID 按时间轴精确匹配还原——时间轴是不可破坏的单一来源，因此改动时间轴、增删
+    cue 都会在此被拒；``#<id>`` 注释行若存在，必须与时间轴匹配结果一致。
+    """
+
+    expected_stem = translation_review_stem(expected_fingerprint)
+    if response_file.stem != expected_stem:
+        raise UserInputError(
+            "translation review response is stale for the current report "
+            f"(expected a file named {expected_stem}.srt)"
+        )
+    try:
+        entries = load_review_srt(response_file)
+    except (OSError, ValueError) as error:
+        raise UserInputError(f"cannot read translation review response: {error}") from error
+    if not entries:
+        raise UserInputError("translation review response items must be a non-empty array")
+
+    by_timing = {(cue.start_ms, cue.end_ms): cue.id for cue in candidate if cue.id in affected}
+    if len(by_timing) != len(affected):
+        raise UserInputError(
+            "cannot map the review SRT back to cue ids because candidate cues share timing"
+        )
+    changes: dict[int, str] = {}
+    for marker_id, start_ms, end_ms, text in entries:
+        cue_id = by_timing.get((start_ms, end_ms))
+        if cue_id is None:
+            raise UserInputError(
+                "translation review SRT changed cue timing or added a cue; "
+                "revision may only change translated text"
+            )
+        if marker_id is not None and marker_id != cue_id:
+            raise UserInputError(
+                f"translation review SRT cue id marker #{marker_id} does not match its timing"
+            )
+        if cue_id in changes:
+            raise UserInputError(
+                "translation review response contains an invalid or duplicate item"
+            )
+        if not text.strip():
+            raise UserInputError(
+                "translation review response contains an invalid or duplicate item"
+            )
+        changes[cue_id] = text.strip()
+    if set(changes) != set(by_timing.values()):
+        raise UserInputError(
+            "translation review SRT removed a cue; revision may only change translated text"
+        )
+    return changes
+
+
+def apply_translation_review_fixes(
+    job_file: str | Path,
+    response_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, Path]:
+    job = load_job(job_file)
+    target = _target_kinds(job)
+    if target is None:
+        raise UserInputError("no current semantic review report is available for revision")
+    report_kind, candidate_kind, report_path, candidate_path = target
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    expected_fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
     candidate = load_cues(candidate_path)
+    # SRT 与 JSON 是同一修订通道的两种载体，各自解析后汇聚成同一个 changes 映射，
+    # 后续 fingerprint 绑定、只改译文、review-only 复查的语义完全共用。
+    if Path(response_file).suffix.lower() == ".srt":
+        changes = _srt_review_changes(
+            Path(response_file),
+            candidate,
+            {cue_id for issue in _issue_set(report) for cue_id in issue["cue_ids"]},
+            expected_fingerprint,
+        )
+    else:
+        changes = _json_review_changes(Path(response_file), expected_fingerprint)
     known_ids = {cue.id for cue in candidate}
     if not changes.keys() <= known_ids:
         raise UserInputError("translation review response contains an unknown cue id")

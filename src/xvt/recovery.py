@@ -114,7 +114,13 @@ def _semantic_review_options(
     source_input = (
         source_review_input_path(job, list(source_ids)) if source_ids and source_supported else None
     )
-    input_paths = tuple(str(path) for path in (source_input, translation_input) if path is not None)
+    # 译文修订同时提供 SRT 人工通道（同 fingerprint 同名），一并露出让用户自选载体。
+    translation_srt = translation_input.with_suffix(".srt") if translation_input else None
+    if translation_srt is not None and not translation_srt.is_file():
+        translation_srt = None
+    input_paths = tuple(
+        str(path) for path in (source_input, translation_input, translation_srt) if path is not None
+    )
     if source_ids and source_supported:
         if source_input is not None:
             primary = _job_command(

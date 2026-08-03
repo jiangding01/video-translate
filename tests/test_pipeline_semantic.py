@@ -26,6 +26,7 @@ from xvt.pipeline import (
     source_review_input_path,
     translation_review_input_path,
 )
+from xvt.pipeline.revision import translation_review_stem
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
 from xvt.subtitles import save_subtitles
 from xvt.translate import SemanticIssue, SemanticSuggestedItem
@@ -528,7 +529,14 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             save_job(job)
             before_status = job_file.read_bytes()
             recovery = build_recovery_plan(load_job(job_file))
-            self.assertEqual(recovery.input_paths, (str(source_template), str(template)))
+            self.assertEqual(
+                recovery.input_paths,
+                (
+                    str(source_template),
+                    str(template),
+                    str(template.with_suffix(".srt")),
+                ),
+            )
             self.assertIn("apply-source-review-fixes", recovery.primary_command or "")
             self.assertIn(
                 "apply-translation-review-fixes",
@@ -820,6 +828,114 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 with self.assertRaises(UserInputError):
                     apply_translation_review_fixes(job_file, response)
                 self.assertEqual(job_file.read_bytes(), before)
+
+    def test_srt_and_json_revision_channels_produce_identical_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1, 2), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            self.assertIsNotNone(template)
+            srt_template = template.with_suffix(".srt")
+            self.assertTrue(srt_template.is_file())
+            template_text = srt_template.read_text(encoding="utf-8")
+            self.assertIn("#1", template_text)
+            self.assertIn("你好。", template_text)
+            before = job_file.read_bytes()
+
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [
+                {"id": 1, "text": "你好，朋友。"},
+                {"id": 2, "text": "世界，你好。"},
+            ]
+            json_response = root / "review-response.json"
+            json_response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, json_response)
+            json_job = load_job(job_file)
+            json_records = {
+                item.kind: item.checksum
+                for item in json_job.artifacts
+                if item.kind in {"translation_review_revision", "translation_reviewed_cues"}
+            }
+            self.assertEqual(len(json_records), 2)
+
+            # 回到修订前的 Job 状态，同一组编辑改走人工 SRT 通道。
+            job_file.write_bytes(before)
+            srt_response = root / srt_template.name
+            srt_response.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n#1\n你好，朋友。\n\n"
+                "2\n00:00:01,000 --> 00:00:02,000\n#2\n世界，你好。\n",
+                encoding="utf-8",
+            )
+            apply_translation_review_fixes(job_file, srt_response)
+            srt_job = load_job(job_file)
+            srt_records = {
+                item.kind: item.checksum
+                for item in srt_job.artifacts
+                if item.kind in {"translation_review_revision", "translation_reviewed_cues"}
+            }
+
+            self.assertEqual(srt_records, json_records)
+            reviewed = next(
+                Path(item.path)
+                for item in srt_job.artifacts
+                if item.kind == "translation_reviewed_cues"
+            )
+            self.assertEqual(_load_target_text(reviewed, 1), "你好，朋友。")
+            self.assertEqual(_load_target_text(reviewed, 2), "世界，你好。")
+
+    def test_srt_revision_rejects_timeline_edits_and_cue_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1, 2), "review", "check", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                run_translation_semantic_review(job_file)
+            template = translation_review_input_path(load_job(job_file))
+            srt_name = template.with_suffix(".srt").name
+            first = "1\n00:00:00,000 --> 00:00:01,000\n#1\n你好，朋友。\n\n"
+            second = "2\n00:00:01,000 --> 00:00:02,000\n#2\n世界，你好。\n"
+            rejected = {
+                # 拉长第一条的时间轴：时间轴是唯一来源，回填时无法匹配。
+                "timing_shifted": (
+                    srt_name,
+                    "1\n00:00:00,000 --> 00:00:01,500\n#1\n你好，朋友。\n\n" + second,
+                ),
+                "cue_removed": (srt_name, first),
+                "cue_added": (
+                    srt_name,
+                    first + second + "\n3\n00:00:02,000 --> 00:00:03,000\n#3\n新增。\n",
+                ),
+                # 注释行与时间轴各指一条，说明人工挪动了正文而非改译文。
+                "marker_mismatch": (
+                    srt_name,
+                    "1\n00:00:00,000 --> 00:00:01,000\n#2\n你好，朋友。\n\n" + second,
+                ),
+                "empty_text": (
+                    srt_name,
+                    "1\n00:00:00,000 --> 00:00:01,000\n#1\n\n\n" + second,
+                ),
+                "stale_fingerprint": (
+                    f"{translation_review_stem('0' * 32)}.srt",
+                    first + second,
+                ),
+            }
+            before = job_file.read_bytes()
+            for label, (name, text) in rejected.items():
+                with self.subTest(label):
+                    response = root / name
+                    response.write_text(text, encoding="utf-8")
+                    with self.assertRaises(UserInputError):
+                        apply_translation_review_fixes(job_file, response)
+                    self.assertEqual(job_file.read_bytes(), before)
 
     def test_acknowledgment_invalidates_when_candidate_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
