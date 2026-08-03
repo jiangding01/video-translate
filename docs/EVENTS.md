@@ -158,9 +158,11 @@ stage 状态迁移（`pipeline/common.py`），由 `StageStatus → EventType` �
 | --- | --- | --- |
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
-| `path` | string | 当前修订模板路径 |
+| `path` | string | 当前修订模板路径（JSON 载体） |
 | `scope` | string | 当前固定为 `translation` |
 | `item_count` | int | 模板涉及的 cue 数量 |
+
+同一目录下还有同名 `.srt`（把 `path` 的后缀换成 `.srt`），是同一修订通道的人工载体，供用字幕工具直接改译文；两条载体 fingerprint 相同、回填结果等价。事件只公布 JSON 路径，SRT 路径由消费方按后缀推导，`xvt status` 会把它一并列出。
 
 ### `translation_review_revised`
 

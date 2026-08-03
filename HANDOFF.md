@@ -334,7 +334,8 @@ media-qa.json
 - **已完成（PR #68，堆叠于 #67）**：R1 全部四项——CI 增加 Python 3.11/3.13 矩阵与 `uv build`、补打并推送 `v0.1.0` / `v0.1.1` tag 且 AGENTS 记录发版流程、`tests/test_pipeline_imports.py` 守卫 pipeline 依赖方向、16 个跨模块 `_` 前缀符号公有化。R1.3 落地时发现 semantic ↔ review/revision 存在函数级惰性 import 打破加载期循环，留待 R3.1 一并消解。
 - **已完成**：R2.1 `_run_command` 分发拆解——26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表，`_run_command` 从 622 行缩减至 4 行查表逻辑，纯搬移不改行为。
 - **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
-- **待做**：R2.3 人工修订 SRT 通道、R2.4 确认通道评估（GUI 之前）；R3 架构演进（polished E2E 验收后）。
+- **已完成**：R2.3 译文修订 SRT 人工通道——`await_translation_review` 在 JSON 模板旁写出同 fingerprint 的 `translation-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前译文），可用任意字幕工具编辑；`apply-translation-review-fixes` 按后缀识别，统一入口 `xvt apply` 按该固定文件名识别为修订通道而非译文导入。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。两条通道汇聚为同一 `changes` 映射，对同一组编辑产生完全相同的修订记录 checksum。旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出。源文修订（`prepare-source-review`）的 SRT 通道待做。
+- **待做**：R2.3 源文修订 SRT 通道、R2.4 确认通道评估（GUI 之前）；R3 架构演进（polished E2E 验收后）。
 
 全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。
 

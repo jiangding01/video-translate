@@ -124,7 +124,14 @@ class WorkflowTest(unittest.TestCase):
             assert translation_input is not None
             plan = build_recovery_plan(job)
             self.assertEqual(result.status, "awaiting_input")
-            self.assertEqual(plan.input_paths, (str(source_input), str(translation_input)))
+            self.assertEqual(
+                plan.input_paths,
+                (
+                    str(source_input),
+                    str(translation_input),
+                    str(translation_input.with_suffix(".srt")),
+                ),
+            )
             self.assertIn("apply-source-review-fixes", plan.primary_command or "")
             self.assertIn(
                 "apply-translation-review-fixes",

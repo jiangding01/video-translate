@@ -46,7 +46,7 @@ xvt apply JOB.json RESPONSE
 xvt continue JOB.json
 ```
 
-`xvt apply` 的路由规则：人工修订模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。各 `apply-*` 命令仍是稳定入口，行为不变。
+`xvt apply` 的路由规则：人工修订模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`translation-review-<fp12>.srt`）按其固定文件名识别为修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。各 `apply-*` 命令仍是稳定入口，行为不变。
 
 目录批处理：
 
@@ -239,7 +239,7 @@ uv run --no-sync xvt run INPUT --output OUTPUT \
 
 Q6.1c 要求 API 和 Agent 都把每个语义组作为连续话语处理：先理解完整组，再在不改变 cue ID 和时间轴的前提下生成自然、连贯的目标语言文本。专名、产品名和代码标识符没有术语表证据时不得猜测修正；语义校对只有在上下文矛盾、明显误听或可识别专名异常时才报告 `source_suspect`，源文修改继续由人工修订入口完成。
 
-语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板。编辑其中的 `items[].text` 后运行 `xvt apply-translation-review-fixes JOB REVIEW.json`，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。存在 `source_suspect` 时还会为相关源 cue 自动生成源文模板，`status` 优先推荐修订源文，同时保留译文修订和 `--acknowledge-translation-review` 直接确认两条备选路径。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
+语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板，同时给出 JSON 与 SRT 两种载体：JSON（`translation-review-<fp12>.json`）供 Agent 与脚本消费，编辑其中的 `items[].text`；SRT（`translation-review-<fp12>.srt`，每条正文为 `#<cue id>` 注释行加当前译文）供人工用任意字幕工具编辑，只改译文行、保留注释行与时间轴，文件名也不要改（fingerprint 由文件名承载）。两者都用 `xvt apply-translation-review-fixes JOB REVIEW`（按后缀自动识别）回填，效果完全等价，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。SRT 若改动了时间轴或增删了 cue，会在解析阶段直接被拒。存在 `source_suspect` 时还会为相关源 cue 自动生成源文模板，`status` 优先推荐修订源文，同时保留译文修订和 `--acknowledge-translation-review` 直接确认两条备选路径。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 
 源字幕存在误听或专名错误时，可显式生成源文修订模板。该路径只修改指定 cue 的源文字段，立即重新执行确定性源字幕 QA，并使旧翻译、润色、语义报告、渲染和烧录结果失效；ID、时间轴、词级时间戳和 provenance 保持不变：
 
@@ -269,6 +269,8 @@ uv run --no-sync xvt continue "/path/to/job.json"
 
 ```bash
 uv run --no-sync xvt apply-translation-review-fixes "/path/to/job.json" "/path/to/review.json"
+# 或用字幕工具编辑 review/ 下同名的 .srt 后回填（两条通道等价）：
+uv run --no-sync xvt apply-translation-review-fixes "/path/to/job.json" "/path/to/translation-review-<fp12>.srt"
 uv run --no-sync xvt continue "/path/to/job.json"
 # 或在确认当前问题可接受时：
 uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-review
