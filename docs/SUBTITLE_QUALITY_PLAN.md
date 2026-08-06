@@ -426,7 +426,7 @@ Q2/Q6 的新增事件类型或可选字段均保持 v1 兼容；Q3 不新增事�
 - ~~最多一次按完整语义组定向修复和复查。~~ 已完成：`source_suspect` 不自动修复，其余问题只修复一次并最终复查。
 - ~~独立人工确认、恢复计划与事件。~~ 已完成：确认绑定 source、候选、报告、prompt version 和精确问题集合，不能放行确定性 QA。
 - ~~Q6.1c 加固翻译、润色、语义校对和修复提示词。~~ 已完成：API 与 Agent 统一将完整语义组视为连续话语，明确专名保护、跨 cue 连贯性与 `source_suspect` 证据门槛；prompt v4/v2/v2/v2 进入 API/润色恢复指纹及 polished/semantic Agent manifest。
-- 完成真实 E2E 后将新 Job 默认切为 `natural + polished`。
+- 完成 polished API/Agent 真实 E2E 后评估是否将新 Job 默认切为 `natural + polished`；若质量、耗时或人工确认成本不满足验收，继续保持 `standard + faithful`。
 
 独立价值：形成可审计的语义质量闭环。
 

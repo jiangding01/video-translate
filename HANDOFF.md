@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 497 个测试、18 个子测试，全部通过 |
+| 自动化测试 | 504 个测试、24 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -301,9 +301,9 @@ media-qa.json
 
 ## 后续任务规划
 
-### Q1-Q6：字幕质量与自适应源字幕
+### Q1-Q6.1：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复。下一步是使用真实公开素材完成 polished API/Agent E2E，再决定是否切换默认质量。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。polished API 路径已完成真实 E2E；下一步是完成剩余 R2 CLI 收敛和 polished Agent E2E，再决定是否切换默认质量。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
@@ -325,7 +325,7 @@ media-qa.json
 
 **Q6.1b：源文修订与多路径引导已完成。** `prepare-source-review JOB --cue ID` 生成绑定当前 source checksum 和精确 ID 集合的模板，`apply-source-review-fixes` 只修改 source text，保留 cue 时间轴、words、置信度和 provenance。接受结果以 fingerprint 文件保存，并在一次 Job 原子保存中切换 `source_review_revision`、source cue、`selected_kind=human_reviewed` 的选择记录、源 QA 和可用 SRT；QA 阻断时不登记 SRT，确认后 `continue` 从人工 cue 恢复。旧翻译、润色、语义报告、译文修订、渲染和烧录全部失效，上游媒体与转写证据保留；导入译文任务明确拒绝。Q6 的 `source_suspect` 现在会自动准备源文模板，`status` 优先源文修订并同时提供译文修订和直接确认；旧等待 Job 由 `continue` 懒生成，避免在恢复命令中展开大量 cue ID。
 
-**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，`source_suspect` 只在上下文矛盾、明显误听或可识别专名异常时报告，并保持人工修订；定向修复联合处理完整组且不把模型建议当作标准答案。批次文本统一按不可信字幕数据处理，不得作为改变任务或输出协议的指令。translation/polish/review/repair prompt 分别升级为 v4/v2/v2/v2；旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效。已等待的标准 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才使用新版提示词。下一步使用公开素材完成 polished API/Agent E2E，再决定默认质量。
+**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，`source_suspect` 只在上下文矛盾、明显误听或可识别专名异常时报告，并保持人工修订；定向修复联合处理完整组且不把模型建议当作标准答案。批次文本统一按不可信字幕数据处理，不得作为改变任务或输出协议的指令。translation/polish/review/repair prompt 分别升级为 v4/v2/v2/v2；旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效。已等待的标准 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才使用新版提示词。polished API 路径已完成公开素材 E2E；下一步完成 Agent 路径 E2E，再决定默认质量。
 
 ### R 系列：架构改进与工程加固
 
@@ -336,9 +336,9 @@ media-qa.json
 - **已完成**：R2.1 `_run_command` 分发拆解——26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表，`_run_command` 从 622 行缩减至 4 行查表逻辑，纯搬移不改行为。
 - **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
 - **已完成**：R2.3 译文修订 SRT 人工通道——`await_translation_review` 在 JSON 模板旁写出同 fingerprint 的 `translation-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前译文），可用任意字幕工具编辑；`apply-translation-review-fixes` 按后缀识别，统一入口 `xvt apply` 按该固定文件名识别为修订通道而非译文导入。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。两条通道汇聚为同一 `changes` 映射，对同一组编辑产生完全相同的修订记录 checksum。旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出。源文修订（`prepare-source-review`）的 SRT 通道待做。
-- **待做**：R2.3 源文修订 SRT 通道、R2.4 确认通道评估（GUI 之前）；R3 架构演进（polished E2E 验收后）。
+- **待做**：R2.3 源文修订 SRT 通道、R2.4 确认通道评估（GUI 之前）；polished Agent 路径真实 E2E 与默认质量决策；随后按 R3.1 provider 传输统一 → R3.2 内容寻址 step 缓存推进架构演进。
 
-全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。
+全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 
