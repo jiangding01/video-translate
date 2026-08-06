@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from xvt.config import DEFAULT_MAX_RETRIES
+from xvt.config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job
 from xvt.models import StageName, StageStatus
@@ -99,7 +99,7 @@ def retranslate_cues(
     model: str | None = None,
     api_key_env: str = "XVT_TRANSLATION_API_KEY",
     max_retries: int = DEFAULT_MAX_RETRIES,
-    timeout_seconds: float = 60,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     event_sink: EventSink | None = None,
 ) -> TranslationRunResult:
     if max_retries < 0:
