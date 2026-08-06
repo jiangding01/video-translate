@@ -44,7 +44,7 @@
 - **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：人工修订模板按 task 字段路由、Agent 响应（无 task 字段）按 Job 等待步骤路由的两级路由，仅支持有 `config.workflow` 目标的端到端 Job，原 `apply-*` 命令全部保留。
   R2.3 译文修订 SRT 通道已完成：`review/translation-review-<fp12>.srt` 与同名 JSON 同时生成（旧 Job 首次 `ensure_translation_review_input` 时按同一 fingerprint 补齐），`apply-translation-review-fixes` 按后缀分派到 SRT / JSON 解析器，两者汇聚成同一个 `changes` 映射后共用 fingerprint 绑定、只改 `target_text`、review-only 复查。SRT 无 fingerprint 字段，改由文件名承载校验；cue ID 按 `(start_ms, end_ms)` 精确匹配还原，因此改时间轴、增删 cue 都在解析边界失败，无需额外校验。统一入口 `xvt apply` 按固定文件名识别修订 SRT，不再把它误引导到 `import-translation`。补成功路径测试时发现 `_srt_review_changes` 的完整性断言把 cue ID 集合与时间轴键集合相比，SRT 通道的成功路径原本永远抛"removed a cue"——修正为与 `by_timing.values()` 比较。
 
-- **待做**：源文修订 SRT 通道（R2.3 的独立后续项）、R2.4 确认通道评估；R3 全部（polished E2E 验收后启动）。
+- **待做**：源文修订 SRT 通道（R2.3 的独立后续项）、R2.4 确认通道评估；polished Agent 路径真实 E2E 与默认质量决策；R3 全部在此后启动。
 
 ## R1：工程加固（低风险，可立即实施）
 
@@ -117,7 +117,7 @@
 - 顺带按 sibling 排查：搜索所有把 stage 置为 `failed` 并期待后续人工确认解除的路径，确认每条都有对应收口逻辑（语义复核已由 PR #66 覆盖，字幕 QA 为本项，若有第三处一并列出）。
 - 验收：2026-08-01 真实 Job 副本重跑 `continue` 后 stage 行不再显示 `failed`；`recovery: complete` 与 stage 行不再矛盾。
 
-## R3：架构演进（较高投入，polished E2E 验收后启动）
+## R3：架构演进（较高投入，polished Agent E2E 与默认质量决策后启动）
 
 R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独立。
 
@@ -157,8 +157,10 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 ## 交付顺序建议
 
 1. **立即**：R1 全部（四项合计改动量小，可一到两个 PR）。
-2. **GUI 之前**：R2.1 → R2.2 → R2.3（R2.2 依赖的路由信息已存在，与 R2.1 无耦合但建议先拆分发表再加新命令）。
-3. **polished 真实 E2E 验收之后**：R3.1 → R3.2，随后重新评估 R3.3；R3.4 可穿插。
+2. **GUI 之前**：R2.1、R2.2 与 R2.3 译文修订 SRT 通道已完成；剩余 R2.3 源文修订 SRT 通道与 R2.4 确认通道评估继续串行收口。
+3. **质量验收**：polished API 路径真实 E2E 已完成；继续完成 Agent 路径真实 E2E，并据此决定是否调整默认质量。
+4. **质量验收之后**：R3.1 → R3.2，随后再设计 Q7 翻译上下文与术语候选包，避免新增模型步骤后立即重做 provider 和 checkpoint；R3.3 重新评估，R3.4 可穿插。
+5. **上述内核稳定后**：实现只消费现有事件、Job、QA artifact、人工修订 SRT 和预览能力的可视化校对工作台。
 
 每项均遵循 AGENTS.md 修改流程：单分支串行、超过 6 文件拆小、行为变化补测试、提交前过 ruff + pytest 硬门槛、同步文档。
 

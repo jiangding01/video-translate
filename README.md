@@ -25,7 +25,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复，以及人工修订和提示词加固。下一步是使用公开素材完成 polished API/Agent E2E，再决定是否调整默认质量。完整设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复，以及人工修订和提示词加固。polished API 路径已通过公开素材真实 E2E；下一步依次完成剩余 R2 CLI 收敛、polished Agent E2E 与默认质量决策、R3 provider/checkpoint 收敛，再评估 Q7 翻译上下文与术语候选包，最后进入可视化校对工作台。完整顺序见 [路线图](ROADMAP.md)，字幕质量设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -56,6 +56,439 @@ xvt batch-continue BATCH.json
 ```
 
 `resume`、`translate`、`burn`、`preview`、`resegment-translation` 等是**原子/修复**入口（`xvt --help` 中标为 `[advanced]`）。端到端 Job 不要用 `resume` 代替 `continue`：前者只恢复转写 checkpoint，后者完成 `job.config.workflow` 里的目标。
+
+## 完整命令与参数参考
+
+<!-- cli-reference:start -->
+
+以下内容覆盖当前 CLI 的全部命令和参数。运行 `xvt --help` 查看命令列表，运行 `xvt COMMAND --help` 查看某条命令接受的参数；这里补充参数用途、默认值和容易混淆的行为。方括号表示可选项，`...` 表示可重复参数。
+
+### 全局参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `--version` | 输出 XVT 版本并退出。版本号不能证明工作区代码是否最新；开发环境还应检查 Git commit 和 `xvt.__file__`。 |
+
+### 公共参数词典
+
+同名参数在各命令中的含义一致；每条命令实际接受的参数以其后面的命令清单为准。
+
+| 参数 | 说明 |
+| --- | --- |
+| `--output PATH` | 输出目录或输出文件，具体含义由命令决定。`run`、`batch` 必填且表示输出目录；`doctor` 可用它检查目标目录；`preview`、`burn` 中表示媒体输出文件。 |
+| `--json` | 输出适合程序读取的单个 JSON 文档。 |
+| `--events-jsonl` | stdout 只输出 v1 JSONL 事件；人类可读进度不混入 stdout。 |
+| `--engine mlx\|faster` | ASR 引擎，默认 `mlx`。 |
+| `--language LANG` | 源语言代码，例如 `en`。ASR 不传时自动检测；导入字幕通常应显式提供，未传时以 `auto` 保存。 |
+| `--subtitles PATH` | 显式提供源字幕；默认保留其 cue ID 和时间轴并跳过 ASR。 |
+| `--source-strategy auto\|subtitles\|asr` | 源字幕选择策略，默认 `auto`。`subtitles` 强制采用候选字幕，`asr` 强制语音转写；详见下方“源字幕选择速查”。 |
+| `--align-subtitles` | 对显式源字幕或平台字幕额外运行 ASR，并按语音结果修正整体偏移或漂移。不能与 `--source-strategy asr` 同用。 |
+| `--min-alignment-confidence FLOAT` | 对齐结果的最低置信度，默认 `0.55`。 |
+| `--allow-low-confidence-alignment` | 显式接受低于阈值的对齐结果；仍需通过后续字幕 QA。 |
+| `--segmentation-preset conservative\|balanced\|compact` | ASR cue 分段预设，默认 `balanced`；不改变导入字幕的既有时间轴。 |
+| `--youtube-subtitles` | 对 YouTube 输入请求平台字幕候选；不传时不会下载平台字幕。 |
+| `--subtitle-language LANG` | 希望下载的平台字幕语言，例如 `en`。 |
+| `--allow-auto-subtitles` | 人工字幕不可用时允许下载 YouTube 自动字幕候选。 |
+| `--cookies-from-browser BROWSER` | 让 yt-dlp 从指定浏览器读取登录 Cookie，例如 `chrome`；只记录浏览器名称，不持久化 Cookie 内容。 |
+| `--proxy URL` | 为远程检查与下载显式指定代理；凭据会在事件和错误边界脱敏。 |
+| `--translation-subtitles PATH` | 导入已有译文字幕，跳过翻译提供方并映射到源 cue 时间轴。 |
+| `--target-language LANG` | 目标语言代码，例如 `zh-CN`。 |
+| `--translation-quality standard\|polished` | 翻译质量链，默认 `standard`；`polished` 增加润色、语义校对和最多一次定向修复。 |
+| `--provider auto\|openai-compatible\|agent` | 翻译提供方，默认 `auto`：配置完整时调用兼容 API，否则生成 Agent 批次。 |
+| `--base-url URL` | OpenAI-compatible API 根地址；XVT 请求 `<base-url>/chat/completions`。 |
+| `--model NAME` | 翻译模型名称。 |
+| `--api-key-env NAME` | 保存 API Key 的环境变量名，默认 `XVT_TRANSLATION_API_KEY`；参数值是变量名，不是密钥。 |
+| `--batch-size N` | 每个翻译请求最多包含的 cue 数，默认 `25`；语义组不会被批次边界拆开。 |
+| `--max-retries N` | 翻译传输失败后的额外重试次数，默认 `4`（连同首次请求最多 5 次传输尝试）；结构性无效响应另有独立纠错预算。 |
+| `--timeout-seconds SECONDS` | 单次翻译 API 请求超时，默认 `180` 秒。 |
+| `--glossary PATH` | JSON 术语表；命中源 cue 的术语会进入请求并由确定性 QA 检查。 |
+| `--translation-style faithful\|natural\|concise` | 翻译风格，默认 `faithful`。 |
+| `--burn` | 在端到端工作流中生成双语 ASS、烧录视频并执行媒体 QA。 |
+| `--burn-media PATH` | 为本地纯音频 Job 显式提供烧录所需的视频。 |
+| `--burn-output PATH` | 指定 `run` 的最终烧录文件；必须是安全的绝对输出路径。 |
+| `--media PATH` | 为 `preview` 或原子 `burn` 指定视频媒体。 |
+| `--software` | 显式强制使用软件编码。`run` / `burn` 不传时优先硬件编码并在明确不支持时回退；`preview` 不传时优先复用 Job 保存的烧录设置。 |
+| `--target-font NAME` | 目标语言字幕字体。 |
+| `--source-font NAME` | 源语言字幕字体。 |
+
+### 源字幕选择速查
+
+| 需求 | 推荐参数 | 行为 |
+| --- | --- | --- |
+| 让 XVT 自动选择 | `--source-strategy auto` | 人工平台字幕没有 error 级问题时走快速路径（`needs_review` 仍会在正式 QA 等待确认）；error 级问题先尝试对齐再回退 ASR；翻译或烧录任务中的自动字幕只作参考并最终采用 ASR。 |
+| 无论质量如何都使用下载字幕 | `--source-strategy subtitles --youtube-subtitles` | 强制候选作为时间轴；正式 QA 的 `failed` 或 `needs_review` 仍会阻断任务。 |
+| 不信任平台字幕，强制听写 | `--source-strategy asr` | 使用媒体音频重新生成源 cue；可同时请求下载字幕作为候选证据，但不把它作为最终时间轴。 |
+| 修复旧 Job 的源时间轴 | `rebuild-source JOB --strategy asr` | 显式重建已有媒体 Job，失效旧翻译及下游，不要新建 Job。 |
+
+### 日常命令
+
+<details>
+<summary><code>xvt run</code>：创建 Job 并执行端到端工作流</summary>
+
+```text
+xvt run INPUT --output DIR [源字幕参数] [翻译参数] [烧录参数]
+```
+
+- 位置参数：`input`，本地视频、音频、字幕文件或远程 URL。
+- 必填参数：`--output`。
+- 源字幕与 ASR：`--engine`、`--language`、`--subtitles`、`--source-strategy`、`--align-subtitles`、`--min-alignment-confidence`、`--allow-low-confidence-alignment`、`--segmentation-preset`。
+- YouTube 访问：`--youtube-subtitles`、`--subtitle-language`、`--allow-auto-subtitles`、`--cookies-from-browser`、`--proxy`。
+- 翻译：`--translation-subtitles`、`--target-language`、`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
+- 烧录与输出：`--burn`、`--burn-media`、`--burn-output`、`--software`、`--target-font`、`--source-font`、`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt status</code>：查看 Job 状态和下一步</summary>
+
+```text
+xvt status JOB_FILE [--json]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--json`。优先使用本命令提供的 `recovery_plan` / `advance_steps`，不要猜测该运行 `resume` 还是 `continue`。
+
+</details>
+
+<details>
+<summary><code>xvt continue</code>：继续端到端目标</summary>
+
+```text
+xvt continue JOB_FILE [--cookies-from-browser BROWSER] [--proxy URL]
+  [--acknowledge-subtitle-review] [--acknowledge-translation-review]
+  [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 远程重试：`--cookies-from-browser`、`--proxy`。
+- 人工确认：`--acknowledge-subtitle-review` 只确认当前 `needs_review` 字幕 QA；`--acknowledge-translation-review` 只确认当前译文语义报告。两者都不能绕过 error 级确定性 QA。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply</code>：自动路由 Agent 或人工修订响应</summary>
+
+```text
+xvt apply JOB_FILE RESPONSE_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`。
+- 可选参数：`--events-jsonl`。
+- 仅用于有持久化工作流目标且能从响应或等待状态确定路由的 Job；无法安全判断时会报错而不会猜测。
+
+</details>
+
+<details>
+<summary><code>xvt batch</code>：串行处理目录输入</summary>
+
+```text
+xvt batch INPUT_DIRECTORY --output DIR [--recursive] [转写/翻译/烧录参数]
+```
+
+- 位置参数：`input_directory`；必填参数：`--output`。
+- 扫描：`--recursive`。
+- 转写：`--engine`、`--language`、`--source-strategy`、`--segmentation-preset`。
+- 翻译：`--target-language`、`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
+- 烧录与输出：`--burn`、`--software`、`--target-font`、`--source-font`、`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt batch-continue</code>：继续已有批处理</summary>
+
+```text
+xvt batch-continue BATCH_FILE [--events-jsonl]
+```
+
+- 位置参数：`batch_file`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt verify</code>：重新校验 Job artifact</summary>
+
+```text
+xvt verify JOB_FILE [--json]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--json`。本命令重新计算 checksum，但不修改工作流目标。
+
+</details>
+
+<details>
+<summary><code>xvt doctor</code>：检查本机运行依赖</summary>
+
+```text
+xvt doctor [--output PATH] [--json]
+```
+
+- `--output`：额外检查目标输出位置。
+- `--json`：输出机器可读诊断结果。
+
+</details>
+
+### 高级、修复与原子命令
+
+<details>
+<summary><code>xvt inspect</code>：检查本地媒体或远程 URL</summary>
+
+```text
+xvt inspect INPUT [--json]
+```
+
+- 位置参数：`input`。
+- 可选参数：`--json`。
+
+</details>
+
+<details>
+<summary><code>xvt resume</code>：只恢复转写 checkpoint</summary>
+
+```text
+xvt resume JOB_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--events-jsonl`。它不完成持久化的翻译或烧录目标；端到端 Job 通常应使用 `continue`。
+
+</details>
+
+<details>
+<summary><code>xvt rebuild-source</code>：用 ASR 重建既有 Job 的源 cue</summary>
+
+```text
+xvt rebuild-source JOB_FILE --strategy asr
+  [--cookies-from-browser BROWSER] [--proxy URL] [--events-jsonl]
+```
+
+- 位置参数：`job_file`；必填参数：`--strategy asr`。
+- 远程访问：`--cookies-from-browser`、`--proxy`。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt prepare-translation</code>：生成确定性的 Agent 翻译批次</summary>
+
+```text
+xvt prepare-translation JOB_FILE --source-language LANG --target-language LANG
+  [--translation-quality standard|polished] [--batch-size N]
+  [--glossary PATH] [--translation-style STYLE] [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 必填参数：`--source-language`、`--target-language`。
+- 策略：`--translation-quality`、`--batch-size`、`--glossary`、`--translation-style`。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply-translation</code>：回填 Agent 翻译响应</summary>
+
+```text
+xvt apply-translation JOB_FILE RESPONSE_FILE --target-language LANG [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`。
+- 必填参数：`--target-language`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt import-translation</code>：导入已有译文字幕</summary>
+
+```text
+xvt import-translation JOB_FILE SUBTITLE_FILE --target-language LANG [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`subtitle_file`。
+- 必填参数：`--target-language`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt translate</code>：原子翻译入口</summary>
+
+```text
+xvt translate JOB_FILE --target-language LANG [翻译参数] [--events-jsonl]
+```
+
+- 位置参数：`job_file`；必填参数：`--target-language`。
+- 翻译：`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt polish-translation</code>：为已有译文补跑可恢复润色</summary>
+
+```text
+xvt polish-translation JOB_FILE [--provider PROVIDER] [--base-url URL]
+  [--model NAME] [--api-key-env NAME] [--batch-size N]
+  [--max-retries N] [--timeout-seconds SECONDS] [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 翻译提供方覆盖：`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`；不传时优先复用 Job 配置。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply-polish-translation</code>：回填 Agent 润色响应</summary>
+
+```text
+xvt apply-polish-translation JOB_FILE RESPONSE_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply-semantic-review</code>：回填 Agent 语义校对与一次修复响应</summary>
+
+```text
+xvt apply-semantic-review JOB_FILE RESPONSE_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply-translation-review-fixes</code>：应用人工译文修订</summary>
+
+```text
+xvt apply-translation-review-fixes JOB_FILE RESPONSE_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`；支持生成的 JSON 模板或固定命名的修订 SRT。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt prepare-source-review</code>：生成源 cue 修订模板</summary>
+
+```text
+xvt prepare-source-review JOB_FILE --cue ID [--cue ID ...] [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 必填可重复参数：`--cue`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply-source-review-fixes</code>：应用人工源文修订</summary>
+
+```text
+xvt apply-source-review-fixes JOB_FILE RESPONSE_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`。
+- 可选参数：`--events-jsonl`。修改源文后会重跑源字幕 QA，并失效旧翻译及全部下游产物。
+
+</details>
+
+<details>
+<summary><code>xvt acknowledge-translation-review</code>：单独确认当前语义复核报告</summary>
+
+```text
+xvt acknowledge-translation-review JOB_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--events-jsonl`。日常路径也可使用 `continue --acknowledge-translation-review`。
+
+</details>
+
+<details>
+<summary><code>xvt resegment-translation</code>：重切超宽 ASR cue</summary>
+
+```text
+xvt resegment-translation JOB_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--events-jsonl`。只支持具有词级时间戳的 ASR cue；会失效旧翻译及下游。
+
+</details>
+
+<details>
+<summary><code>xvt retranslate-cues</code>：局部重译指定 cue</summary>
+
+```text
+xvt retranslate-cues JOB_FILE --cue ID [--cue ID ...] --target-language LANG
+  [--provider PROVIDER] [--base-url URL] [--model NAME]
+  [--api-key-env NAME] [--max-retries N] [--timeout-seconds SECONDS]
+  [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 必填参数：可重复的 `--cue`、`--target-language`。
+- 翻译提供方：`--provider`、`--base-url`、`--model`、`--api-key-env`、`--max-retries`、`--timeout-seconds`。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt apply-cue-retranslation</code>：回填局部重译结果</summary>
+
+```text
+xvt apply-cue-retranslation JOB_FILE RESPONSE_FILE --cue ID [--cue ID ...]
+  --target-language LANG [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`response_file`。
+- 必填参数：可重复的 `--cue`、`--target-language`。
+- 可选参数：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt preview</code>：生成短片段双语预览</summary>
+
+```text
+xvt preview JOB_FILE [--cue ID | --start SECONDS] [--duration SECONDS]
+  [--media PATH] [--output PATH] [--software]
+  [--target-font NAME] [--source-font NAME] [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 范围：`--cue` 与 `--start` 互斥；`--duration` 默认 `15` 秒。
+- 媒体与输出：`--media`、`--output`、`--software`、`--target-font`、`--source-font`。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<details>
+<summary><code>xvt burn</code>：原子烧录入口</summary>
+
+```text
+xvt burn JOB_FILE [--media PATH] [--output PATH] [--software]
+  [--cookies-from-browser BROWSER] [--proxy URL]
+  [--target-font NAME] [--source-font NAME] [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 媒体与输出：`--media`、`--output`、`--software`、`--target-font`、`--source-font`。
+- 远程访问：`--cookies-from-browser`、`--proxy`。
+- 事件：`--events-jsonl`。
+
+</details>
+
+<!-- cli-reference:end -->
 
 ## 环境要求
 
