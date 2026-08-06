@@ -34,6 +34,8 @@
 
 ### Changed
 
+- 兼容 API 翻译默认批次从 40 调整为 25 个 cue，请求默认超时从 60 秒调整为 180 秒，以降低 DeepSeek 等远程服务在大批次下的断连和超时概率；旧 Job 继续使用其持久化批次与超时配置。
+
 - `cli.py` 的 `_run_command`（~622 行 if/elif 链）拆分为 26 个独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表；纯搬移，不改变任何命令的行为和输出。
 - `pipeline` 包内确实被跨模块引用的 `_` 前缀符号去掉下划线并公有化（如 `set_stage`、`complete_qa_stage`、`translate_batch_with_retries`、`artifact_checksum_for`、`write_json`、`load_cues`、`checksum` 等）；纯重命名，不保留旧名别名，不改变任何行为。
 - 烧录与预览输出路径安全统一到 `xvt.paths`：允许写到 Job 目录外的绝对路径，但写入前拒绝覆盖源媒体、`job.json` 与除「正在写入的同 kind」外的已登记 artifact（含 hardlink/`samefile`）；同 kind 重烧/重预览允许。冲突抛 `UserInputError`，且烧录在 RENDER/BURN 记账前校验、不把路径错误记成 stage failed。

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from xvt.config import DEFAULT_BATCH_SIZE
 from xvt.errors import InternalError, UserInputError
 from xvt.models import Cue
 from xvt.qa import character_limit, reading_speed_limit
@@ -305,7 +306,7 @@ def build_translation_batches(
     *,
     source_language: str,
     target_language: str,
-    batch_size: int = 40,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     context_size: int = 1,
     policy: TranslationPolicy | None = None,
 ) -> list[TranslationBatch]:
@@ -446,7 +447,7 @@ def build_polish_batches(
     *,
     source_language: str,
     target_language: str,
-    batch_size: int = 40,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     context_size: int = 1,
     policy: TranslationPolicy | None = None,
 ) -> list[PolishBatch]:
@@ -505,7 +506,7 @@ def build_semantic_review_batches(
     *,
     source_language: str,
     target_language: str,
-    batch_size: int = 40,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     policy: TranslationPolicy | None = None,
 ) -> list[SemanticReviewBatch]:
     polish_batches = build_polish_batches(

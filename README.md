@@ -212,6 +212,8 @@ export XVT_TRANSLATION_API_KEY="secret"
 
 API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误和 5xx 会退避重试。
 
+兼容 API 默认每批最多翻译 25 个 cue，请求超时时间为 180 秒；可用 `--batch-size` 和 `--timeout-seconds` 针对单个新任务调整。已创建的 Job 继续使用其持久化配置。
+
 `translate` 和 `prepare-translation` 支持结构化术语表及 `faithful`（默认）、`natural`、`concise` 三种风格。Q4 不改变默认风格：新 Job 仍使用 `faithful`，除非显式传入 `--translation-style`。术语表是 JSON 文件；命中当前批次源 cue 的术语才会写入 API 请求或 Agent 批次，避免无关提示膨胀：
 
 ```json
@@ -225,7 +227,7 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 
 `translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。译文 QA 会确定性检查命中源 cue 的术语是否包含要求的目标词；违规会以 `glossary_violation` 写入 `qa-translated.json`，阻断渲染和烧录。
 
-Q4 在翻译前按已有 cue 确定性建立语义组：句末标点、相邻 cue 间隔达到 650ms、20 个 cue 或 30 秒会形成边界；达到上限时优先在句末、软标点、连接词前或最大停顿处分界。provider 批次仍最多容纳 40 个 cue，但只以完整语义组装箱，不会从组中切开。批次中的 `semantic_groups` 仅记录各组的 cue ID，时间轴、cue 数量和顺序始终不变。
+Q4 在翻译前按已有 cue 确定性建立语义组：句末标点、相邻 cue 间隔达到 650ms、20 个 cue 或 30 秒会形成边界；达到上限时优先在句末、软标点、连接词前或最大停顿处分界。provider 批次默认最多容纳 25 个 cue，但只以完整语义组装箱，不会从组中切开；可通过 `--batch-size` 调整。批次中的 `semantic_groups` 仅记录各组的 cue ID，时间轴、cue 数量和顺序始终不变。
 
 新 Job 可显式选择翻译质量，默认仍为 `standard`：
 

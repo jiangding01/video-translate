@@ -12,6 +12,10 @@ class ConfigDefaultsTest(unittest.TestCase):
     def test_default_max_retries_is_four(self) -> None:
         self.assertEqual(config.DEFAULT_MAX_RETRIES, 4)
 
+    def test_translation_defaults_are_conservative_for_remote_provider(self) -> None:
+        self.assertEqual(config.DEFAULT_BATCH_SIZE, 25)
+        self.assertEqual(config.DEFAULT_TIMEOUT_SECONDS, 180)
+
     def test_workflow_options_defaults_match_config_constants(self) -> None:
         options = WorkflowOptions(input="/tmp/video.mp4", output="/tmp/out")
         self.assertEqual(options.engine, config.DEFAULT_ENGINE)

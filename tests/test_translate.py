@@ -62,6 +62,16 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual([item.id for item in batches[0].context_after], [3])
         self.assertEqual([item.id for item in batches[1].context_before], [1, 2])
 
+    def test_default_batch_capacity_is_25_cues(self) -> None:
+        cues = [
+            Cue(index, (index - 1) * 1000, index * 1000, f"Sentence {index}.")
+            for index in range(1, 27)
+        ]
+
+        batches = build_translation_batches(cues, source_language="en", target_language="zh-CN")
+
+        self.assertEqual([len(batch.items) for batch in batches], [25, 1])
+
     def test_semantic_groups_end_at_sentence_boundary_or_long_gap(self) -> None:
         cues = [
             Cue(1, 0, 500, "First sentence."),

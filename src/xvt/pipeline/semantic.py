@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
+from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -80,9 +81,9 @@ def _config_for_job(job: Job, config: WorkflowConfig | None) -> WorkflowConfig:
         base_url=job.config.get("base_url"),
         model=job.config.get("model"),
         api_key_env=str(job.config.get("api_key_env", "XVT_TRANSLATION_API_KEY")),
-        batch_size=int(job.config.get("batch_size", 40)),
-        max_retries=int(job.config.get("max_retries", 4)),
-        timeout_seconds=float(job.config.get("timeout_seconds", 60)),
+        batch_size=int(job.config.get("batch_size", DEFAULT_BATCH_SIZE)),
+        max_retries=int(job.config.get("max_retries", DEFAULT_MAX_RETRIES)),
+        timeout_seconds=float(job.config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
         translation_policy=translation_policy_from_dict(job.config.get("translation_policy")),
         translation_quality="polished",
     )

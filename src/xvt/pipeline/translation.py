@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
-from xvt.config import DEFAULT_MAX_RETRIES
+from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -643,7 +643,7 @@ def prepare_agent_translation(
     *,
     source_language: str,
     target_language: str,
-    batch_size: int = 40,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
     translation_style: str = "faithful",
@@ -731,9 +731,9 @@ def run_translation(
     base_url: str | None = None,
     model: str | None = None,
     api_key_env: str = "XVT_TRANSLATION_API_KEY",
-    batch_size: int = 40,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     max_retries: int = DEFAULT_MAX_RETRIES,
-    timeout_seconds: float = 60,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
     translation_style: str = "faithful",

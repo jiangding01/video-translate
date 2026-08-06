@@ -7,6 +7,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from xvt.config import DEFAULT_TIMEOUT_SECONDS
 from xvt.errors import DependencyError, UserInputError
 from xvt.translate import (
     PolishBatch,
@@ -54,7 +55,7 @@ class CompatibleProviderConfig:
     base_url: str
     model: str
     api_key: str
-    timeout_seconds: float = 60
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
 
 def resolve_provider(
@@ -63,7 +64,7 @@ def resolve_provider(
     base_url: str | None,
     model: str | None,
     api_key_env: str,
-    timeout_seconds: float = 60,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[str, CompatibleProviderConfig | None, str | None]:
     if provider == "agent":
         return "agent", None, None
