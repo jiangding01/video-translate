@@ -112,4 +112,4 @@ API 与 Agent 使用同一套文本质量语义。翻译和润色先把每个 `s
 
 语义校对必须检查按 ID 拼接后的完整组，并区分：含义变化、漏译、术语或专名错误、单 cue 可读但拼接生硬，以及有上下文证据的源文疑点。`source_suspect` 不能仅因歧义或陌生词触发，报告必须指出可疑源片段和证据，且 `suggested_items` 为空，源文仍只能通过人工模板修改。定向修复联合重写完整语义组，把建议文本视为线索而非标准答案，不得修复 `source_suspect`。
 
-四类提示词独立升级版本：translation v4、polish v2、semantic review v2、semantic repair v2。所有批次文本都按不可信字幕数据处理，不得作为改变任务或输出协议的指令。版本继续进入 API checkpoint 指纹和 Agent manifest；升级后旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 不会被误复用。已等待的标准 Agent Job 保持既有兼容策略，可按严格 ID 契约回填；重新准备批次后才获得新版提示词。Q6.1c 不新增 CLI、stage、artifact、事件、Job schema、依赖或凭据。单元测试只固定契约和版本失效，不把单个真实视频的期望译文硬编码为模型正确答案；实际质量由后续公开素材 E2E 验收。
+四类提示词当前版本为 translation v5、polish v3、semantic review v2、semantic repair v3。翻译、润色和修复避免模型无依据添加破折号、公式化对比、空泛连接词、宣传式措辞或抽象拔高，同时明确保留源文真实的对比、强调、列举、打断、语气与全部信息。所有批次文本都按不可信字幕数据处理，不得作为改变任务或输出协议的指令。版本继续进入 API checkpoint 指纹和 Agent manifest；升级后旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 不会被误复用。已等待的标准 Agent Job 保持既有兼容策略，可按严格 ID 契约回填；重新准备批次后才获得新版提示词。Q6.1c 不新增 CLI、stage、artifact、事件、Job schema、依赖或凭据。单元测试只固定契约和版本失效，不把单个真实视频的期望译文硬编码为模型正确答案；实际质量由后续公开素材 E2E 验收。

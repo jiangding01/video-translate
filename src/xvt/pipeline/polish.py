@@ -354,6 +354,42 @@ def translation_polish_satisfied(
         return False
 
 
+def agent_translation_polish_manifest_valid(
+    job: Job,
+    config: WorkflowConfig | None = None,
+) -> bool:
+    config = config or get_workflow_config(job)
+    draft_path = valid_artifact_path(job, "translation_draft_cues")
+    batches_path = valid_artifact_path(job, "translation_polish_batches")
+    if config is None or draft_path is None or batches_path is None:
+        return False
+    try:
+        manifest = json.loads(batches_path.read_text(encoding="utf-8"))
+        expected_fingerprint = _fingerprint(
+            job,
+            config=config,
+            mode="agent",
+            base_url=config.base_url,
+            model=config.model,
+        )
+        expected_batches = json.loads(
+            json.dumps(
+                [batch.to_dict() for batch in _build_batches(job, draft_path, config)],
+                ensure_ascii=False,
+            )
+        )
+        return (
+            isinstance(manifest, dict)
+            and manifest.get("job_id") == job.id
+            and manifest.get("fingerprint") == expected_fingerprint
+            and manifest.get("prompt_version") == TRANSLATION_POLISH_PROMPT_VERSION
+            and manifest.get("semantic_grouping_version") == SEMANTIC_GROUPING_VERSION
+            and manifest.get("batches") == expected_batches
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
 def _write_progress(
     job: Job,
     path: Path,
@@ -639,6 +675,8 @@ def apply_agent_translation_polish(
     batches_path = valid_artifact_path(job, "translation_polish_batches")
     if draft_path is None or batches_path is None:
         raise ValueError("job has no valid Agent polish checkpoint")
+    if not agent_translation_polish_manifest_valid(job, config):
+        raise ValueError("polish batch manifest no longer matches the draft")
     batches = _build_batches(job, draft_path)
     manifest = json.loads(batches_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):

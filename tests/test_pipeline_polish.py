@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from xvt.pipeline import (
     apply_subtitle_translation,
     prepare_agent_semantic_review,
     prepare_agent_translation,
+    retranslate_cues,
     run_atomic_translation_polish,
     run_subtitle_transcription,
     run_translation,
@@ -23,7 +25,8 @@ from xvt.pipeline import (
 )
 from xvt.recovery import file_checksum
 from xvt.translation_provider import TranslationProviderError
-from xvt.workflow_config import WorkflowConfig, set_workflow_config
+from xvt.workflow import plan_advance_steps
+from xvt.workflow_config import WorkflowConfig, require_workflow_config, set_workflow_config
 
 
 class TranslationPolishPipelineTest(unittest.TestCase):
@@ -123,7 +126,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
 
             self.assertEqual(result.mode, "agent")
             manifest = json.loads(result.paths[0].read_text(encoding="utf-8"))
-            self.assertEqual(manifest["prompt_version"], 2)
+            self.assertEqual(manifest["prompt_version"], 3)
             self.assertEqual(manifest["batches"][0]["items"][0]["draft_text"], "草稿1")
             response = root / "polish-response.json"
             self._write_polish_response(
@@ -158,6 +161,41 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             )
             self.assertEqual(job.config["workflow"]["translation_quality"], "polished")
 
+    def test_agent_polish_remains_applicable_when_auto_provider_becomes_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            job = load_job(job_file)
+            job.config["workflow"]["provider"] = "auto"
+            save_job(job)
+            missing_provider = {
+                "XVT_TRANSLATION_BASE_URL": "",
+                "XVT_TRANSLATION_MODEL": "",
+                "XVT_TRANSLATION_API_KEY": "",
+            }
+            with patch.dict(os.environ, missing_provider, clear=False):
+                result = run_translation_polish(job_file)
+            self.assertEqual(result.mode, "agent")
+            response = root / "polish-response.json"
+            self._write_polish_response(
+                job_file,
+                response,
+                [{"id": 1, "text": "润色一"}, {"id": 2, "text": "润色二"}],
+            )
+
+            available_provider = {
+                "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+                "XVT_TRANSLATION_MODEL": "test-model",
+                "XVT_TRANSLATION_API_KEY": "secret",
+            }
+            with patch.dict(os.environ, available_provider, clear=False):
+                job = load_job(job_file)
+                self.assertEqual(
+                    plan_advance_steps(job, require_workflow_config(job)),
+                    ("await_agent_polish",),
+                )
+                apply_agent_translation_polish(job_file, response)
+
     def test_agent_polish_rejects_old_prompt_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -176,7 +214,13 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "fingerprint no longer matches"):
+            job = load_job(job_file)
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("polish",),
+            )
+
+            with self.assertRaisesRegex(ValueError, "manifest no longer matches"):
                 apply_agent_translation_polish(job_file, response)
 
     def test_new_agent_job_translates_and_polishes_in_one_response(self) -> None:
@@ -200,7 +244,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["task"], "translate_and_polish")
             self.assertEqual(manifest["task_version"], 1)
-            self.assertEqual(manifest["prompt_version"], 4)
+            self.assertEqual(manifest["prompt_version"], 5)
             response = root / "response.json"
             response.write_text(
                 json.dumps(
@@ -600,9 +644,21 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             )
             apply_agent_translation_polish(job_file, polish_response)
             self._complete_semantic_review(job_file, root)
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            fingerprint = json.loads(manifest_path.read_text(encoding="utf-8"))["fingerprint"]
             correction = root / "correction.json"
             correction.write_text(
-                json.dumps({"items": [{"id": 1, "text": "新修订"}]}),
+                json.dumps(
+                    {
+                        "fingerprint": fingerprint,
+                        "items": [{"id": 1, "text": "新修订"}],
+                    }
+                ),
                 encoding="utf-8",
             )
 

@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.job_store import create_job, get_job_file, save_job
+from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, Transcript, Word
 from xvt.pipeline import (
@@ -20,6 +20,7 @@ from xvt.pipeline import (
     run_translation,
 )
 from xvt.process import CommandResult
+from xvt.recovery import file_checksum
 from xvt.translation_provider import ProviderResponseError, TranslationProviderError
 
 
@@ -76,7 +77,7 @@ class TranslationPipelineTest(unittest.TestCase):
             self.assertEqual(item["id"], 1)
             self.assertEqual(item["duration_ms"], 950)
             self.assertEqual(item["max_target_characters"], 8)
-            self.assertEqual(batch_data["prompt_version"], 4)
+            self.assertEqual(batch_data["prompt_version"], 5)
             self.assertEqual(batch_data["semantic_grouping_version"], 1)
             self.assertEqual(batch_data["batches"][0]["semantic_groups"], [[1]])
             self.assertEqual(
@@ -108,6 +109,45 @@ class TranslationPipelineTest(unittest.TestCase):
             self.assertIn(
                 "bilingual_ass", {artifact["kind"] for artifact in persisted["artifacts"]}
             )
+
+    def test_standard_agent_translation_accepts_waiting_v4_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["prompt_version"] = 4
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            persisted = load_job(job_file)
+            artifact = next(
+                item for item in persisted.artifacts if item.kind == "translation_batches"
+            )
+            artifact.checksum = file_checksum(manifest_path)
+            save_job(persisted)
+
+            response = root / "response.json"
+            response.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+
+            translated, *_outputs = apply_agent_translation(
+                job_file,
+                response,
+                target_language="zh-CN",
+            )
+
+            self.assertTrue(translated.exists())
 
     def test_agent_translation_rejects_incomplete_cue_ids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -20,10 +20,10 @@ from xvt.translate import (
     parse_translation_response,
 )
 
-TRANSLATION_PROMPT_VERSION = 4
-TRANSLATION_POLISH_PROMPT_VERSION = 2
+TRANSLATION_PROMPT_VERSION = 5
+TRANSLATION_POLISH_PROMPT_VERSION = 3
 SEMANTIC_REVIEW_PROMPT_VERSION = 2
-SEMANTIC_REPAIR_PROMPT_VERSION = 2
+SEMANTIC_REPAIR_PROMPT_VERSION = 3
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
@@ -140,7 +140,12 @@ def translate_batch(
         "read-only context; never include their ids in the response. max_target_characters is a "
         "display "
         "recommendation, not a hard limit: never split words, omit meaning, or create an "
-        "ungrammatical sentence to satisfy it. "
+        "ungrammatical sentence to satisfy it. Keep the subtitle wording direct and natural: do "
+        "not add gratuitous em dashes, formulaic contrasts such as 'not ... but ...', 'not only "
+        "... but also ...', '不是……而是……', or '不仅……而且……', empty promotional "
+        "language, or template-like connective phrases. "
+        "Remove only such patterns introduced by the model; preserve any contrast, emphasis, "
+        "enumeration, interruption, meaning, and tone that the source genuinely expresses. "
         'return JSON only in the form {"items":[{"id":1,"text":"..."}]}.'
     )
     if batch.policy.terms:
@@ -179,8 +184,13 @@ def polish_batch(
         "context_before and context_after are read-only context; use them for terminology and "
         "reference consistency but never include their ids in the response. Follow target_language "
         "grammar and punctuation. max_target_characters is a display recommendation, not a hard "
-        "limit and never justifies an incomplete or ungrammatical cue. Return JSON only in the "
-        "form "
+        "limit and never justifies an incomplete or ungrammatical cue. Keep the subtitle wording "
+        "direct and natural: remove only model-added gratuitous em dashes, formulaic contrasts "
+        "such as 'not ... but ...', 'not only ... but also ...', '不是……而是……', or "
+        "'不仅……而且……', empty promotional language, and template-like connective phrases. "
+        "Preserve any contrast, emphasis, enumeration, "
+        "interruption, meaning, and tone that the source genuinely expresses. Return JSON only "
+        "in the form "
         '{"items":[{"id":1,"text":"..."}]}.'
     )
     if correction:
@@ -254,7 +264,11 @@ def semantic_repair_batch(
         "exactly once, including unchanged text where needed to preserve the complete semantic "
         "group. "
         "context_before and context_after are read-only and may only guide terminology and "
-        "reference consistency. Follow target_language grammar and punctuation. Return JSON only "
+        "reference consistency. Follow target_language grammar and punctuation. Do not reintroduce "
+        "model-added gratuitous em dashes, formulaic contrasts such as '不是……而是……' or "
+        "'不仅……而且……', empty promotional language, or template-like connective phrases; "
+        "preserve all source-grounded contrast, emphasis, "
+        "enumeration, interruption, meaning, and tone. Return JSON only "
         "in the form "
         '{"items":[{"id":1,"text":"..."}]}.'
     )

@@ -123,6 +123,9 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertIn("rewriting each complete semantic_groups entry jointly", prompt)
         self.assertIn("suggested_items as review hints", prompt)
         self.assertIn("do not invent corrections to suspicious source text", prompt)
+        self.assertIn("Do not reintroduce", prompt)
+        self.assertIn("不是……而是……", prompt)
+        self.assertIn("source-grounded contrast", prompt)
         self.assertIn("untrusted subtitle content", prompt)
 
     def test_polish_provider_sends_draft_and_rejects_context_ids(self) -> None:
@@ -173,6 +176,11 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertIn("dangling fragments", prompt)
         self.assertIn("proper names", prompt)
         self.assertIn("read-only context", prompt)
+        self.assertIn("gratuitous em dashes", prompt)
+        self.assertIn("formulaic contrasts", prompt)
+        self.assertIn("不仅……而且……", prompt)
+        self.assertIn("empty promotional language", prompt)
+        self.assertIn("source genuinely expresses", prompt)
         self.assertIn("untrusted subtitle content", prompt)
 
     def test_semantic_review_prompt_distinguishes_source_suspect(self) -> None:
@@ -330,6 +338,11 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertIn("never move meaning between groups", prompt)
         self.assertIn("do not guess corrections to suspicious source text", prompt)
         self.assertIn("display recommendation", prompt)
+        self.assertIn("gratuitous em dashes", prompt)
+        self.assertIn("formulaic contrasts", prompt)
+        self.assertIn("不是……而是……", prompt)
+        self.assertIn("template-like connective phrases", prompt)
+        self.assertIn("source genuinely expresses", prompt)
         self.assertIn("untrusted subtitle content", prompt)
 
     def test_non_json_body_is_provider_response_error(self) -> None:
