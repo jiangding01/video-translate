@@ -123,6 +123,8 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ),
     ArtifactKind.TRANSLATION_PROGRESS: frozenset({ArtifactKind.TRANSLATION_BATCHES}),
     ArtifactKind.TRANSLATION_RESPONSE: frozenset({ArtifactKind.TRANSLATION_BATCHES}),
+    # Manifest 另以 fingerprint 绑定当前 translated_cues；不能在图中反向依赖它，
+    # 否则会与 batches -> response -> translated_cues 形成环。回填时会重建并校验 manifest。
     ArtifactKind.CUE_RETRANSLATION_BATCHES: frozenset({ArtifactKind.SOURCE_CUES}),
     ArtifactKind.CUE_RETRANSLATION_RESPONSE: frozenset({ArtifactKind.CUE_RETRANSLATION_BATCHES}),
     ArtifactKind.TRANSLATION_DRAFT_CUES: frozenset(

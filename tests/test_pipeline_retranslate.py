@@ -26,6 +26,16 @@ class CueRetranslationTest(unittest.TestCase):
             job = create_job("/tmp/input.mp4", root)
             artifacts = root / "jobs" / job.id / "artifacts"
             artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps(
+                    [
+                        asdict(Cue(1, 0, 1000, "First", source_language="en")),
+                        asdict(Cue(2, 1000, 2000, "Second", source_language="en")),
+                    ]
+                ),
+                encoding="utf-8",
+            )
             translated_path = artifacts / "translated-cues.json"
             translated_path.write_text(
                 json.dumps(
@@ -44,6 +54,7 @@ class CueRetranslationTest(unittest.TestCase):
             stale_preview.write_bytes(b"stale preview")
             job.artifacts.extend(
                 [
+                    Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
                     Artifact("media_info", str(media_path)),
                     Artifact("bilingual_ass", str(stale_ass)),
@@ -51,9 +62,21 @@ class CueRetranslationTest(unittest.TestCase):
                 ]
             )
             job_file = save_job(job)
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            fingerprint = json.loads(manifest_path.read_text(encoding="utf-8"))["fingerprint"]
             response_path = root / "response.json"
             response_path.write_text(
-                json.dumps({"items": [{"id": 1, "text": "新译文一"}]}),
+                json.dumps(
+                    {
+                        "fingerprint": fingerprint,
+                        "items": [{"id": 1, "text": "新译文一"}],
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -78,6 +101,11 @@ class CueRetranslationTest(unittest.TestCase):
             job = create_job("/tmp/input.mp4", root)
             artifacts = root / "jobs" / job.id / "artifacts"
             artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "First", source_language="en"))]),
+                encoding="utf-8",
+            )
             translated_path = artifacts / "translated-cues.json"
             translated_path.write_text(
                 json.dumps([asdict(Cue(1, 0, 1000, "First", "一", target_language="zh-CN"))]),
@@ -87,6 +115,7 @@ class CueRetranslationTest(unittest.TestCase):
             media_path.write_text(json.dumps({"duration_ms": 1000}), encoding="utf-8")
             job.artifacts.extend(
                 [
+                    Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
                     Artifact("media_info", str(media_path)),
                 ]
@@ -152,8 +181,59 @@ class CueRetranslationTest(unittest.TestCase):
             batch_data = json.loads(result.paths[0].read_text(encoding="utf-8"))
             persisted = json.loads(job_file.read_text(encoding="utf-8"))
 
+            stale_response = root / "stale-response.json"
+            stale_response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": batch_data["fingerprint"],
+                        "items": [{"id": 2, "text": "旧上下文生成的译文"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            current = json.loads(translated_path.read_text(encoding="utf-8"))
+            current[1]["target_text"] = "等待期间人工改过"
+            translated_path.write_text(json.dumps(current), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "manifest no longer matches current inputs"):
+                apply_cue_retranslation(
+                    job_file,
+                    stale_response,
+                    cue_ids=(2,),
+                    target_language="zh-CN",
+                )
+
+            with patch("xvt.pipeline.retranslate.TRANSLATION_PROMPT_VERSION", 4):
+                old_manifest_path = retranslate_cues(
+                    job_file,
+                    cue_ids=(2,),
+                    target_language="zh-CN",
+                    provider="agent",
+                ).paths[0]
+            old_manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+            old_prompt_response = root / "old-prompt-response.json"
+            old_prompt_response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": old_manifest["fingerprint"],
+                        "items": [{"id": 2, "text": "旧提示词生成的译文"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "manifest no longer matches current inputs"):
+                apply_cue_retranslation(
+                    job_file,
+                    old_prompt_response,
+                    cue_ids=(2,),
+                    target_language="zh-CN",
+                )
+
         batch = batch_data["batches"][0]
         self.assertEqual(result.mode, "agent")
+        self.assertEqual(batch_data["prompt_version"], 5)
+        self.assertEqual(batch_data["task"], "retranslate_cues")
+        self.assertIsInstance(batch_data["fingerprint"], str)
         self.assertEqual([item["id"] for item in batch["items"]], [2])
         self.assertEqual([item["id"] for item in batch["context_before"]], [1])
         self.assertEqual([item["id"] for item in batch["context_after"]], [3])

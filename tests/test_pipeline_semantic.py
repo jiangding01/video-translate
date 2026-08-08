@@ -621,7 +621,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             manifest_path = prepare_agent_semantic_review(job_file)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["review_prompt_version"], 2)
-            self.assertEqual(manifest["repair_prompt_version"], 2)
+            self.assertEqual(manifest["repair_prompt_version"], 3)
             response = root / "semantic-response.json"
             response.write_text(
                 json.dumps(

@@ -18,6 +18,7 @@ from __future__ import annotations
 from xvt.pipeline.burnin import burn_translated_job, preview_translated_job
 from xvt.pipeline.common import inspect_input, interrupt_running_stage, is_subtitle_input
 from xvt.pipeline.polish import (
+    agent_translation_polish_manifest_valid,
     apply_agent_translation_polish,
     run_atomic_translation_polish,
     run_translation_polish,
@@ -88,6 +89,7 @@ __all__ = [
     "acknowledge_subtitle_review",
     "acknowledge_translation_review",
     "agent_translation_polish_core_satisfied",
+    "agent_translation_polish_manifest_valid",
     "agent_translation_polish_progress_ready",
     "agent_translation_polish_started",
     "agent_translation_polish_waiting",

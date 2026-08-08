@@ -1046,13 +1046,16 @@ class WorkflowPlannerTest(unittest.TestCase):
                 target_language="zh-CN",
                 translation_quality="polished",
             )
-            with patch(
-                "xvt.workflow.valid_artifact_path",
-                side_effect=lambda _job, kind: (
-                    Path(f"/tmp/{kind}")
-                    if kind in {"translation_draft_cues", "translation_polish_batches"}
-                    else None
+            with (
+                patch(
+                    "xvt.workflow.valid_artifact_path",
+                    side_effect=lambda _job, kind: (
+                        Path(f"/tmp/{kind}")
+                        if kind in {"translation_draft_cues", "translation_polish_batches"}
+                        else None
+                    ),
                 ),
+                patch("xvt.workflow.agent_translation_polish_manifest_valid", return_value=True),
             ):
                 self.assertEqual(plan_advance_steps(job, config), ("await_agent_polish",))
 

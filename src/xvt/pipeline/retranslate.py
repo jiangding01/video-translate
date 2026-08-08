@@ -6,16 +6,18 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
 from xvt.config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job
-from xvt.models import StageName, StageStatus
+from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
     add_artifact,
     artifact_path,
+    checksum,
     error_category,
     invalidate_rendered_artifacts,
     load_cues,
@@ -29,13 +31,73 @@ from xvt.pipeline.translation import (
     translate_batch_with_retries,
 )
 from xvt.process import raise_if_cancelled
+from xvt.recovery import valid_artifact_path
 from xvt.translate import (
+    SEMANTIC_GROUPING_VERSION,
+    TranslationBatch,
+    agent_translation_manifest_fingerprint,
     build_cue_retranslation_batches,
     translation_policy_from_dict,
 )
 from xvt.translation_provider import (
+    TRANSLATION_PROMPT_VERSION,
     resolve_provider,
 )
+
+CUE_RETRANSLATION_TASK_VERSION = 1
+
+
+def _cue_retranslation_manifest(
+    job: Job,
+    cue_ids: tuple[int, ...],
+    target_language: str,
+) -> tuple[dict, list[Cue], list[TranslationBatch]]:
+    if not cue_ids:
+        raise ValueError("at least one cue id is required")
+    if len(set(cue_ids)) != len(cue_ids):
+        raise ValueError("cue ids must not contain duplicates")
+    source_path = artifact_path(job, "source_cues")
+    translated_path = artifact_path(job, "translated_cues")
+    source_cues = load_cues(source_path)
+    translated_cues = load_cues(translated_path)
+    translated_by_id = {cue.id: cue for cue in translated_cues}
+    if len(translated_by_id) != len(translated_cues):
+        raise ValueError("translated_cues contains duplicate cue ids")
+    expected_ids = set(cue_ids)
+    missing = sorted(expected_ids - translated_by_id.keys())
+    if missing:
+        raise ValueError(f"translated_cues does not contain ids: {missing}")
+    existing_languages = {cue.target_language for cue in translated_cues if cue.target_language}
+    if existing_languages and existing_languages != {target_language}:
+        raise ValueError("target language must match the existing translated cues")
+    source_language = next(
+        (cue.source_language for cue in source_cues if cue.source_language),
+        job.config.get("source_language", "auto"),
+    )
+    policy = translation_policy_from_dict(job.config.get("translation_policy"))
+    batches = build_cue_retranslation_batches(
+        source_cues,
+        cue_ids,
+        source_language=source_language,
+        target_language=target_language,
+        policy=policy,
+    )
+    manifest = {
+        "task": "retranslate_cues",
+        "task_version": CUE_RETRANSLATION_TASK_VERSION,
+        "job_id": job.id,
+        "source_cues_checksum": checksum(source_path),
+        "translated_cues_checksum": checksum(translated_path),
+        "source_language": source_language,
+        "target_language": target_language,
+        "policy": policy.to_dict(),
+        "prompt_version": TRANSLATION_PROMPT_VERSION,
+        "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
+        "batches": [batch.to_dict() for batch in batches],
+    }
+    manifest = json.loads(json.dumps(manifest, ensure_ascii=False))
+    manifest["fingerprint"] = agent_translation_manifest_fingerprint(manifest)
+    return manifest, translated_cues, batches
 
 
 def apply_cue_retranslation(
@@ -46,25 +108,23 @@ def apply_cue_retranslation(
     target_language: str,
     event_sink: EventSink | None = None,
 ) -> tuple[Path, ...]:
-    if not cue_ids:
-        raise ValueError("at least one cue id is required")
-    if len(set(cue_ids)) != len(cue_ids):
-        raise ValueError("cue ids must not contain duplicates")
     job = load_job(job_file)
     current_stage = StageName.TRANSLATE
     set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
-        translated_cues = load_cues(artifact_path(job, "translated_cues"))
-        translated_by_id = {cue.id: cue for cue in translated_cues}
-        if len(translated_by_id) != len(translated_cues):
-            raise ValueError("translated_cues contains duplicate cue ids")
-        existing_languages = {cue.target_language for cue in translated_cues if cue.target_language}
-        if existing_languages and existing_languages != {target_language}:
-            raise ValueError("target language must match the existing translated cues")
+        manifest, translated_cues, _batches = _cue_retranslation_manifest(
+            job, cue_ids, target_language
+        )
+        batches_path = valid_artifact_path(job, "cue_retranslation_batches")
+        if batches_path is None:
+            raise ValueError("job has no valid cue retranslation manifest")
+        stored_manifest = json.loads(batches_path.read_text(encoding="utf-8"))
+        if stored_manifest != manifest:
+            raise ValueError("cue retranslation manifest no longer matches current inputs")
         expected_ids = set(cue_ids)
-        missing = sorted(expected_ids - translated_by_id.keys())
-        if missing:
-            raise ValueError(f"translated_cues does not contain ids: {missing}")
+        response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+        if not isinstance(response, dict) or response.get("fingerprint") != manifest["fingerprint"]:
+            raise ValueError("cue retranslation response fingerprint does not match current inputs")
         translations = load_translation_response(response_file, expected_ids)
         repaired = [
             replace(
@@ -107,27 +167,7 @@ def retranslate_cues(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     job = load_job(job_file)
-    source_cues = load_cues(artifact_path(job, "source_cues"))
-    translated_cues = load_cues(artifact_path(job, "translated_cues"))
-    translated_ids = {cue.id for cue in translated_cues}
-    missing = sorted(set(cue_ids) - translated_ids)
-    if missing:
-        raise ValueError(f"translated_cues does not contain ids: {missing}")
-    existing_languages = {cue.target_language for cue in translated_cues if cue.target_language}
-    if existing_languages and existing_languages != {target_language}:
-        raise ValueError("target language must match the existing translated cues")
-    source_language = next(
-        (cue.source_language for cue in source_cues if cue.source_language),
-        job.config.get("source_language", "auto"),
-    )
-    policy = translation_policy_from_dict(job.config.get("translation_policy"))
-    batches = build_cue_retranslation_batches(
-        source_cues,
-        cue_ids,
-        source_language=source_language,
-        target_language=target_language,
-        policy=policy,
-    )
+    manifest, _translated_cues, batches = _cue_retranslation_manifest(job, cue_ids, target_language)
     mode, provider_config, fallback_reason = resolve_provider(
         provider,
         base_url=base_url,
@@ -136,10 +176,10 @@ def retranslate_cues(
         timeout_seconds=timeout_seconds,
     )
     artifacts_directory = get_job_directory(job) / "artifacts"
+    batches_path = artifacts_directory / "cue-retranslation-batches.json"
+    write_json(batches_path, manifest)
+    add_artifact(job, "cue_retranslation_batches", batches_path, event_sink)
     if mode == "agent":
-        batches_path = artifacts_directory / "cue-retranslation-batches.json"
-        write_json(batches_path, {"batches": [batch.to_dict() for batch in batches]})
-        add_artifact(job, "cue_retranslation_batches", batches_path, event_sink)
         set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return TranslationRunResult("agent", (batches_path,), fallback_reason)
     if provider_config is None:
@@ -187,7 +227,12 @@ def retranslate_cues(
     response_path = artifacts_directory / "cue-retranslation-response.json"
     write_json(
         response_path,
-        {"items": [{"id": cue_id, "text": text} for cue_id, text in sorted(translations.items())]},
+        {
+            "fingerprint": manifest["fingerprint"],
+            "items": [
+                {"id": cue_id, "text": text} for cue_id, text in sorted(translations.items())
+            ],
+        },
     )
     add_artifact(job, "cue_retranslation_response", response_path, event_sink)
     paths = apply_cue_retranslation(

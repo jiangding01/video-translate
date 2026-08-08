@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
@@ -409,7 +410,8 @@ class RecoveryTest(unittest.TestCase):
             job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
             job_file = save_job(job)
 
-            plan = build_recovery_plan(job_file)
+            with patch("xvt.workflow.agent_translation_polish_manifest_valid", return_value=True):
+                plan = build_recovery_plan(job_file)
 
         self.assertEqual(plan.category, "awaiting_input")
         self.assertIn("xvt apply ", plan.prerequisite_commands[0])

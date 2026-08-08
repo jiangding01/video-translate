@@ -24,6 +24,7 @@ from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
     agent_semantic_review_waiting,
     agent_translation_polish_core_satisfied,
+    agent_translation_polish_manifest_valid,
     agent_translation_polish_progress_ready,
     agent_translation_polish_started,
     agent_translation_polish_waiting,
@@ -461,6 +462,7 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
             if (
                 job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
                 and valid_artifact_path(job, "translation_polish_batches") is not None
+                and agent_translation_polish_manifest_valid(job, config)
             ):
                 return ("await_agent_polish",)
             steps.append("polish")
