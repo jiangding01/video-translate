@@ -304,6 +304,9 @@ def translation_polish_satisfied(
     if not all((draft_path, batches_path, progress_path, polished_path)):
         return False
     try:
+        config = config or require_workflow_config(job)
+        if config.target_language is None:
+            return False
         batches_data = json.loads(batches_path.read_text(encoding="utf-8"))
         progress_data = json.loads(progress_path.read_text(encoding="utf-8"))
         if not isinstance(batches_data, dict) or not isinstance(progress_data, dict):
@@ -347,7 +350,11 @@ def translation_polish_satisfied(
             ):
                 return False
             translations[cue_id] = text.strip()
-        expected = apply_polish_translations(load_cues(draft_path), translations)
+        expected = apply_polish_translations(
+            load_cues(draft_path),
+            translations,
+            target_language=config.target_language,
+        )
         polished = load_cues(polished_path)
         return polished == expected
     except (KeyError, OSError, TypeError, ValueError):
@@ -415,9 +422,15 @@ def _finalize_polish(
     job: Job,
     draft: list[Cue],
     translations: dict[int, str],
+    *,
+    target_language: str,
     event_sink: EventSink | None,
 ) -> tuple[Path, ...]:
-    polished = apply_polish_translations(draft, translations)
+    polished = apply_polish_translations(
+        draft,
+        translations,
+        target_language=target_language,
+    )
     invalidated = downstream_of(ArtifactKind.TRANSLATION_POLISHED_CUES)
     job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in invalidated]
     clear_burn_fingerprint(job)
@@ -449,6 +462,8 @@ def _run_translation_polish(
     job = load_job(job_file)
     if config.max_retries < 0 or config.timeout_seconds <= 0:
         raise ValueError("invalid persisted translation provider retry configuration")
+    if config.target_language is None:
+        raise ValueError("translation polish requires a persisted target language")
     batches = _build_batches(job, draft_path, config)
     mode, provider_config, fallback_reason = resolve_provider(
         config.provider,
@@ -577,7 +592,13 @@ def _run_translation_polish(
             extras={"phase": "polish"},
         )
         raise
-    rendered = _finalize_polish(job, load_cues(draft_path), translations, event_sink)
+    rendered = _finalize_polish(
+        job,
+        load_cues(draft_path),
+        translations,
+        target_language=config.target_language,
+        event_sink=event_sink,
+    )
     return TranslationRunResult(mode, (progress_path, *rendered))
 
 
@@ -671,6 +692,8 @@ def apply_agent_translation_polish(
     config = require_workflow_config(job)
     if config.translation_quality != "polished":
         raise ValueError("job does not request polished translation quality")
+    if config.target_language is None:
+        raise ValueError("translation polish requires a persisted target language")
     draft_path = valid_artifact_path(job, "translation_draft_cues")
     batches_path = valid_artifact_path(job, "translation_polish_batches")
     if draft_path is None or batches_path is None:
@@ -727,4 +750,10 @@ def apply_agent_translation_polish(
         translations,
         event_sink,
     )
-    return _finalize_polish(job, load_cues(draft_path), translations, event_sink)
+    return _finalize_polish(
+        job,
+        load_cues(draft_path),
+        translations,
+        target_language=config.target_language,
+        event_sink=event_sink,
+    )

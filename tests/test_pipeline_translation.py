@@ -90,7 +90,7 @@ class TranslationPipelineTest(unittest.TestCase):
 
             response_path = root / "response.json"
             response_path.write_text(
-                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                json.dumps({"items": [{"id": 1, "text": "你好，世界。"}]}),
                 encoding="utf-8",
             )
             translated, bilingual, bilingual_ass = apply_agent_translation(
@@ -100,7 +100,10 @@ class TranslationPipelineTest(unittest.TestCase):
             )
 
             self.assertTrue(translated.exists())
-            self.assertIn("你好", bilingual.read_text())
+            # 模型译文经确定性标点收口后才写入产物：入口漏传 normalize_generated 时此处会失败。
+            self.assertIn("你好 世界", translated.read_text(encoding="utf-8"))
+            self.assertNotIn("你好，世界。", translated.read_text(encoding="utf-8"))
+            self.assertIn("你好 世界", bilingual.read_text(encoding="utf-8"))
             self.assertTrue(bilingual_ass.exists())
             persisted = json.loads((root / "jobs" / job.id / "job.json").read_text())
             self.assertEqual(persisted["stages"]["translate"]["status"], "succeeded")
@@ -244,7 +247,7 @@ class TranslationPipelineTest(unittest.TestCase):
             save_job(job)
             translation_path = root / "translation.srt"
             translation_path.write_text(
-                "1\n00:00:00,000 --> 00:00:00,500\n你好\n",
+                "1\n00:00:00,000 --> 00:00:00,500\n你好，世界。\n",
                 encoding="utf-8",
             )
 
@@ -255,7 +258,7 @@ class TranslationPipelineTest(unittest.TestCase):
             )
 
             self.assertIn("00:00:01,000 --> 00:00:02,000", translated.read_text())
-            self.assertIn("你好", bilingual.read_text())
+            self.assertIn("你好，世界。", bilingual.read_text())
 
     def test_existing_translation_rejects_cue_count_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -321,6 +324,26 @@ class TranslationPipelineTest(unittest.TestCase):
                     max_retries=2,
                     event_sink=events.append,
                 )
+
+            # API 入口的最终产物必须已经过简中标点收口：provider 返回「你好，世界。」，
+            # 落盘的 cue 与用户可见字幕都应是「你好 世界」。入口漏传 normalize_generated
+            # 时这里会失败。
+            persisted = load_job(get_job_file(job))
+            translated_cues = json.loads(
+                next(
+                    Path(artifact.path)
+                    for artifact in persisted.artifacts
+                    if artifact.kind == "translated_cues"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual([cue["target_text"] for cue in translated_cues], ["你好 世界"])
+            translated_srt = next(
+                Path(artifact.path)
+                for artifact in persisted.artifacts
+                if artifact.kind == "translated_srt"
+            ).read_text(encoding="utf-8")
+            self.assertIn("你好 世界", translated_srt)
+            self.assertNotIn("你好，世界。", translated_srt)
 
         self.assertEqual(result.mode, "openai-compatible")
         self.assertEqual(len(calls), 2)

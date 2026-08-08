@@ -157,7 +157,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 ) as review,
                 patch(
                     "xvt.pipeline.semantic.semantic_repair_batch",
-                    return_value={1: "您好。"},
+                    return_value={1: "您好，"},
                 ) as repair,
             ):
                 result = run_translation_semantic_review(job_file)
@@ -182,7 +182,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 if item.kind == "translation_repaired_cues"
             )
             repaired = json.loads(repaired_path.read_text(encoding="utf-8"))
-            self.assertEqual(repaired[0]["target_text"], "您好。")
+            self.assertEqual(repaired[0]["target_text"], "您好")
             self.assertEqual(
                 [(item["id"], item["start_ms"], item["end_ms"]) for item in repaired],
                 [(1, 0, 1000), (2, 1000, 2000)],
@@ -201,7 +201,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 if item.kind == "translated_cues"
             )
             translated = json.loads(translated_path.read_text(encoding="utf-8"))
-            self.assertEqual(translated[0]["target_text"], "您好。")
+            self.assertEqual(translated[0]["target_text"], "您好")
 
     def test_api_final_review_issues_wait_for_acknowledgment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -620,7 +620,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             job_file = self._job(root, provider="agent")
             manifest_path = prepare_agent_semantic_review(job_file)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["review_prompt_version"], 2)
+            self.assertEqual(manifest["review_prompt_version"], 3)
             self.assertEqual(manifest["repair_prompt_version"], 3)
             response = root / "semantic-response.json"
             response.write_text(
@@ -1036,7 +1036,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                                 ],
                             }
                         ],
-                        "repair_results": [{"batch": 1, "items": [{"id": 1, "text": "您好。"}]}],
+                        "repair_results": [{"batch": 1, "items": [{"id": 1, "text": "您好，"}]}],
                         "final_results": [{"batch": manifest["batches"][0]["id"], "issues": []}],
                     },
                     ensure_ascii=False,
@@ -1055,7 +1055,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 if item.kind == "translation_repaired_cues"
             )
             repaired = json.loads(repaired_path.read_text(encoding="utf-8"))
-            self.assertEqual(repaired[0]["target_text"], "您好。")
+            self.assertEqual(repaired[0]["target_text"], "您好")
 
     def test_agent_invalid_repair_keeps_manifest_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1146,7 +1146,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
     def test_agent_manifest_is_bound_to_current_contract_versions(self) -> None:
         for field, value in (
             ("task_version", 999),
-            ("review_prompt_version", 1),
+            ("review_prompt_version", 2),
             ("repair_prompt_version", 1),
         ):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,142 @@ SEMANTIC_GROUP_MAX_DURATION_MS = 30_000
 SEMANTIC_GROUP_PAUSE_MS = 650
 SEMANTIC_SENTENCE_END = SENTENCE_END | frozenset("؟۔।॥։՞")
 _TRAILING_CLOSERS = frozenset("\"'”’»）)]}」』】》〉〕〗〙〛〞〟＂＇")
+# 左右同形的引号无法由字形判断开闭方向，需要按有效引号出现次数的奇偶推断。
+_SYMMETRIC_QUOTES = frozenset("\"'＂＇")
+_SIMPLIFIED_CHINESE_TARGETS = frozenset({"zh-cn", "zh-hans"})
+# 已经承担了停顿或语气的标点，两处判断共用：消除全角逗号、句号后若紧跟这些标点，
+# 停顿已由它们承担，无需补空格；译文末尾是这些标点时也不再追加句末问号——破折号表示
+# 话被打断，逗号表示句子未完，两种情况下追加问号都不合适。
+_EXISTING_PUNCTUATION = frozenset("。！？；：…?!.;:,，—–-")
+_CHINESE_PUNCTUATION_PATTERN = re.compile(
+    r"[ \t]*[，。]+[ \t]*"
+    rf"(?P<closers>[{re.escape(''.join(sorted(_TRAILING_CLOSERS)))}]*)"
+)
+# 模型把省略号写成连续句号时，它承载的是语气停顿而不是句末句号，先归一为规范省略号，
+# 这样下一步消除句号时不会把它整段吃掉。
+_CHINESE_ELLIPSIS_PATTERN = re.compile(r"。{2,}")
+
+
+def _is_simplified_chinese_target(target_language: str) -> bool:
+    normalized = target_language.strip().replace("_", "-").casefold()
+    if normalized in _SIMPLIFIED_CHINESE_TARGETS:
+        return True
+    if not normalized.startswith("zh-hans-"):
+        return False
+    return all(part and part.isalnum() for part in normalized.removeprefix("zh-hans-").split("-"))
+
+
+def _trailing_closers(text: str) -> tuple[list[int], int]:
+    """返回末尾闭合符号的下标（由外到内）与正文结束位置。
+
+    闭合符号之间的空白会被跳过，因此 ``准备好了吗 ”`` 的正文同样在 ``吗`` 结束。
+    """
+
+    positions: list[int] = []
+    index = len(text)
+    while index:
+        character = text[index - 1]
+        if character in _TRAILING_CLOSERS:
+            positions.append(index - 1)
+            index -= 1
+        elif positions and character in " \t":
+            index -= 1
+        else:
+            break
+    return positions, index
+
+
+def _normalize_chinese_punctuation(text: str) -> str:
+    """消除句中的全角逗号、句号，必要时用半角空格保留词边界。
+
+    ``re.sub`` 对每个匹配从左到右恰好调用替换函数一次，下面 ``cursor`` 与
+    ``quote_parity`` 的增量记账依赖这一点；换成 ``finditer`` 或传入 ``count``
+    会让记账静默失效。记账只按游标增量向前扫描，整体保持线性复杂度。
+    """
+
+    cursor = 0
+    quote_parity = dict.fromkeys(_SYMMETRIC_QUOTES, 0)
+
+    def advance(until: int) -> None:
+        nonlocal cursor
+        segment = text[cursor:until]
+        for offset, quote in enumerate(segment):
+            if quote not in quote_parity:
+                continue
+            index = cursor + offset
+            before = text[index - 1] if index else ""
+            after = text[index + 1] if index + 1 < len(text) else ""
+            if (
+                quote in "'＇"
+                and before.isascii()
+                and after.isascii()
+                and before.isalnum()
+                and after.isalnum()
+            ):
+                continue
+            if quote in '"＂' and quote_parity[quote] == 0 and before.isdigit():
+                continue
+            quote_parity[quote] ^= 1
+        cursor = until
+
+    def replace_punctuation(match: re.Match[str]) -> str:
+        advance(match.start())
+        closers = match.group("closers")
+        # 左右同形的引号无法由字形判断方向，用它此前出现次数的奇偶推断：偶数次表示
+        # 这里是开引号，空格要落在引号之前；否则是闭引号，空格落在引号之后。两种
+        # 情况下空格都在引文之外，不会插进引号里面。
+        opens_quote = bool(closers) and quote_parity.get(closers[0]) == 0
+        advance(match.end())
+
+        before = text[match.start() - 1] if match.start() else ""
+        after = text[match.end()] if match.end() < len(text) else ""
+        if (
+            before
+            and after
+            and before not in "\r\n"
+            and after not in "\r\n"
+            and after not in _EXISTING_PUNCTUATION
+        ):
+            return f" {closers}" if opens_quote else f"{closers} "
+        return closers
+
+    return _CHINESE_PUNCTUATION_PATTERN.sub(replace_punctuation, text)
+
+
+def normalize_generated_subtitle_text(
+    source_text: str,
+    target_text: str,
+    *,
+    target_language: str,
+) -> str:
+    if not _is_simplified_chinese_target(target_language):
+        return target_text
+
+    # 只在确有连续句号时才改写，否则保持入参对象不变，让线性复杂度守卫测试可观测。
+    if "。。" in target_text:
+        target_text = _CHINESE_ELLIPSIS_PATTERN.sub("…", target_text)
+    normalized = _normalize_chinese_punctuation(target_text)
+    if not normalized.strip() or _trailing_closers(normalized.rstrip())[1] == 0:
+        return target_text
+
+    # 源文以问句结尾时，记录问号之后还有几个闭合符号，以便在译文中镜像同一位置。
+    stripped_source = source_text.rstrip()
+    source_closers, source_content_end = _trailing_closers(stripped_source)
+    if source_content_end == 0 or stripped_source[source_content_end - 1] not in {"?", "？"}:
+        return normalized
+
+    target_closers, target_content_end = _trailing_closers(normalized)
+    if target_content_end == 0 or normalized[target_content_end - 1] in _EXISTING_PUNCTUATION:
+        return normalized
+
+    # 镜像源文：问号之后保留与源文相同数量的闭合符号，译文闭合符号不足时按实际数量收敛。
+    # 这样 `(ready?)` 得到 `（准备好了？）`，而 `Is it (a)?` 得到 `是吗（a）？`。
+    mirrored = min(len(source_closers), len(target_closers))
+    insert_at = target_closers[mirrored - 1] if mirrored else len(normalized.rstrip())
+    # 反斜杠不能出现在 f-string 表达式内（Python 3.11 仍受此限制），先算好前后两段。
+    leading = normalized[:insert_at].rstrip(" \t")
+    trailing = normalized[insert_at:]
+    return f"{leading}？{trailing}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,11 +821,24 @@ def apply_semantic_repairs(
     candidate_cues: list[Cue],
     repaired: dict[int, str],
     expected_ids: set[int],
+    *,
+    target_language: str,
 ) -> list[Cue]:
     if set(repaired) != expected_ids:
         raise ValueError("semantic repairs must cover all affected semantic groups exactly once")
+    # 未修复的 cue 同样返回新的 Cue 实例，避免调用方复用原列表元素。
     return [
-        replace(cue, target_text=repaired.get(cue.id, cue.target_text)) for cue in candidate_cues
+        replace(
+            cue,
+            target_text=normalize_generated_subtitle_text(
+                cue.source_text,
+                repaired[cue.id].strip(),
+                target_language=target_language,
+            ),
+        )
+        if cue.id in repaired
+        else replace(cue)
+        for cue in candidate_cues
     ]
 
 
@@ -743,6 +893,7 @@ def apply_translations(
     translations: dict[int, str],
     *,
     target_language: str,
+    normalize_generated: bool,
 ) -> list[Cue]:
     expected_ids = {cue.id for cue in cues}
     if set(translations) != expected_ids:
@@ -750,7 +901,15 @@ def apply_translations(
     return [
         replace(
             cue,
-            target_text=translations[cue.id].strip(),
+            target_text=(
+                normalize_generated_subtitle_text(
+                    cue.source_text,
+                    translations[cue.id].strip(),
+                    target_language=target_language,
+                )
+                if normalize_generated
+                else translations[cue.id].strip()
+            ),
             target_language=target_language,
         )
         for cue in cues
@@ -760,10 +919,22 @@ def apply_translations(
 def apply_polish_translations(
     draft_cues: list[Cue],
     polished: dict[int, str],
+    *,
+    target_language: str,
 ) -> list[Cue]:
     if set(polished) != {cue.id for cue in draft_cues}:
         raise ValueError("polished translations must cover every cue exactly once")
-    return [replace(cue, target_text=polished[cue.id].strip()) for cue in draft_cues]
+    return [
+        replace(
+            cue,
+            target_text=normalize_generated_subtitle_text(
+                cue.source_text,
+                polished[cue.id].strip(),
+                target_language=target_language,
+            ),
+        )
+        for cue in draft_cues
+    ]
 
 
 def map_subtitle_translations(

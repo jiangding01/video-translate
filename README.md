@@ -13,6 +13,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议；确定性语义组避免在 provider 批次边界切开句意
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
 - 已有端到端 Job 可显式补跑可恢复译文润色，支持 API checkpoint 与 Agent 回填
+- 对模型生成的简体中文字幕进行保守标点收口：消除全角中文逗号和句号（句中按需替换为半角空格以保留词边界），连续句号归一为单个省略号，保留问号、分号、冒号、破折号和原有换行；导入译文、人工修订、源字幕及非简中不改写
 - 原文、译文、双语 SRT，及独立中英样式的双语 ASS
 - 按 cue 或时间范围生成短片段预览，复用正式 ASS 样式和烧录参数
 - `conservative`、`balanced`、`compact` 三种 ASR 字幕分段预设，默认保持既有平衡行为
@@ -673,6 +674,8 @@ uv run --no-sync xvt run INPUT --output OUTPUT \
 `run`、`batch`、`translate` 和 `prepare-translation` 都支持 `standard|polished`。API 模式的 `polished` 先保存完整翻译草稿，再逐批润色；Agent 模式生成带 `task=translate_and_polish` 和 fingerprint 的单个 `translation-batches.json`。润色候选随后必须经过 Q6 语义校对；API 对可修复问题按完整语义组最多修复一次并复查，Agent 生成 `task=semantic_review_and_repair` manifest，使用 `apply-semantic-review JOB RESPONSE` 回填。旧 Job 或旧 batch 缺质量字段时继续按 `standard`。`--translation-subtitles` 不能与新 Job 的 `polished` 同时使用，应先导入译文再执行 `polish-translation`。
 
 Q6.1c 要求 API 和 Agent 都把每个语义组作为连续话语处理：先理解完整组，再在不改变 cue ID 和时间轴的前提下生成自然、连贯的目标语言文本。翻译和润色优先使用直接、口语化的字幕表达，避免模型无依据添加破折号、公式化对比、空泛连接词或宣传式措辞；原文确有的对比、强调、列举、打断、语气和信息必须保留。专名、产品名和代码标识符没有术语表证据时不得猜测修正；语义校对只有在上下文矛盾、明显误听或可识别专名异常时才报告 `source_suspect`，源文修改继续由人工修订入口完成。
+
+模型生成的显式简中译文（`zh-CN`、`zh-Hans` 及 `zh-Hans-*` 区域后缀形式）写入时还会经过保守的确定性标点收口：消除全角 `，`、`。`，其中句中位置按需替换为一个半角空格以保留 `OpenAI GPT-5` 一类词边界，行尾与换行前直接移除；模型把省略号写成的连续全角句号归一为单个 `…`；`？`、`！`、`；`、`：`、`——`、ASCII URL/版本号/代码标点及模型原有换行一律保留。左右同形引号按上下文推断开闭，但英文词内撇号和数字后的尺寸符号不参与引号计数。源 cue 末尾为问句而译文没有句末语义标点时补 `？`，位置镜像源文中问号相对末尾闭合符号的位置：源文 `(ready?)` 得到 `（准备好了吗？）`，源文 `Is it (a)?` 得到 `是吗（a）？`；译文闭合符号少于源文时按译文实际数量收敛。语义审查把半角空格和 cue 边界视为有效分隔，不会仅因缺少全角逗号或句号报告 `awkward_join`。导入译文、人工译文修订、源字幕、bare `zh`、繁中及其他目标语言保持原样。
 
 语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板，同时给出 JSON 与 SRT 两种载体：JSON（`translation-review-<fp12>.json`）供 Agent 与脚本消费，编辑其中的 `items[].text`；SRT（`translation-review-<fp12>.srt`，每条正文为 `#<cue id>` 注释行加当前译文）供人工用任意字幕工具编辑，只改译文行、保留注释行与时间轴，文件名也不要改（fingerprint 由文件名承载）。两者都用 `xvt apply-translation-review-fixes JOB REVIEW`（按后缀自动识别）回填，效果完全等价，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。SRT 若改动了时间轴或增删了 cue，会在解析阶段直接被拒。存在 `source_suspect` 时还会为相关源 cue 自动生成源文模板，`status` 优先推荐修订源文，同时保留译文修订和 `--acknowledge-translation-review` 直接确认两条备选路径。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 

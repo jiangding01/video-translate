@@ -49,11 +49,15 @@ Requirements:
 - Do not add explanations, Markdown, speaker labels, or punctuation that the source does not justify.
 - Use an empty-looking source only if it is genuinely meaningful; the pipeline rejects empty translated text.
 
+For model-generated explicit Simplified Chinese targets (`zh-CN`, `zh-Hans`, and `zh-Hans-*` regional suffix forms), XVT applies a post-validation punctuation pass consistently to initial translation, one-pass translation plus polish, explicit polish, semantic repair, and selected-cue retranslation. It removes full-width `，` and `。`, substituting a single ASCII space mid-line where one is needed to keep a word boundary (`OpenAI， GPT-5。` becomes `OpenAI GPT-5`) and deleting them outright at end of line or before a line break. Runs of full-width periods — a model's way of writing an ellipsis — collapse into a single `…`. It preserves `？`、`！`、`；`、`：`、`——`, ASCII punctuation such as URLs and versions, and line breaks. Symmetric quotes (`"`, `'`, `＂`, `＇`) carry no direction, so their open/close role is inferred from context; apostrophes inside English words and numeric measurement marks do not change quote direction. Either way the inserted space lands outside the quoted text, never inside it. When a source cue ends in `?` or `？` after trailing closers are ignored, a target without terminal semantic punctuation may receive `？`; its position mirrors where the question mark sits relative to the source's own trailing closers, so `(ready?)` yields `（准备好了吗？）` while `Is it (a)?` yields `是吗（a）？`. When the target has fewer trailing closers than the source, the mirror converges on the count the target actually has. This is not applied to imported translations, human revisions, source subtitles, bare `zh`, Traditional Chinese, or other target languages.
+
 Before applying the response, verify that the response ID set exactly matches the ID set requested by the current manifest. The CLI performs the same validation and will fail on any mismatch.
 
 ## Semantic review and one repair
 
 When the manifest has `task=semantic_review_and_repair`, copy its fingerprint and return every review batch exactly once in `initial_results`. Review each semantic group as joined source and candidate text as well as cue by cue. Issues may use only `meaning_error`, `omission`, `terminology`, `awkward_join`, or `source_suspect`, always with `severity=review`. Report only genuine actionable issues, not stylistic preferences; never propose timing, ID, source-text, or cue-boundary changes.
+
+For explicit Simplified Chinese targets, full-width commas and full stops may be intentionally absent after XVT normalization. Treat ASCII spaces and cue boundaries as valid separators. Do not report `awkward_join` or suggest adding `，` or `。` solely because those marks are absent.
 
 - `meaning_error`: the translated meaning or relationship differs from the source.
 - `omission`: source meaning is missing from the candidate.
