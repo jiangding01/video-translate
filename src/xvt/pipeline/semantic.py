@@ -593,7 +593,12 @@ def _run_repair_phase(
         event_sink,
     )
     expected_ids = {item.id for batch in batches for item in batch.items}
-    repaired_cues = apply_semantic_repairs(candidate, repaired, expected_ids)
+    repaired_cues = apply_semantic_repairs(
+        candidate,
+        repaired,
+        expected_ids,
+        target_language=config.target_language,
+    )
     repaired_path = get_job_directory(job) / "artifacts" / "translation-repaired-cues.json"
     write_json(repaired_path, [asdict(cue) for cue in repaired_cues])
     add_artifact(job, "translation_repaired_cues", repaired_path, event_sink)
@@ -727,7 +732,12 @@ def _repair_chain_satisfied(
             reusable
             and completed == {batch.id for batch in repair_batches}
             and load_cues(repaired_path)
-            == apply_semantic_repairs(candidate, repaired, expected_ids)
+            == apply_semantic_repairs(
+                candidate,
+                repaired,
+                expected_ids,
+                target_language=config.target_language,
+            )
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
@@ -1167,6 +1177,7 @@ def apply_agent_semantic_review(
             candidate,
             repaired,
             {item.id for batch in repair_batches for item in batch.items},
+            target_language=resolved.target_language,
         )
         final_batches = build_semantic_review_batches(
             source,

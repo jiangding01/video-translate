@@ -37,6 +37,7 @@ from xvt.translate import (
     TranslationBatch,
     agent_translation_manifest_fingerprint,
     build_cue_retranslation_batches,
+    normalize_generated_subtitle_text,
     translation_policy_from_dict,
 )
 from xvt.translation_provider import (
@@ -129,7 +130,11 @@ def apply_cue_retranslation(
         repaired = [
             replace(
                 cue,
-                target_text=translations[cue.id],
+                target_text=normalize_generated_subtitle_text(
+                    cue.source_text,
+                    translations[cue.id],
+                    target_language=target_language,
+                ),
                 target_language=target_language,
             )
             if cue.id in translations

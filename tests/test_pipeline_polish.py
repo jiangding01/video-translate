@@ -132,7 +132,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             self._write_polish_response(
                 job_file,
                 response,
-                [{"id": 1, "text": "润色一"}, {"id": 2, "text": "润色二"}],
+                [{"id": 1, "text": "润色一，"}, {"id": 2, "text": "润色二。"}],
             )
             apply_agent_translation_polish(job_file, response)
 
@@ -281,7 +281,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 if artifact.kind == "translation_polished_cues"
             )
             polished = json.loads(polished_path.read_text(encoding="utf-8"))
-            self.assertEqual([item["target_text"] for item in polished], ["你好。", "世界。"])
+            self.assertEqual([item["target_text"] for item in polished], ["你好", "世界"])
             self.assertEqual(
                 [(item["id"], item["start_ms"], item["end_ms"]) for item in polished],
                 [(1, 0, 1000), (2, 1000, 2000)],
@@ -556,7 +556,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 calls.append(batch.id)
                 if batch.id == 2:
                     raise TranslationProviderError("offline", retryable=True)
-                return {item.id: f"润色{item.id}" for item in batch.items}
+                return {item.id: f"润色{item.id}，" for item in batch.items}
 
             with (
                 patch.dict("os.environ", {"TEST_POLISH_API_KEY": "secret"}),
@@ -578,7 +578,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 patch(
                     "xvt.pipeline.polish.polish_batch",
                     side_effect=lambda batch, _config, **_kwargs: {
-                        item.id: f"润色{item.id}" for item in batch.items
+                        item.id: f"润色{item.id}。" for item in batch.items
                     },
                 ) as provider,
             ):
@@ -587,6 +587,14 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             self.assertEqual(result.mode, "openai-compatible")
             self.assertEqual(provider.call_count, 1)
             self.assertEqual(provider.call_args.args[0].id, 2)
+            job = load_job(job_file)
+            polished_path = next(
+                Path(artifact.path)
+                for artifact in job.artifacts
+                if artifact.kind == "translation_polished_cues"
+            )
+            polished = [Cue(**item) for item in json.loads(polished_path.read_text())]
+            self.assertEqual([cue.target_text for cue in polished], ["润色1", "润色2"])
 
     def test_agent_polish_rejects_extra_id_without_replacing_draft(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

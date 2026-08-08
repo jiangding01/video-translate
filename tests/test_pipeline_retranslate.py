@@ -74,7 +74,7 @@ class CueRetranslationTest(unittest.TestCase):
                 json.dumps(
                     {
                         "fingerprint": fingerprint,
-                        "items": [{"id": 1, "text": "新译文一"}],
+                        "items": [{"id": 1, "text": "新译文一，"}],
                     }
                 ),
                 encoding="utf-8",

@@ -19,6 +19,7 @@ from xvt.translate import (
     build_translation_batches,
     load_translation_policy,
     map_subtitle_translations,
+    normalize_generated_subtitle_text,
     parse_semantic_repair_response,
     parse_semantic_review_response,
     parse_translation_response,
@@ -297,6 +298,7 @@ class TranslateTest(unittest.TestCase):
             self.cues,
             {1: "一", 2: "二", 3: "三"},
             target_language="zh-CN",
+            normalize_generated=True,
         )
 
         self.assertEqual([cue.target_text for cue in translated], ["一", "二", "三"])
@@ -304,6 +306,240 @@ class TranslateTest(unittest.TestCase):
             [(cue.start_ms, cue.end_ms) for cue in translated],
             [(0, 1000), (1000, 2000), (2000, 3000)],
         )
+
+    def test_generated_simplified_chinese_normalization_is_language_gated(self) -> None:
+        # 源文问号在全部闭合符号之外，因此译文的问号同样落在闭合引号之后（镜像源文位置）。
+        source = "Are you ready?"
+        target = "准备好了吗， ”"
+        cases = {
+            "zh-CN": "准备好了吗”？",
+            "ZH_hans": "准备好了吗”？",
+            "zh-Hans-SG": "准备好了吗”？",
+            "zh-Hans-": target,
+            "zh-Hans--SG": target,
+            "zh": target,
+            "zh-TW": target,
+            "zh-Hant": target,
+            "en": target,
+            "ja": target,
+        }
+
+        for language, expected in cases.items():
+            with self.subTest(language=language):
+                self.assertEqual(
+                    normalize_generated_subtitle_text(
+                        source,
+                        target,
+                        target_language=language,
+                    ),
+                    expected,
+                )
+
+    def test_generated_simplified_chinese_normalization_scans_text_linearly(self) -> None:
+        class SliceTrackingText(str):
+            sliced_characters = 0
+
+            def __getitem__(self, key: object) -> str:
+                if isinstance(key, slice):
+                    self.sliced_characters += len(range(*key.indices(len(self))))
+                return super().__getitem__(key)
+
+        target = SliceTrackingText('x，"' * 200)
+        normalize_generated_subtitle_text(
+            "A statement.",
+            target,
+            target_language="zh-CN",
+        )
+
+        # 计数必须真的落在生产代码的前缀扫描上：一旦上游多做一次 str 转换，切片就记不到
+        # 这个子类身上，断言会退化为恒真。下界守住「确实观测到了」，上界守住线性复杂度
+        # （引号奇偶记账按游标增量前进；O(n²) 的实现在 600 字符输入下约为 18 万次）。
+        self.assertGreater(target.sliced_characters, 0)
+        self.assertLessEqual(target.sliced_characters, len(target) * 2)
+
+    def test_generated_question_normalization_mirrors_source_closer_position(self) -> None:
+        # 问号相对闭合符号的位置镜像源文，而不是按引号/括号分类固定。
+        cases = (
+            ("(Are you ready?)", "（准备好了吗）", "（准备好了吗？）"),
+            ("Is it (a)?", "是吗（a）", "是吗（a）？"),
+            ('He said "hi?"', "他说“你好”", "他说“你好？”"),
+            ("He said hi?", "他说“你好”", "他说“你好”？"),
+            # 源文问号后有两层闭合符号，译文只有一层时按译文实际数量收敛。
+            ('(He said "hi?")', "他说“你好”", "他说“你好？”"),
+        )
+
+        for source, target, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    normalize_generated_subtitle_text(
+                        source,
+                        target,
+                        target_language="zh-CN",
+                    ),
+                    expected,
+                )
+
+    def test_generated_simplified_chinese_normalization_keeps_spaces_outside_quotes(self) -> None:
+        # 左右同形的引号无法由字形判断方向，空格必须落在引号之外，不能插进引文里面。
+        cases = (
+            ("He said hello.", "他说，'hello'。", "他说 'hello'"),
+            ("He said hello.", "他说，＂hello＂。", "他说 ＂hello＂"),
+            ("He said hello.", "他说，＇hello＇。", "他说 ＇hello＇"),
+            ("He said hello and left.", "他说'hello。'然后走了。", "他说'hello' 然后走了"),
+        )
+
+        for source, target, expected in cases:
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_generated_subtitle_text(
+                        source,
+                        target,
+                        target_language="zh-CN",
+                    ),
+                    expected,
+                )
+
+    def test_generated_normalization_ignores_apostrophes_and_inches(self) -> None:
+        cases = (
+            ("It's fine.", "It's fine，'hello'。", "It's fine 'hello'"),
+            ("Tom's answer is yes.", "Tom's answer，'yes'。", "Tom's answer 'yes'"),
+            ('The 5" screen is large.', '5" screen，"large"。', '5" screen "large"'),
+            ('The 5"screen is large.', '5"screen，"large"。', '5"screen "large"'),
+        )
+
+        for source, target, expected in cases:
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_generated_subtitle_text(
+                        source,
+                        target,
+                        target_language="zh-CN",
+                    ),
+                    expected,
+                )
+
+    def test_generated_consecutive_ideographic_periods_become_one_ellipsis(self) -> None:
+        # 模型把省略号写成连续句号时承载的是语气停顿，归一为单个 `…` 而不是整段删除。
+        cases = (
+            ("Ok...", "我想想。。", "我想想…"),
+            ("Ok...", "好。。。的", "好…的"),
+            ("Ok...", "好的……", "好的……"),
+        )
+
+        for source, target, expected in cases:
+            with self.subTest(target=target):
+                self.assertEqual(
+                    normalize_generated_subtitle_text(
+                        source,
+                        target,
+                        target_language="zh-CN",
+                    ),
+                    expected,
+                )
+
+    def test_generated_simplified_chinese_normalization_preserves_other_punctuation(self) -> None:
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "What is this?",
+                "访问 https://example.com/a,b；版本 1.2.3：可以…——！",
+                target_language="zh-CN",
+            ),
+            "访问 https://example.com/a,b；版本 1.2.3：可以…——！",
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "A statement.",
+                "第一行，\n第二行。",
+                target_language="zh-CN",
+            ),
+            "第一行\n第二行",
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "What?",
+                "这是什么；",
+                target_language="zh-CN",
+            ),
+            "这是什么；",
+        )
+
+    def test_generated_simplified_chinese_normalization_keeps_word_boundaries(self) -> None:
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "OpenAI and GPT-5.",
+                "OpenAI， GPT-5。",
+                target_language="zh-CN",
+            ),
+            "OpenAI GPT-5",
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "A statement.",
+                "，。",
+                target_language="zh-CN",
+            ),
+            "，。",
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "He said hello and left.",
+                "他说“你好。”然后走了。",
+                target_language="zh-CN",
+            ),
+            "他说“你好” 然后走了",
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                'He said "hello".',
+                '他说，"hello"。',
+                target_language="zh-CN",
+            ),
+            '他说 "hello"',
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                'He said "hello" and left.',
+                '他说"hello。"然后走了。',
+                target_language="zh-CN",
+            ),
+            '他说"hello" 然后走了',
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "A statement.",
+                "。”",
+                target_language="zh-CN",
+            ),
+            "。”",
+        )
+
+    def test_generated_question_normalization_handles_spaces_before_closers(self) -> None:
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                'Are you ready? "',
+                "准备好了吗 ”",
+                target_language="zh-CN",
+            ),
+            "准备好了吗？”",
+        )
+        self.assertEqual(
+            normalize_generated_subtitle_text(
+                "Are you ready?",
+                "准备好了吗？ ”",
+                target_language="zh-CN",
+            ),
+            "准备好了吗？ ”",
+        )
+
+    def test_apply_translations_keeps_imported_text_unchanged(self) -> None:
+        translated = apply_translations(
+            [Cue(1, 0, 1000, "What?")],
+            {1: "这是什么， ”"},
+            target_language="zh-CN",
+            normalize_generated=False,
+        )
+
+        self.assertEqual(translated[0].target_text, "这是什么， ”")
 
     def test_polish_batches_include_draft_and_preserve_semantic_groups(self) -> None:
         draft = [
@@ -357,7 +593,11 @@ class TranslateTest(unittest.TestCase):
             for cue in self.cues
         ]
 
-        polished = apply_polish_translations(draft, {1: "一", 2: "二", 3: "三"})
+        polished = apply_polish_translations(
+            draft,
+            {1: "一", 2: "二", 3: "三"},
+            target_language="zh-CN",
+        )
 
         self.assertEqual([cue.target_text for cue in polished], ["一", "二", "三"])
         self.assertEqual(
@@ -447,7 +687,12 @@ class TranslateTest(unittest.TestCase):
                 {"id": 3, "text": "译文3"},
             ],
         )
-        result = apply_semantic_repairs(candidate, repaired, {1, 2, 3})
+        result = apply_semantic_repairs(
+            candidate,
+            repaired,
+            {1, 2, 3},
+            target_language="zh-CN",
+        )
         self.assertEqual([cue.target_text for cue in result], ["译文1", "修订二", "译文3"])
         self.assertEqual(
             [(cue.id, cue.start_ms, cue.end_ms) for cue in result],

@@ -219,7 +219,12 @@ def _atomic_draft_matches_translation_progress(
         if not isinstance(items, list):
             return None
         translations = load_translation_response(progress_path, expected_ids)
-        expected = apply_translations(cues, translations, target_language=target_language)
+        expected = apply_translations(
+            cues,
+            translations,
+            target_language=target_language,
+            normalize_generated=True,
+        )
         return draft_path if load_cues(draft_path) == expected else None
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         return None
@@ -421,6 +426,7 @@ def _agent_polished_cues(job: Job) -> list[Cue]:
         load_cues(source_path),
         progress[1],
         target_language=target_language,
+        normalize_generated=True,
     )
 
 
@@ -1051,7 +1057,12 @@ def apply_agent_translation(
             if not isinstance(text, str) or not text.strip():
                 raise ValueError(f"translation for cue {cue_id} is empty")
             translations[cue_id] = text.strip()
-        translated = apply_translations(cues, translations, target_language=target_language)
+        translated = apply_translations(
+            cues,
+            translations,
+            target_language=target_language,
+            normalize_generated=True,
+        )
     except Exception as error:
         set_stage(
             job,
@@ -1101,6 +1112,7 @@ def apply_subtitle_translation(
             source_cues,
             translations,
             target_language=target_language,
+            normalize_generated=False,
         )
         artifacts_directory = get_job_directory(job) / "artifacts"
         imported_path = artifacts_directory / f"input-translation{subtitle_path.suffix.lower()}"
