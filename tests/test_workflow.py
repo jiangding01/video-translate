@@ -128,6 +128,7 @@ class WorkflowTest(unittest.TestCase):
                 plan.input_paths,
                 (
                     str(source_input),
+                    str(source_input.with_suffix(".srt")),
                     str(translation_input),
                     str(translation_input.with_suffix(".srt")),
                 ),

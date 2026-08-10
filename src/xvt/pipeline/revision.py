@@ -34,11 +34,18 @@ from xvt.workflow_config import (
 SOURCE_REVIEW_TASK = "source_review_fixes"
 TRANSLATION_REVIEW_TASK = "translation_review_fixes"
 
-# 译文修订模板的文件名主干。SRT 载体没有 `revision_fingerprint` 字段，fingerprint 全靠
-# 文件名承载，所以这个命名同时是「写模板」和「校验回填」的唯一来源；CLI 统一入口识别
-# 修订 SRT 用的形状正则也从这两个常量派生，不再各自硬编码。
+# 人工修订模板的文件名主干。SRT 载体没有 `revision_fingerprint` 字段，fingerprint 全靠
+# 文件名承载，所以这些命名同时是「写模板」和「校验回填」的唯一来源；CLI 统一入口识别
+# 修订 SRT 用的形状正则也从这些常量派生，不再各自硬编码。
+SOURCE_REVIEW_STEM_PREFIX = "source-review-"
 TRANSLATION_REVIEW_STEM_PREFIX = "translation-review-"
 REVISION_FINGERPRINT_LENGTH = 12
+
+
+def source_review_stem(fingerprint: str) -> str:
+    """源文修订模板（JSON 与 SRT 共用）的文件名主干。"""
+
+    return f"{SOURCE_REVIEW_STEM_PREFIX}{fingerprint[:REVISION_FINGERPRINT_LENGTH]}"
 
 
 def translation_review_stem(fingerprint: str) -> str:
@@ -82,7 +89,7 @@ def source_review_input_path(job: Job, cue_ids: list[int]) -> Path | None:
         fingerprint = _source_revision_fingerprint(job, cue_ids)
     except UserInputError:
         return None
-    path = get_job_directory(job) / "review" / f"source-review-{fingerprint[:12]}.json"
+    path = get_job_directory(job) / "review" / f"{source_review_stem(fingerprint)}.json"
     return path if path.is_file() else None
 
 
@@ -111,8 +118,15 @@ def prepare_source_review(
         raise UserInputError(f"source review contains unknown cue ids: {unknown}")
 
     fingerprint = _source_revision_fingerprint(job, cue_ids)
-    path = get_job_directory(job) / "review" / f"source-review-{fingerprint[:12]}.json"
+    path = get_job_directory(job) / "review" / f"{source_review_stem(fingerprint)}.json"
     if path.is_file():
+        srt_path = path.with_suffix(".srt")
+        if not srt_path.is_file() or srt_path.is_symlink():
+            save_review_srt(
+                [by_id[cue_id] for cue_id in sorted(cue_ids)],
+                srt_path,
+                mode="source",
+            )
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(
@@ -126,6 +140,11 @@ def prepare_source_review(
             ],
         },
     )
+    save_review_srt(
+        [by_id[cue_id] for cue_id in sorted(cue_ids)],
+        path.with_suffix(".srt"),
+        mode="source",
+    )
     if event_sink:
         event_sink(
             create_event(
@@ -137,6 +156,55 @@ def prepare_source_review(
             )
         )
     return path
+
+
+def _source_srt_review_changes(
+    response_file: Path,
+    job: Job,
+    source_cues: list[Cue],
+) -> tuple[str, dict[int, str]]:
+    try:
+        entries = load_review_srt(response_file)
+    except (OSError, ValueError) as error:
+        raise UserInputError(f"cannot read source review response: {error}") from error
+    if not entries:
+        raise UserInputError("source review response items must be a non-empty array")
+
+    ids_by_timing: dict[tuple[int, int], list[int]] = {}
+    for cue in source_cues:
+        ids_by_timing.setdefault((cue.start_ms, cue.end_ms), []).append(cue.id)
+    changes: dict[int, str] = {}
+    for marker_id, start_ms, end_ms, text in entries:
+        matching_ids = ids_by_timing.get((start_ms, end_ms), [])
+        if not matching_ids:
+            raise UserInputError(
+                "source review SRT changed cue timing or added a cue; "
+                "revision may only change source text"
+            )
+        if marker_id is not None:
+            if marker_id not in matching_ids:
+                raise UserInputError(
+                    f"source review SRT cue id marker #{marker_id} does not match its timing"
+                )
+            cue_id = marker_id
+        elif len(matching_ids) == 1:
+            cue_id = matching_ids[0]
+        else:
+            raise UserInputError(
+                "cannot map the review SRT back to a cue id because source cues share timing"
+            )
+        if cue_id in changes or not text.strip():
+            raise UserInputError("source review response contains an invalid or duplicate item")
+        changes[cue_id] = text.strip()
+
+    expected_fingerprint = _source_revision_fingerprint(job, list(changes))
+    expected_stem = source_review_stem(expected_fingerprint)
+    if response_file.stem != expected_stem:
+        raise UserInputError(
+            "source review response is stale for the current source cues "
+            f"(expected a file named {expected_stem}.srt)"
+        )
+    return expected_fingerprint, changes
 
 
 def _load_previous_source_selection(job: Job) -> dict[str, Any] | None:
@@ -190,41 +258,49 @@ def apply_source_review_fixes(
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise UserInputError("source review requires valid source cues")
-    try:
-        response = json.loads(Path(response_file).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise UserInputError(f"cannot read source review response: {error}") from error
-    if not isinstance(response, dict):
-        raise UserInputError("source review response must be a JSON object")
-    if response.get("task") != SOURCE_REVIEW_TASK or response.get("scope") != "source":
-        raise UserInputError("source review response task or scope is invalid")
-    items = response.get("items")
-    if not isinstance(items, list) or not items:
-        raise UserInputError("source review response items must be a non-empty array")
-
-    changes: dict[int, str] = {}
-    for item in items:
-        if not isinstance(item, dict) or set(item) != {"id", "text"}:
-            raise UserInputError("source review items may contain only id and text")
-        cue_id = item.get("id") if isinstance(item, dict) else None
-        text = item.get("text") if isinstance(item, dict) else None
-        if (
-            not isinstance(cue_id, int)
-            or isinstance(cue_id, bool)
-            or cue_id in changes
-            or not isinstance(text, str)
-            or not text.strip()
-        ):
-            raise UserInputError("source review response contains an invalid or duplicate item")
-        changes[cue_id] = text.strip()
-
-    expected_fingerprint = _source_revision_fingerprint(job, list(changes))
-    if response.get("revision_fingerprint") != expected_fingerprint:
-        raise UserInputError("source review response is stale for the current source cues")
     source_cues = load_cues(source_path)
     by_id = {cue.id: cue for cue in source_cues}
     if len(by_id) != len(source_cues):
         raise UserInputError("source cues contain duplicate cue ids")
+    response_path = Path(response_file)
+    if response_path.suffix.lower() == ".srt":
+        expected_fingerprint, changes = _source_srt_review_changes(
+            response_path,
+            job,
+            source_cues,
+        )
+    else:
+        try:
+            response = json.loads(response_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise UserInputError(f"cannot read source review response: {error}") from error
+        if not isinstance(response, dict):
+            raise UserInputError("source review response must be a JSON object")
+        if response.get("task") != SOURCE_REVIEW_TASK or response.get("scope") != "source":
+            raise UserInputError("source review response task or scope is invalid")
+        items = response.get("items")
+        if not isinstance(items, list) or not items:
+            raise UserInputError("source review response items must be a non-empty array")
+
+        changes = {}
+        for item in items:
+            if not isinstance(item, dict) or set(item) != {"id", "text"}:
+                raise UserInputError("source review items may contain only id and text")
+            cue_id = item.get("id")
+            text = item.get("text")
+            if (
+                not isinstance(cue_id, int)
+                or isinstance(cue_id, bool)
+                or cue_id in changes
+                or not isinstance(text, str)
+                or not text.strip()
+            ):
+                raise UserInputError("source review response contains an invalid or duplicate item")
+            changes[cue_id] = text.strip()
+
+        expected_fingerprint = _source_revision_fingerprint(job, list(changes))
+        if response.get("revision_fingerprint") != expected_fingerprint:
+            raise UserInputError("source review response is stale for the current source cues")
     unknown = sorted(changes.keys() - by_id.keys())
     if unknown:
         raise UserInputError(f"source review contains unknown cue ids: {unknown}")
@@ -533,7 +609,7 @@ def ensure_translation_review_input(
     if existing is not None:
         # 旧 Job 可能只有 JSON 模板；SRT 是后加的人工通道，缺失时按同一 fingerprint 补齐。
         srt_path = existing.with_suffix(".srt")
-        if not srt_path.is_file():
+        if not srt_path.is_file() or srt_path.is_symlink():
             target = _target_kinds(job)
             if target is not None:
                 _, _, _, candidate_path = target

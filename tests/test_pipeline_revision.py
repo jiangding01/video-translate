@@ -14,6 +14,7 @@ from xvt.pipeline import (
     prepare_source_review,
     run_subtitle_transcription,
 )
+from xvt.pipeline.revision import source_review_stem
 from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.workflow import _source_selection_satisfied, continue_workflow
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
@@ -211,6 +212,166 @@ class SourceReviewPipelineTest(unittest.TestCase):
             self.assertEqual(repeated, response)
             persisted = json.loads(repeated.read_text(encoding="utf-8"))
             self.assertEqual(persisted["items"][0]["text"], "Unsaved user edit")
+
+    def test_prepare_source_review_replaces_srt_symlink_without_following_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            response = prepare_source_review(job_file, [1])
+            srt_path = response.with_suffix(".srt")
+            outside = root / "outside.srt"
+            outside.write_text("sentinel", encoding="utf-8")
+            srt_path.unlink()
+            srt_path.symlink_to(outside)
+
+            prepare_source_review(job_file, [1])
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel")
+            self.assertTrue(srt_path.is_file())
+            self.assertFalse(srt_path.is_symlink())
+
+    def test_source_review_srt_matches_json_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "json").mkdir()
+            (root / "srt").mkdir()
+            json_job = self._job(root / "json")
+            json_response = prepare_source_review(json_job, [1])
+            json_payload = json.loads(json_response.read_text(encoding="utf-8"))
+            json_payload["items"][0]["text"] = "Corrected source text."
+            json_response.write_text(json.dumps(json_payload), encoding="utf-8")
+            apply_source_review_fixes(json_job, json_response)
+            json_revision = valid_artifact_path(load_job(json_job), "source_review_revision")
+            assert json_revision is not None
+
+            srt_job = self._job(root / "srt")
+            srt_template = prepare_source_review(srt_job, [1]).with_suffix(".srt")
+            srt_text = srt_template.read_text(encoding="utf-8").replace(
+                "GPT's 5.6 soul.",
+                "Corrected source text.",
+            )
+            srt_template.write_text(srt_text, encoding="utf-8")
+            apply_source_review_fixes(srt_job, srt_template)
+            srt_revision = valid_artifact_path(load_job(srt_job), "source_review_revision")
+            assert srt_revision is not None
+
+            json_data = json.loads(json_revision.read_text(encoding="utf-8"))
+            srt_data = json.loads(srt_revision.read_text(encoding="utf-8"))
+            for data in (json_data, srt_data):
+                data.pop("revision_fingerprint")
+                data.pop("previous_source_cues_checksum")
+                data.pop("reviewed_source_cues_checksum")
+            self.assertEqual(json_data, srt_data)
+
+    def test_source_review_srt_rejects_timing_add_remove_marker_and_stale_name(self) -> None:
+        cases = {
+            "timing": (
+                "00:00:00,000 --> 00:00:01,000",
+                "00:00:00,100 --> 00:00:01,000",
+                "timing",
+            ),
+            "added": (
+                "#1\nGPT's 5.6 soul.",
+                "#1\nGPT's 5.6 soul.\n\n2\n00:00:01,000 --> 00:00:02,000\n#2\nAdded.",
+                "stale",
+            ),
+            "removed": (
+                "1\n00:00:00,000 --> 00:00:01,000\n#1\nGPT's 5.6 soul.\n",
+                "",
+                "non-empty",
+            ),
+            "marker": ("#1", "#2", "does not match"),
+        }
+        for name, (old, new, message) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                job_file = self._job(Path(directory))
+                response = prepare_source_review(job_file, [1]).with_suffix(".srt")
+                response.write_text(
+                    response.read_text(encoding="utf-8").replace(old, new),
+                    encoding="utf-8",
+                )
+                before = job_file.read_bytes()
+                with self.assertRaisesRegex(UserInputError, message):
+                    apply_source_review_fixes(job_file, response)
+                self.assertEqual(job_file.read_bytes(), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            response = prepare_source_review(job_file, [1]).with_suffix(".srt")
+            response.rename(response.with_name(f"{source_review_stem('0' * 32)}.srt"))
+            stale = response.with_name(f"{source_review_stem('0' * 32)}.srt")
+            with self.assertRaisesRegex(UserInputError, "stale"):
+                apply_source_review_fixes(job_file, stale)
+
+    def test_source_review_srt_uses_marker_to_disambiguate_shared_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            job = load_job(job_file)
+            source_path = valid_artifact_path(job, "source_cues")
+            assert source_path is not None
+            cues = json.loads(source_path.read_text(encoding="utf-8"))
+            cues[1]["start_ms"] = cues[0]["start_ms"]
+            cues[1]["end_ms"] = cues[0]["end_ms"]
+            source_path.write_text(json.dumps(cues), encoding="utf-8")
+            for artifact in job.artifacts:
+                if artifact.kind == "source_cues":
+                    artifact.checksum = file_checksum(source_path)
+            save_job(job)
+            response = prepare_source_review(job_file, [2]).with_suffix(".srt")
+            response.write_text(
+                response.read_text(encoding="utf-8").replace(
+                    "Keep this line.",
+                    "Corrected second cue.",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                apply_source_review_fixes(job_file, response)
+
+            reviewed_path = valid_artifact_path(load_job(job_file), "source_cues")
+            assert reviewed_path is not None
+            reviewed = json.loads(reviewed_path.read_text(encoding="utf-8"))
+            self.assertEqual(reviewed[0]["source_text"], "GPT's 5.6 soul.")
+            self.assertEqual(reviewed[1]["source_text"], "Corrected second cue.")
+
+    def test_source_review_srt_preserves_unedited_multiline_source_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            job = load_job(job_file)
+            source_path = valid_artifact_path(job, "source_cues")
+            assert source_path is not None
+            cues = json.loads(source_path.read_text(encoding="utf-8"))
+            cues[1]["source_text"] = (
+                "First line.\n\n  indented second line.\n"
+                "<i>literal</i> {\\an8}literal literal\\Ntext"
+            )
+            source_path.write_text(json.dumps(cues), encoding="utf-8")
+            for artifact in job.artifacts:
+                if artifact.kind == "source_cues":
+                    artifact.checksum = file_checksum(source_path)
+            save_job(job)
+            response = prepare_source_review(job_file, [1, 2]).with_suffix(".srt")
+            response.write_text(
+                response.read_text(encoding="utf-8").replace(
+                    "GPT's 5.6 soul.",
+                    "Corrected first cue.",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA"):
+                apply_source_review_fixes(job_file, response)
+
+            reviewed_path = valid_artifact_path(load_job(job_file), "source_cues")
+            assert reviewed_path is not None
+            reviewed = json.loads(reviewed_path.read_text(encoding="utf-8"))
+            self.assertEqual(reviewed[0]["source_text"], "Corrected first cue.")
+            self.assertEqual(
+                reviewed[1]["source_text"],
+                "First line.\n\n  indented second line.\n"
+                "<i>literal</i> {\\an8}literal literal\\Ntext",
+            )
 
     def test_response_rejects_timing_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
