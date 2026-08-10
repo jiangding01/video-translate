@@ -18,6 +18,7 @@ from xvt.config import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TRANSLATION_STYLE,
 )
+from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -283,6 +284,16 @@ def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
     ).hexdigest()
 
 
+def _burn_source_media_checksum(job: Job, config: WorkflowConfig) -> str | None:
+    media_value = config.burn_media or job.input
+    parsed = urlparse(str(media_value))
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        media_path = valid_artifact_path(job, "source_video")
+        return _artifact_checksum(job, "source_video") if media_path is not None else None
+    media_path = Path(str(media_value)).expanduser()
+    return file_checksum(media_path) if media_path.is_file() else None
+
+
 def _stored_burn_fingerprint(job: Job) -> str | None:
     """读取已登记的烧录指纹：优先 checksum 有效的 artifact，回退旧 workflow 字段。"""
 
@@ -302,6 +313,24 @@ def _stored_burn_fingerprint(job: Job) -> str | None:
     return None
 
 
+def _burn_proof(job: Job) -> dict[str, str] | None:
+    """读取 checksum 有效的 v2 烧录证明记录。"""
+
+    path = valid_artifact_path(job, "burn_fingerprint")
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != 2:
+        return None
+    fields = ("fingerprint", "burned_video_checksum", "source_media_checksum")
+    if not all(isinstance(data.get(field), str) and data[field] for field in fields):
+        return None
+    return {field: data[field] for field in fields}
+
+
 def _record_burn_fingerprint(job_file: Path) -> None:
     """将派生指纹登记为 ``burn_fingerprint`` artifact，并清除历史 workflow 旁路字段。"""
 
@@ -311,14 +340,29 @@ def _record_burn_fingerprint(job_file: Path) -> None:
     except ValueError:
         return
     fingerprint = _burn_fingerprint(job, config)
-    if not fingerprint:
+    source_media_checksum = _burn_source_media_checksum(job, config)
+    burned_videos = [artifact for artifact in job.artifacts if artifact.kind == "burned_video"]
+    if not fingerprint or not source_media_checksum or len(burned_videos) != 1:
+        return
+    burned_video = burned_videos[0]
+    if not burned_video.checksum:
         return
     artifacts_directory = get_job_directory(job) / "artifacts"
     artifacts_directory.mkdir(parents=True, exist_ok=True)
     path = artifacts_directory / "burn-fingerprint.json"
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(
-        json.dumps({"fingerprint": fingerprint}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            {
+                "version": 2,
+                "fingerprint": fingerprint,
+                "burned_video_checksum": burned_video.checksum,
+                "source_media_checksum": source_media_checksum,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     temporary.replace(path)
@@ -326,6 +370,102 @@ def _record_burn_fingerprint(job_file: Path) -> None:
     clear_burn_fingerprint(job)
     job.artifacts.append(Artifact("burn_fingerprint", str(path), file_checksum(path)))
     save_job(job)
+
+
+def relink_burned_output(
+    job_file: str | Path,
+    candidate: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> Path:
+    """将原烧录成品登记重新绑定到 checksum 完全一致的现存文件。"""
+
+    requested_job_file = Path(job_file).expanduser().resolve()
+    job = load_job(requested_job_file)
+    if requested_job_file != get_job_file(job).resolve():
+        raise UserInputError("job file path does not match the Job's persisted identity")
+    try:
+        config = require_workflow_config(job)
+    except ValueError as error:
+        raise UserInputError("job has no persisted burned-video workflow goal") from error
+    if not config.burn:
+        raise UserInputError("job has no persisted burned-video goal")
+
+    burned_artifacts = [artifact for artifact in job.artifacts if artifact.kind == "burned_video"]
+    if len(burned_artifacts) != 1:
+        raise UserInputError("burned video relink requires exactly one registered burned video")
+    burned_artifact = burned_artifacts[0]
+    if not burned_artifact.checksum:
+        raise UserInputError("job has no checksummed burned video to relink")
+    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
+        raise UserInputError("burned video cannot be relinked before media QA passes")
+
+    media_qa_path = valid_artifact_path(job, "media_qa")
+    if media_qa_path is None:
+        raise UserInputError("burned video cannot be relinked without a valid media QA report")
+    try:
+        media_qa = json.loads(media_qa_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise UserInputError("burned video media QA report is unreadable") from error
+    if not isinstance(media_qa, dict) or media_qa.get("status") != "pass":
+        raise UserInputError("burned video cannot be relinked unless media QA passed")
+
+    if valid_artifact_path(job, "translated_cues") is None:
+        raise UserInputError("burned video cannot be relinked without valid translated subtitles")
+    current_fingerprint = _burn_fingerprint(job, config)
+    current_source_media_checksum = _burn_source_media_checksum(job, config)
+    proof = _burn_proof(job)
+    if proof is None:
+        raise UserInputError("burned video relink requires a checksum-valid v2 burn proof")
+    if (
+        current_fingerprint is None
+        or current_source_media_checksum is None
+        or proof["fingerprint"] != current_fingerprint
+        or proof["source_media_checksum"] != current_source_media_checksum
+        or _stored_burn_fingerprint(job) != current_fingerprint
+    ):
+        raise UserInputError("burned video cannot be relinked because its fingerprint is stale")
+
+    candidate_path = Path(candidate).expanduser()
+    if not candidate_path.is_file():
+        raise UserInputError(f"burned video candidate does not exist: {candidate_path}")
+    candidate_path = candidate_path.resolve()
+    candidate_checksum = file_checksum(candidate_path)
+    if (
+        burned_artifact.checksum != proof["burned_video_checksum"]
+        or candidate_checksum != proof["burned_video_checksum"]
+    ):
+        raise UserInputError("burned video candidate checksum does not match the registered output")
+
+    old_path = burned_artifact.path
+    if candidate_path == Path(old_path).expanduser().resolve():
+        return candidate_path
+    job.artifacts = [
+        Artifact("burned_video", str(candidate_path), burned_artifact.checksum)
+        if artifact.kind == "burned_video"
+        else artifact
+        for artifact in job.artifacts
+    ]
+    save_job(job)
+    if event_sink:
+        fields = job_event_fields(job.id, get_job_file(job))
+        event_sink(
+            create_event(
+                EventType.ARTIFACT_INVALIDATED,
+                **fields,
+                kind="burned_video",
+                path=old_path,
+            )
+        )
+        event_sink(
+            create_event(
+                EventType.ARTIFACT_CREATED,
+                **fields,
+                kind="burned_video",
+                path=str(candidate_path),
+            )
+        )
+    return candidate_path
 
 
 def _current_artifacts(
@@ -390,11 +530,40 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
 def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
     """烧录目标完成：成品 checksum 有效、媒体 QA 通过、派生指纹匹配。"""
 
-    if valid_artifact_path(job, "burned_video") is None:
+    burned_path = valid_artifact_path(job, "burned_video")
+    if burned_path is None:
         return False
     if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
         return False
-    return _stored_burn_fingerprint(job) == _burn_fingerprint(job, config)
+    media_qa_path = valid_artifact_path(job, "media_qa")
+    if media_qa_path is None:
+        return False
+    try:
+        media_qa = json.loads(media_qa_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    if not isinstance(media_qa, dict) or media_qa.get("status") != "pass":
+        return False
+    if _stored_burn_fingerprint(job) != _burn_fingerprint(job, config):
+        return False
+    proof = _burn_proof(job)
+    proof_path = valid_artifact_path(job, "burn_fingerprint")
+    if proof_path is not None:
+        try:
+            proof_data = json.loads(proof_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            return False
+        if isinstance(proof_data, dict) and proof_data.get("version") == 2:
+            if proof is None:
+                return False
+        else:
+            return True
+    if proof is None:
+        return True
+    burned_artifact = next(
+        artifact for artifact in job.artifacts if artifact.kind == "burned_video"
+    )
+    return burned_artifact.checksum == proof["burned_video_checksum"]
 
 
 def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:

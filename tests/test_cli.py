@@ -847,6 +847,78 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 5)
         self.assertEqual(json.loads(output.getvalue())["status"], "fail")
 
+    def test_relink_burned_output_dispatches_and_prints_path(self) -> None:
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = Path(directory) / "job.json"
+            job_file.write_text("{}", encoding="utf-8")
+            candidate = Path(directory) / "saved.mp4"
+            candidate.write_bytes(b"video")
+            with (
+                patch(
+                    "xvt.cli.relink_burned_output",
+                    return_value=candidate.resolve(),
+                ) as relink,
+                redirect_stdout(output),
+            ):
+                return_code = main(["relink-burned-output", str(job_file), str(candidate)])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(relink.call_args.args, (str(job_file), str(candidate)))
+        self.assertIn(str(candidate.resolve()), output.getvalue())
+
+    def test_relink_burned_output_jsonl_reports_cli_completion(self) -> None:
+        output = StringIO()
+
+        def relink_with_events(_job_file, _candidate, *, event_sink):
+            event_sink(
+                create_event(
+                    EventType.ARTIFACT_INVALIDATED,
+                    job_id="job-1",
+                    kind="burned_video",
+                    path="/tmp/old.mp4",
+                )
+            )
+            event_sink(
+                create_event(
+                    EventType.ARTIFACT_CREATED,
+                    job_id="job-1",
+                    kind="burned_video",
+                    path=str(candidate.resolve()),
+                )
+            )
+            return candidate.resolve()
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = Path(directory) / "job.json"
+            job_file.write_text("{}", encoding="utf-8")
+            candidate = Path(directory) / "saved.mp4"
+            candidate.write_bytes(b"video")
+            with (
+                patch(
+                    "xvt.cli.relink_burned_output",
+                    side_effect=relink_with_events,
+                ),
+                redirect_stdout(output),
+            ):
+                return_code = main(
+                    [
+                        "relink-burned-output",
+                        str(job_file),
+                        str(candidate),
+                        "--events-jsonl",
+                    ]
+                )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(return_code, 0)
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["artifact_invalidated", "artifact_created", "cli_completed"],
+        )
+        self.assertEqual(events[-1]["data"]["command"], "relink-burned-output")
+        self.assertEqual(events[-1]["data"]["artifacts"], [str(candidate.resolve())])
+
     def test_resume_prints_job_file(self) -> None:
         output = StringIO()
         with tempfile.TemporaryDirectory() as directory:

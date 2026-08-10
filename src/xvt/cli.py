@@ -68,7 +68,13 @@ from xvt.recovery import (
 )
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.translate import translation_policy_from_dict
-from xvt.workflow import WorkflowOptions, continue_workflow, plan_advance_steps, run_workflow
+from xvt.workflow import (
+    WorkflowOptions,
+    continue_workflow,
+    plan_advance_steps,
+    relink_burned_output,
+    run_workflow,
+)
 from xvt.workflow_config import (
     WorkflowConfig,
     get_workflow_config,
@@ -242,6 +248,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_parser.add_argument("job_file")
     verify_parser.add_argument("--json", action="store_true")
+
+    relink_burned_parser = subparsers.add_parser(
+        "relink-burned-output",
+        help="Relink a moved burned video after verifying its original checksum",
+    )
+    relink_burned_parser.add_argument("job_file")
+    relink_burned_parser.add_argument("existing_video")
+    relink_burned_parser.add_argument("--events-jsonl", action="store_true")
 
     resume_parser = subparsers.add_parser(
         "resume",
@@ -1186,6 +1200,24 @@ def _cmd_verify(arguments: argparse.Namespace) -> int:
     return ExitCode.OK if report["status"] == "pass" else ExitCode.VERIFY_FAILED
 
 
+def _cmd_relink_burned_output(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    path = relink_burned_output(
+        arguments.job_file,
+        arguments.existing_video,
+        event_sink=event_sink,
+    )
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            job_file=str(Path(arguments.job_file).expanduser().resolve()),
+            artifacts=[str(path)],
+        )
+    else:
+        print(f"已重新关联烧录成品: {path}")
+    return 0
+
+
 def _cmd_resume(arguments: argparse.Namespace) -> int:
     event_sink = _event_sink(arguments)
     job = resume_job(arguments.job_file, event_sink=event_sink)
@@ -1765,6 +1797,7 @@ _COMMAND_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "batch-continue": _cmd_batch_continue,
     "status": _cmd_status,
     "verify": _cmd_verify,
+    "relink-burned-output": _cmd_relink_burned_output,
     "resume": _cmd_resume,
     "rebuild-source": _cmd_rebuild_source,
     "continue": _cmd_continue,
@@ -1802,6 +1835,7 @@ _JOB_MUTATING_COMMANDS = frozenset(
     {
         "apply",
         "continue",
+        "relink-burned-output",
         "resume",
         "rebuild-source",
         "translate",

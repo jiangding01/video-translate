@@ -1,9 +1,12 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.errors import UserInputError
+from xvt.events import EventType
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import (
@@ -17,7 +20,7 @@ from xvt.pipeline import (
     source_review_input_path,
     translation_review_input_path,
 )
-from xvt.recovery import build_recovery_plan, file_checksum
+from xvt.recovery import build_recovery_plan, file_checksum, verify_job
 from xvt.translate import GlossaryTerm, SemanticIssue, TranslationPolicy
 from xvt.workflow import (
     WorkflowOptions,
@@ -27,6 +30,7 @@ from xvt.workflow import (
     continue_workflow,
     plan_advance_steps,
     planned_run_steps,
+    relink_burned_output,
     run_workflow,
     workflow_goals,
 )
@@ -675,13 +679,17 @@ class WorkflowTest(unittest.TestCase):
             )
             job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
             save_job(job)
+            media_qa = Path(directory) / "media-qa.json"
+            media_qa.write_text('{"status":"pass"}\n', encoding="utf-8")
             with (
                 patch("xvt.workflow.valid_artifact_path") as valid,
                 patch("xvt.workflow._burn_fingerprint", return_value="current"),
                 patch("xvt.workflow.burn_translated_job") as burn,
             ):
                 valid.side_effect = lambda _job, kind: (
-                    Path(f"/tmp/{kind}")
+                    media_qa
+                    if kind == "media_qa"
+                    else Path(f"/tmp/{kind}")
                     if kind
                     in {
                         "source_cues",
@@ -906,6 +914,49 @@ class WorkflowTest(unittest.TestCase):
 
 
 class BurnFingerprintArtifactTest(unittest.TestCase):
+    def _relinkable_job(self, root: Path) -> tuple[Path, Path, Path]:
+        media = root / "video.mp4"
+        media.write_bytes(b"media")
+        burned = root / "burned.mp4"
+        burned.write_bytes(b"burned-output")
+        candidate = root / "saved.mp4"
+        candidate.write_bytes(burned.read_bytes())
+        cues = root / "translated-cues.json"
+        cues.write_text("[]", encoding="utf-8")
+        source_cues = root / "source-cues.json"
+        source_cues.write_text("[]", encoding="utf-8")
+        translated_srt = root / "translated.srt"
+        translated_srt.write_text("", encoding="utf-8")
+        bilingual_srt = root / "bilingual.srt"
+        bilingual_srt.write_text("", encoding="utf-8")
+        media_qa = root / "media-qa.json"
+        media_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
+        job = create_job(
+            str(media),
+            root,
+            {
+                "workflow": {
+                    "target_language": "zh-CN",
+                    "burn": True,
+                    "hardware_encoding": True,
+                }
+            },
+        )
+        job.artifacts.extend(
+            [
+                Artifact("translated_cues", str(cues), file_checksum(cues)),
+                Artifact("source_cues", str(source_cues), file_checksum(source_cues)),
+                Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
+                Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                Artifact("burned_video", str(burned), file_checksum(burned)),
+                Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
+            ]
+        )
+        job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+        job_file = save_job(job)
+        _record_burn_fingerprint(job_file)
+        return job_file, burned, candidate
+
     def test_record_writes_artifact_and_clears_workflow_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             media = Path(directory) / "video.mp4"
@@ -919,7 +970,14 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             }
             cues = Path(directory) / "translated-cues.json"
             cues.write_text("[]", encoding="utf-8")
-            job.artifacts.append(Artifact("translated_cues", str(cues), file_checksum(cues)))
+            burned = Path(directory) / "burned.mp4"
+            burned.write_bytes(b"burned")
+            job.artifacts.extend(
+                [
+                    Artifact("translated_cues", str(cues), file_checksum(cues)),
+                    Artifact("burned_video", str(burned), file_checksum(burned)),
+                ]
+            )
             job_file = save_job(job)
 
             _record_burn_fingerprint(job_file)
@@ -931,6 +989,15 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             self.assertTrue(any(item.kind == "burn_fingerprint" for item in job.artifacts))
             path = next(item.path for item in job.artifacts if item.kind == "burn_fingerprint")
             self.assertTrue(Path(path).is_file())
+            self.assertEqual(
+                json.loads(Path(path).read_text(encoding="utf-8")),
+                {
+                    "version": 2,
+                    "fingerprint": stored,
+                    "burned_video_checksum": file_checksum(burned),
+                    "source_media_checksum": file_checksum(media),
+                },
+            )
 
     def test_stored_fingerprint_falls_back_to_workflow_field(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -957,10 +1024,13 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             cues.write_text("[]", encoding="utf-8")
             burned = Path(directory) / "burned.mp4"
             burned.write_bytes(b"out")
+            media_qa = Path(directory) / "media-qa.json"
+            media_qa.write_text('{"status":"pass"}\n', encoding="utf-8")
             job.artifacts.extend(
                 [
                     Artifact("translated_cues", str(cues), file_checksum(cues)),
                     Artifact("burned_video", str(burned), file_checksum(burned)),
+                    Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
                 ]
             )
             job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
@@ -976,6 +1046,278 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             )
             fingerprint_path.write_text('{"fingerprint": "tampered"}\n', encoding="utf-8")
             self.assertFalse(_burn_satisfied(job, config))
+
+    def test_relink_burned_output_restores_artifact_validity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file, burned, candidate = self._relinkable_job(Path(directory))
+            burned.unlink()
+            events = []
+
+            result = relink_burned_output(job_file, candidate, event_sink=events.append)
+            job = load_job(job_file)
+            artifact = next(item for item in job.artifacts if item.kind == "burned_video")
+            config = WorkflowConfig.from_dict(job.config["workflow"])
+            self.assertEqual(result, candidate.resolve())
+            self.assertEqual(artifact.path, str(candidate.resolve()))
+            self.assertEqual(artifact.checksum, file_checksum(candidate))
+            self.assertTrue(_burn_satisfied(job, config))
+            self.assertEqual(verify_job(job_file)["status"], "pass")
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+            self.assertEqual(
+                [event.type for event in events],
+                [EventType.ARTIFACT_INVALIDATED, EventType.ARTIFACT_CREATED],
+            )
+
+    def test_relink_burned_output_rejects_unverified_candidates_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for case in (
+                "checksum",
+                "media_qa_stage",
+                "media_qa_missing",
+                "media_qa_checksum",
+                "media_qa_status",
+                "translated_cues",
+                "fingerprint",
+            ):
+                with self.subTest(case=case):
+                    case_root = root / case
+                    case_root.mkdir()
+                    job_file, burned, candidate = self._relinkable_job(case_root)
+                    burned.unlink()
+                    if case == "checksum":
+                        candidate.write_bytes(b"different")
+                    elif case == "media_qa_stage":
+                        job = load_job(job_file)
+                        job.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
+                        save_job(job)
+                    elif case == "media_qa_missing":
+                        job = load_job(job_file)
+                        job.artifacts = [
+                            artifact for artifact in job.artifacts if artifact.kind != "media_qa"
+                        ]
+                        save_job(job)
+                    elif case == "media_qa_checksum":
+                        job = load_job(job_file)
+                        media_qa_path = Path(
+                            next(
+                                artifact.path
+                                for artifact in job.artifacts
+                                if artifact.kind == "media_qa"
+                            )
+                        )
+                        media_qa_path.write_text('{"status":"failed"}\n', encoding="utf-8")
+                    elif case == "media_qa_status":
+                        job = load_job(job_file)
+                        media_qa_path = Path(
+                            next(
+                                artifact.path
+                                for artifact in job.artifacts
+                                if artifact.kind == "media_qa"
+                            )
+                        )
+                        media_qa_path.write_text('{"status":"failed"}\n', encoding="utf-8")
+                        job.artifacts = [
+                            Artifact("media_qa", str(media_qa_path), file_checksum(media_qa_path))
+                            if artifact.kind == "media_qa"
+                            else artifact
+                            for artifact in job.artifacts
+                        ]
+                        save_job(job)
+                    elif case == "translated_cues":
+                        job = load_job(job_file)
+                        cues_path = Path(
+                            next(
+                                item.path
+                                for item in job.artifacts
+                                if item.kind == "translated_cues"
+                            )
+                        )
+                        cues_path.write_text('[{"text":"tampered"}]', encoding="utf-8")
+                    else:
+                        job = load_job(job_file)
+                        job.config["workflow"]["hardware_encoding"] = False
+                        save_job(job)
+                    if case.startswith("media_qa"):
+                        job = load_job(job_file)
+                        config = WorkflowConfig.from_dict(job.config["workflow"])
+                        self.assertFalse(_burn_satisfied(job, config))
+                        self.assertIn("burn", build_recovery_plan(job_file).advance_steps)
+                    before = job_file.read_bytes()
+
+                    with self.assertRaisesRegex(
+                        UserInputError,
+                        "checksum|media QA|translated subtitles|fingerprint",
+                    ):
+                        relink_burned_output(job_file, candidate)
+
+                    self.assertEqual(job_file.read_bytes(), before)
+
+    def test_recovery_does_not_hash_source_media_for_v2_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file, _burned, _candidate = self._relinkable_job(Path(directory))
+
+            with patch("xvt.workflow._burn_source_media_checksum") as source_checksum:
+                plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "complete")
+            source_checksum.assert_not_called()
+
+    def test_relink_burned_output_rejects_replaced_burned_checksum_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            burned.unlink()
+            candidate.write_bytes(b"replacement")
+            job = load_job(job_file)
+            job.artifacts = [
+                Artifact("burned_video", str(candidate), file_checksum(candidate))
+                if artifact.kind == "burned_video"
+                else artifact
+                for artifact in job.artifacts
+            ]
+            save_job(job)
+            self.assertFalse(_burn_satisfied(job, WorkflowConfig.from_dict(job.config["workflow"])))
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "checksum"):
+                relink_burned_output(job_file, candidate)
+
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_relink_burned_output_rejects_source_content_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            media = root / "video.mp4"
+            stat = media.stat()
+            media.write_bytes(b"other")
+            os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            self.assertEqual(media.stat().st_size, stat.st_size)
+            self.assertEqual(media.stat().st_mtime_ns, stat.st_mtime_ns)
+            burned.unlink()
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "fingerprint"):
+                relink_burned_output(job_file, candidate)
+
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_relink_burned_output_rejects_legacy_proofs_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for mode in ("artifact", "workflow"):
+                with self.subTest(mode=mode):
+                    case_root = root / mode
+                    case_root.mkdir()
+                    job_file, burned, candidate = self._relinkable_job(case_root)
+                    job = load_job(job_file)
+                    if mode == "artifact":
+                        proof_path = Path(
+                            next(
+                                artifact.path
+                                for artifact in job.artifacts
+                                if artifact.kind == "burn_fingerprint"
+                            )
+                        )
+                        proof_path.write_text(
+                            json.dumps({"fingerprint": _stored_burn_fingerprint(job)}) + "\n",
+                            encoding="utf-8",
+                        )
+                        job.artifacts = [
+                            Artifact("burn_fingerprint", str(proof_path), file_checksum(proof_path))
+                            if artifact.kind == "burn_fingerprint"
+                            else artifact
+                            for artifact in job.artifacts
+                        ]
+                    else:
+                        job.artifacts = [
+                            artifact
+                            for artifact in job.artifacts
+                            if artifact.kind != "burn_fingerprint"
+                        ]
+                        job.config["workflow"]["burn_fingerprint"] = "legacy"
+                    save_job(job)
+                    burned.unlink()
+                    before = job_file.read_bytes()
+
+                    with self.assertRaisesRegex(UserInputError, "v2 burn proof"):
+                        relink_burned_output(job_file, candidate)
+
+                    self.assertEqual(job_file.read_bytes(), before)
+
+    def test_relink_burned_output_rejects_duplicate_burned_artifacts_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            job = load_job(job_file)
+            job.artifacts.append(Artifact("burned_video", str(candidate), file_checksum(candidate)))
+            save_job(job)
+            burned.unlink()
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "exactly one"):
+                relink_burned_output(job_file, candidate)
+
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_relink_burned_output_accepts_remote_source_video_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            job = load_job(job_file)
+            job.input = "https://example.com/video.mp4"
+            source_video = root / "source-video.mp4"
+            source_video.write_bytes((root / "video.mp4").read_bytes())
+            job.artifacts.append(
+                Artifact("source_video", str(source_video), file_checksum(source_video))
+            )
+            save_job(job)
+            _record_burn_fingerprint(job_file)
+            burned.unlink()
+
+            self.assertEqual(relink_burned_output(job_file, candidate), candidate.resolve())
+
+    def test_relink_burned_output_uses_explicit_burn_media_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            burn_media = root / "burn-media.mp4"
+            burn_media.write_bytes(b"explicit-media")
+            job = load_job(job_file)
+            job.config["workflow"]["burn_media"] = str(burn_media)
+            save_job(job)
+            _record_burn_fingerprint(job_file)
+            burned.unlink()
+
+            self.assertEqual(relink_burned_output(job_file, candidate), candidate.resolve())
+
+    def test_relink_burned_output_rejects_copied_job_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            burned.unlink()
+            copied_job = root / "copied-job.json"
+            copied_job.write_bytes(job_file.read_bytes())
+
+            with self.assertRaisesRegex(UserInputError, "persisted identity"):
+                relink_burned_output(copied_job, candidate)
+
+            self.assertEqual(copied_job.read_bytes(), job_file.read_bytes())
+
+    def test_relink_burned_output_rejects_job_without_workflow_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "saved.mp4"
+            candidate.write_bytes(b"video")
+            job = create_job(str(root / "input.mp4"), root)
+            job_file = save_job(job)
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "workflow goal"):
+                relink_burned_output(job_file, candidate)
+
+            self.assertEqual(job_file.read_bytes(), before)
 
 
 class WorkflowPlannerTest(unittest.TestCase):
@@ -1104,6 +1446,8 @@ class WorkflowPlannerTest(unittest.TestCase):
             )
             job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
             save_job(job)
+            media_qa = Path(directory) / "media-qa.json"
+            media_qa.write_text('{"status":"pass"}\n', encoding="utf-8")
             config = WorkflowConfig(
                 target_language="zh-CN",
                 burn=True,
@@ -1113,7 +1457,9 @@ class WorkflowPlannerTest(unittest.TestCase):
                 patch(
                     "xvt.workflow.valid_artifact_path",
                     side_effect=lambda _job, kind: (
-                        Path(f"/tmp/{kind}")
+                        media_qa
+                        if kind == "media_qa"
+                        else Path(f"/tmp/{kind}")
                         if kind
                         in {
                             "translated_cues",
