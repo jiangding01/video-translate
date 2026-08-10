@@ -524,7 +524,7 @@ def _recovery_for_workflow(
     延迟导入 ``xvt.workflow``，避免 ``workflow → recovery → workflow`` 循环导入。
     """
 
-    from xvt.workflow import plan_advance_steps
+    from xvt.workflow import burned_output_relink_recovery_available, plan_advance_steps
 
     steps = plan_advance_steps(job, workflow)
     if not steps:
@@ -613,6 +613,23 @@ def _recovery_for_workflow(
             "润色草稿缺失或 checksum 已失效，不能从最终译文安全重建；"
             "请重新导入或生成原始译文草稿。",
             primary_command=None,
+            advance_steps=steps,
+        )
+
+    if steps[0] == "burn" and burned_output_relink_recovery_available(
+        job,
+        workflow,
+        burned_video_valid="burned_video" in valid_artifacts,
+    ):
+        return plan(
+            "awaiting_input",
+            "烧录成品可能可重新关联；执行命令时会再次校验源媒体内容。",
+            primary_command=_job_command(
+                "relink-burned-output",
+                job_file,
+                "EXISTING_VIDEO",
+            ),
+            alternative_commands=(_job_command("continue", job_file),),
             advance_steps=steps,
         )
 

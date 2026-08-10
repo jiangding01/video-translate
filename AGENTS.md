@@ -55,8 +55,8 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 默认用户路径是 **`run` → `status` → `continue`**（批处理为 `batch` / `batch-continue`）。`status` 输出 `recovery_plan` 与 `advance_steps`，与 `continue` 共用 `plan_advance_steps` 判定，是中断后的导航入口。
 
 - `xvt run` 创建新 Job。没有 `--target-language` 时停在源字幕；提供目标语言后继续翻译；同时提供 `--burn` 时继续烧录。
-- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。
-- `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。
+- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。已登记烧录成品缺失、但具备重新关联资格的 Job 会停在 `awaiting_input`，绝不由批处理自动重烧；用户须先显式 `relink-burned-output`，或明确选择 `continue` 重烧。
+- `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum；符合资格时归类为 `awaiting_input`，优先给出 `relink-burned-output`，并列出显式 `continue` 重烧作为备选。
 - `xvt continue JOB` 读取 `job.config.workflow`（类型化为 `WorkflowConfig`），补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
 - `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
@@ -68,7 +68,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 - `xvt polish-translation JOB` 为已有端到端 Job 显式补跑润色；API 模式逐批 checkpoint，Agent 模式必须先运行 `apply-polish-translation`，再由 `continue` 进入语义校对。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。
 - `xvt burn JOB` 是独立烧录入口（advanced）。本地纯音频 Job 必须通过 `--media` 提供视频。该原子命令可覆盖持久化 workflow 之外的媒体、字体和编码参数，因此不签发 workflow v2 proof；只有 `run` / `continue` 按持久化目标完成的烧录才登记 checksum 保护的 `version=2` `burn_fingerprint` proof，绑定 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum。旧/legacy fingerprint 可按既有轻量完成语义读取，但不能用于 relink。
-- `xvt relink-burned-output JOB EXISTING_VIDEO` 是已移动烧录成品的唯一重新关联入口（advanced）。仅接受 checksum 有效的 v2 proof，且重算的源媒体内容 checksum、原 `burned_video` checksum、当前 fingerprint、媒体 QA 和候选文件 SHA-256 必须全部匹配；重复 `burned_video` 一律 fail closed。旧 Job 必须先 `continue` 重烧一次生成 v2 proof，不得宣称可直接 relink。普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；内容 checksum 只在烧录落证和 relink 校验时计算。
+- `xvt relink-burned-output JOB EXISTING_VIDEO` 是已移动烧录成品的唯一重新关联入口（advanced）。仅接受 checksum 有效的 v2 proof，且重算的源媒体内容 checksum、原 `burned_video` checksum、当前 fingerprint、媒体 QA 和候选文件 SHA-256 必须全部匹配；重复 `burned_video` 一律 fail closed。legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重新关联资格，按 `retryable` 恢复并由 `continue` 重烧；旧 Job 必须先 `continue` 重烧一次生成 v2 proof，不得宣称可直接 relink。普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；内容 checksum 只在烧录落证和 relink 校验时计算。
 
 不要把 `resume` 和 `continue` 合并。前者恢复转写状态，后者完成用户最初请求的端到端目标。
 

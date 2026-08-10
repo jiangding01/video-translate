@@ -12,14 +12,14 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 535 个测试、63 个子测试，全部通过 |
+| 自动化测试 | 539 个测试、64 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
 | Git | 功能修改使用 `codex/` 开发分支，Review 通过后以 PR 合并 `main` |
 | 默认 CLI 路径 | `run` → `status` → `continue`（批处理 `batch` / `batch-continue`） |
 
-当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status` 查看 `recovery_plan` / `advance_steps`，再 `xvt continue` 按持久化目标补齐。翻译与烧录推进与 status 共用 `plan_advance_steps`。由 `run` / `continue` 按持久化目标完成的烧录写入 checksum 保护的 `version=2` burn proof，绑定烧录 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum；高级原子 `xvt burn` 不签发 workflow proof。仅有效 v2 proof 可让 `relink-burned-output` 重新关联已移动成品。旧/legacy fingerprint 仍可用于既有轻量完成判定，不能直接 relink，必须 `continue` 重烧一次生成 v2 proof；第二阶段恢复导航仍待完成。
+当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status` 查看 `recovery_plan` / `advance_steps`，再 `xvt continue` 按持久化目标补齐。翻译与烧录推进与 status 共用 `plan_advance_steps`。由 `run` / `continue` 按持久化目标完成的烧录写入 checksum 保护的 `version=2` burn proof，绑定烧录 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum；高级原子 `xvt burn` 不签发 workflow proof。仅有效 v2 proof 可让 `relink-burned-output` 重新关联已移动成品。若其余静态条件满足但已登记成品缺失或 checksum 失效，`status` 返回 `awaiting_input`，首选重新关联占位命令、备选显式 `continue` 重烧；这只表示成品可能可重新关联，执行时仍会校验实际源媒体内容。`batch-continue` 停在该状态，不自动重烧。旧/legacy fingerprint、媒体 QA/proof/fingerprint 无效仍为 `retryable`，只推荐重烧。
 
 ## 项目背景
 
@@ -304,7 +304,7 @@ media-qa.json
 
 ### Q1-Q6.1：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。polished API 路径已完成真实 E2E；下一步是完成剩余 R2 CLI 收敛和 polished Agent E2E，再决定是否切换默认质量。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；下一步是完成 polished Agent 路径真实 E2E，再决定是否切换默认质量，随后进入 R3.1/R3.2。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
@@ -339,7 +339,7 @@ media-qa.json
 - **已完成**：R2.1 `_run_command` 分发拆解——26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表，`_run_command` 从 622 行缩减至 4 行查表逻辑，纯搬移不改行为。
 - **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
 - **已完成**：R2.3 译文与源文修订 SRT 人工通道——两类 JSON 模板旁均写出同 fingerprint 的 `*-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前文本），可用任意字幕工具编辑；对应 `apply-*-review-fixes` 按后缀识别，统一入口 `xvt apply` 按固定文件名路由。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。JSON/SRT 汇聚为同一 `changes` 语义；旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出两种载体。
-- **进行中**：R2.4 第一阶段已实现 `relink-burned-output`，仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径。legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。第二阶段待把重新关联接入恢复导航，并阻止 `batch-continue` 自动重烧缺失成品。详见 [R2.4 技术方案](docs/R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
+- **已完成**：R2.4 两阶段——`relink-burned-output` 仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径；legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。恢复导航在其余静态条件满足、但已登记成品缺失或 checksum 失效时返回 `awaiting_input`，首选重新关联、备选显式重烧；建议仅表示可能可关联，relink 会复核源媒体内容。`batch-continue` 将该状态作为停止态，不自动重烧。媒体 QA、proof 或 fingerprint 无效仍为 `retryable`。详见 [R2.4 技术方案](docs/R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
 - **待做**：polished Agent 路径真实 E2E 与默认质量决策；随后按 R3.1 provider 传输统一 → R3.2 内容寻址 step 缓存推进架构演进。
 
 全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。
