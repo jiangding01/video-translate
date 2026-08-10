@@ -33,6 +33,7 @@ from xvt.pipeline.review import (
 )
 from xvt.pipeline.revision import (
     REVISION_FINGERPRINT_LENGTH,
+    SOURCE_REVIEW_STEM_PREFIX,
     TRANSLATION_REVIEW_STEM_PREFIX,
     apply_source_review_fixes,
     apply_translation_review_fixes,
@@ -40,6 +41,7 @@ from xvt.pipeline.revision import (
     ensure_translation_review_input,
     prepare_source_review,
     source_review_input_path,
+    source_review_stem,
     source_review_supported,
     source_suspect_cue_ids,
     translation_review_input_path,
@@ -81,6 +83,7 @@ from xvt.pipeline.translation import (
 
 __all__ = [
     "REVISION_FINGERPRINT_LENGTH",
+    "SOURCE_REVIEW_STEM_PREFIX",
     "TRANSLATION_REVIEW_STEM_PREFIX",
     "ResegmentationResult",
     "RebuildSourceResult",
@@ -133,6 +136,7 @@ __all__ = [
     "semantic_review_satisfied",
     "semantic_review_waiting",
     "source_review_input_path",
+    "source_review_stem",
     "source_review_supported",
     "source_suspect_cue_ids",
     "agent_semantic_review_waiting",

@@ -12,7 +12,13 @@ from unittest.mock import patch
 
 from xvt import cancellation
 from xvt.batch import BatchResult
-from xvt.cli import _REVIEW_SRT_NAME, _STEP_ROUTES, _TASK_ROUTES, main
+from xvt.cli import (
+    _SOURCE_REVIEW_SRT_NAME,
+    _STEP_ROUTES,
+    _TASK_ROUTES,
+    _TRANSLATION_REVIEW_SRT_NAME,
+    main,
+)
 from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
@@ -27,6 +33,7 @@ from xvt.pipeline import (
 from xvt.pipeline.revision import (
     SOURCE_REVIEW_TASK,
     TRANSLATION_REVIEW_TASK,
+    source_review_stem,
     translation_review_stem,
 )
 from xvt.process import CommandCancelled
@@ -487,6 +494,7 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         self.assertEqual(prepare.call_args.args[:2], ("/tmp/job.json", [3, 5]))
+        self.assertIn("/tmp/source-review.srt", output.getvalue())
         self.assertIn("apply-source-review-fixes", output.getvalue())
 
     def test_apply_source_review_fixes_forwards_response_and_prints_continue(self) -> None:
@@ -689,6 +697,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", str(review)))
 
+    def test_apply_routes_source_review_srt_by_its_generated_name(self) -> None:
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed.json"))
+        with tempfile.TemporaryDirectory() as directory:
+            stem = source_review_stem("0123456789abcdef0123456789abcdef")
+            review = Path(directory) / f"{stem}.srt"
+            review.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n#1\nHello.\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", str(review)])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", str(review)))
+
     def test_apply_routes_real_agent_translation_job_end_to_end(self) -> None:
         """不 mock 任何路由/实现，验证 _STEP_ROUTES 的 key 与真实 planner 对得上。"""
         with tempfile.TemporaryDirectory() as directory:
@@ -734,9 +760,13 @@ class CliTest(unittest.TestCase):
 
     def test_review_srt_pattern_matches_generated_stem(self) -> None:
         """统一入口的形状正则必须认得模板真实写出的文件名，改名不能静默失配。"""
-        stem = translation_review_stem("0123456789abcdef0123456789abcdef")
-        self.assertIsNotNone(_REVIEW_SRT_NAME.match(stem))
-        self.assertIsNone(_REVIEW_SRT_NAME.match(f"{stem}-extra"))
+        fingerprint = "0123456789abcdef0123456789abcdef"
+        source_stem = source_review_stem(fingerprint)
+        translation_stem = translation_review_stem(fingerprint)
+        self.assertIsNotNone(_SOURCE_REVIEW_SRT_NAME.match(source_stem))
+        self.assertIsNone(_SOURCE_REVIEW_SRT_NAME.match(f"{source_stem}-extra"))
+        self.assertIsNotNone(_TRANSLATION_REVIEW_SRT_NAME.match(translation_stem))
+        self.assertIsNone(_TRANSLATION_REVIEW_SRT_NAME.match(f"{translation_stem}-extra"))
 
     def test_inspect_prints_json(self) -> None:
         output = StringIO()

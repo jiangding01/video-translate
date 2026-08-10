@@ -83,10 +83,12 @@ Q6 的自动语义校对仍可能留下需要人判断的术语、误听或中�
 ```bash
 xvt prepare-source-review JOB --cue 13 --cue 14
 xvt apply-source-review-fixes JOB REVIEW.json
+# 或编辑同 fingerprint 的 source-review-<fp12>.srt 后回填
+xvt apply-source-review-fixes JOB source-review-<fp12>.srt
 xvt continue JOB
 ```
 
-模板使用 `task=source_review_fixes`、`scope=source`，fingerprint 绑定 Job ID、当前 `source_cues` checksum 和精确 cue ID 集合。回填必须完整保留模板 ID 集合，只允许修改非空 `items[].text`；过期 source、未知或重复 ID、错误 scope 和无实际变化均拒绝。cue ID、数量、顺序、时间码、words、语言、置信度、warnings 和 provenance 逐项保持。
+命令同时生成同 fingerprint 的 JSON 与 SRT。JSON 使用 `task=source_review_fixes`、`scope=source`，SRT 以固定文件名承载 fingerprint，并用原时间轴和可选的 `#<cue id>` 注释还原 cue ID。fingerprint 绑定 Job ID、当前 `source_cues` checksum 和精确 cue ID 集合。回填必须完整保留模板 ID 集合，只允许修改非空源文；过期 source、未知或重复 ID、错误 scope、改动时间轴、增删 cue、注释 ID 不匹配、改名和无实际变化均拒绝。cue ID、数量、顺序、时间码、words、语言、置信度、warnings 和 provenance 逐项保持。
 
 接受修订后登记 `source_review_revision`、新的 `source_cues`、`source_selection`、`subtitle_qa`，QA 通过时同时登记新的 `source_srt`。所有替换文件使用 fingerprint 区分路径，写完后通过一次 Job 原子保存切换登记，避免覆盖旧文件后保存失败破坏原 checkpoint。新的选择记录使用 `selected_kind=human_reviewed`、绑定新 source checksum，并嵌入上一份选择记录供追溯；cue 自身 provenance 不改写。
 
@@ -96,7 +98,7 @@ xvt continue JOB
 
 ## Q6.1b `source_suspect` 自动引导
 
-当前 checksum 有效的语义报告包含 `source_suspect` 时，XVT 对这些问题引用的 cue ID 取去重并集，并在进入人工等待状态前自动生成对应的 `source-review-*.json`。源文模板仍只绑定 Job、当前 source checksum 和精确 cue ID 集合，不绑定语义报告；报告变化但源文和 ID 集合不变时不会覆盖用户尚未提交的编辑。译文模板继续覆盖报告中的全部 review 问题。
+当前 checksum 有效的语义报告包含 `source_suspect` 时，XVT 对这些问题引用的 cue ID 取去重并集，并在进入人工等待状态前自动生成对应的 `source-review-*.json` 与同名 SRT。源文模板仍只绑定 Job、当前 source checksum 和精确 cue ID 集合，不绑定语义报告；报告变化但源文和 ID 集合不变时不会覆盖用户尚未提交的编辑。译文模板继续覆盖报告中的全部 review 问题。
 
 `status` 保持只读，并按以下顺序展示恢复路径：
 

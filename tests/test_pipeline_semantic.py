@@ -533,6 +533,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 recovery.input_paths,
                 (
                     str(source_template),
+                    str(source_template.with_suffix(".srt")),
                     str(template),
                     str(template.with_suffix(".srt")),
                 ),

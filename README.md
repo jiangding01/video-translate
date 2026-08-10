@@ -47,7 +47,7 @@ xvt apply JOB.json RESPONSE
 xvt continue JOB.json
 ```
 
-`xvt apply` 的路由规则：人工修订模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`translation-review-<fp12>.srt`）按其固定文件名识别为修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。各 `apply-*` 命令仍是稳定入口，行为不变。
+`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。各 `apply-*` 命令仍是稳定入口，行为不变。
 
 目录批处理：
 
@@ -386,7 +386,7 @@ xvt prepare-source-review JOB_FILE --cue ID [--cue ID ...] [--events-jsonl]
 
 - 位置参数：`job_file`。
 - 必填可重复参数：`--cue`。
-- 可选参数：`--events-jsonl`。
+- 可选参数：`--events-jsonl`。命令同时生成同 fingerprint 的 JSON 与 SRT；JSON 供 Agent/脚本编辑，SRT 供字幕工具编辑。
 
 </details>
 
@@ -397,7 +397,7 @@ xvt prepare-source-review JOB_FILE --cue ID [--cue ID ...] [--events-jsonl]
 xvt apply-source-review-fixes JOB_FILE RESPONSE_FILE [--events-jsonl]
 ```
 
-- 位置参数：`job_file`、`response_file`。
+- 位置参数：`job_file`、`response_file`；支持生成的 JSON 模板或固定命名的源文修订 SRT。
 - 可选参数：`--events-jsonl`。修改源文后会重跑源字幕 QA，并失效旧翻译及全部下游产物。
 
 </details>
@@ -683,12 +683,14 @@ Q6.1c 要求 API 和 Agent 都把每个语义组作为连续话语处理：先�
 
 ```bash
 uv run --no-sync xvt prepare-source-review JOB --cue 13 --cue 14
-# 编辑命令输出的 source-review-*.json 中 items[].text
+# 编辑命令输出的 source-review-*.json 中 items[].text；或用字幕工具编辑同名 .srt
 uv run --no-sync xvt apply-source-review-fixes JOB REVIEW.json
+# SRT 通道等价：保留 #<cue id> 注释、时间轴和文件名，只改源文
+uv run --no-sync xvt apply-source-review-fixes JOB source-review-<fp12>.srt
 uv run --no-sync xvt continue JOB
 ```
 
-源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；准备和回填命令都会提前拒绝，`status` 也不会展示不可执行的源文路径。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁。
+两种载体都绑定相同 source checksum 和精确 cue ID 集合，并汇聚到同一回填流程；改时间轴、增删 cue、注释与时间轴不符或修改 fingerprint 文件名都会被拒绝。源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；准备和回填命令都会提前拒绝，`status` 也不会展示不可执行的源文路径。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁。
 
 已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
 

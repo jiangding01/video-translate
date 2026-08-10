@@ -31,6 +31,7 @@ from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline import (
     REVISION_FINGERPRINT_LENGTH,
+    SOURCE_REVIEW_STEM_PREFIX,
     TRANSLATION_REVIEW_STEM_PREFIX,
     TranslationRunResult,
     acknowledge_subtitle_review,
@@ -1480,10 +1481,12 @@ def _cmd_prepare_source_review(arguments: argparse.Namespace) -> int:
         arguments.cue_ids,
         event_sink=event_sink,
     )
+    paths = (path, path.with_suffix(".srt"))
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path)])
+        _complete(arguments, artifacts=[str(item) for item in paths])
     else:
-        print(path)
+        for item in paths:
+            print(item)
         print(
             "next: xvt apply-source-review-fixes "
             f"{shlex.quote(str(arguments.job_file))} {shlex.quote(str(path))}"
@@ -1666,10 +1669,11 @@ _STEP_ROUTES: dict[str, str] = {
 }
 
 # 人工修订 SRT 的固定命名形状。命名规则的唯一来源在 xvt.pipeline.revision（模板写入点与
-# 回填校验点共用），这里只按同样的前缀与 fingerprint 长度派生形状正则，不再独立硬编码；
-# 它是修订通道的载体而非待导入的译文字幕，因此在统一入口按文件名确定性识别，
-# 不能与 import-translation 的字幕输入混淆。
-_REVIEW_SRT_NAME = re.compile(
+# 回填校验点共用），这里只按同样的前缀与 fingerprint 长度派生形状正则，不再独立硬编码。
+_SOURCE_REVIEW_SRT_NAME = re.compile(
+    rf"^{re.escape(SOURCE_REVIEW_STEM_PREFIX)}[0-9a-f]{{{REVISION_FINGERPRINT_LENGTH}}}$"
+)
+_TRANSLATION_REVIEW_SRT_NAME = re.compile(
     rf"^{re.escape(TRANSLATION_REVIEW_STEM_PREFIX)}[0-9a-f]{{{REVISION_FINGERPRINT_LENGTH}}}$"
 )
 
@@ -1678,10 +1682,15 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
     # 先在原 Namespace 上建 sink，路由副本才能继承它，让失败路径仍能取到恢复计划。
     _event_sink(arguments)
     response_path = Path(arguments.response_file)
-    if response_path.suffix.lower() == ".srt" and _REVIEW_SRT_NAME.match(response_path.stem):
-        return _COMMAND_DISPATCH["apply-translation-review-fixes"](
-            argparse.Namespace(**vars(arguments))
-        )
+    if response_path.suffix.lower() == ".srt":
+        if _SOURCE_REVIEW_SRT_NAME.match(response_path.stem):
+            return _COMMAND_DISPATCH["apply-source-review-fixes"](
+                argparse.Namespace(**vars(arguments))
+            )
+        if _TRANSLATION_REVIEW_SRT_NAME.match(response_path.stem):
+            return _COMMAND_DISPATCH["apply-translation-review-fixes"](
+                argparse.Namespace(**vars(arguments))
+            )
     # 读不出/解析不了都是用户输入错误（含把 SRT 当 response 喂进来），不能逃逸成
     # OSError/JSONDecodeError 被顶层归到 dependency_or_process。
     try:
