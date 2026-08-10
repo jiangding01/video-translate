@@ -41,10 +41,10 @@
 
 ## 实施进度（2026-08-10 更新）
 
-- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口（PR #67，均在真实 Job 上实证）。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：人工修订模板按 task 字段路由、Agent 响应（无 task 字段）按 Job 等待步骤路由的两级路由，仅支持有 `config.workflow` 目标的端到端 Job，原 `apply-*` 命令全部保留。
+- **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口已在真实 Job 上实证（PR #67），R2.4 两阶段随后以 v2 proof Job、CLI 和批处理集成测试完成。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：人工修订模板按 task 字段路由、Agent 响应（无 task 字段）按 Job 等待步骤路由的两级路由，仅支持有 `config.workflow` 目标的端到端 Job，原 `apply-*` 命令全部保留。
   R2.3 译文修订 SRT 通道已完成：`review/translation-review-<fp12>.srt` 与同名 JSON 同时生成（旧 Job 首次 `ensure_translation_review_input` 时按同一 fingerprint 补齐），`apply-translation-review-fixes` 按后缀分派到 SRT / JSON 解析器，两者汇聚成同一个 `changes` 映射后共用 fingerprint 绑定、只改 `target_text`、review-only 复查。SRT 无 fingerprint 字段，改由文件名承载校验；cue ID 按 `(start_ms, end_ms)` 精确匹配还原，因此改时间轴、增删 cue 都在解析边界失败，无需额外校验。统一入口 `xvt apply` 按固定文件名识别修订 SRT，不再把它误引导到 `import-translation`。补成功路径测试时发现 `_srt_review_changes` 的完整性断言把 cue ID 集合与时间轴键集合相比，SRT 通道的成功路径原本永远抛"removed a cue"——修正为与 `by_timing.values()` 比较。
 
-- **进行中**：R2.4 第一阶段显式 `relink-burned-output` 已完成，以 checksum 有效的 v2 proof 绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum；第二阶段待接入恢复导航并阻止批处理自动重烧缺失成品。polished Agent 路径真实 E2E 与默认质量决策、R3 全部在此后启动。R2.3 源文修订 SRT 通道已完成：与译文通道共用文件名 fingerprint、时间轴精确匹配、注释 ID 校验和统一 `xvt apply` 路由契约，JSON/SRT 回填汇聚到同一 `changes` 语义。
+- **进行中**：polished Agent 路径真实 E2E 与默认质量决策；其后启动 R3.1。R2.3 源文修订 SRT 通道已完成：与译文通道共用文件名 fingerprint、时间轴精确匹配、注释 ID 校验和统一 `xvt apply` 路由契约，JSON/SRT 回填汇聚到同一 `changes` 语义。
 
 ## R1：工程加固（低风险，可立即实施）
 
@@ -104,12 +104,13 @@
 - 源文修订（`prepare-source-review`）已按相同契约增加 SRT 通道：JSON/SRT 同 fingerprint，按 source cue 时间轴还原 ID，只允许改 `source_text`，统一入口按 `source-review-<fp12>.srt` 路由。
 - 验收：SRT 通道与 JSON 通道对同一组编辑产生相同的修订记录 checksum；改动时间轴或增删 cue 的 SRT 在解析边界被拒绝。译文通道两项均已通过（含 6 个拒绝场景 subtest：时间轴平移、删 cue、加 cue、注释与时间轴不符、空译文、过期 fingerprint）；501 测试全部通过。
 
-### R2.4 烧录成品缺失的恢复语义与文案修正（F14）——第一阶段重新关联已完成，第二阶段导航待做
+### R2.4 烧录成品缺失的恢复语义与文案修正（F14）——两阶段已完成
 
-- `_burn_recovery_reason`（`recovery.py:623`）拆分三种情形并分别给出准确文案：媒体 QA 未通过（现文案保留）、烧录派生指纹失效（现文案保留）、**成品文件缺失但媒体 QA 与指纹均有效**（新增文案，说明成品已不在登记路径，如已自行保存可忽略，重新烧录才需要 `continue`）。
+- `_burn_recovery_reason`（`recovery.py`）拆分三种情形并分别给出准确文案：媒体 QA 未通过（现文案保留）、烧录派生指纹失效（现文案保留）、**成品文件缺失但媒体 QA 与指纹均有效**（说明成品已不在登记路径；第二阶段再按 proof 等静态资格决定提示重新关联还是 `continue` 重烧）。
 - 第一阶段提供显式 `relink-burned-output JOB EXISTING_VIDEO`：仅在唯一旧成品记录、媒体 QA pass、当前译文有效且 checksum 有效的 v2 burn proof 同时成立时，校验当前 fingerprint、原成品 checksum、实际源媒体内容 checksum 和候选文件 checksum，再原子更新 artifact 路径；legacy fingerprint、重复成品记录或任一校验失败均拒绝且不改 Job。
-- 第二阶段把重新关联接入 `status` 恢复导航，并阻止 `batch-continue` 在缺失成品时自动触发整段重烧；仍不得把媒体 QA 失败或指纹失效误判为可重新关联。
-- 验收：第一阶段已覆盖成功后的 `verify` / `status`、checksum 不匹配、媒体 QA/proof/源媒体绑定无效、legacy proof、重复成品记录和失败原子性；第二阶段需补 status 建议和批处理恢复测试。
+- 第二阶段已把重新关联接入 `status` 恢复导航：普通 `status` 仅作静态资格判断，不为提示额外 hash 源媒体内容；符合资格的缺失成品归类 `awaiting_input`，优先给出 `relink-burned-output`，并保留显式 `continue` 重烧作为备选。最终 `relink` 命令仍重新计算并校验源媒体内容 checksum。
+- `batch-continue` 对上述 `awaiting_input` 项保持阻断，不自动触发整段重烧；legacy proof/fingerprint、媒体 QA、proof 或 fingerprint 无效的缺失成品均不提示 relink，而是归类 `retryable` 并沿正常 `continue` 重烧恢复。
+- 验收：第一阶段已覆盖成功后的 `verify` / `status`、checksum 不匹配、媒体 QA/proof/源媒体绑定无效、legacy proof、重复成品记录和失败原子性；第二阶段覆盖 status 的优先 relink/显式重烧导航、静态导航不 hash 源媒体，以及 batch-continue 对可 relink 项停住而对无资格项按 retryable 重烧。
 
 ### R2.5 字幕 QA 确认后的 translate stage 收口（F15）——已完成（PR #67，真实 Job 实证收口）
 
@@ -158,7 +159,7 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 ## 交付顺序建议
 
 1. **立即**：R1 全部（四项合计改动量小，可一到两个 PR）。
-2. **GUI 之前**：R2.1、R2.2、R2.3 译文/源文修订 SRT 通道与 R2.4 第一阶段显式重新关联已完成；继续串行完成 R2.4 第二阶段恢复导航和批处理安全。
+2. **GUI 之前**：R2.1、R2.2、R2.3 译文/源文修订 SRT 通道与 R2.4 两阶段恢复安全均已完成；下一项转入 polished Agent 路径真实 E2E。
 3. **质量验收**：polished API 路径真实 E2E 已完成；继续完成 Agent 路径真实 E2E，并据此决定是否调整默认质量。
 4. **质量验收之后**：R3.1 → R3.2，随后再设计 Q7 翻译上下文与术语候选包，避免新增模型步骤后立即重做 provider 和 checkpoint；R3.3 重新评估，R3.4 可穿插。
 5. **上述内核稳定后**：实现只消费现有事件、Job、QA artifact、人工修订 SRT 和预览能力的可视化校对工作台。

@@ -20,13 +20,14 @@ from xvt.pipeline import (
     source_review_input_path,
     translation_review_input_path,
 )
-from xvt.recovery import build_recovery_plan, file_checksum, verify_job
+from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
 from xvt.translate import GlossaryTerm, SemanticIssue, TranslationPolicy
 from xvt.workflow import (
     WorkflowOptions,
     _burn_satisfied,
     _record_burn_fingerprint,
     _stored_burn_fingerprint,
+    burned_output_relink_recovery_available,
     continue_workflow,
     plan_advance_steps,
     planned_run_steps,
@@ -1143,6 +1144,10 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
                         config = WorkflowConfig.from_dict(job.config["workflow"])
                         self.assertFalse(_burn_satisfied(job, config))
                         self.assertIn("burn", build_recovery_plan(job_file).advance_steps)
+                    if case != "checksum":
+                        plan = build_recovery_plan(job_file)
+                        self.assertNotEqual(plan.category, "awaiting_input")
+                        self.assertNotIn("relink-burned-output", plan.primary_command or "")
                     before = job_file.read_bytes()
 
                     with self.assertRaisesRegex(
@@ -1163,6 +1168,59 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             self.assertEqual(plan.category, "complete")
             source_checksum.assert_not_called()
 
+    def test_recovery_offers_relink_for_missing_v2_burned_output_without_hashing_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file, burned, _candidate = self._relinkable_job(Path(directory))
+            burned.unlink()
+
+            with patch("xvt.workflow._burn_source_media_checksum") as source_checksum:
+                plan = build_recovery_plan(job_file)
+            job = load_job(job_file)
+            config = WorkflowConfig.from_dict(job.config["workflow"])
+            with patch(
+                "xvt.workflow.valid_artifact_path",
+                wraps=valid_artifact_path,
+            ) as valid_artifact_path_mock:
+                self.assertTrue(
+                    burned_output_relink_recovery_available(
+                        job,
+                        config,
+                        burned_video_valid=False,
+                    )
+                )
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertEqual(
+            plan.reason,
+            "烧录成品可能可重新关联；执行命令时会再次校验源媒体内容。",
+        )
+        self.assertIn("relink-burned-output", plan.primary_command or "")
+        self.assertIn("EXISTING_VIDEO", plan.primary_command or "")
+        self.assertIn("continue", plan.alternative_commands[0])
+        self.assertEqual(plan.advance_steps, ("burn",))
+        source_checksum.assert_not_called()
+        self.assertNotIn(
+            "burned_video",
+            [call.args[1] for call in valid_artifact_path_mock.call_args_list],
+        )
+
+    def test_recovery_retries_burn_when_v2_proof_fingerprint_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file, burned, _candidate = self._relinkable_job(Path(directory))
+            job = load_job(job_file)
+            job.config["workflow"]["hardware_encoding"] = False
+            save_job(job)
+            burned.unlink()
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertNotIn("relink-burned-output", plan.primary_command or "")
+        self.assertEqual(plan.advance_steps, ("burn",))
+
     def test_relink_burned_output_rejects_replaced_burned_checksum_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1178,6 +1236,9 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             ]
             save_job(job)
             self.assertFalse(_burn_satisfied(job, WorkflowConfig.from_dict(job.config["workflow"])))
+            plan = build_recovery_plan(job_file)
+            self.assertNotEqual(plan.category, "awaiting_input")
+            self.assertNotIn("relink-burned-output", plan.primary_command or "")
             before = job_file.read_bytes()
 
             with self.assertRaisesRegex(UserInputError, "checksum"):
@@ -1196,6 +1257,9 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             self.assertEqual(media.stat().st_size, stat.st_size)
             self.assertEqual(media.stat().st_mtime_ns, stat.st_mtime_ns)
             burned.unlink()
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertIn("relink-burned-output", plan.primary_command or "")
             before = job_file.read_bytes()
 
             with self.assertRaisesRegex(UserInputError, "fingerprint"):
@@ -1206,7 +1270,7 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
     def test_relink_burned_output_rejects_legacy_proofs_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for mode in ("artifact", "workflow"):
+            for mode in ("artifact", "workflow", "invalid_checksum"):
                 with self.subTest(mode=mode):
                     case_root = root / mode
                     case_root.mkdir()
@@ -1230,15 +1294,28 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
                             else artifact
                             for artifact in job.artifacts
                         ]
-                    else:
+                    elif mode == "workflow":
                         job.artifacts = [
                             artifact
                             for artifact in job.artifacts
                             if artifact.kind != "burn_fingerprint"
                         ]
                         job.config["workflow"]["burn_fingerprint"] = "legacy"
+                    else:
+                        proof_path = Path(
+                            next(
+                                artifact.path
+                                for artifact in job.artifacts
+                                if artifact.kind == "burn_fingerprint"
+                            )
+                        )
+                        proof_path.write_text('{"version":2}\n', encoding="utf-8")
                     save_job(job)
                     burned.unlink()
+                    plan = build_recovery_plan(job_file)
+                    self.assertEqual(plan.category, "retryable")
+                    self.assertIn("continue", plan.primary_command or "")
+                    self.assertNotIn("relink-burned-output", plan.primary_command or "")
                     before = job_file.read_bytes()
 
                     with self.assertRaisesRegex(UserInputError, "v2 burn proof"):
@@ -1254,6 +1331,9 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             job.artifacts.append(Artifact("burned_video", str(candidate), file_checksum(candidate)))
             save_job(job)
             burned.unlink()
+            plan = build_recovery_plan(job_file)
+            self.assertNotEqual(plan.category, "awaiting_input")
+            self.assertNotIn("relink-burned-output", plan.primary_command or "")
             before = job_file.read_bytes()
 
             with self.assertRaisesRegex(UserInputError, "exactly one"):

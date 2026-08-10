@@ -22,7 +22,7 @@ from xvt.cli import (
 from xvt.errors import DependencyError, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
-from xvt.models import Job, StageName, StageStatus
+from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
     RebuildSourceResult,
     ResegmentationResult,
@@ -37,11 +37,48 @@ from xvt.pipeline.revision import (
     translation_review_stem,
 )
 from xvt.process import CommandCancelled
-from xvt.workflow import AWAIT_STEPS, WorkflowResult
+from xvt.recovery import file_checksum
+from xvt.workflow import AWAIT_STEPS, WorkflowResult, _record_burn_fingerprint
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 class CliTest(unittest.TestCase):
+    def _missing_relinkable_burned_job(self, root: Path) -> Path:
+        media = root / "video.mp4"
+        media.write_bytes(b"media")
+        burned = root / "burned.mp4"
+        burned.write_bytes(b"burned-output")
+        cues = root / "translated-cues.json"
+        cues.write_text("[]", encoding="utf-8")
+        source_cues = root / "source-cues.json"
+        source_cues.write_text("[]", encoding="utf-8")
+        translated_srt = root / "translated.srt"
+        translated_srt.write_text("", encoding="utf-8")
+        bilingual_srt = root / "bilingual.srt"
+        bilingual_srt.write_text("", encoding="utf-8")
+        media_qa = root / "media-qa.json"
+        media_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
+        job = create_job(
+            str(media),
+            root,
+            {"workflow": {"target_language": "zh-CN", "burn": True}},
+        )
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_cues), file_checksum(source_cues)),
+                Artifact("translated_cues", str(cues), file_checksum(cues)),
+                Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
+                Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                Artifact("burned_video", str(burned), file_checksum(burned)),
+                Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
+            ]
+        )
+        job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+        job_file = save_job(job)
+        _record_burn_fingerprint(job_file)
+        burned.unlink()
+        return job_file
+
     def test_batch_forwards_shared_workflow_options(self) -> None:
         output = StringIO()
         result = BatchResult("completed", Path("/tmp/batch.json"), 2, 2, 0, 0)
@@ -834,6 +871,33 @@ class CliTest(unittest.TestCase):
         status = json.loads(output.getvalue())
         self.assertEqual(status["recovery_plan"]["category"], "unrecoverable")
         self.assertNotIn("xvt continue", status["next_action"])
+
+    def test_status_exposes_relink_navigation_in_plain_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._missing_relinkable_burned_job(Path(directory))
+            plain_output = StringIO()
+            with redirect_stdout(plain_output):
+                plain_code = main(["status", str(job_file)])
+            json_output = StringIO()
+            with redirect_stdout(json_output):
+                json_code = main(["status", str(job_file), "--json"])
+
+        self.assertEqual(plain_code, 0)
+        self.assertIn("awaiting_input", plain_output.getvalue())
+        self.assertIn("relink-burned-output", plain_output.getvalue())
+        self.assertIn("EXISTING_VIDEO", plain_output.getvalue())
+        self.assertIn("alternative: xvt continue", plain_output.getvalue())
+        self.assertLess(
+            plain_output.getvalue().index("next: xvt relink-burned-output"),
+            plain_output.getvalue().index("alternative: xvt continue"),
+        )
+        self.assertEqual(json_code, 0)
+        status = json.loads(json_output.getvalue())
+        plan = status["recovery_plan"]
+        self.assertEqual(plan["category"], "awaiting_input")
+        self.assertIn("relink-burned-output", plan["primary_command"])
+        self.assertEqual(plan["advance_steps"], ["burn"])
+        self.assertEqual(status["next_action"], plan["primary_command"])
 
     def test_verify_json_returns_verify_failed_exit_code_for_invalid_artifact(self) -> None:
         output = StringIO()

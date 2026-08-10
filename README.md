@@ -26,7 +26,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复，以及人工修订和提示词加固。polished API 路径已通过公开素材真实 E2E；下一步依次完成剩余 R2 CLI 收敛、polished Agent E2E 与默认质量决策、R3 provider/checkpoint 收敛，再评估 Q7 翻译上下文与术语候选包，最后进入可视化校对工作台。完整顺序见 [路线图](ROADMAP.md)，字幕质量设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环和 R2.4 烧录成品重新关联：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复，以及人工修订和提示词加固。polished API 路径已通过公开素材真实 E2E；下一步依次完成 polished Agent E2E 与默认质量决策、R3 provider/checkpoint 收敛，再评估 Q7 翻译上下文与术语候选包，最后进入可视化校对工作台。完整顺序见 [路线图](ROADMAP.md)，字幕质量设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -147,7 +147,7 @@ xvt status JOB_FILE [--json]
 ```
 
 - 位置参数：`job_file`。
-- 可选参数：`--json`。优先使用本命令提供的 `recovery_plan` / `advance_steps`，不要猜测该运行 `resume` 还是 `continue`。
+- 可选参数：`--json`。优先使用本命令提供的 `recovery_plan` / `advance_steps`，不要猜测该运行 `resume` 还是 `continue`。若烧录目标的其他静态条件和 v2 proof 均有效、但已登记成品缺失或 checksum 失效，状态为 `awaiting_input`：首选命令是 `relink-burned-output`，备选是显式 `continue` 重烧；这只表示成品**可能**可重新关联，命令仍会重新校验实际源媒体内容。
 
 </details>
 
@@ -203,7 +203,7 @@ xvt batch-continue BATCH_FILE [--events-jsonl]
 ```
 
 - 位置参数：`batch_file`。
-- 可选参数：`--events-jsonl`。
+- 可选参数：`--events-jsonl`。遇到 `awaiting_input` 会停止该项，不会自动重烧可能已移动、替换的烧录成品；先按 Job 的 `status` 处理重新关联或显式重烧。
 
 </details>
 

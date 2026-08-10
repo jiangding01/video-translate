@@ -331,6 +331,49 @@ def _burn_proof(job: Job) -> dict[str, str] | None:
     return {field: data[field] for field in fields}
 
 
+def burned_output_relink_recovery_available(
+    job: Job,
+    config: WorkflowConfig,
+    *,
+    burned_video_valid: bool,
+) -> bool:
+    """判断 status 是否可安全提示已移动成品的重新关联。
+
+    ``burned_video_valid`` 由 recovery 已计算的 artifact 校验结果提供，避免 status
+    重复读取大型成品；此检查也刻意不读取源媒体内容。真正的 relink 命令会在写入前
+    重新计算并比对。
+    """
+
+    if not config.burn:
+        return False
+    burned_videos = [artifact for artifact in job.artifacts if artifact.kind == "burned_video"]
+    if len(burned_videos) != 1:
+        return False
+    burned_video = burned_videos[0]
+    if not burned_video.checksum or burned_video_valid:
+        return False
+    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
+        return False
+    media_qa_path = valid_artifact_path(job, "media_qa")
+    if media_qa_path is None or valid_artifact_path(job, "translated_cues") is None:
+        return False
+    try:
+        media_qa = json.loads(media_qa_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(media_qa, dict) or media_qa.get("status") != "pass":
+        return False
+    proof = _burn_proof(job)
+    current_fingerprint = _burn_fingerprint(job, config)
+    return bool(
+        proof is not None
+        and current_fingerprint is not None
+        and proof["fingerprint"] == current_fingerprint
+        and _stored_burn_fingerprint(job) == current_fingerprint
+        and proof["burned_video_checksum"] == burned_video.checksum
+    )
+
+
 def _record_burn_fingerprint(job_file: Path) -> None:
     """将派生指纹登记为 ``burn_fingerprint`` artifact，并清除历史 workflow 旁路字段。"""
 

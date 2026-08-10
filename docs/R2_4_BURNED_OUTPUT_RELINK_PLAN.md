@@ -64,18 +64,18 @@ artifact）仍按既有轻量完成语义读取，避免改变旧 Job 的正常 
 
 ## 恢复语义
 
-第一阶段先提供显式重新关联命令。第二阶段调整恢复导航：
+R2.4 两阶段均已完成：第一阶段提供显式重新关联命令；第二阶段调整恢复导航：
 
 | 场景 | recovery category | 建议 |
 | --- | --- | --- |
 | 成品、媒体 QA、派生指纹/proof 均有效 | `complete` | `verify` |
-| 媒体 QA、当前派生指纹和有效 v2 proof 均有效，但登记成品缺失或 checksum 失效 | `awaiting_input` | 首选重新关联，备选显式 `continue` 重烧 |
+| 媒体 QA、当前派生指纹和有效 v2 proof 均有效，但登记成品缺失或 checksum 失效 | `awaiting_input` | 首选重新关联占位命令，备选显式 `continue` 重烧；只表示可能可关联，执行仍校验实际源媒体内容 |
 | 登记成品缺失或 checksum 失效，但只有 legacy fingerprint | `retryable` | `continue` 重烧生成 v2 proof；不能推荐 relink |
 | 媒体 QA 未通过 | `retryable` | `continue` 重烧并复查 |
 | 派生指纹/proof 失效 | `retryable` | `continue` 按当前输入重烧 |
 | 从未登记烧录成品 | `retryable` | `continue` 完成首次烧录 |
 
-`batch-continue` 已将 `awaiting_input` 作为停止态处理，因此第二阶段完成后不会自动覆盖或
+`batch-continue` 已将 `awaiting_input` 作为停止态处理，因此不会自动覆盖或
 重新编码可能已被用户移动、替换的外部成品。
 
 ## 兼容性与事件
@@ -99,10 +99,11 @@ artifact）仍按既有轻量完成语义读取，避免改变旧 Job 的正常 
 
 第一阶段独立可用：用户可显式运行命令恢复 artifact 路径和完整完成态。
 
-### 第二阶段：恢复导航与批处理
+### 第二阶段：恢复导航与批处理（已完成）
 
 - `src/xvt/recovery.py`：精确区分可重新关联、媒体 QA 失败和指纹失效。
-- `tests/test_recovery.py`：固定恢复分类和命令优先级。
+- `tests/test_workflow.py`：用真实 v2 proof Job 固定恢复分类、命令优先级和不额外 hash 源媒体的边界。
+- `tests/test_cli.py`：固定普通与 JSON `status` 的首选/备选命令输出。
 - `tests/test_batch.py`：证明 `batch-continue` 不自动重烧可重新关联的成品。
 - ROADMAP、HANDOFF 与架构方案：记录评估结论和完成状态。
 
