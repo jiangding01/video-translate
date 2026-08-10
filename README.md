@@ -220,6 +220,22 @@ xvt verify JOB_FILE [--json]
 </details>
 
 <details>
+<summary><code>xvt relink-burned-output</code>：重新关联已移动的烧录成品</summary>
+
+```text
+xvt relink-burned-output JOB_FILE EXISTING_VIDEO [--events-jsonl]
+```
+
+- 位置参数：`job_file`、`existing_video`。
+- 只接受 checksum 有效的 `version=2` burn proof：它绑定当前烧录 fingerprint、原 `burned_video` checksum 和实际源媒体内容 checksum。原成品须已通过媒体 QA，候选视频的 SHA-256 还必须与原 artifact checksum 完全相同，才会更新登记路径。
+- 旧/legacy fingerprint 仍可按既有轻量完成语义读取，但不能用于重新关联；请先运行 `continue` 重烧一次以生成 v2 proof。重复登记的 `burned_video` 一律拒绝，不会猜测应关联哪一项。
+- 普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；该 checksum 只在烧录落证和重新关联校验时计算。
+- 高级原子命令 `xvt burn` 允许使用临时媒体、字体和编码参数，因此不签发 workflow v2 proof；只有 `run` / `continue` 按持久化目标完成的烧录可供重新关联。
+- 命令不复制、移动、删除或重新编码视频；失败时不修改 Job。`--events-jsonl` 输出 artifact 路径切换和 CLI 终态事件。
+
+</details>
+
+<details>
 <summary><code>xvt doctor</code>：检查本机运行依赖</summary>
 
 ```text

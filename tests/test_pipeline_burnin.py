@@ -23,6 +23,7 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             media = root / "input.mp4"
             media.write_bytes(b"video")
             job = create_job("https://youtu.be/abc", root)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
             artifacts = root / "jobs" / job.id / "artifacts"
             artifacts.mkdir()
             translated_path = artifacts / "translated-cues.json"
@@ -81,6 +82,9 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             self.assertTrue(result.exists())
             persisted = json.loads((root / "jobs" / job.id / "job.json").read_text())
             self.assertEqual(persisted["stages"]["media_qa"]["status"], "succeeded")
+            self.assertFalse(
+                any(artifact["kind"] == "burn_fingerprint" for artifact in persisted["artifacts"])
+            )
             self.assertTrue((artifacts / "bilingual.ass").exists())
             self.assertEqual(burn_options["video_bitrate"], "5M")
             download.assert_not_called()
