@@ -231,6 +231,8 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertIn("not stylistic preferences", prompt)
         self.assertIn("recognizable proper name", prompt)
         self.assertIn("suggested_items must be empty", prompt)
+        self.assertIn("at least two adjacent cue ids", prompt)
+        self.assertIn("never report it for a single cue", prompt)
         self.assertIn("treat ASCII spaces and cue boundaries as valid separators", prompt)
         self.assertIn("Do not report awkward_join", prompt)
         self.assertIn("solely because those marks are absent", prompt)

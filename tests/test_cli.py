@@ -499,7 +499,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
 
-    def test_apply_translation_review_fixes_forwards_response_and_prints_continue(self) -> None:
+    def test_apply_translation_review_fixes_forwards_response_and_prints_status(self) -> None:
         paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed-cues.json"))
         output = StringIO()
         with (
@@ -516,7 +516,7 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
-        self.assertIn("xvt continue /tmp/job.json", output.getvalue())
+        self.assertIn("xvt status /tmp/job.json", output.getvalue())
 
     def test_prepare_source_review_forwards_cues_and_prints_apply_command(self) -> None:
         path = Path("/tmp/source-review.json")
@@ -534,7 +534,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("/tmp/source-review.srt", output.getvalue())
         self.assertIn("apply-source-review-fixes", output.getvalue())
 
-    def test_apply_source_review_fixes_forwards_response_and_prints_continue(self) -> None:
+    def test_apply_source_review_fixes_forwards_response_and_prints_status(self) -> None:
         paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed-cues.json"))
         output = StringIO()
         with (
@@ -545,7 +545,7 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", "/tmp/response.json"))
-        self.assertIn("xvt continue /tmp/job.json", output.getvalue())
+        self.assertIn("xvt status /tmp/job.json", output.getvalue())
 
     def _write_response(self, directory: str, payload: dict[str, object]) -> str:
         path = Path(directory) / "response.json"
@@ -590,6 +590,85 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", response))
+
+    def test_apply_continue_runs_workflow_after_agent_response(self) -> None:
+        result = SimpleNamespace(status="completed", paths=(Path("/tmp/reviewed.json"),))
+        workflow_result = WorkflowResult("completed", Path("/tmp/job.json"), (), None)
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "semantic_review_only"})
+            with (
+                patch("xvt.cli.apply_agent_semantic_review", return_value=result),
+                patch("xvt.cli.load_job", return_value=Job("job-1", "", "", "input", "/tmp", {})),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch(
+                    "xvt.cli.continue_workflow", return_value=workflow_result
+                ) as continue_workflow,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response, "--continue"])
+
+        self.assertEqual(return_code, 0)
+        continue_workflow.assert_called_once()
+
+    def test_apply_continue_suppresses_intermediate_recovery_summary(self) -> None:
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed.json"))
+        workflow_result = WorkflowResult("completed", Path("/tmp/job.json"), (), None)
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "translation_review_fixes"})
+            with (
+                patch("xvt.cli.apply_translation_review_fixes", return_value=paths),
+                patch("xvt.cli.load_job", return_value=Job("job-1", "", "", "input", "/tmp", {})),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.continue_workflow", return_value=workflow_result),
+                patch("xvt.cli._print_recovery_navigation") as recovery,
+                redirect_stdout(output),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response, "--continue"])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(output.getvalue(), "/tmp/job.json\n")
+        recovery.assert_not_called()
+
+    def test_apply_continue_jsonl_contains_only_json_events(self) -> None:
+        result = SimpleNamespace(status="completed", paths=(Path("/tmp/reviewed.json"),))
+        workflow_result = WorkflowResult("completed", Path("/tmp/job.json"), (), None)
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "semantic_review_only"})
+            with (
+                patch("xvt.cli.apply_agent_semantic_review", return_value=result),
+                patch("xvt.cli.load_job", return_value=Job("job-1", "", "", "input", "/tmp", {})),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.continue_workflow", return_value=workflow_result),
+                redirect_stdout(output),
+            ):
+                return_code = main(
+                    [
+                        "apply",
+                        "/tmp/job.json",
+                        response,
+                        "--continue",
+                        "--events-jsonl",
+                    ]
+                )
+
+        lines = [line for line in output.getvalue().splitlines() if line]
+        events = [json.loads(line) for line in lines]
+        self.assertEqual(return_code, 0)
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["type"], "cli_completed")
+        self.assertNotIn("/tmp/reviewed.json", lines)
+
+    def test_apply_continue_rejects_source_review(self) -> None:
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "source_review_fixes"})
+            with redirect_stderr(errors):
+                return_code = main(["apply", "/tmp/job.json", response, "--continue"])
+
+        self.assertEqual(return_code, 2)
+        self.assertIn("invalidate translation and downstream", errors.getvalue())
 
     def test_apply_routes_polished_translation_and_resolves_target_language(self) -> None:
         job = Job("job-1", "", "", "input", "/tmp", {})
@@ -679,6 +758,23 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(return_code, 0)
         self.assertIn("no persisted workflow goal", errors.getvalue())
 
+    def test_apply_continue_rejects_atomic_review_before_mutation(self) -> None:
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(directory, {"task": "translation_review_fixes"})
+            with (
+                patch("xvt.cli.load_job", return_value=job),
+                patch("xvt.cli.get_workflow_config", return_value=None),
+                patch("xvt.cli.apply_translation_review_fixes") as apply,
+                redirect_stderr(errors),
+            ):
+                return_code = main(["apply", "/tmp/job.json", response, "--continue"])
+
+        self.assertEqual(return_code, 2)
+        self.assertIn("persisted end-to-end workflow goal", errors.getvalue())
+        apply.assert_not_called()
+
     def test_apply_rejects_when_job_is_not_awaiting_input(self) -> None:
         job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})
         errors = StringIO()
@@ -733,6 +829,28 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.args[:2], ("/tmp/job.json", str(review)))
+
+    def test_apply_review_srt_continue_runs_workflow(self) -> None:
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed.json"))
+        workflow_result = WorkflowResult("completed", Path("/tmp/job.json"), (), None)
+        with tempfile.TemporaryDirectory() as directory:
+            stem = translation_review_stem("0123456789abcdef0123456789abcdef")
+            review = Path(directory) / f"{stem}.srt"
+            review.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n#1\n你好，朋友。\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("xvt.cli.apply_translation_review_fixes", return_value=paths),
+                patch("xvt.cli.load_job", return_value=Job("job-1", "", "", "input", "/tmp", {})),
+                patch("xvt.cli.get_workflow_config", return_value=SimpleNamespace()),
+                patch("xvt.cli.continue_workflow", return_value=workflow_result) as continue_job,
+                redirect_stdout(StringIO()),
+            ):
+                return_code = main(["apply", "/tmp/job.json", str(review), "--continue"])
+
+        self.assertEqual(return_code, 0)
+        continue_job.assert_called_once()
 
     def test_apply_routes_source_review_srt_by_its_generated_name(self) -> None:
         paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed.json"))
@@ -997,6 +1115,33 @@ class CliTest(unittest.TestCase):
         resume.assert_called_once()
         self.assertEqual(output.getvalue(), f"{get_job_file(job)}\n")
 
+    def test_resume_jsonl_waiting_for_subtitle_review_has_no_cli_completed(self) -> None:
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/input.mp4", directory)
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.AWAITING_INPUT
+
+            def resume_waiting(_job_file, *, event_sink):
+                event_sink(
+                    create_event(
+                        EventType.STAGE_WAITING,
+                        stage="subtitle_qa",
+                        status="awaiting_input",
+                    )
+                )
+                return job
+
+            with (
+                patch("xvt.cli.resume_job", side_effect=resume_waiting),
+                redirect_stdout(output),
+            ):
+                return_code = main(["resume", str(get_job_file(job)), "--events-jsonl"])
+
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line]
+        self.assertEqual(return_code, 0)
+        self.assertEqual([event["type"] for event in events], ["stage_waiting"])
+        self.assertNotIn("cli_completed", {event["type"] for event in events})
+
     def test_rebuild_source_dispatches_and_prints_next_workflow_command(self) -> None:
         output = StringIO()
         result = RebuildSourceResult(
@@ -1185,6 +1330,14 @@ class CliTest(unittest.TestCase):
             )
             event_sink(
                 create_event(
+                    EventType.TRANSLATION_BATCH_STARTED,
+                    batch=38,
+                    batch_index=1,
+                    batch_total=1,
+                )
+            )
+            event_sink(
+                create_event(
                     EventType.SOURCE_SELECTED,
                     selected_kind="asr",
                     reason="automatic_subtitles_reference_only",
@@ -1235,6 +1388,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("[进行中] 下载源视频  42%  2.0 MB/s  剩余 00:15", progress)
         self.assertIn("[进行中] 转写音频  42%  03:30/08:20  剩余 00:41", progress)
         self.assertIn("[进行中] 翻译字幕（批次 2/5）", progress)
+        self.assertIn("[进行中] 翻译字幕（批次 1/1）", progress)
         self.assertIn(
             "[选择] 源字幕：采用 ASR 字幕（automatic_subtitles_reference_only）",
             progress,
@@ -1353,6 +1507,33 @@ class CliTest(unittest.TestCase):
         self.assertIn("其他:", text)
         self.assertIn("/tmp/translation-batches.json", text)
         self.assertIn("translation is awaiting input", text)
+
+    def test_workflow_awaiting_result_prints_recovery_plan(self) -> None:
+        output = StringIO()
+        result = WorkflowResult("awaiting_input", Path("/tmp/job.json"), (), "needs agent")
+        plan = SimpleNamespace(
+            reason="等待 Agent 语义校对",
+            report_paths=("/tmp/report.json",),
+            input_paths=("/tmp/review.json",),
+            prerequisite_commands=("xvt apply /tmp/job.json RESPONSE",),
+            primary_command="xvt continue /tmp/job.json",
+            alternative_commands=("xvt apply-semantic-review /tmp/job.json RESPONSE",),
+        )
+
+        with (
+            patch("xvt.cli.run_workflow", return_value=result),
+            patch("xvt.cli.build_recovery_plan", return_value=plan),
+            redirect_stdout(output),
+            redirect_stderr(StringIO()),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 0)
+        text = output.getvalue()
+        self.assertIn("恢复建议：等待 Agent 语义校对", text)
+        self.assertIn("报告: /tmp/report.json", text)
+        self.assertIn("待编辑: /tmp/review.json", text)
+        self.assertIn("xvt continue /tmp/job.json", text)
 
     def test_status_displays_needs_review_instead_of_failed(self) -> None:
         output = StringIO()
@@ -1729,6 +1910,43 @@ class CliTest(unittest.TestCase):
         self.assertEqual(prepare.call_args.kwargs["translation_style"], "natural")
         self.assertEqual(output.getvalue(), "/tmp/batches.json\n")
 
+    def test_apply_translation_jsonl_semantic_review_waiting_has_no_cli_completed(self) -> None:
+        output = StringIO()
+        job = Job("job-1", "", "", "input", "/tmp", {"translation_quality": "standard"})
+
+        def apply_waiting(_job_file, _response_file, *, target_language, event_sink):
+            self.assertEqual(target_language, "zh-CN")
+            event_sink(
+                create_event(
+                    EventType.STAGE_WAITING,
+                    stage="translate",
+                    status="awaiting_input",
+                )
+            )
+            return (Path("/tmp/translated.json"),)
+
+        with (
+            patch("xvt.cli.apply_agent_translation", side_effect=apply_waiting),
+            patch("xvt.cli.load_job", return_value=job),
+            patch("xvt.cli.semantic_review_waiting", return_value=True),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "apply-translation",
+                    "/tmp/job.json",
+                    "/tmp/response.json",
+                    "--target-language",
+                    "zh-CN",
+                    "--events-jsonl",
+                ]
+            )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line]
+        self.assertEqual(return_code, 0)
+        self.assertEqual([event["type"] for event in events], ["stage_waiting"])
+        self.assertNotIn("cli_completed", {event["type"] for event in events})
+
     def test_translate_reports_agent_fallback(self) -> None:
         output = StringIO()
         result = TranslationRunResult(
@@ -1759,6 +1977,42 @@ class CliTest(unittest.TestCase):
         self.assertEqual(translate.call_args.kwargs["translation_style"], "concise")
         self.assertIn("using Agent mode", output.getvalue())
         self.assertIn("translation-batches.json", output.getvalue())
+
+    def test_translate_jsonl_semantic_review_waiting_has_no_cli_completed(self) -> None:
+        output = StringIO()
+        job = Job("job-1", "", "", "input", "/tmp", {"translation_quality": "standard"})
+        result = TranslationRunResult("agent", (Path("/tmp/translation-batches.json"),))
+
+        def translate_waiting(_job_file, **options):
+            options["event_sink"](
+                create_event(
+                    EventType.STAGE_WAITING,
+                    stage="translate",
+                    status="awaiting_input",
+                )
+            )
+            return result
+
+        with (
+            patch("xvt.cli.run_translation", side_effect=translate_waiting),
+            patch("xvt.cli.load_job", return_value=job),
+            patch("xvt.cli.semantic_review_waiting", return_value=True),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "translate",
+                    "/tmp/job.json",
+                    "--target-language",
+                    "zh-CN",
+                    "--events-jsonl",
+                ]
+            )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line]
+        self.assertEqual(return_code, 0)
+        self.assertEqual([event["type"] for event in events], ["stage_waiting"])
+        self.assertNotIn("cli_completed", {event["type"] for event in events})
 
     def test_translate_runs_atomic_polish_for_polished_api_result(self) -> None:
         output = StringIO()
@@ -1824,8 +2078,10 @@ class CliTest(unittest.TestCase):
     def test_import_translation_forwards_target_language(self) -> None:
         output = StringIO()
         paths = (Path("/tmp/translated.srt"), Path("/tmp/bilingual.srt"))
+        job = Job("job-1", "", "", "input", "/tmp", {})
         with (
             patch("xvt.cli.apply_subtitle_translation", return_value=paths) as apply,
+            patch("xvt.cli.load_job", return_value=job),
             redirect_stdout(output),
         ):
             return_code = main(
@@ -1841,6 +2097,60 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(apply.call_args.kwargs["target_language"], "zh-CN")
         self.assertIn("/tmp/bilingual.srt", output.getvalue())
+
+    def test_import_translation_jsonl_review_waiting_has_no_cli_completed(self) -> None:
+        output = StringIO()
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        job.stages[StageName.SUBTITLE_QA].status = StageStatus.AWAITING_INPUT
+        with (
+            patch(
+                "xvt.cli.apply_subtitle_translation",
+                return_value=(Path("/tmp/qa-translated.json"),),
+            ),
+            patch("xvt.cli.load_job", return_value=job),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "import-translation",
+                    "/tmp/job.json",
+                    "/tmp/zh.srt",
+                    "--target-language",
+                    "zh-CN",
+                    "--events-jsonl",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertNotIn("cli_completed", output.getvalue())
+
+    def test_apply_cue_retranslation_jsonl_review_waiting_has_no_cli_completed(self) -> None:
+        output = StringIO()
+        job = Job("job-1", "", "", "input", "/tmp", {})
+        job.stages[StageName.SUBTITLE_QA].status = StageStatus.AWAITING_INPUT
+        with (
+            patch(
+                "xvt.cli.apply_cue_retranslation",
+                return_value=(Path("/tmp/qa-translated.json"),),
+            ),
+            patch("xvt.cli.load_job", return_value=job),
+            redirect_stdout(output),
+        ):
+            return_code = main(
+                [
+                    "apply-cue-retranslation",
+                    "/tmp/job.json",
+                    "/tmp/response.json",
+                    "--cue",
+                    "1",
+                    "--target-language",
+                    "zh-CN",
+                    "--events-jsonl",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertNotIn("cli_completed", output.getvalue())
 
     def test_doctor_json_returns_dependency_exit_code(self) -> None:
         output = StringIO()

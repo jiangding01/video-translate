@@ -61,7 +61,7 @@ def complete_qa_stage(
     job: Job,
     report: Any,
     event_sink: EventSink | None,
-) -> None:
+) -> bool:
     if report.status == "needs_review":
         # 人工确认通道：仅当当前报告的全部 review 级问题都是用户已确认集合的
         # 子集时放行；出现任何新的 review 问题仍然阻断，error 级永不放行。
@@ -82,12 +82,18 @@ def complete_qa_stage(
                     )
                 )
             set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
-            return
-    if report.status in {"failed", "needs_review"}:
-        if report.status == "needs_review":
-            message = SUBTITLE_REVIEW_REQUIRED_MESSAGE
-        else:
-            message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
+            return True
+    if report.status == "needs_review":
+        set_stage(
+            job,
+            StageName.SUBTITLE_QA,
+            StageStatus.AWAITING_INPUT,
+            event_sink,
+            error=SUBTITLE_REVIEW_REQUIRED_MESSAGE,
+        )
+        return False
+    if report.status == "failed":
+        message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
         set_stage(
             job,
             StageName.SUBTITLE_QA,
@@ -97,6 +103,7 @@ def complete_qa_stage(
         )
         raise RuntimeError(message)
     set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
+    return True
 
 
 def acknowledge_subtitle_review(
@@ -148,7 +155,7 @@ def acknowledge_subtitle_review(
         "acknowledged_at": utc_now(),
     }
     qa_record = job.stages[StageName.SUBTITLE_QA]
-    if qa_record.status is StageStatus.FAILED:
+    if qa_record.status in {StageStatus.FAILED, StageStatus.AWAITING_INPUT}:
         qa_record.status = StageStatus.PENDING
         qa_record.started_at = None
         qa_record.completed_at = None

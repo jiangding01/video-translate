@@ -41,6 +41,7 @@ class ArtifactKind(StrEnum):
     TRANSLATION_POLISH_BATCHES = "translation_polish_batches"
     TRANSLATION_POLISH_PROGRESS = "translation_polish_progress"
     TRANSLATION_POLISHED_CUES = "translation_polished_cues"
+    TRANSLATION_CANDIDATE_QA = "translation_candidate_qa"
     TRANSLATION_SEMANTIC_QA = "translation_semantic_qa"
     TRANSLATION_SEMANTIC_REPAIR = "translation_semantic_repair"
     TRANSLATION_REPAIRED_CUES = "translation_repaired_cues"
@@ -145,6 +146,9 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.TRANSLATION_POLISHED_CUES: frozenset(
         {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_POLISH_PROGRESS}
     ),
+    # 具体候选通过报告内 checksum 绑定；图上只依赖 source，避免 polished/repaired/
+    # reviewed 三条互斥候选路径把当前报告错误地视作彼此的下游。
+    ArtifactKind.TRANSLATION_CANDIDATE_QA: frozenset({ArtifactKind.SOURCE_CUES}),
     ArtifactKind.TRANSLATION_SEMANTIC_QA: frozenset(
         {ArtifactKind.SOURCE_CUES, ArtifactKind.TRANSLATION_POLISHED_CUES}
     ),

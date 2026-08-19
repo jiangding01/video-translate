@@ -44,10 +44,10 @@ Agent 等待输入时：
 
 ```text
 xvt apply JOB.json RESPONSE
-xvt continue JOB.json
+xvt apply JOB.json RESPONSE --continue  # 回填后在同一进程继续端到端任务
 ```
 
-`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。各 `apply-*` 命令仍是稳定入口，行为不变。
+`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。增加 `--continue` 可在回填成功后立即继续同一端到端任务；源文修订不接受该参数，因为它会失效译文及下游产物，回填后请先查看 `status`。各 `apply-*` 命令仍是稳定入口，行为不变。
 
 目录批处理：
 
@@ -171,7 +171,7 @@ xvt continue JOB_FILE [--cookies-from-browser BROWSER] [--proxy URL]
 <summary><code>xvt apply</code>：自动路由 Agent 或人工修订响应</summary>
 
 ```text
-xvt apply JOB_FILE RESPONSE_FILE [--events-jsonl]
+xvt apply JOB_FILE RESPONSE_FILE [--continue] [--events-jsonl]
 ```
 
 - 位置参数：`job_file`、`response_file`。
@@ -693,7 +693,7 @@ Q6.1c 要求 API 和 Agent 都把每个语义组作为连续话语处理：先�
 
 模型生成的显式简中译文（`zh-CN`、`zh-Hans` 及 `zh-Hans-*` 区域后缀形式）写入时还会经过保守的确定性标点收口：消除全角 `，`、`。`，其中句中位置按需替换为一个半角空格以保留 `OpenAI GPT-5` 一类词边界，行尾与换行前直接移除；模型把省略号写成的连续全角句号归一为单个 `…`；`？`、`！`、`；`、`：`、`——`、ASCII URL/版本号/代码标点及模型原有换行一律保留。左右同形引号按上下文推断开闭，但英文词内撇号和数字后的尺寸符号不参与引号计数。源 cue 末尾为问句而译文没有句末语义标点时补 `？`，位置镜像源文中问号相对末尾闭合符号的位置：源文 `(ready?)` 得到 `（准备好了吗？）`，源文 `Is it (a)?` 得到 `是吗（a）？`；译文闭合符号少于源文时按译文实际数量收敛。语义审查把半角空格和 cue 边界视为有效分隔，不会仅因缺少全角逗号或句号报告 `awkward_join`。导入译文、人工译文修订、源字幕、bare `zh`、繁中及其他目标语言保持原样。
 
-语义复查仍有 review 问题时，XVT 会在 Job 的 `review/` 目录生成绑定当前候选和报告的译文修订模板，同时给出 JSON 与 SRT 两种载体：JSON（`translation-review-<fp12>.json`）供 Agent 与脚本消费，编辑其中的 `items[].text`；SRT（`translation-review-<fp12>.srt`，每条正文为 `#<cue id>` 注释行加当前译文）供人工用任意字幕工具编辑，只改译文行、保留注释行与时间轴，文件名也不要改（fingerprint 由文件名承载）。两者都用 `xvt apply-translation-review-fixes JOB REVIEW`（按后缀自动识别）回填，效果完全等价，再运行 `xvt continue JOB`；修订不会改变 cue ID 或时间轴，并且只重新执行语义复查，不再触发第二轮自动修复。SRT 若改动了时间轴或增删了 cue，会在解析阶段直接被拒。存在 `source_suspect` 时还会为相关源 cue 自动生成源文模板，`status` 优先推荐修订源文，同时保留译文修订和 `--acknowledge-translation-review` 直接确认两条备选路径。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
+语义复查或候选译文确定性 QA 仍有可修复问题时，XVT 会生成绑定当前候选、语义报告和 `translation_candidate_qa` 的 JSON/SRT 修订模板。两种载体都必须完整保留模板 cue ID 集合，并可用 `xvt apply JOB REVIEW --continue` 一步回填并继续。系统记录实际变化的 `changed_ids`，只重新检查包含这些 ID 的完整语义组，相邻组仅作只读上下文，未触及问题保持原结论；不会重新翻译、润色或再次自动修复，候选 QA 会完整重跑。存在 `source_suspect` 时还会生成源文模板；源文修改会失效译文及下游，因此不支持 `apply --continue`，`status` 会明确提示高成本路径与备选方案。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 
 源字幕存在误听或专名错误时，可显式生成源文修订模板。该路径只修改指定 cue 的源文字段，立即重新执行确定性源字幕 QA，并使旧翻译、润色、语义报告、渲染和烧录结果失效；ID、时间轴、词级时间戳和 provenance 保持不变：
 
@@ -706,7 +706,7 @@ uv run --no-sync xvt apply-source-review-fixes JOB source-review-<fp12>.srt
 uv run --no-sync xvt continue JOB
 ```
 
-两种载体都绑定相同 source checksum 和精确 cue ID 集合，并汇聚到同一回填流程；改时间轴、增删 cue、注释与时间轴不符或修改 fingerprint 文件名都会被拒绝。源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；准备和回填命令都会提前拒绝，`status` 也不会展示不可执行的源文路径。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁。
+两种载体都绑定相同 source checksum 和精确 cue ID 集合，并汇聚到同一回填流程；改时间轴、增删 cue、注释与时间轴不符或修改 fingerprint 文件名都会被拒绝。源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；准备和回填命令都会提前拒绝，`status` 也不会展示不可执行的源文路径。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁；纯 `needs_review` 持久化为 `awaiting_input` 并返回确认/修订命令，只有 error 级问题记为 `failed`。
 
 已有端到端 Job 具备 checksum 有效的 `translated_cues` 时，可显式补跑 Q5a 润色：
 

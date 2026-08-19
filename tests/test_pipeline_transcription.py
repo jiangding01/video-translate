@@ -223,12 +223,11 @@ class TranscriptionPipelineTest(unittest.TestCase):
                 patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
                 patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
             ):
-                with self.assertRaisesRegex(RuntimeError, "subtitle QA needs_review"):
-                    run_local_transcription(media, root)
+                job = run_local_transcription(media, root)
 
-            job_file = next((root / "jobs").glob("*/job.json"))
+            job_file = get_job_file(job)
             data = json.loads(job_file.read_text())
-            self.assertEqual(data["stages"]["subtitle_qa"]["status"], "failed")
+            self.assertEqual(data["stages"]["subtitle_qa"]["status"], "awaiting_input")
             qa = json.loads((job_file.parent / "artifacts" / "qa.json").read_text())
             self.assertEqual(qa["status"], "needs_review")
             self.assertIn("line_too_wide", {issue["code"] for issue in qa["issues"]})

@@ -58,6 +58,7 @@ from xvt.pipeline import (
     run_translation,
     run_translation_polish,
     run_translation_semantic_review,
+    semantic_review_waiting,
 )
 from xvt.process import CommandCancelled, CommandError
 from xvt.recovery import (
@@ -90,8 +91,7 @@ recommended path:
   xvt continue JOB.json
 
 when status says awaiting Agent input:
-  xvt apply JOB.json RESPONSE          # auto-routes to the right apply command
-  xvt continue JOB.json
+  xvt apply JOB.json RESPONSE --continue  # auto-route, apply, and keep going
   # explicit alternatives: apply-translation / apply-polish-translation /
   # apply-semantic-review / apply-translation-review-fixes / apply-source-review-fixes
 
@@ -299,6 +299,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     unified_apply_parser.add_argument("job_file")
     unified_apply_parser.add_argument("response_file")
+    unified_apply_parser.add_argument(
+        "--continue",
+        dest="continue_after_apply",
+        action="store_true",
+        help="Apply the response and continue the same end-to-end workflow",
+    )
     unified_apply_parser.add_argument("--events-jsonl", action="store_true")
 
     prepare_parser = subparsers.add_parser(
@@ -532,8 +538,15 @@ def _stage_display_label(
     stage: str,
     *,
     detail: object = None,
+    phase: object = None,
     translated_context: bool = False,
 ) -> str:
+    if stage == "translate":
+        return {
+            "polish": "润色字幕",
+            "semantic_review": "语义校对",
+            "repair": "定向修复",
+        }.get(str(phase), "翻译字幕")
     if stage == "acquire":
         if detail == "subtitles":
             return "下载平台字幕"
@@ -635,7 +648,9 @@ _SOURCE_SELECTION_LABELS = {
 
 
 def _format_batch_position(data: dict[str, object]) -> str:
-    batch = data.get("batch")
+    batch = data.get("batch_index")
+    if not isinstance(batch, int) or batch <= 0:
+        batch = data.get("batch")
     batch_total = data.get("batch_total")
     if isinstance(batch_total, int) and batch_total > 0:
         return f"{batch}/{batch_total}"
@@ -793,11 +808,13 @@ class _HumanEventSink(_TrackedEventSink):
             return
         status = event.data.get("status")
         detail = event.data.get("detail")
+        phase = event.data.get("phase")
         if stage == "translate" and status in {"running", "succeeded", "awaiting_input"}:
             self._seen_translation = True
         label = _stage_display_label(
             stage,
             detail=detail,
+            phase=phase,
             translated_context=self._seen_translation,
         )
 
@@ -979,6 +996,31 @@ def _complete(arguments: argparse.Namespace, **data: object) -> None:
     event_sink(create_event(EventType.CLI_COMPLETED, command=arguments.command, **data))
 
 
+def _human_review_waiting(job: Job) -> bool:
+    stages = getattr(job, "stages", None)
+    if not isinstance(stages, dict):
+        return False
+    qa = stages.get(StageName.SUBTITLE_QA)
+    return bool(qa and qa.status is StageStatus.AWAITING_INPUT) or semantic_review_waiting(job)
+
+
+def _print_recovery_navigation(job_file: str | Path) -> None:
+    try:
+        plan = build_recovery_plan(job_file)
+    except (OSError, RuntimeError, ValueError):
+        print(f"next: xvt status {shlex.quote(str(job_file))}")
+        return
+    print(f"recovery: {plan.reason}")
+    for path in plan.report_paths:
+        print(f"report: {path}")
+    for path in plan.input_paths:
+        print(f"input: {path}")
+    if plan.primary_command:
+        print(f"next: {plan.primary_command}")
+    for command in plan.alternative_commands:
+        print(f"alternative: {command}")
+
+
 def _print_batch_result(result: BatchResult) -> None:
     print(result.batch_file)
     print(
@@ -1031,8 +1073,25 @@ def _print_workflow_result(result: object) -> None:
         print("其他:")
         for path in others:
             print(f"  {path}")
-    if status == "awaiting_input" and message:
-        print(f"translation is awaiting input: {message}")
+    if status == "awaiting_input":
+        try:
+            plan = build_recovery_plan(job_file) if job_file is not None else None
+        except (OSError, RuntimeError, ValueError):
+            plan = None
+        if plan is not None:
+            print(f"恢复建议：{plan.reason}")
+            for path in plan.report_paths:
+                print(f"报告: {path}")
+            for path in plan.input_paths:
+                print(f"待编辑: {path}")
+            for command in plan.prerequisite_commands:
+                print(f"  {command}")
+            if plan.primary_command:
+                print(f"  {plan.primary_command}")
+            for command in plan.alternative_commands:
+                print(f"  或：{command}")
+        elif message:
+            print(f"translation is awaiting input: {message}")
 
 
 def _cmd_inspect(arguments: argparse.Namespace) -> int:
@@ -1221,10 +1280,14 @@ def _cmd_relink_burned_output(arguments: argparse.Namespace) -> int:
 def _cmd_resume(arguments: argparse.Namespace) -> int:
     event_sink = _event_sink(arguments)
     job = resume_job(arguments.job_file, event_sink=event_sink)
+    waiting = _human_review_waiting(job)
     if arguments.events_jsonl:
-        _complete(arguments, job_file=str(get_job_file(job)))
+        if not waiting:
+            _complete(arguments, job_file=str(get_job_file(job)))
     else:
         print(get_job_file(job))
+        if waiting:
+            _print_recovery_navigation(get_job_file(job))
     return 0
 
 
@@ -1324,11 +1387,17 @@ def _cmd_apply_translation(arguments: argparse.Namespace) -> int:
             event_sink=event_sink,
         )
         paths = semantic.paths
+        job = load_job(arguments.job_file)
+    waiting = _human_review_waiting(job)
+    defer = bool(getattr(arguments, "_defer_cli_complete", False))
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path) for path in paths])
-    else:
+        if not waiting and not defer:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+    elif not defer:
         for path in paths:
             print(path)
+        if waiting:
+            _print_recovery_navigation(arguments.job_file)
     return 0
 
 
@@ -1340,11 +1409,15 @@ def _cmd_import_translation(arguments: argparse.Namespace) -> int:
         target_language=arguments.target_language,
         event_sink=event_sink,
     )
+    waiting = _human_review_waiting(load_job(arguments.job_file))
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path) for path in paths])
+        if not waiting:
+            _complete(arguments, artifacts=[str(path) for path in paths])
     else:
         for path in paths:
             print(path)
+        if waiting:
+            _print_recovery_navigation(arguments.job_file)
     return 0
 
 
@@ -1412,18 +1485,27 @@ def _cmd_translate(arguments: argparse.Namespace) -> int:
                 semantic.paths,
                 semantic.fallback_reason,
             )
+    try:
+        job = load_job(arguments.job_file)
+    except OSError:
+        waiting = False
+    else:
+        waiting = _human_review_waiting(job)
     if arguments.events_jsonl:
-        _complete(
-            arguments,
-            mode=result.mode,
-            artifacts=[str(path) for path in result.paths],
-        )
+        if not waiting:
+            _complete(
+                arguments,
+                mode=result.mode,
+                artifacts=[str(path) for path in result.paths],
+            )
     else:
         if result.fallback_reason:
             print(f"translation provider unavailable ({result.fallback_reason}); using Agent mode")
         print(f"mode: {result.mode}")
         for path in result.paths:
             print(path)
+        if waiting:
+            _print_recovery_navigation(arguments.job_file)
     return 0
 
 
@@ -1462,9 +1544,11 @@ def _cmd_apply_polish_translation(arguments: argparse.Namespace) -> int:
         arguments.response_file,
         event_sink=event_sink,
     )
+    defer = bool(getattr(arguments, "_defer_cli_complete", False))
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path) for path in paths])
-    else:
+        if not defer:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+    elif not defer:
         for path in paths:
             print(path)
     return 0
@@ -1477,13 +1561,15 @@ def _cmd_apply_semantic_review(arguments: argparse.Namespace) -> int:
         arguments.response_file,
         event_sink=event_sink,
     )
+    defer = bool(getattr(arguments, "_defer_cli_complete", False))
     if arguments.events_jsonl:
-        _complete(
-            arguments,
-            status=result.status,
-            artifacts=[str(path) for path in result.paths],
-        )
-    else:
+        if not defer:
+            _complete(
+                arguments,
+                status=result.status,
+                artifacts=[str(path) for path in result.paths],
+            )
+    elif not defer:
         print(f"status: {result.status}")
         for path in result.paths:
             print(path)
@@ -1497,12 +1583,14 @@ def _cmd_apply_translation_review_fixes(arguments: argparse.Namespace) -> int:
         arguments.response_file,
         event_sink=event_sink,
     )
+    defer = bool(getattr(arguments, "_defer_cli_complete", False))
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path) for path in paths])
-    else:
+        if not defer:
+            _complete(arguments, artifacts=[str(path) for path in paths])
+    elif not defer:
         for path in paths:
             print(path)
-        print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
+        _print_recovery_navigation(arguments.job_file)
     return 0
 
 
@@ -1534,11 +1622,12 @@ def _cmd_apply_source_review_fixes(arguments: argparse.Namespace) -> int:
         event_sink=event_sink,
     )
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path) for path in paths])
+        if not getattr(arguments, "_defer_cli_complete", False):
+            _complete(arguments, artifacts=[str(path) for path in paths])
     else:
         for path in paths:
             print(path)
-        print(f"next: xvt continue {shlex.quote(str(arguments.job_file))}")
+        _print_recovery_navigation(arguments.job_file)
     return 0
 
 
@@ -1645,14 +1734,17 @@ def _cmd_apply_cue_retranslation(arguments: argparse.Namespace) -> int:
         target_language=arguments.target_language,
         event_sink=event_sink,
     )
+    job = load_job(arguments.job_file)
+    waiting = _human_review_waiting(job)
     if arguments.events_jsonl:
-        _complete(arguments, artifacts=[str(path) for path in paths])
+        if not waiting:
+            _complete(arguments, artifacts=[str(path) for path in paths])
     else:
         for path in paths:
             print(path)
-        job = load_job(arguments.job_file)
-        workflow = get_workflow_config(job)
-        if workflow is not None and workflow.burn:
+        if waiting:
+            _print_recovery_navigation(arguments.job_file)
+        elif (workflow := get_workflow_config(job)) is not None and workflow.burn:
             print(f'继续烧录: xvt continue "{arguments.job_file}"')
     return 0
 
@@ -1714,49 +1806,47 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
     # 先在原 Namespace 上建 sink，路由副本才能继承它，让失败路径仍能取到恢复计划。
     _event_sink(arguments)
     response_path = Path(arguments.response_file)
+    route = None
+    job = None
     if response_path.suffix.lower() == ".srt":
         if _SOURCE_REVIEW_SRT_NAME.match(response_path.stem):
-            return _COMMAND_DISPATCH["apply-source-review-fixes"](
-                argparse.Namespace(**vars(arguments))
-            )
-        if _TRANSLATION_REVIEW_SRT_NAME.match(response_path.stem):
-            return _COMMAND_DISPATCH["apply-translation-review-fixes"](
-                argparse.Namespace(**vars(arguments))
-            )
-    # 读不出/解析不了都是用户输入错误（含把 SRT 当 response 喂进来），不能逃逸成
-    # OSError/JSONDecodeError 被顶层归到 dependency_or_process。
-    try:
-        response_data = json.loads(Path(arguments.response_file).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise UserInputError(
-            f"cannot read response file: {error}; "
-            "xvt apply only accepts a JSON response file — "
-            "for subtitle files (SRT etc.) use xvt import-translation"
-        ) from error
-    if not isinstance(response_data, dict):
-        raise UserInputError("response file must contain a JSON object")
+            route = "apply-source-review-fixes"
+        elif _TRANSLATION_REVIEW_SRT_NAME.match(response_path.stem):
+            route = "apply-translation-review-fixes"
+    if route is None:
+        # 读不出/解析不了都是用户输入错误（含把普通 SRT 当 response 喂进来），不能逃逸成
+        # OSError/JSONDecodeError 被顶层归到 dependency_or_process。
+        try:
+            response_data = json.loads(response_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise UserInputError(
+                f"cannot read response file: {error}; "
+                "xvt apply only accepts a JSON response file — "
+                "for subtitle files (SRT etc.) use xvt import-translation"
+            ) from error
+        if not isinstance(response_data, dict):
+            raise UserInputError("response file must contain a JSON object")
 
-    task = response_data.get("task")
-    job = None
-    if isinstance(task, str):
-        route = _TASK_ROUTES.get(task)
-        if route is None:
-            raise ValueError(f"unknown task in response file: {task}")
-    else:
-        job = load_job(arguments.job_file)
-        workflow = get_workflow_config(job)
-        if workflow is None:
-            raise ValueError(
-                "response file has no task field, and this job has no persisted workflow goal; "
-                "run xvt status to see the explicit apply-* command for it"
-            )
-        steps = plan_advance_steps(job, workflow)
-        route = _STEP_ROUTES.get(steps[0]) if steps else None
-        if route is None:
-            raise ValueError(
-                "response file has no task field, and the job is not awaiting Agent input; "
-                "run xvt status to see the current next step"
-            )
+        task = response_data.get("task")
+        if isinstance(task, str):
+            route = _TASK_ROUTES.get(task)
+            if route is None:
+                raise ValueError(f"unknown task in response file: {task}")
+        else:
+            job = load_job(arguments.job_file)
+            workflow = get_workflow_config(job)
+            if workflow is None:
+                raise ValueError(
+                    "response file has no task field, and this job has no persisted workflow goal; "
+                    "run xvt status to see the explicit apply-* command for it"
+                )
+            steps = plan_advance_steps(job, workflow)
+            route = _STEP_ROUTES.get(steps[0]) if steps else None
+            if route is None:
+                raise ValueError(
+                    "response file has no task field, and the job is not awaiting Agent input; "
+                    "run xvt status to see the current next step"
+                )
 
     # 不改写 command：cli_completed 与 cli_failed 都必须报用户实际执行的子命令名
     # （EVENTS.md 契约），否则同一次调用在成功与失败两条路径上报出两个身份。
@@ -1766,7 +1856,30 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         if target_language is None:
             raise ValueError("job has no target language configured")
         routed.target_language = target_language
-    return _COMMAND_DISPATCH[route](routed)
+    continue_after_apply = bool(getattr(arguments, "continue_after_apply", False))
+    if continue_after_apply and route == "apply-source-review-fixes":
+        raise UserInputError(
+            "--continue is not supported for source review fixes: source edits invalidate "
+            "translation and downstream artifacts; apply the source review first, then run status"
+        )
+    if continue_after_apply:
+        continuation_job = job or load_job(arguments.job_file)
+        if get_workflow_config(continuation_job) is None:
+            raise UserInputError(
+                "--continue requires a persisted end-to-end workflow goal; "
+                "apply the response without --continue, then run status"
+            )
+    if not continue_after_apply:
+        return _COMMAND_DISPATCH[route](routed)
+    routed._defer_cli_complete = True
+    _COMMAND_DISPATCH[route](routed)
+    continuation = argparse.Namespace(**vars(arguments))
+    continuation.command = "apply"
+    continuation.cookies_from_browser = None
+    continuation.proxy = None
+    continuation.acknowledge_subtitle_review = False
+    continuation.acknowledge_translation_review = False
+    return _cmd_continue(continuation)
 
 
 def _cmd_burn(arguments: argparse.Namespace) -> int:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from xvt.candidate_qa import translation_candidate_qa_issues
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.workflow_config import WorkflowConfig, get_workflow_config, resolve_target_language
@@ -128,6 +129,38 @@ def _semantic_review_options(
         for path in (source_input, source_srt, translation_input, translation_srt)
         if path is not None
     )
+    candidate_path = next(
+        (
+            path
+            for kind in (
+                "translation_reviewed_cues",
+                "translation_repaired_cues",
+                "translation_polished_cues",
+            )
+            if (path := valid_artifact_path(job, kind)) is not None
+        ),
+        None,
+    )
+    qa_issues = (
+        translation_candidate_qa_issues(job, candidate_path) if candidate_path is not None else None
+    )
+    if qa_issues:
+        alternatives: tuple[str, ...] = ()
+        if source_ids and source_supported and source_input is not None:
+            alternatives = (
+                _job_command(
+                    "apply-source-review-fixes",
+                    job_file,
+                    shlex.quote(str(source_input)),
+                ),
+            )
+        return (
+            "候选译文的确定性 QA 仍有可修复问题；请修改译文模板后继续。"
+            "这类问题不能通过语义确认绕过，也不会触发重新翻译或润色。",
+            translation_command,
+            alternatives,
+            input_paths,
+        )
     if source_ids and source_supported:
         if source_input is not None:
             primary = _job_command(
@@ -138,13 +171,16 @@ def _semantic_review_options(
         else:
             primary = _job_command("continue", job_file)
         return (
-            "语义校对发现源文可能有误；优先修订源文，也可只修订译文或显式确认。",
+            "语义校对发现源文可能有误；源文修订会使译文、润色和下游产物失效，"
+            "需要重新翻译，属于高成本路径。若源文无误，可只修订译文；译文修订只会重新执行"
+            "语义校对，不会重新翻译或润色。",
             primary,
             (translation_command, acknowledgment_command),
             input_paths,
         )
     return (
-        "语义校对仍有 review 问题；可编辑修订模板后回填，或显式确认当前译文。",
+        "语义校对仍有 review 问题；译文修订只会重新执行语义校对，不会重新翻译或润色；"
+        "也可显式确认当前译文。",
         translation_command,
         (acknowledgment_command,),
         input_paths,
@@ -207,12 +243,17 @@ def subtitle_qa_failure_guidance(
     job: Job,
     job_file: str | Path | None = None,
 ) -> SubtitleQaFailureGuidance | None:
-    """当 ``subtitle_qa`` stage 为 failed 时返回恢复引导；否则返回 None。
+    """当 ``subtitle_qa`` 阻断时返回恢复引导；否则返回 None。
 
     ``needs_review``（且无 error 级问题）指向 ``continue --acknowledge-subtitle-review``；
     error 级失败仍要求修复字幕，不提供 acknowledge 命令。
     """
-    if job.stages[StageName.SUBTITLE_QA].status is not StageStatus.FAILED:
+    if job.stages[StageName.SUBTITLE_QA].status not in {
+        StageStatus.FAILED,
+        StageStatus.AWAITING_INPUT,
+    }:
+        return None
+    if _translated_qa_needs_rebuild(job):
         return None
 
     resolved = (
@@ -256,6 +297,18 @@ def subtitle_qa_failure_guidance(
         report_paths=tuple(report_paths),
         primary_command=None,
         is_needs_review=False,
+    )
+
+
+def _translated_qa_needs_rebuild(job: Job) -> bool:
+    source_path = valid_artifact_path(job, "subtitle_qa")
+    source_report = _load_qa_report(source_path) if source_path is not None else None
+    return bool(
+        source_report is not None
+        and not _qa_report_has_errors(source_report)
+        and any(item.kind == "translated_subtitle_qa" for item in job.artifacts)
+        and valid_artifact_path(job, "translated_subtitle_qa") is None
+        and valid_artifact_path(job, "translated_cues") is not None
     )
 
 
@@ -348,14 +401,25 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             "没有 checksum 有效的源字幕或转写 checkpoint，当前 Job 不能自动续跑。",
         )
 
-    qa_failed = job.stages[StageName.SUBTITLE_QA].status is StageStatus.FAILED
-    if qa_failed:
+    qa_blocked = job.stages[StageName.SUBTITLE_QA].status in {
+        StageStatus.FAILED,
+        StageStatus.AWAITING_INPUT,
+    }
+    if qa_blocked:
         source_report_path = valid_artifacts.get("subtitle_qa")
         translated_report_path = valid_artifacts.get("translated_subtitle_qa")
         source_report = _load_qa_report(source_report_path) if source_report_path else None
         translated_report = (
             _load_qa_report(translated_report_path) if translated_report_path else None
         )
+        if _translated_qa_needs_rebuild(job):
+            return plan(
+                "retryable",
+                "译文字幕 QA 报告缺失或 checksum 已失效，可以从现有译文重新执行 QA。",
+                primary_command=(
+                    _job_command("continue", job_file) if workflow is not None else None
+                ),
+            )
         if source_report is None and "source_srt" not in valid_artifacts:
             command = "continue" if workflow is not None else "resume"
             return plan(
@@ -442,7 +506,11 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             primary_command=primary,
             alternative_commands=alternatives,
             input_paths=inputs,
-            report_paths=(str(valid_artifacts[report_kind]),),
+            report_paths=tuple(
+                str(valid_artifacts[kind])
+                for kind in ("translation_candidate_qa", report_kind)
+                if kind in valid_artifacts
+            ),
         )
 
     if (
@@ -598,6 +666,7 @@ def _recovery_for_workflow(
             report_paths=tuple(
                 str(valid_artifacts[kind])
                 for kind in (
+                    "translation_candidate_qa",
                     "translation_semantic_qa_reviewed",
                     "translation_semantic_qa_final",
                     "translation_semantic_qa",

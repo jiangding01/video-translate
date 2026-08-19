@@ -514,7 +514,8 @@ def _process_adaptive_media(
         qa_path = artifacts_directory / "qa.json"
         write_json(qa_path, asdict(report))
         add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        complete_qa_stage(job, report, event_sink)
+        if not complete_qa_stage(job, report, event_sink):
+            return job
 
         current_stage = StageName.RENDER
         set_stage(
@@ -692,7 +693,8 @@ def _process_acquired_media(
         qa_path = artifacts_directory / "qa.json"
         write_json(qa_path, asdict(report))
         add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        complete_qa_stage(job, report, event_sink)
+        if not complete_qa_stage(job, report, event_sink):
+            return job
 
         current_stage = StageName.RENDER
         set_stage(
@@ -863,7 +865,8 @@ def _finish_subtitle_job(
         qa_path = artifacts_directory / "qa.json"
         write_json(qa_path, asdict(report))
         add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        complete_qa_stage(job, report, event_sink)
+        if not complete_qa_stage(job, report, event_sink):
+            return job
 
         current_stage = StageName.RENDER
         set_stage(
@@ -1501,7 +1504,8 @@ def _finish_resumed_source(
     qa_path = artifacts_directory / "qa.json"
     write_json(qa_path, asdict(report))
     add_artifact(job, "subtitle_qa", qa_path, event_sink)
-    complete_qa_stage(job, report, event_sink)
+    if not complete_qa_stage(job, report, event_sink):
+        return job
 
     set_stage(
         job,

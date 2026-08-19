@@ -6,10 +6,27 @@ from unittest.mock import patch
 
 from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
-from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
+from xvt.recovery import (
+    _semantic_review_options,
+    build_recovery_plan,
+    file_checksum,
+    subtitle_qa_failure_guidance,
+    valid_artifact_path,
+    verify_job,
+)
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_semantic_review_recovery_explains_revision_cost(self) -> None:
+        job = create_job("/tmp/source.srt", Path("/tmp"), {"input_kind": "subtitle"})
+        reason, _primary, _alternatives, _inputs = _semantic_review_options(
+            job,
+            Path("/tmp/job.json"),
+            acknowledgment_command="xvt continue /tmp/job.json",
+        )
+
+        self.assertIn("不会重新翻译或润色", reason)
+
     def test_recovery_plan_resumes_subtitle_job_from_imported_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -297,6 +314,60 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("--acknowledge-subtitle-review", plan.primary_command or "")
         self.assertIn("continue", plan.primary_command or "")
         self.assertEqual(plan.report_paths, (str(report),))
+
+    def test_missing_translated_qa_report_is_rebuilt_from_existing_cues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {"target_language": "zh-CN"}
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "subtitle_qa", '{"status":"pass","issues":[]}')
+            self._add_artifact(job, root, "translated_cues")
+            translated_report = self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                '{"status":"needs_review","issues":[{"severity":"review"}]}',
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.AWAITING_INPUT
+            job_file = save_job(job)
+            translated_report.unlink()
+
+            plan = build_recovery_plan(job_file)
+            guidance = subtitle_qa_failure_guidance(job, job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("译文字幕 QA 报告", plan.reason)
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertIsNone(guidance)
+
+    def test_missing_translated_qa_does_not_hide_source_qa_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"input_kind": "subtitle"})
+            job.config["workflow"] = {"target_language": "zh-CN"}
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(
+                job,
+                root,
+                "subtitle_qa",
+                '{"status":"failed","issues":[{"severity":"error"}]}',
+            )
+            self._add_artifact(job, root, "translated_cues")
+            translated_report = self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                '{"status":"needs_review","issues":[{"severity":"review"}]}',
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.AWAITING_INPUT
+            job_file = save_job(job)
+            translated_report.unlink()
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("修复字幕", plan.reason)
 
     def test_recovery_plan_retries_burn_after_media_qa_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -22,7 +22,7 @@ from xvt.translate import (
 
 TRANSLATION_PROMPT_VERSION = 5
 TRANSLATION_POLISH_PROMPT_VERSION = 3
-SEMANTIC_REVIEW_PROMPT_VERSION = 3
+SEMANTIC_REVIEW_PROMPT_VERSION = 4
 SEMANTIC_REPAIR_PROMPT_VERSION = 3
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
@@ -225,7 +225,9 @@ def semantic_review_batch(
         "source_suspect merely for ambiguity or an unfamiliar term. Its message must identify the "
         "suspicious source span and evidence, and its suggested_items must be empty because source "
         "text requires human review. Every issue must use severity review and one category from "
-        "meaning_error, omission, terminology, awkward_join, source_suspect. An issue may "
+        "meaning_error, omission, terminology, awkward_join, source_suspect. "
+        "Use awkward_join only for a join across at least two adjacent cue ids; never report it "
+        "for a single cue. An issue may "
         "reference current items and context_after, but its lowest cue id must belong to items; "
         "context_before is read-only. Never propose source text, timing, ID, or cue-boundary "
         "changes. For explicit Simplified Chinese targets (zh-CN, zh-Hans, or zh-Hans-*), "
@@ -233,7 +235,7 @@ def semantic_review_batch(
         "boundaries as valid separators. Do not report awkward_join or suggest adding ， or 。 "
         "solely because those marks are absent. Return JSON "
         "only in the form "
-        '{"issues":[{"category":"awkward_join","cue_ids":[1],"severity":"review",'
+        '{"issues":[{"category":"awkward_join","cue_ids":[1,2],"severity":"review",'
         '"message":"...","suggested_items":[{"id":1,"text":"..."}]}]}.'
     )
     if correction:

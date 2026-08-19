@@ -297,6 +297,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
+| `batch_index` | int? | 当前批次在本次执行集合中的 1-based 顺序；人类进度显示优先使用，旧事件流可能缺失 |
 | `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 ### `translation_batch_retrying`
@@ -306,6 +307,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
+| `batch_index` | int? | 当前批次在本次执行集合中的 1-based 顺序；人类进度显示优先使用，旧事件流可能缺失 |
 | `attempt` | int | 当前批次即将进行的请求序号；传输重试与结构纠错共用连续序号 |
 | `delay_seconds` | number | 重试前等待秒数；生产端当前限制在 0 到 30 秒 |
 | `reason` | string | 重试原因；当前生产端使用 `provider temporarily unavailable` 或 `invalid provider response` |
@@ -320,6 +322,7 @@ yt-dlp 下载进度（`download.py`）。
 | `job_file` | string | Job 文件路径 |
 | `batch` | int | 批次 ID |
 | `batch_total` | int? | 批次总数（v1 兼容性新增可选字段，旧事件流可能缺失） |
+| `batch_index` | int? | 当前批次在本次执行集合中的 1-based 顺序；人类进度显示优先使用，旧事件流可能缺失 |
 | `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 
 ## 烧录与预览

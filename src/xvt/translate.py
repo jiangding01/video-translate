@@ -645,6 +645,7 @@ def build_semantic_review_batches(
     target_language: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
     policy: TranslationPolicy | None = None,
+    review_cue_ids: frozenset[int] | None = None,
 ) -> list[SemanticReviewBatch]:
     polish_batches = build_polish_batches(
         source_cues,
@@ -663,6 +664,51 @@ def build_semantic_review_batches(
             duration_ms=item.duration_ms,
             max_target_characters=item.max_target_characters,
         )
+
+    if review_cue_ids is not None:
+        if not review_cue_ids:
+            raise ValueError("semantic review cue scope must not be empty")
+        items_by_id = {
+            item.id: review_item(item) for batch in polish_batches for item in batch.items
+        }
+        missing = sorted(review_cue_ids - items_by_id.keys())
+        if missing:
+            raise ValueError(f"semantic review cue scope contains unknown ids: {missing}")
+        groups = build_semantic_groups(
+            source_cues,
+            max_cues=min(SEMANTIC_GROUP_MAX_CUES, batch_size),
+        )
+        selected = [index for index, group in enumerate(groups) if set(group) & review_cue_ids]
+        resolved_policy = policy or TranslationPolicy()
+        batches: list[SemanticReviewBatch] = []
+        for index in selected:
+            group = groups[index]
+            batch_items = tuple(items_by_id[cue_id] for cue_id in group)
+            before = groups[index - 1] if index > 0 else ()
+            after = groups[index + 1] if index + 1 < len(groups) else ()
+            batches.append(
+                SemanticReviewBatch(
+                    id=index + 1,
+                    source_language=source_language,
+                    target_language=target_language,
+                    items=batch_items,
+                    context_before=tuple(items_by_id[cue_id] for cue_id in before),
+                    context_after=tuple(items_by_id[cue_id] for cue_id in after),
+                    policy=TranslationPolicy(
+                        style=resolved_policy.style,
+                        terms=tuple(
+                            term
+                            for term in resolved_policy.terms
+                            if any(
+                                term.source.casefold() in item.source_text.casefold()
+                                for item in batch_items
+                            )
+                        ),
+                    ),
+                    semantic_groups=(group,),
+                )
+            )
+        return batches
 
     return [
         SemanticReviewBatch(
@@ -738,6 +784,9 @@ def parse_semantic_review_response(
 ) -> tuple[SemanticIssue, ...]:
     owned_ids = {item.id for item in batch.items}
     allowed_ids = owned_ids | {item.id for item in batch.context_after}
+    allowed_order = [item.id for item in (*batch.items, *batch.context_after)]
+    positions = {cue_id: index for index, cue_id in enumerate(allowed_order)}
+    candidate_text = {item.id: item.candidate_text for item in (*batch.items, *batch.context_after)}
     issues: list[SemanticIssue] = []
     seen: set[tuple[str, tuple[int, ...]]] = set()
     for raw in response:
@@ -760,12 +809,20 @@ def parse_semantic_review_response(
         cue_ids = tuple(sorted(cue_ids_raw))
         if not set(cue_ids) <= allowed_ids or min(cue_ids) not in owned_ids:
             raise ValueError("semantic review issue references cues outside its owned batch")
+        if category == "awkward_join":
+            issue_positions = sorted(positions[cue_id] for cue_id in cue_ids)
+            if len(issue_positions) < 2 or issue_positions != list(
+                range(issue_positions[0], issue_positions[-1] + 1)
+            ):
+                raise ValueError("awkward_join must reference at least two adjacent cues")
         if severity != "review":
             raise ValueError("semantic review issue severity must be review")
         if not isinstance(message, str) or not message.strip():
             raise ValueError("semantic review issue message must be non-empty text")
         if not isinstance(suggestions_raw, list):
             raise ValueError("semantic review issue suggested_items must be an array")
+        if category == "source_suspect" and suggestions_raw:
+            raise ValueError("source_suspect suggested_items must be empty")
         suggestions: list[SemanticSuggestedItem] = []
         suggested_ids: set[int] = set()
         for item in suggestions_raw:
@@ -781,7 +838,10 @@ def parse_semantic_review_response(
             ):
                 raise ValueError("semantic review issue contains invalid suggested_items")
             suggested_ids.add(cue_id)
-            suggestions.append(SemanticSuggestedItem(cue_id, text.strip()))
+            normalized_text = text.strip()
+            if normalized_text == candidate_text[cue_id].strip():
+                raise ValueError("semantic review suggestion must change the candidate text")
+            suggestions.append(SemanticSuggestedItem(cue_id, normalized_text))
         key = (category, cue_ids)
         if key in seen:
             raise ValueError("semantic review response contains a duplicate issue")
