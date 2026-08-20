@@ -414,7 +414,7 @@ xvt apply-source-review-fixes JOB_FILE RESPONSE_FILE [--events-jsonl]
 ```
 
 - 位置参数：`job_file`、`response_file`；支持生成的 JSON 模板或固定命名的源文修订 SRT。
-- 可选参数：`--events-jsonl`。修改源文后会重跑源字幕 QA，并失效旧翻译及全部下游产物。
+- 可选参数：`--events-jsonl`。修改源文后会重跑源字幕 QA，并失效旧翻译及全部下游产物；回填后先运行 `xvt status JOB_FILE`，再按恢复计划继续。
 
 </details>
 
@@ -703,7 +703,9 @@ uv run --no-sync xvt prepare-source-review JOB --cue 13 --cue 14
 uv run --no-sync xvt apply-source-review-fixes JOB REVIEW.json
 # SRT 通道等价：保留 #<cue id> 注释、时间轴和文件名，只改源文
 uv run --no-sync xvt apply-source-review-fixes JOB source-review-<fp12>.srt
-uv run --no-sync xvt continue JOB
+# 源文变化会使旧译文失效，先确认新的恢复计划
+uv run --no-sync xvt status JOB
+# 按 status 输出的 next / before 命令继续
 ```
 
 两种载体都绑定相同 source checksum 和精确 cue ID 集合，并汇聚到同一回填流程；改时间轴、增删 cue、注释与时间轴不符或修改 fingerprint 文件名都会被拒绝。源文修订与 `--translation-subtitles` 导入译文工作流不能组合，因为旧译文不再可信；准备和回填命令都会提前拒绝，`status` 也不会展示不可执行的源文路径。QA 的 `failed` 或 `needs_review` 仍会阻断翻译，修订命令不会绕过门禁；纯 `needs_review` 持久化为 `awaiting_input` 并返回确认/修订命令，只有 error 级问题记为 `failed`。
