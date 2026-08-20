@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-08-10
+更新时间：2026-08-19
 
 ## 当前快照
 
@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 539 个测试、64 个子测试，全部通过 |
+| 自动化测试 | 559 个测试、64 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -72,7 +72,7 @@
 - 16:9 横版英文在 64 个显示单位以内通过，65 到 72 为警告，超过 72 需要复核。窄画幅会收紧限制，中文限制更严格。
 - ASR / `asr_resegmented` 的 `low_timing_confidence` 为 warning；对齐或用户导入字幕的低置信度仍为 review，需确认后继续。
 - ASS 使用独立的中英文字体和字号。macOS 默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`。
-- 字幕 QA 失败或进入 `needs_review` 时，工作流停止，不允许继续烧录。
+- 字幕 QA error 记为 `failed`；纯 `needs_review` 记为 `awaiting_input`。两者都会停止工作流且不允许继续烧录，原子命令也不会误发 `cli_completed`。
 - 语义复核确认后，若译文候选和渲染产物已有效或被补齐，`translate` stage 会收口为 `succeeded` 并清除旧 QA 错误；字幕 QA 的独立 `needs_review` 仍需单独确认。
 - 字幕 QA `needs_review` 被确认后，`continue` 会清除 `translate` stage 上的过期阻断错误（要求 QA 门已放行、确认仍对当前源 cue 有效、译文 cue 与两份 SRT 均有效）；旧 Job 下次 `continue` 自动收口。
 
@@ -322,11 +322,11 @@ media-qa.json
 
 **Q6：语义校对与一次修复已完成。** polished 候选必须经过 `meaning_error`、`omission`、`terminology`、`awkward_join`、`source_suspect` 五类结构化 review；除 `source_suspect` 外的问题按完整语义组最多修复一次并最终复查。API 初审、修复和复审逐批 checkpoint，并使用阶段对应的结构纠错提示；Agent 使用严格绑定 Job、候选、版本和批次的 `task=semantic_review_and_repair` manifest，通过 `apply-semantic-review` 一次性校验后回填，无效响应不会破坏等待状态。初次报告含可修复问题时不能提前确认；`source_suspect` 在无关修复后继续保留；最终报告只有在初次报告、修复 checkpoint 和修复候选 checksum 均有效时才能批准。新增四类 checksum artifact，`status` / `continue` / batch recovery 区分 Agent 输入等待和人工语义确认等待。确认绑定 source、候选、报告、prompt version 与精确问题集合，且后续确定性字幕 QA 仍可阻断。专项方案见 [Q6 技术方案](docs/Q6_SEMANTIC_REVIEW_PLAN.md)。
 
-**Q6.1a：人工译文修订已完成。** Q6 等待人工复核时生成 fingerprint 绑定的 `review/translation-review-*.json`，用户通过 `apply-translation-review-fixes` 回填；只允许修改既有 cue 的译文，接受后登记完整修订记录、独立候选并执行 review-only 语义复查，不增加第二次自动修复。`status` 只读并展示修订首选路径和确认备选路径；旧等待 Job 由 `continue` 懒生成模板。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
+**Q6.1a：人工译文修订已完成。** Q6 等待人工复核时生成 fingerprint 绑定的 JSON/SRT 模板；两种载体严格保留完整模板 ID 集合。`apply JOB REVIEW --continue` 可一步回填并继续，修订记录持久化 `changed_ids`，只重新复查受影响的完整语义组；不会重跑翻译、润色或自动修复。候选还由 checksum 绑定的 `translation_candidate_qa` fail-closed 门禁保护，只有目标译文可修问题进入模板。源文修改会失效译文及下游，因此拒绝 `--continue`。详见 [Q6.1 方案](docs/Q6_1_HUMAN_REVISION_PLAN.md)。
 
 **Q6.1b：源文修订与多路径引导已完成。** `prepare-source-review JOB --cue ID` 生成绑定当前 source checksum 和精确 ID 集合的 JSON 与同 fingerprint SRT；`apply-source-review-fixes` 接受任一载体且只修改 source text，保留 cue 时间轴、words、置信度和 provenance。SRT 用固定文件名承载 fingerprint，按原时间轴还原 cue ID；改时间轴、增删 cue、注释 ID 不符、空文本或改名均被拒绝。接受结果以 fingerprint 文件保存，并在一次 Job 原子保存中切换 `source_review_revision`、source cue、`selected_kind=human_reviewed` 的选择记录、源 QA 和可用 SRT；QA 阻断时不登记 source SRT，确认后 `continue` 从人工 cue 恢复。旧翻译、润色、语义报告、译文修订、渲染和烧录全部失效，上游媒体与转写证据保留；导入译文任务明确拒绝。Q6 的 `source_suspect` 现在会自动准备源文模板，`status` 优先源文修订并同时提供译文修订和直接确认；旧等待 Job 由 `continue` 懒生成，避免在恢复命令中展开大量 cue ID。
 
-**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，`source_suspect` 只在上下文矛盾、明显误听或可识别专名异常时报告，并保持人工修订；定向修复联合处理完整组且不把模型建议当作标准答案。批次文本统一按不可信字幕数据处理，不得作为改变任务或输出协议的指令。字幕表达进一步避免模型无依据添加破折号、公式化对比、空泛连接词、宣传式措辞和抽象拔高，同时保留源文真实的对比、强调、列举、打断、语气与全部信息。translation/polish/review/repair prompt 当前为 v5/v3/v3/v3；旧 API checkpoint、润色 checkpoint 及带版本指纹的 polished/semantic Agent manifest 安全失效，恢复 planner 会重建失效的旧润色 manifest。Agent 局部重译响应绑定当前提示词版本、源文、译文和策略 fingerprint。已等待的标准 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才使用新版提示词。2026-08-08 使用 113 cue 历史字幕完成真实 API polished 回归：5 个初译批次、5 个润色批次、初审、一次定向修复和最终复查均完成且 artifact 校验通过；旧译文的 4 个破折号在草稿、润色、修复候选中均降为 0，2 个问号和 2 个分号跨润色与修复保持不变，cue ID 与时间轴零变化；最终只剩 8 个 `source_suspect`，流程按设计停在人工确认。下一步完成 Agent 路径 E2E，再决定默认质量。
+**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，解析器拒绝无变化建议、`source_suspect` 非空建议和单 cue `awkward_join`。translation/polish/review/repair prompt 当前为 v5/v3/v4/v3；旧 checkpoint 与带版本指纹的 Agent manifest 安全失效。人工修订 Agent manifest 可只复查 `changed_ids` 命中的完整语义组，相邻组只读。2026-08-08 的历史真实 API polished 回归证据保持有效；下一步完成 Agent 路径 E2E，再决定默认质量。
 
 **简中模型译文标点收口已完成。** 初译、一次翻译加润色、显式润色、语义修复和局部重译共用同一写入边界：消除全角 `，`、`。`，句中位置按需替换为一个半角空格以保留 `OpenAI GPT-5` 一类词边界，行尾与换行前直接移除；模型把省略号写成的连续全角句号归一为单个 `…`；问号、感叹号、分号、冒号、破折号、ASCII 标点一律保留，不折叠模型原有换行。左右同形的引号（`"`、`'`、`＂`、`＇`）按上下文推断开闭方向，英文词内撇号和数字后的尺寸符号不参与引号计数，补出的空格始终落在引号之外。源 cue 末尾为问句而译文缺少句末语义标点时补 `？`，位置镜像源文中问号相对末尾闭合符号的位置（源文 `(ready?)` 得到 `（准备好了吗？）`，源文 `Is it (a)?` 得到 `是吗（a）？`），译文闭合符号少于源文时按译文实际数量收敛。语义审查把半角空格和 cue 边界视为有效分隔，不会仅因缺少全角逗号或句号报告 `awkward_join`。处理范围严格限于显式 `zh-CN` / `zh-Hans` 等简中标签；导入译文、人工译文修订、源字幕、bare `zh`、繁中及其他目标语言保持不变。恢复中的 API checkpoint 与 Agent 回填通过相同路径，保证重放文本和 checksum 一致。
 
@@ -348,16 +348,20 @@ media-qa.json
 
 CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消、进程组清理、持久化中断状态）与 JSONL 事件协议 v1 均已完成，详见 [路线图](ROADMAP.md) 和 [CHANGELOG](CHANGELOG.md)。真实 E2E 暴露的 P0（缺 `translated.srt`/`bilingual.srt`、`needs_review` 恢复不提示 acknowledge）已在本轮修复。Job/artifact 路径安全与输出覆盖策略已固定（见 `xvt.paths`）。这些能力已经满足未来界面消费要求，但在开发界面前先完成字幕质量闭环。
 
-真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常，后续需单独优化 CLI 阶段语义与完成摘要：
+真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常。2026-08-19 的 polished API E2E 完成到烧录和媒体 QA，最终 `verify` 校验 29 个 artifact、0 failed、0 warnings；人工回填后的每轮推进只做受影响语义组复查和候选 QA，没有重新翻译或重新润色。已确认及后续体验项如下：
 
 - ~~YouTube 下载格式回退 / 403 引导（E2E P0-3）。~~ 已完成：格式串 `bv*+ba/b/18/best`；HTTP 403 提示 `continue` / 更新 yt-dlp / `--cookies-from-browser`。
 - ~~下载平台字幕和下载源视频使用不同提示，避免重复显示“获取素材”。~~ 已完成（`acquire` detail）。
 - ~~端到端任务不得先显示“跳过翻译/烧录”再实际执行；API 自动翻译准备批次时不得显示“等待用户输入”。~~ 已完成（计划跳过静默 + `await_input`）。
-- ~~区分源字幕 QA/渲染与译文字幕 QA/渲染；`needs_review` 在 status 中勿仅显示为 `failed`（P1-7）。~~ 已完成（展示层区分，stage 枚举未扩展）。
+- ~~区分源字幕 QA/渲染与译文字幕 QA/渲染；`needs_review` 在 status 中勿仅显示为 `failed`（P1-7）。~~ 已完成：纯 review 持久化为 `awaiting_input`，error 才是 `failed`，stage 枚举未扩展。
 - ~~翻译重试的人类可读输出补齐下一次尝试序号和等待时间。~~ 已完成。
 - ~~完成摘要按最终视频、字幕和 Job 分类，并由 XVT 显示总耗时。~~ 已完成。
 - ~~ASR 低 timing confidence / 确认摩擦（E2E P2）。~~ 已完成：ASR 派生 cue 的 `low_timing_confidence` 降为 warning；对齐与用户导入仍 review；硬溢出仍需确认。
 - ~~Job/artifact 路径安全边界和输出覆盖策略。~~ 已完成：烧录/预览经 `xvt.paths` 拒绝覆盖源媒体、job 文件与其他 artifact；同 kind 可重写。
+- ~~局部语义复查进度把稳定批次 ID 当作本轮序号，出现「批次 38/1」一类显示。~~ 已完成：事件保留 `batch` 作为稳定 ID，新增可选 `batch_index` 供人类进度显示。
+- ~~`xvt apply ... --continue` 完成后夹带回填阶段的旧产物路径和 recovery 摘要。~~ 已完成：统一回填路由在继续工作流前抑制中间人类输出，只展示继续后的真实终态。
+- **待设计（Q6.2）**：本次真实任务经历 7 轮人工修订，主要集中在跨 cue 列表语义与确定性显示宽度。增加不修改 Job、不调用模型的修订文件预检，提交前一次展示全部当前阻断、cue ID、问题类型和宽度限制，降低“改完才发现下一项”的往返成本。
+- **待验证（Q6.2）**：语义提供方曾输出“可接受/无需报告”却仍登记为 review 问题，并在相邻 cue 的连接方式上多轮改变判断。以脱敏真实样本建立收敛回归集，评估提示词、响应纠错或审查策略；验收要求减少无效往返，同时不得自动忽略真实 meaning/omission 问题或绕过确定性 QA。YouTube 首次 403 和 provider 无实际文本变化的建议均已被现有边界正确拦截并给出恢复路径，记录为外部条件，不列为应用正确性 Bug。
 
 ## 接手步骤
 

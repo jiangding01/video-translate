@@ -155,16 +155,16 @@ class PipelineTest(unittest.TestCase):
             "1\n00:00:00,000 --> 00:00:20,000\n你好。\n",
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(RuntimeError, "needs_review"):
-            run_workflow(
-                WorkflowOptions(
-                    input=str(source),
-                    output=root / "output",
-                    language="en",
-                    target_language="zh-CN",
-                    translation_subtitles=translated,
-                )
+        result = run_workflow(
+            WorkflowOptions(
+                input=str(source),
+                output=root / "output",
+                language="en",
+                target_language="zh-CN",
+                translation_subtitles=translated,
             )
+        )
+        self.assertEqual(result.status, "awaiting_input")
         job_file = next((root / "output" / "jobs").glob("*/job.json"))
         return job_file
 
@@ -173,8 +173,9 @@ class PipelineTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             job_file = self._make_review_blocked_subtitle_workflow(Path(directory))
-            with self.assertRaisesRegex(RuntimeError, "needs_review"):
-                continue_workflow(job_file)
+            result = continue_workflow(job_file)
+
+        self.assertEqual(result.status, "awaiting_input")
 
     def test_acknowledged_continue_completes_both_qa_gates(self) -> None:
         from xvt.pipeline import acknowledge_subtitle_review
@@ -218,19 +219,19 @@ class PipelineTest(unittest.TestCase):
             )
             translated = root / "translated.srt"
             translated.write_text(
-                "1\n00:00:00,000 --> 00:00:20,000\n这是一条明显超过单行显示宽度限制的中文字幕\n",
+                f"1\n00:00:00,000 --> 00:00:20,000\n{'超长字幕' * 20}\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(RuntimeError, "needs_review"):
-                run_workflow(
-                    WorkflowOptions(
-                        input=str(source),
-                        output=root / "output",
-                        language="en",
-                        target_language="zh-CN",
-                        translation_subtitles=translated,
-                    )
+            waiting = run_workflow(
+                WorkflowOptions(
+                    input=str(source),
+                    output=root / "output",
+                    language="en",
+                    target_language="zh-CN",
+                    translation_subtitles=translated,
                 )
+            )
+            self.assertEqual(waiting.status, "awaiting_input")
             job_file = next((root / "output" / "jobs").glob("*/job.json"))
             acknowledge_subtitle_review(job_file)
 
@@ -238,7 +239,7 @@ class PipelineTest(unittest.TestCase):
             job = load_job(job_file)
             job.stages[StageName.TRANSLATE].status = StageStatus.FAILED
             job.stages[StageName.TRANSLATE].error = SUBTITLE_REVIEW_REQUIRED_MESSAGE
-            save_job(job)
+            job_file = save_job(job)
 
             result = continue_workflow(job_file)
 
@@ -315,7 +316,7 @@ class PipelineTest(unittest.TestCase):
                 "source_cues_checksum": file_checksum(cues_path),
                 "acknowledged_issues": [["line_too_wide", 1]],
             }
-            save_job(job)
+            job_file = save_job(job)
             report = SubtitleQaReport(
                 status="needs_review",
                 cue_count=2,
@@ -324,8 +325,11 @@ class PipelineTest(unittest.TestCase):
                     SubtitleIssue("line_too_wide", "review", 2, "new problem"),
                 ),
             )
-            with self.assertRaisesRegex(RuntimeError, "needs_review"):
-                complete_qa_stage(job, report, None)
+            self.assertFalse(complete_qa_stage(job, report, None))
+            self.assertEqual(
+                load_job(job_file).stages[StageName.SUBTITLE_QA].status,
+                StageStatus.AWAITING_INPUT,
+            )
 
 
 if __name__ == "__main__":

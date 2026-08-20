@@ -950,6 +950,14 @@ def _advance_workflow(
 
     guidance = subtitle_qa_failure_guidance(job, path)
     if guidance is not None:
+        if guidance.is_needs_review:
+            return _emit_waiting(
+                job=job,
+                path=path,
+                message=guidance.message,
+                artifacts=tuple(Path(item) for item in guidance.report_paths),
+                event_sink=event_sink,
+            )
         raise RuntimeError(guidance.message)
 
     # 与 planner 共用等待判定：Agent 等待是终态快照，不得继续烧录。
@@ -993,6 +1001,17 @@ def _advance_workflow(
             if waiting is not None:
                 return waiting
             job = load_job(path)
+            guidance = subtitle_qa_failure_guidance(job, path)
+            if guidance is not None:
+                if guidance.is_needs_review:
+                    return _emit_waiting(
+                        job=job,
+                        path=path,
+                        message=guidance.message,
+                        artifacts=tuple(Path(item) for item in guidance.report_paths),
+                        event_sink=event_sink,
+                    )
+                raise RuntimeError(guidance.message)
         # 字幕 QA needs_review 已被确认且译文产物齐备时，清掉确认前留下的过期
         # translate 失败记录；旧 Job 也在这里收口。
         if finalize_acknowledged_subtitle_review(path, event_sink=event_sink):

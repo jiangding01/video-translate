@@ -360,8 +360,7 @@ class SourceReviewPipelineTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(RuntimeError, "subtitle QA"):
-                apply_source_review_fixes(job_file, response)
+            apply_source_review_fixes(job_file, response)
 
             reviewed_path = valid_artifact_path(load_job(job_file), "source_cues")
             assert reviewed_path is not None
@@ -417,11 +416,13 @@ class SourceReviewPipelineTest(unittest.TestCase):
             payload["items"][0]["text"] = "x" * 80
             response.write_text(json.dumps(payload), encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "needs_review"):
-                apply_source_review_fixes(job_file, response)
+            apply_source_review_fixes(job_file, response)
 
             job = load_job(job_file)
-            self.assertEqual(job.stages[StageName.SUBTITLE_QA].status, StageStatus.FAILED)
+            self.assertEqual(
+                job.stages[StageName.SUBTITLE_QA].status,
+                StageStatus.AWAITING_INPUT,
+            )
             self.assertIsNotNone(valid_artifact_path(job, "source_review_revision"))
             self.assertIsNotNone(valid_artifact_path(job, "subtitle_qa"))
             self.assertIsNone(valid_artifact_path(job, "source_srt"))
@@ -434,8 +435,7 @@ class SourceReviewPipelineTest(unittest.TestCase):
             payload = json.loads(response.read_text(encoding="utf-8"))
             payload["items"][0]["text"] = "x" * 80
             response.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaises(RuntimeError):
-                apply_source_review_fixes(job_file, response)
+            apply_source_review_fixes(job_file, response)
 
             acknowledge_subtitle_review(job_file)
             result = continue_workflow(job_file)

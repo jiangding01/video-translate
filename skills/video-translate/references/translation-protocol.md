@@ -62,7 +62,7 @@ For explicit Simplified Chinese targets, full-width commas and full stops may be
 - `meaning_error`: the translated meaning or relationship differs from the source.
 - `omission`: source meaning is missing from the candidate.
 - `terminology`: a required term, name, product, or code identifier is wrong or inconsistent.
-- `awkward_join`: cue texts may look acceptable alone but become ungrammatical, repetitive, or unnatural when read in ID order.
+- `awkward_join`: at least two adjacent cue texts may look acceptable alone but become ungrammatical, repetitive, or unnatural when read in ID order. Never report it for a single cue.
 - `source_suspect`: the source itself is likely corrupted or mistranscribed because of contextual contradiction, an implausible phrase, or a recognizable proper name. Do not use it merely for ambiguity or an unfamiliar term. Explain the suspicious source span and evidence in `message`, and return an empty `suggested_items` array so source changes remain human-controlled.
 
 For repairable issues, return every repair batch exactly once in `repair_results`, covering every item in the requested complete semantic group, including unchanged items. Rewrite the group jointly so its cue texts are coherent in ID order; treat `suggested_items` as review hints, not authoritative wording. Never repair `source_suspect` or invent a correction to suspicious source text; it remains pending even when unrelated issues are repaired. Review the repaired candidate once and return every final batch in `final_results`. If no repairable issue exists, both arrays must be empty. The CLI validates the entire combined response before replacing the waiting manifest, so a rejected response can be corrected and submitted again.
@@ -93,4 +93,4 @@ Repairs must keep the same direct subtitle style rules as translation and polish
 }
 ```
 
-When a semantic manifest has `task=semantic_review_only`, review the human-revised candidate once. Copy its fingerprint and return every batch exactly once in `initial_results`; omit `repair_results` and `final_results` (or return empty arrays). Human revision does not grant another automatic repair pass.
+When a semantic manifest has `task=semantic_review_only`, review the human-revised candidate once. The manifest may contain only the complete semantic groups affected by `changed_ids`; adjacent groups in context are read-only and must not appear in results. Copy its fingerprint and return every listed batch exactly once in `initial_results`; omit `repair_results` and `final_results` (or return empty arrays). `source_suspect` must keep `suggested_items` empty, and every other suggested item must actually differ from the current candidate text. Human revision does not grant another automatic repair pass.

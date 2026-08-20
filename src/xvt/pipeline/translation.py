@@ -571,7 +571,8 @@ def _qa_and_render_translation(
         qa_path = artifacts_directory / "qa-translated.json"
         write_json(qa_path, asdict(report))
         add_artifact(job, "translated_subtitle_qa", qa_path, event_sink)
-        complete_qa_stage(job, report, event_sink)
+        if not complete_qa_stage(job, report, event_sink):
+            return (qa_path,)
 
         current_stage = StageName.RENDER
         set_stage(

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
+from xvt.candidate_qa import translation_candidate_qa_issues
 from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job, utc_now
@@ -401,8 +402,14 @@ def apply_source_review_fixes(
             record.status = StageStatus.SKIPPED
             record.completed_at = now
     qa_record = job.stages[StageName.SUBTITLE_QA]
-    qa_record.status = StageStatus.SUCCEEDED if qa_message is None else StageStatus.FAILED
-    qa_record.completed_at = now
+    qa_record.status = (
+        StageStatus.SUCCEEDED
+        if qa_message is None
+        else StageStatus.AWAITING_INPUT
+        if report.status == "needs_review"
+        else StageStatus.FAILED
+    )
+    qa_record.completed_at = None if report.status == "needs_review" else now
     qa_record.error = qa_message
     if qa_message is None:
         render_record = job.stages[StageName.RENDER]
@@ -439,7 +446,7 @@ def apply_source_review_fixes(
                 qa_status=report.status,
             )
         )
-    if qa_message is not None:
+    if report.status == "failed":
         raise RuntimeError(qa_message)
     return tuple(Path(artifact.path) for artifact in replacements)
 
@@ -466,6 +473,8 @@ def _target_kinds(job: Job) -> tuple[str, str, Path, Path] | None:
 
 def _issue_set(report: dict[str, Any]) -> list[dict[str, Any]]:
     issues = report.get("issues")
+    if report.get("status") == "pass" and issues == []:
+        return []
     if report.get("status") != "needs_review" or not isinstance(issues, list) or not issues:
         raise UserInputError("semantic review report does not require translation revision")
     normalized: list[dict[str, Any]] = []
@@ -504,6 +513,14 @@ def _issue_set(report: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return sorted(normalized, key=lambda item: (item["category"], item["cue_ids"]))
+
+
+def _candidate_qa_issue_set(job: Job, candidate_path: Path) -> list[dict[str, Any]]:
+    issues = translation_candidate_qa_issues(job, candidate_path)
+    return sorted(
+        [dict(issue) for issue in issues or ()],
+        key=lambda item: (item.get("cue_id", 0), item.get("code", "")),
+    )
 
 
 def source_suspect_cue_ids(job: Job) -> tuple[int, ...]:
@@ -549,6 +566,9 @@ def _revision_fingerprint(
     candidate_kind: str,
     report: dict[str, Any],
 ) -> str:
+    candidate_path = valid_artifact_path(job, candidate_kind)
+    if candidate_path is None:
+        raise UserInputError("semantic review candidate is no longer valid")
     payload = {
         "job_id": job.id,
         "source_cues_checksum": artifact_checksum_for(job, "source_cues"),
@@ -558,6 +578,8 @@ def _revision_fingerprint(
         "report_checksum": artifact_checksum_for(job, report_kind),
         "prompt_version": report.get("prompt_version", SEMANTIC_REVIEW_PROMPT_VERSION),
         "issues": _issue_set(report),
+        "candidate_qa_checksum": artifact_checksum_for(job, "translation_candidate_qa"),
+        "candidate_qa_issues": _candidate_qa_issue_set(job, candidate_path),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
@@ -590,6 +612,8 @@ def translation_review_input_path(job: Job) -> Path | None:
     report_kind, candidate_kind, report_path, _candidate_path = target
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        if not _issue_set(report) and not _candidate_qa_issue_set(job, _candidate_path):
+            return None
         fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
         review_dir = get_job_directory(job) / "review"
         path = review_dir / f"{translation_review_stem(fingerprint)}.json"
@@ -626,9 +650,14 @@ def ensure_translation_review_input(
     report_kind, candidate_kind, report_path, candidate_path = target
     report = json.loads(report_path.read_text(encoding="utf-8"))
     issues = _issue_set(report)
+    qa_issues = _candidate_qa_issue_set(job, candidate_path)
+    if not issues and not qa_issues:
+        raise UserInputError("current translation candidate does not require revision")
     fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
     cues = load_cues(candidate_path)
-    affected = {cue_id for issue in issues for cue_id in issue["cue_ids"]}
+    affected = {cue_id for issue in issues for cue_id in issue["cue_ids"]} | {
+        issue["cue_id"] for issue in qa_issues
+    }
     path = get_job_directory(job) / "review" / f"{translation_review_stem(fingerprint)}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(
@@ -639,6 +668,8 @@ def ensure_translation_review_input(
             "scope": "translation",
             "report": str(report_path),
             "issues": issues,
+            "qa_report": str(valid_artifact_path(job, "translation_candidate_qa")),
+            "qa_issues": qa_issues,
             "items": [
                 {"id": cue.id, "text": cue.target_text or ""} for cue in cues if cue.id in affected
             ],
@@ -671,7 +702,11 @@ def ensure_semantic_review_inputs(
     return source_input, translation_input
 
 
-def _json_review_changes(response_file: Path, expected_fingerprint: str) -> dict[int, str]:
+def _json_review_changes(
+    response_file: Path,
+    expected_fingerprint: str,
+    expected_ids: set[int],
+) -> dict[int, str]:
     """解析 JSON 修订模板，返回 ``{cue id: 新译文}``。供 Agent 与脚本消费。"""
 
     try:
@@ -702,6 +737,10 @@ def _json_review_changes(response_file: Path, expected_fingerprint: str) -> dict
                 "translation review response contains an invalid or duplicate item"
             )
         changes[cue_id] = text.strip()
+    if set(changes) != expected_ids:
+        raise UserInputError(
+            "translation review response must preserve the complete template cue id set"
+        )
     return changes
 
 
@@ -779,6 +818,11 @@ def apply_translation_review_fixes(
         raise UserInputError("no current semantic review report is available for revision")
     report_kind, candidate_kind, report_path, candidate_path = target
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    issues = _issue_set(report)
+    qa_issues = _candidate_qa_issue_set(job, candidate_path)
+    affected = {cue_id for issue in issues for cue_id in issue["cue_ids"]} | {
+        issue["cue_id"] for issue in qa_issues
+    }
     expected_fingerprint = _revision_fingerprint(job, report_kind, candidate_kind, report)
     candidate = load_cues(candidate_path)
     # SRT 与 JSON 是同一修订通道的两种载体，各自解析后汇聚成同一个 changes 映射，
@@ -787,11 +831,11 @@ def apply_translation_review_fixes(
         changes = _srt_review_changes(
             Path(response_file),
             candidate,
-            {cue_id for issue in _issue_set(report) for cue_id in issue["cue_ids"]},
+            affected,
             expected_fingerprint,
         )
     else:
-        changes = _json_review_changes(Path(response_file), expected_fingerprint)
+        changes = _json_review_changes(Path(response_file), expected_fingerprint, affected)
     known_ids = {cue.id for cue in candidate}
     if not changes.keys() <= known_ids:
         raise UserInputError("translation review response contains an unknown cue id")
@@ -805,6 +849,17 @@ def apply_translation_review_fixes(
     revision_suffix = expected_fingerprint[:12]
     revision_path = artifacts_dir / f"translation-review-revision-{revision_suffix}.json"
     reviewed_path = artifacts_dir / f"translation-reviewed-cues-{revision_suffix}.json"
+    write_json(reviewed_path, [asdict(cue) for cue in reviewed])
+    reviewed_checksum = checksum(reviewed_path)
+    parent_revision_path = valid_artifact_path(job, "translation_review_revision")
+    parent_revision = (
+        {
+            "path": str(parent_revision_path),
+            "checksum": artifact_checksum_for(job, "translation_review_revision"),
+        }
+        if parent_revision_path is not None
+        else None
+    )
     write_json(
         revision_path,
         {
@@ -812,15 +867,23 @@ def apply_translation_review_fixes(
             "revision_fingerprint": expected_fingerprint,
             "scope": "translation",
             "source_report_kind": report_kind,
+            "source_report_path": str(report_path),
             "source_report_checksum": artifact_checksum_for(job, report_kind),
             "source_candidate_kind": candidate_kind,
             "source_candidate_checksum": artifact_checksum_for(job, candidate_kind),
+            "reviewed_candidate_checksum": reviewed_checksum,
+            "semantic_grouping_version": report.get("semantic_grouping_version"),
+            "template_ids": sorted(affected),
+            "changed_ids": sorted(changed_ids),
+            "base_issues": issues,
+            "base_qa_issues": qa_issues,
+            "parent_revision": parent_revision,
             "items": [{"id": cue.id, "text": cue.target_text or ""} for cue in reviewed],
         },
     )
-    write_json(reviewed_path, [asdict(cue) for cue in reviewed])
 
     invalidated = {
+        ArtifactKind.TRANSLATION_CANDIDATE_QA,
         ArtifactKind.TRANSLATION_SEMANTIC_QA,
         ArtifactKind.TRANSLATION_SEMANTIC_REPAIR,
         ArtifactKind.TRANSLATION_REPAIRED_CUES,

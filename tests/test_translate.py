@@ -638,6 +638,60 @@ class TranslateTest(unittest.TestCase):
             parse_semantic_review_response(batch, [valid, valid])
         with self.assertRaisesRegex(ValueError, "outside its owned batch"):
             parse_semantic_review_response(batch, [{**valid, "cue_ids": [3]}])
+        with self.assertRaisesRegex(ValueError, "must be empty"):
+            parse_semantic_review_response(
+                batch,
+                [
+                    {
+                        **valid,
+                        "category": "source_suspect",
+                        "suggested_items": [{"id": 1, "text": "修订"}],
+                    }
+                ],
+            )
+        with self.assertRaisesRegex(ValueError, "must change"):
+            parse_semantic_review_response(
+                batch,
+                [{**valid, "suggested_items": [{"id": 1, "text": "译文1"}]}],
+            )
+        with self.assertRaisesRegex(ValueError, "at least two adjacent"):
+            parse_semantic_review_response(
+                batch,
+                [{**valid, "category": "awkward_join", "suggested_items": []}],
+            )
+
+    def test_scoped_semantic_review_owns_complete_groups_with_neighbor_context(self) -> None:
+        source = [
+            Cue(1, 0, 500, "First."),
+            Cue(2, 500, 1000, "Second part"),
+            Cue(3, 1000, 1500, "continues."),
+            Cue(4, 1500, 2000, "Fourth."),
+        ]
+        candidate = [
+            Cue(
+                cue.id,
+                cue.start_ms,
+                cue.end_ms,
+                cue.source_text,
+                target_text=f"译文{cue.id}",
+                target_language="zh-CN",
+            )
+            for cue in source
+        ]
+
+        batches = build_semantic_review_batches(
+            source,
+            candidate,
+            source_language="en",
+            target_language="zh-CN",
+            review_cue_ids=frozenset({2}),
+        )
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual([item.id for item in batches[0].items], [2, 3])
+        self.assertEqual([item.id for item in batches[0].context_before], [1])
+        self.assertEqual([item.id for item in batches[0].context_after], [4])
+        self.assertEqual(batches[0].semantic_groups, ((2, 3),))
 
     def test_semantic_repair_covers_complete_group_and_preserves_timeline(self) -> None:
         candidate = [

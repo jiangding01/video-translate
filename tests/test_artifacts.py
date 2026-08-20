@@ -59,6 +59,7 @@ LEGACY_RESEGMENT_INVALIDATION = {
     "translation_polish_batches",
     "translation_polish_progress",
     "translation_polished_cues",
+    "translation_candidate_qa",
     # Q6：语义审查、修复和最终复审均绑定 source_cues。
     "translation_semantic_qa",
     "translation_semantic_repair",
