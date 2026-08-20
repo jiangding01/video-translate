@@ -948,6 +948,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("--translation-quality standard|polished", help_text)
         self.assertIn("[advanced]", help_text)
         self.assertIn("resume ≠ continue", help_text)
+        normalized_help = " ".join(help_text.split())
+        self.assertIn("re-run source QA, then inspect status", normalized_help)
 
     def test_status_reads_job_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

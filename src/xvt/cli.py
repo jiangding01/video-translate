@@ -421,7 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_source_review_parser = subparsers.add_parser(
         "apply-source-review-fixes",
-        help="Apply human source cue edits, re-run source QA, then continue",
+        help="Apply human source cue edits, re-run source QA, then inspect status",
     )
     apply_source_review_parser.add_argument("job_file")
     apply_source_review_parser.add_argument("response_file")

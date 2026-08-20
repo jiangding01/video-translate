@@ -23,6 +23,8 @@ Q6 的自动语义校对仍可能留下需要人判断的术语、误听或中�
    xvt continue JOB
    ```
 
+   端到端 Job 也可执行 `xvt apply JOB REVIEW.json --continue`，在同一进程完成译文回填与续跑。该组合不适用于源文修订；源文变化会使译文及下游失效，必须独立回填后先查看 `status`。
+
 4. XVT 保存完整修订记录和独立候选，重新执行**语义复查**。人工修订后不再获得第二次自动修复预算。
 5. 复查通过则进入确定性字幕 QA；仍有问题则生成绑定新报告的新模板，用户可再次修订或显式确认。
 
@@ -57,6 +59,8 @@ Q6 的自动语义校对仍可能留下需要人判断的术语、误听或中�
 - `translation_reviewed_cues`：应用修订后的完整候选快照。
 - `translation_semantic_qa_reviewed`：人工候选的语义复查报告。
 
+polished 候选还必须具备 checksum 有效且绑定当前候选 checksum 的 `translation_candidate_qa`。候选变化、报告缺失或损坏时重新计算；报告无效时审批 fail closed。只有能通过修改目标译文解决的确定性问题进入译文修订模板，源文宽度和时间轴类问题不进入该模板。
+
 应用修订会失效旧语义报告/修复/确认、旧字幕 QA 确认以及译文渲染和烧录下游。每轮接受结果写入 fingerprint 区分的独立文件，并在一次 Job 原子保存中同时切换修订记录和候选登记；保存失败时上一轮 checksum 有效的证据链保持可恢复。复查报告与修订候选 checksum 有效时可恢复；API 与 Agent 都只做 review-only。Job schema 和 `StageName` 不升级，继续用 `translate` stage 的 `semantic_review` phase。
 
 `RecoveryPlan` 新增可选 `input_paths` 和 `alternative_commands`。等待人工语义处理时，首选命令是 `apply-translation-review-fixes`，直接确认保留为备选。旧等待 Job 没有模板时，`continue` 会补生成模板；`status` 始终只读。
@@ -85,14 +89,15 @@ xvt prepare-source-review JOB --cue 13 --cue 14
 xvt apply-source-review-fixes JOB REVIEW.json
 # 或编辑同 fingerprint 的 source-review-<fp12>.srt 后回填
 xvt apply-source-review-fixes JOB source-review-<fp12>.srt
-xvt continue JOB
+xvt status JOB
+# 按 status 输出的恢复命令继续
 ```
 
 命令同时生成同 fingerprint 的 JSON 与 SRT。JSON 使用 `task=source_review_fixes`、`scope=source`，SRT 以固定文件名承载 fingerprint，并用原时间轴和可选的 `#<cue id>` 注释还原 cue ID。fingerprint 绑定 Job ID、当前 `source_cues` checksum 和精确 cue ID 集合。回填必须完整保留模板 ID 集合，只允许修改非空源文；过期 source、未知或重复 ID、错误 scope、改动时间轴、增删 cue、注释 ID 不匹配、改名和无实际变化均拒绝。cue ID、数量、顺序、时间码、words、语言、置信度、warnings 和 provenance 逐项保持。
 
 接受修订后登记 `source_review_revision`、新的 `source_cues`、`source_selection`、`subtitle_qa`，QA 通过时同时登记新的 `source_srt`。所有替换文件使用 fingerprint 区分路径，写完后通过一次 Job 原子保存切换登记，避免覆盖旧文件后保存失败破坏原 checkpoint。新的选择记录使用 `selected_kind=human_reviewed`、绑定新 source checksum，并嵌入上一份选择记录供追溯；cue 自身 provenance 不改写。
 
-源字幕修订会清除字幕与语义确认，并失效旧 source SRT/QA/selection、翻译批次与 checkpoint、润色、语义校对、译文修订、字幕渲染、预览、烧录和媒体 QA。下载字幕、候选 QA、对齐、词级转写、音频和媒体证据保留。确定性源字幕 QA 在修订命令内执行：`failed` 或 `needs_review` 会保存新 source 证据链但不登记 source SRT，从而阻断翻译；人工确认后 `continue` 从新 source cue 恢复，不重新导入旧源字幕。
+源字幕修订会清除字幕与语义确认，并失效旧 source SRT/QA/selection、翻译批次与 checkpoint、润色、语义校对、译文修订、字幕渲染、预览、烧录和媒体 QA。下载字幕、候选 QA、对齐、词级转写、音频和媒体证据保留。确定性源字幕 QA 在修订命令内执行：`failed` 或 `needs_review` 会保存新 source 证据链但不登记 source SRT，从而阻断翻译；回填后先用 `status` 检查新的恢复计划，QA 满足后再从新 source cue 恢复，不重新导入旧源字幕。
 
 配置了导入译文字幕的任务拒绝源文修订，避免静默复用与新源文不匹配的旧译文；准备和回填入口使用同一适用性判断，不能先生成最终无法提交的模板。
 
