@@ -175,7 +175,7 @@ xvt apply JOB_FILE RESPONSE_FILE [--continue] [--events-jsonl]
 ```
 
 - 位置参数：`job_file`、`response_file`。
-- 可选参数：`--events-jsonl`。
+- 可选参数：`--continue` 在回填成功后继续同一端到端工作流；`--events-jsonl` 输出纯 JSONL 事件。源文修订会失效译文及下游产物，因此不接受 `--continue`。
 - 仅用于有持久化工作流目标且能从响应或等待状态确定路由的 Job；无法安全判断时会报错而不会猜测。
 
 </details>
