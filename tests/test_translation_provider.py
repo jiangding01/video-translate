@@ -4,15 +4,17 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from email.message import Message
-from http.client import RemoteDisconnected
+from http.client import IncompleteRead, RemoteDisconnected, ResponseNotReady
 from pathlib import Path
+from ssl import SSLCertVerificationError, SSLEOFError, SSLZeroReturnError
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from xvt.errors import UserInputError
 from xvt.job_store import create_job, save_job
 from xvt.models import Artifact, Cue
 from xvt.pipeline import run_translation
+from xvt.pipeline.translation import translate_batch_with_retries
 from xvt.recovery import file_checksum
 from xvt.translate import (
     GlossaryTerm,
@@ -607,6 +609,175 @@ class TranslationProviderTest(unittest.TestCase):
             )
 
         self.assertTrue(raised.exception.retryable)
+
+    def test_provider_classifies_incomplete_chunked_read_as_retryable(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                raise IncompleteRead(b"")
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertIn("transfer failed", str(raised.exception))
+
+    def test_provider_does_not_retry_connection_state_protocol_errors(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(_request, **_kwargs):
+            raise ResponseNotReady("client connection state error")
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertFalse(raised.exception.retryable)
+
+    def test_retry_budget_covers_incomplete_chunked_read(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+        attempts = []
+
+        class Response:
+            def __init__(self, body: str | None) -> None:
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                if self._body is None:
+                    raise IncompleteRead(b"")
+                return self._body.encode("utf-8")
+
+        def opener(_request, **_kwargs):
+            attempts.append(len(attempts) + 1)
+            if len(attempts) < 3:
+                return Response(None)
+            payload = {
+                "choices": [
+                    {"message": {"content": json.dumps({"items": [{"id": 1, "text": "你好"}]})}}
+                ]
+            }
+            return Response(json.dumps(payload))
+
+        retries = []
+
+        with patch("xvt.pipeline.translation.time.sleep", lambda delay: retries.append(delay)):
+            result = translate_batch_with_retries(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                max_retries=4,
+                request=lambda batch_arg, config, correction=None: translate_batch(
+                    batch_arg, config, opener=opener
+                ),
+            )
+
+        self.assertEqual(result, {1: "你好"})
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(retries, [1, 2])
+
+    def test_provider_classifies_tls_request_termination_as_retryable(self) -> None:
+        # urlopen 在请求阶段把底层 SSLError 包装成 URLError，因此真实路径下 provider 收到的是
+        # URLError(reason=SSLError 子类)，而不是裸的 SSLError。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(_request, **_kwargs):
+            raise URLError(SSLZeroReturnError("tls connection closed"))
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        self.assertTrue(raised.exception.retryable)
+
+    def test_provider_classifies_tls_response_termination_as_retryable(self) -> None:
+        # 响应读取不经过 urlopen 的 URLError 包装，SSLError 原样到达提供方边界。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                raise SSLEOFError("EOF occurred in violation of protocol")
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=lambda *_args, **_kwargs: Response(),
+            )
+
+        self.assertTrue(raised.exception.retryable)
+
+    def test_provider_does_not_retry_tls_certificate_errors(self) -> None:
+        # 证书校验发生在握手阶段，真实路径下必然经 URLError 包装抵达；直接断言裸异常会
+        # 绕过该包装层，让不可重试分类看起来成立而实际失效。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(_request, **_kwargs):
+            raise URLError(SSLCertVerificationError("certificate verify failed"))
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+
+        # SSLCertVerificationError 同时继承 ValueError，必须保持依赖故障分类而非用户输入错误。
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(raised.exception.category, "dependency_or_process")
+
+    def test_provider_retries_non_tls_url_errors(self) -> None:
+        # 按 reason 细分 TLS 后，普通网络故障必须保持既有的无条件可重试语义。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        for reason in (ConnectionRefusedError("connection refused"), "name resolution failed"):
+            with self.subTest(reason=type(reason).__name__):
+
+                def opener(_request, _reason=reason, **_kwargs):
+                    raise URLError(_reason)
+
+                with self.assertRaises(TranslationProviderError) as raised:
+                    translate_batch(
+                        batch,
+                        CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                        opener=opener,
+                    )
+
+                self.assertTrue(raised.exception.retryable)
 
     def test_provider_does_not_retry_non_connection_os_errors(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")

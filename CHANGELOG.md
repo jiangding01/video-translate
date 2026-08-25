@@ -31,6 +31,8 @@
 
 ### Fixed
 
+- 润色、翻译、语义校对等提供方请求在读取响应时遇到分块传输中途断开不再直接抛出 `http.client.IncompleteRead` 堆栈：`IncompleteRead`、`BadStatusLine` 和 `LineTooLong` 归类为可重试传输故障，进入既有的最多 4 次退避重试；其余 `http.client.HTTPException` 属于客户端连接状态错误，包装为不可重试的提供方依赖故障。`HTTPException` 既不是 `OSError` 也不是 `ValueError`，此前既不被提供方边界捕获、也不被 CLI 顶层兜底覆盖，因而输出裸 traceback 并返回退出码 1；现在统一以退出码 3 和结构化恢复计划结束，Job 逐批进度不受影响，仍可 `continue` 续跑。`RemoteDisconnected` 保持既有连接故障归类不变。
+- 同源修复 TLS 传输故障的分类，两个阶段此前各错一半：请求阶段 `urlopen` 会把全部 `SSLError` 包装成 `URLError`，而该分支无条件可重试，因此证书校验失败、握手失败等重发必然同样失败的问题会被空跑满 4 次重试预算；响应读取阶段不经过该包装，`SSLError` 又因不属于 `ConnectionError` 被判为不可重试，使 `SSLEOFError`（未经正常关闭即断开）、`SSLZeroReturnError`（传输中途关闭）和 `SSLSyscallError`（底层 I/O 中断）这类瞬时故障直接失败。现在两个阶段共用同一张 TLS 分类表：上述三类进入退避重试，其余 `SSLError`（含 `SSLCertVerificationError`）立即失败。`SSLCertVerificationError` 同时继承 `ValueError`，由提供方边界包装可确保它按依赖故障退出，不会被 CLI 顶层误判为用户输入错误。
 - 局部语义复查保留稳定批次 ID 供 checkpoint/事件消费，同时新增本轮 `batch_index` 供人类进度显示，不再出现「批次 38/1」一类误导输出；`xvt apply ... --continue` 在继续工作流前不再打印回填阶段的旧产物路径或恢复建议，最终只展示继续后的真实终态。
 - 字幕 QA 的纯 `needs_review` 现在持久化为 `awaiting_input`，所有原子译文入口与端到端命令都不会发出 `cli_completed`；error 级问题仍记为 `failed`。恢复导航会展示真正阻断的候选 QA 报告，且仅 QA 阻断时不再提供必然失败的语义确认命令。已登记的译文 QA 报告缺失或 checksum 失效时，只要源 QA 无 error 且译文 cue 有效，`continue` 会重新计算 QA，不再误用源报告形成永久阻断。
 - 人工平台字幕候选失败时尝试对齐后再回退 ASR，自动候选在翻译/烧录目标中不再直接决定时间轴。仅平台最后一个 cue 超出媒体不超过 500ms 时安全裁剪。

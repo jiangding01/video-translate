@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from http.client import BadStatusLine, HTTPException, IncompleteRead, LineTooLong
+from ssl import SSLEOFError, SSLError, SSLSyscallError, SSLZeroReturnError
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -25,6 +27,14 @@ TRANSLATION_POLISH_PROMPT_VERSION = 3
 SEMANTIC_REVIEW_PROMPT_VERSION = 4
 SEMANTIC_REPAIR_PROMPT_VERSION = 3
 RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# 上游返回的报文残缺或畸形（分块传输中途断开、状态行截断、首部超长）属于传输层瞬时
+# 故障，原样重发大概率成功；其余 HTTPException 是客户端连接状态错误，重发无意义。
+RETRYABLE_PROTOCOL_ERRORS = (IncompleteRead, BadStatusLine, LineTooLong)
+# TLS 连接在传输中途终止与上面的报文残缺同源，同样是瞬时故障：SSLEOFError 表示未经正常
+# 关闭就断开，SSLZeroReturnError 表示传输中途关闭，SSLSyscallError 表示底层 I/O 中断。
+# 其余 SSLError（握手失败、协议版本不匹配、SSLCertVerificationError 等证书问题）是配置或
+# 信任链错误，重发必然得到同样结果，保持不可重试。
+RETRYABLE_TLS_ERRORS = (SSLEOFError, SSLZeroReturnError, SSLSyscallError)
 
 
 class TranslationProviderError(DependencyError):
@@ -337,9 +347,17 @@ def _request_batch(
             retry_after=retry_after,
         ) from error
     except URLError as error:
+        # urlopen 在请求阶段用 URLError 包装底层 OSError（含全部 SSLError），因此 TLS 分类
+        # 必须看 reason，否则证书与握手失败会被当成普通网络错误重试到预算耗尽。
+        # 响应读取阶段不经过该包装，由下面的 OSError 分支按同一张 TLS 表分类。
+        reason = error.reason
+        if isinstance(reason, SSLError):
+            retryable = isinstance(reason, RETRYABLE_TLS_ERRORS)
+        else:
+            retryable = True
         raise TranslationProviderError(
-            f"translation provider request failed: {error.reason}",
-            retryable=True,
+            f"translation provider request failed: {reason}",
+            retryable=retryable,
         ) from error
     except TimeoutError as error:
         raise TranslationProviderError(
@@ -349,7 +367,16 @@ def _request_batch(
     except OSError as error:
         raise TranslationProviderError(
             f"translation provider connection failed: {error}",
-            retryable=isinstance(error, ConnectionError),
+            retryable=isinstance(error, (ConnectionError, *RETRYABLE_TLS_ERRORS)),
+        ) from error
+    except HTTPException as error:
+        # HTTPException 既不是 OSError 也不是 ValueError，上面的分支和 CLI 顶层兜底都接不住；
+        # 不在此包装则会穿透为裸 traceback，既拿不到退出码 3 也拿不到恢复计划。
+        # 本分支排在 OSError 之后：RemoteDisconnected 同时继承 BadStatusLine 与
+        # ConnectionResetError，保持由上面的 OSError 分支归类，行为不变。
+        raise TranslationProviderError(
+            f"translation provider transfer failed: {error}",
+            retryable=isinstance(error, RETRYABLE_PROTOCOL_ERRORS),
         ) from error
 
     try:
