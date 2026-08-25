@@ -660,7 +660,7 @@ export XVT_TRANSLATION_API_KEY="secret"
 
 `--provider auto` 仅在 Base URL、模型和 API Key 都存在时调用 API。配置不完整时会安全降级为 Agent 模式，生成 `artifacts/translation-batches.json`。显式传入 `--provider openai-compatible` 时，缺失配置会直接失败。
 
-API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误和 5xx 会退避重试。
+API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误、5xx、分块响应中途断开和 TLS 连接中途终止会退避重试；证书校验失败等信任链问题立即失败。
 
 兼容 API 默认每批最多翻译 25 个 cue，请求超时时间为 180 秒；可用 `--batch-size` 和 `--timeout-seconds` 针对单个新任务调整。已创建的 Job 继续使用其持久化配置。
 
