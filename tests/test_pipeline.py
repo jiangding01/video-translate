@@ -300,6 +300,25 @@ class PipelineTest(unittest.TestCase):
             job.artifacts[-1] = Artifact("source_cues", str(cues_path), file_checksum(cues_path))
             self.assertIsNone(acknowledged_review_issues(job))
 
+    def test_acknowledgment_rejects_boolean_cue_ids(self) -> None:
+        # bool 是 int 的子类：`true == 1`，放行会让伪造的确认记录匹配 cue 1 的真实
+        # review 问题。与 review_gate_satisfied 的 bool 排除保持对称。
+        from xvt.pipeline.review import acknowledged_review_issues
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.srt", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text("[]", encoding="utf-8")
+            job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
+            job.config["subtitle_review_acknowledgment"] = {
+                "source_cues_checksum": file_checksum(cues_path),
+                "acknowledged_issues": [["line_too_wide", True]],
+            }
+            self.assertIsNone(acknowledged_review_issues(job))
+
     def test_new_review_issue_blocks_despite_acknowledgment(self) -> None:
         from xvt.pipeline.review import complete_qa_stage
         from xvt.qa import SubtitleIssue, SubtitleQaReport

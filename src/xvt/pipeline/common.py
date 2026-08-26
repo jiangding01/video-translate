@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -204,12 +204,33 @@ def artifact_path(job: Job, kind: str) -> Path:
     return Path(artifact.path)
 
 
+# 与 models.Job.from_dict 同款前向兼容策略：只保留已知字段，
+# 新 schema 写入的额外键被忽略而不是抛裸 TypeError。
+_CUE_FIELDS = {field.name for field in fields(Cue)}
+_WORD_FIELDS = {field.name for field in fields(Word)}
+
+
 def load_cues(path: Path) -> list[Cue]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError("cue artifact must contain a JSON array")
     cues = []
-    for item in data:
-        words = [Word(**word) for word in item.get("words", [])]
-        cues.append(Cue(**{**item, "words": words}))
+    try:
+        for item in data:
+            if not isinstance(item, dict):
+                raise TypeError("cue records must be objects")
+            raw_words = item.get("words", [])
+            if not isinstance(raw_words, list):
+                raise TypeError("cue words must be an array")
+            words = []
+            for word in raw_words:
+                if not isinstance(word, dict):
+                    raise TypeError("word records must be objects")
+                words.append(
+                    Word(**{key: value for key, value in word.items() if key in _WORD_FIELDS})
+                )
+            known = {key: value for key, value in item.items() if key in _CUE_FIELDS}
+            cues.append(Cue(**{**known, "words": words}))
+    except (AttributeError, TypeError) as error:
+        raise ValueError(f"invalid cue artifact: {error}") from error
     return cues

@@ -2,6 +2,7 @@ import unittest
 
 from xvt.align import align_source_cues, normalize_text
 from xvt.models import Cue, Transcript, Word
+from xvt.qa import check_subtitles
 
 
 class AlignTest(unittest.TestCase):
@@ -44,6 +45,45 @@ class AlignTest(unittest.TestCase):
 
         self.assertEqual((result.cues[1].start_ms, result.cues[1].end_ms), (2000, 2500))
         self.assertIn("inferred", result.cues[1].warnings[0])
+
+    def test_nested_overlap_is_pushed_after_the_previous_cue(self) -> None:
+        # 源字幕 cue1 可匹配 ASR，cue2 与 cue1 重叠且匹配不上：平移后完全嵌套，
+        # 旧的中点归一在这里会产出 end <= start 的 cue。
+        transcript = Transcript(
+            language="en",
+            engine="test",
+            words=(Word("hello", 10000, 11000, 0.9), Word("world", 11000, 12000, 0.9)),
+        )
+        cues = [Cue(1, 0, 1000, "hello world"), Cue(2, 0, 500, "zzqqxx unmatched gibberish")]
+
+        result = align_source_cues(cues, transcript)
+
+        self.assertEqual(
+            [(cue.start_ms, cue.end_ms) for cue in result.cues], [(10000, 12000), (12000, 12001)]
+        )
+        for index, cue in enumerate(result.cues):
+            self.assertGreater(cue.end_ms, cue.start_ms)
+            if index:
+                self.assertGreaterEqual(cue.start_ms, result.cues[index - 1].end_ms)
+        self.assertIn(
+            "shifted cue start past the previous cue to resolve a degenerate overlap",
+            result.cues[1].warnings,
+        )
+        # 入参 cue 的 warnings 不得被就地污染。
+        self.assertEqual(cues[0].warnings, [])
+
+    def test_reports_no_error_level_issues_after_clamping(self) -> None:
+        transcript = Transcript(
+            language="en",
+            engine="test",
+            words=(Word("hello", 10000, 11000, 0.9), Word("world", 11000, 12000, 0.9)),
+        )
+        cues = [Cue(1, 0, 1000, "hello world"), Cue(2, 0, 500, "zzqqxx unmatched gibberish")]
+
+        result = align_source_cues(cues, transcript)
+        report = check_subtitles(list(result.cues))
+
+        self.assertEqual([issue for issue in report.issues if issue.severity == "error"], [])
 
 
 if __name__ == "__main__":

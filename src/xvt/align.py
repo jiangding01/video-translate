@@ -6,6 +6,7 @@ from statistics import median
 from unicodedata import category
 
 from xvt.models import Cue, Transcript, Word
+from xvt.segment import normalize_cue_boundaries
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +147,9 @@ def align_source_cues(
                     words=list(matched_words),
                     timing_confidence=match.score,
                     provenance="aligned",
+                    # ``replace`` shares mutable field values with the input cue;
+                    # copy the list so boundary clamping cannot mutate the caller's cues.
+                    warnings=list(cue.warnings),
                 )
             )
         else:
@@ -159,13 +163,7 @@ def align_source_cues(
                 )
             )
 
-    for index in range(1, len(aligned)):
-        previous = aligned[index - 1]
-        current = aligned[index]
-        if current.start_ms < previous.end_ms:
-            boundary = (current.start_ms + previous.end_ms) // 2
-            previous.end_ms = boundary
-            current.start_ms = boundary
+    normalize_cue_boundaries(aligned)
 
     coverage = len(matches) / len(cues)
     confidence = coverage * (sum(match.score for match in matches) / len(matches)) if matches else 0

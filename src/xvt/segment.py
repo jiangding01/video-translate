@@ -211,16 +211,61 @@ def _trim_trailing_hallucination(
     return words[:trim_start], True
 
 
+MINIMUM_CUE_DURATION_MS = 1
+
+OVERLAP_SHIFT_WARNING = "shifted cue start past the previous cue to resolve a degenerate overlap"
+MINIMUM_DURATION_WARNING = "extended cue end to keep a positive duration"
+
+
+def _append_warning(cue: Cue, message: str) -> None:
+    if message not in cue.warnings:
+        cue.warnings.append(message)
+
+
+def _assert_monotonic(cues: list[Cue]) -> None:
+    """Fail loudly instead of emitting a timeline the QA stage would reject."""
+
+    for index, cue in enumerate(cues):
+        if cue.end_ms <= cue.start_ms:
+            raise RuntimeError(f"cue {cue.id} has a non-positive duration after normalization")
+        if index and cue.start_ms < cues[index - 1].end_ms:
+            raise RuntimeError(f"cue {cue.id} still overlaps its predecessor after normalization")
+
+
+def normalize_cue_boundaries(cues: list[Cue]) -> None:
+    """Remove overlaps in place while keeping every cue's duration positive.
+
+    Overlapping pairs are split at their midpoint, which is the historical
+    behaviour. When that midpoint cannot leave both cues a positive duration
+    (heavily overlapping, fully nested or non-monotonic input), the later cue is
+    pushed to ``[previous.end_ms, previous.end_ms + 1]`` instead. Touching
+    boundaries are valid for :func:`xvt.qa.check_subtitles` (its overlap check is
+    a strict ``<``), and processing pairs in order lets the shift propagate to
+    the following pair naturally.
+    """
+
+    for index, cue in enumerate(cues):
+        if index:
+            previous = cues[index - 1]
+            if cue.start_ms < previous.end_ms:
+                boundary = (cue.start_ms + previous.end_ms) // 2
+                if previous.start_ms < boundary < cue.end_ms:
+                    previous.end_ms = boundary
+                    cue.start_ms = boundary
+                else:
+                    cue.start_ms = previous.end_ms
+                    _append_warning(cue, OVERLAP_SHIFT_WARNING)
+        if cue.end_ms <= cue.start_ms:
+            cue.end_ms = cue.start_ms + MINIMUM_CUE_DURATION_MS
+            _append_warning(cue, MINIMUM_DURATION_WARNING)
+
+    _assert_monotonic(cues)
+
+
 def _normalize_boundaries(
     cues: list[Cue], tail_padding_ms: int, media_duration_ms: int | None
 ) -> None:
-    for index in range(1, len(cues)):
-        previous = cues[index - 1]
-        current = cues[index]
-        if current.start_ms < previous.end_ms:
-            boundary = (current.start_ms + previous.end_ms) // 2
-            previous.end_ms = boundary
-            current.start_ms = boundary
+    normalize_cue_boundaries(cues)
 
     for index, cue in enumerate(cues):
         next_start = cues[index + 1].start_ms if index + 1 < len(cues) else None
@@ -230,7 +275,14 @@ def _normalize_boundaries(
             limits.append(next_start)
         if media_duration_ms is not None:
             limits.append(media_duration_ms)
-        cue.end_ms = min(limits)
+        # ``media_duration_ms`` can sit before the cue itself (short probe metadata),
+        # so clamp back to a positive duration instead of emitting end <= start.
+        capped_end = min(limits)
+        cue.end_ms = max(cue.start_ms + MINIMUM_CUE_DURATION_MS, capped_end)
+        if cue.end_ms != capped_end:
+            _append_warning(cue, MINIMUM_DURATION_WARNING)
+
+    _assert_monotonic(cues)
 
 
 def segment_transcript(

@@ -18,6 +18,7 @@ from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
+from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -61,6 +62,7 @@ from xvt.translation_provider import (
     translate_batch,
 )
 from xvt.workflow_config import (
+    WorkflowConfig,
     clear_burn_fingerprint,
     get_workflow_config,
     resolve_translation_quality,
@@ -128,7 +130,14 @@ def translate_batch_with_retries(
 
 
 def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
-    policy = translation_policy_from_dict(job.config.get("translation_policy"))
+    # workflow Job 的策略快照存在 job.config["workflow"] 里，顶层 translation_policy 只是
+    # 原子 Job 的回退位置；两处都要读，否则 workflow 路径的术语表校验会静默失效。
+    workflow = get_workflow_config(job)
+    policy = (
+        workflow.translation_policy
+        if workflow is not None and workflow.translation_policy is not None
+        else translation_policy_from_dict(job.config.get("translation_policy"))
+    )
     return tuple((term.source, term.target) for term in policy.terms)
 
 
@@ -141,7 +150,7 @@ def load_translation_response(response_file: str | Path, expected_ids: set[int])
     for item in items:
         cue_id = item.get("id") if isinstance(item, dict) else None
         text = item.get("text") if isinstance(item, dict) else None
-        if not isinstance(cue_id, int) or cue_id in translations:
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool) or cue_id in translations:
             raise ValueError("translation response contains an invalid or duplicate cue id")
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"translation for cue {cue_id} is empty")
@@ -230,6 +239,95 @@ def _atomic_draft_matches_translation_progress(
         return None
 
 
+# `repair_polish_draft` 无法零成本重建时的统一文案：status（recovery）与
+# continue（workflow）必须给出同一句话，避免两处口径漂移。
+REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE = (
+    "润色草稿缺失或 checksum 已失效，不能从最终译文安全重建，"
+    "且 translation_progress checkpoint 不足以零成本重建；"
+    "请重新导入或生成原始译文草稿。"
+)
+
+
+def translation_progress_rebuildable(job: Job, config: WorkflowConfig) -> bool:
+    """判定 translation_progress checkpoint 能否**零 API 成本**重建译文草稿。
+
+    `plan_advance_steps` 在「polished 且 draft 失效」时给出 `repair_polish_draft`。
+    该步骤对应的执行路径是 `run_translation`：只有当 checkpoint 覆盖全部批次且
+    fingerprint 与当前配置一致时，逐批循环才会全部命中 `continue` 分支、一次
+    provider 调用都不发生。任一条件不满足就会真实调用 API 全量重翻，因此这里
+    fail-closed。
+
+    `status`（recovery）与 `continue`（workflow）必须共用本谓词，否则两边对
+    provider 可解析性的判断会因环境变量差异而漂移。
+
+    provider 无法解析（Agent 模式或缺少 base URL / model / API key）时返回 False
+    而不抛异常——status 只是查询，不应因环境不全而失败。
+    """
+    target_language = config.target_language
+    if not target_language:
+        return False
+    source_path = valid_artifact_path(job, "source_cues")
+    progress_path = valid_artifact_path(job, "translation_progress")
+    if source_path is None or progress_path is None:
+        return False
+    try:
+        mode, provider_config, _fallback = resolve_provider(
+            config.provider,
+            base_url=config.base_url,
+            model=config.model,
+            api_key_env=config.api_key_env,
+            timeout_seconds=config.timeout_seconds,
+        )
+    except UserInputError:
+        # 显式 openai-compatible provider 缺配置时会抛错；查询路径不应因此失败。
+        return False
+    if provider_config is None:
+        # Agent 模式没有确定性的零成本重建路径。
+        return False
+    # 与 workflow._translation_policy 同口径，保证 fingerprint 与实际执行一致。
+    policy = (
+        config.translation_policy if config.translation_policy is not None else TranslationPolicy()
+    )
+    try:
+        cues = load_cues(source_path)
+        if not cues:
+            return False
+        source_language = next(
+            (cue.source_language for cue in cues if cue.source_language),
+            job.config.get("source_language", "auto"),
+        )
+        batches = build_translation_batches(
+            cues,
+            source_language=source_language,
+            target_language=target_language,
+            batch_size=config.batch_size,
+            policy=policy,
+        )
+        fingerprint = _translation_fingerprint(
+            source_cues_checksum=checksum(source_path),
+            source_language=source_language,
+            target_language=target_language,
+            provider=mode,
+            base_url=provider_config.base_url,
+            model=provider_config.model,
+            batch_size=config.batch_size,
+            policy=policy,
+        )
+        data = json.loads(progress_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(data, dict)
+            or data.get("fingerprint") != fingerprint
+            or data.get("completed_batches") != [batch.id for batch in batches]
+        ):
+            return False
+        expected_ids = {item.id for batch in batches for item in batch.items}
+        # 每个批次的全部 cue 都必须已有译文，否则该批次仍会被重新调用。
+        load_translation_response(progress_path, expected_ids)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _translation_manifest(job: Job) -> dict[str, Any] | None:
     path = valid_artifact_path(job, "translation_batches")
     if path is None:
@@ -239,6 +337,47 @@ def _translation_manifest(job: Job) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return manifest if isinstance(manifest, dict) else None
+
+
+def _require_usable_translation_manifest(job: Job) -> None:
+    """回填前收紧已登记 manifest 的可信度，避免可疑状态与极旧 Job 走同一放行路径。
+
+    `_translation_manifest` 对「从未登记」「已登记但 checksum 失效或文件缺失」
+    「内容不是 JSON 对象」一律返回 None。只有第一种是合法的历史状态（极旧 Job 没有
+    manifest artifact，回填按无 manifest 处理）；后两种一旦被同样放行，`task` 路由会
+    静默退化成标准翻译，并跳过 `_require_manifest_source_cues` 的源 cue 绑定。
+
+    只在回填这一写路径收紧：`agent_translation_polish_waiting` 等只读谓词仍使用不抛
+    异常的 `_translation_manifest`，`status` 不应因 manifest 损坏而失败。
+    """
+    if not any(item.kind == "translation_batches" for item in job.artifacts):
+        return
+    if valid_artifact_path(job, "translation_batches") is None:
+        raise ValueError(
+            "translation batch manifest is missing or its checksum is stale; "
+            "rerun prepare-translation and translate the regenerated manifest"
+        )
+    if _translation_manifest(job) is None:
+        raise ValueError(
+            "translation batch manifest is not a readable JSON object; "
+            "rerun prepare-translation and translate the regenerated manifest"
+        )
+
+
+def _require_manifest_source_cues(manifest: dict[str, Any] | None, source_path: Path) -> None:
+    """确认 manifest 与当前源 cue 同源，避免陈旧响应错位回填。
+
+    修复前 prepare 的标准 manifest 没有 `source_cues_checksum`，此时保持接受（前向兼容）。
+    """
+    if manifest is None:
+        return
+    recorded = manifest.get("source_cues_checksum")
+    if not isinstance(recorded, str) or recorded == checksum(source_path):
+        return
+    raise ValueError(
+        "translation batch manifest was prepared for different source cues; "
+        "rerun prepare-translation and translate the regenerated manifest"
+    )
 
 
 def _agent_polished_manifest(job: Job) -> dict[str, Any] | None:
@@ -692,13 +831,14 @@ def prepare_agent_translation(
             "prompt_version": TRANSLATION_PROMPT_VERSION,
             "semantic_grouping_version": SEMANTIC_GROUPING_VERSION,
             "policy": resolved_policy.to_dict(),
+            # 标准 manifest 也绑定源 cue checksum，回填时据此拒绝源文变更后的陈旧响应。
+            "source_cues_checksum": checksum(source_path),
             "batches": [batch.to_dict() for batch in batches],
         }
         if quality == "polished" and await_input:
             manifest.update(
                 {
                     "batch_size": batch_size,
-                    "source_cues_checksum": checksum(source_path),
                     "task": "translate_and_polish",
                     "task_version": TRANSLATE_AND_POLISH_TASK_VERSION,
                 }
@@ -708,13 +848,16 @@ def prepare_agent_translation(
             output_path,
             manifest,
         )
-        add_artifact(job, "translation_batches", output_path, event_sink)
+        # 配置必须先于 add_artifact 的 save_job 写入：API 模式（await_input=False）且
+        # 有 workflow 时，add_artifact 是本函数最后一次落盘机会，晚写会被后续
+        # load_job 丢弃，术语表等策略随之失效。
         job.config["target_language"] = target_language
         job.config["source_language"] = source_language
         job.config["translation_policy"] = resolved_policy.to_dict()
         if workflow is None:
+            # workflow Job 的 quality 由 workflow 配置派生，不写入顶层 config。
             job.config["translation_quality"] = quality
-            save_job(job)
+        add_artifact(job, "translation_batches", output_path, event_sink)
         if await_input:
             set_stage(job, StageName.TRANSLATE, StageStatus.AWAITING_INPUT, event_sink)
         return output_path
@@ -986,6 +1129,7 @@ def apply_agent_translation(
         {target_language} if quality == "polished" else {None, target_language}
     ):
         raise ValueError("target language must match the persisted atomic job goal")
+    _require_usable_translation_manifest(job)
     manifest = _translation_manifest(job)
     task = manifest.get("task") if manifest is not None else None
     if task not in {None, "translate_and_polish"}:
@@ -1044,20 +1188,12 @@ def apply_agent_translation(
     current_stage = StageName.TRANSLATE
     set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
-        cues = load_cues(artifact_path(job, "source_cues"))
-        response = json.loads(Path(response_file).read_text(encoding="utf-8"))
-        items = response.get("items") if isinstance(response, dict) else None
-        if not isinstance(items, list):
-            raise ValueError("translation response must contain an items array")
-        translations = {}
-        for item in items:
-            cue_id = item.get("id") if isinstance(item, dict) else None
-            text = item.get("text") if isinstance(item, dict) else None
-            if not isinstance(cue_id, int) or cue_id in translations:
-                raise ValueError("translation response contains an invalid or duplicate cue id")
-            if not isinstance(text, str) or not text.strip():
-                raise ValueError(f"translation for cue {cue_id} is empty")
-            translations[cue_id] = text.strip()
+        source_path = valid_artifact_path(job, "source_cues")
+        if source_path is None:
+            raise ValueError("translation requires checksum-valid source_cues")
+        _require_manifest_source_cues(manifest, source_path)
+        cues = load_cues(source_path)
+        translations = load_translation_response(response_file, {cue.id for cue in cues})
         translated = apply_translations(
             cues,
             translations,

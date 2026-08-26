@@ -83,12 +83,12 @@ xvt batch-continue BATCH.json
 | `--language LANG` | 源语言代码，例如 `en`。ASR 不传时自动检测；导入字幕通常应显式提供，未传时以 `auto` 保存。 |
 | `--subtitles PATH` | 显式提供源字幕；默认保留其 cue ID 和时间轴并跳过 ASR。 |
 | `--source-strategy auto\|subtitles\|asr` | 源字幕选择策略，默认 `auto`。`subtitles` 强制采用候选字幕，`asr` 强制语音转写；详见下方“源字幕选择速查”。 |
-| `--align-subtitles` | 对显式源字幕或平台字幕额外运行 ASR，并按语音结果修正整体偏移或漂移。不能与 `--source-strategy asr` 同用。 |
+| `--align-subtitles` | 对显式源字幕或平台字幕额外运行 ASR，并按语音结果修正整体偏移或漂移。需与 `--subtitles` 同用，不能与 `--source-strategy asr` 同用。对齐结果出现 error 级字幕 QA 问题时直接失败，不会静默回退。 |
 | `--min-alignment-confidence FLOAT` | 对齐结果的最低置信度，默认 `0.55`。 |
-| `--allow-low-confidence-alignment` | 显式接受低于阈值的对齐结果；仍需通过后续字幕 QA。 |
+| `--allow-low-confidence-alignment` | 显式接受低于阈值的对齐结果；只放行低置信度，不放行对齐后 error 级 QA 问题，且仍需通过后续字幕 QA。 |
 | `--segmentation-preset conservative\|balanced\|compact` | ASR cue 分段预设，默认 `balanced`；不改变导入字幕的既有时间轴。 |
 | `--youtube-subtitles` | 对 YouTube 输入请求平台字幕候选；不传时不会下载平台字幕。 |
-| `--subtitle-language LANG` | 希望下载的平台字幕语言，例如 `en`。 |
+| `--subtitle-language LANG` | 希望下载的平台字幕语言，例如 `en`。下载目录中同时存在多个语言或多个变体的字幕文件时，按该语言优先选取。 |
 | `--allow-auto-subtitles` | 人工字幕不可用时允许下载 YouTube 自动字幕候选。 |
 | `--cookies-from-browser BROWSER` | 让 yt-dlp 从指定浏览器读取登录 Cookie，例如 `chrome`；只记录浏览器名称，不持久化 Cookie 内容。 |
 | `--proxy URL` | 为远程检查与下载显式指定代理；凭据会在事件和错误边界脱敏。 |
@@ -270,6 +270,7 @@ xvt resume JOB_FILE [--events-jsonl]
 
 - 位置参数：`job_file`。
 - 可选参数：`--events-jsonl`。它不完成持久化的翻译或烧录目标；端到端 Job 通常应使用 `continue`。
+- 远程 Job：优先复用 checksum 有效的已下载媒体（`source_video` / `downloaded_media`）；没有可复用媒体时委派远程恢复路径重新获取，因此**可能触发一次媒体下载**，并使用 Job 已持久化的 Cookie 配置。
 
 </details>
 
@@ -313,6 +314,7 @@ xvt apply-translation JOB_FILE RESPONSE_FILE --target-language LANG [--events-js
 - 位置参数：`job_file`、`response_file`。
 - 必填参数：`--target-language`。
 - 可选参数：`--events-jsonl`。
+- manifest 绑定：`prepare-translation` 生成的标准 manifest 记录 `source_cues_checksum`；源 cue 在 prepare 之后发生变化时，旧响应会被拒绝，需重新 `prepare-translation` 并翻译新 manifest。已登记的 manifest 若 checksum 失效、文件缺失或内容损坏，同样拒绝回填；从未登记过 manifest 的极旧 Job 以及修复前生成、没有该字段的旧 manifest 仍按原样接受。
 
 </details>
 
@@ -486,6 +488,7 @@ xvt preview JOB_FILE [--cue ID | --start SECONDS] [--duration SECONDS]
 - 范围：`--cue` 与 `--start` 互斥；`--duration` 默认 `15` 秒。
 - 媒体与输出：`--media`、`--output`、`--software`、`--target-font`、`--source-font`。
 - 事件：`--events-jsonl`。
+- 前置条件：需要 checksum 有效的译文 cue 与译文 QA 报告，并通过与 `burn` 相同的 QA 门；`needs_review` 须已在端到端 Job 上确认。缺产物或 QA 未放行时以退出码 4（`workflow`）失败。
 
 </details>
 
@@ -502,6 +505,7 @@ xvt burn JOB_FILE [--media PATH] [--output PATH] [--software]
 - 媒体与输出：`--media`、`--output`、`--software`、`--target-font`、`--source-font`。
 - 远程访问：`--cookies-from-browser`、`--proxy`。
 - 事件：`--events-jsonl`。
+- 前置条件：需要 checksum 有效的译文 cue 与译文 QA 报告，并通过 fail-closed 的译文 QA 门；`needs_review` 须已在端到端 Job 上经 `continue --acknowledge-subtitle-review` 确认。QA 门在远程媒体下载之前执行。
 
 </details>
 
@@ -598,6 +602,8 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
 ```
 
 只有确认字幕存在整体偏移或漂移时，才使用 `--align-subtitles`。该模式会额外运行 Whisper 并写入 `artifacts/alignment.json`。
+
+强制对齐是 fail-closed 的：对齐结果置信度低于阈值时失败（可用 `--allow-low-confidence-alignment` 显式放行），对齐后的字幕 QA 出现 error 级问题时同样失败，且 `--allow-low-confidence-alignment` 不放行这一类问题。此时去掉 `--align-subtitles` 会**保留源字幕原有时间轴**（不是回退到 ASR 分段）；确实需要按语音重建时间轴时，请改用 `--source-strategy asr`（不能与 `--align-subtitles` 同用），或先修复源字幕本身。
 
 ### 3. 纯字幕文件工作流
 
@@ -773,6 +779,8 @@ uv run --no-sync xvt apply-translation "/path/to/job.json" \
 
 响应格式见 [翻译协议](skills/video-translate/references/translation-protocol.md)。
 
+manifest 与源 cue 绑定：`prepare-translation` 之后若源 cue 发生变化（例如执行了源文修订或 `rebuild-source`），旧响应会被拒绝，必须重新 `prepare-translation` 再翻译新 manifest。已登记的 manifest 文件被改动或损坏（checksum 失效）时同样拒绝回填。
+
 如果已有机翻字幕，可直接导入：
 
 ```bash
@@ -827,7 +835,9 @@ uv run --no-sync xvt preview "/path/to/job.json" \
   --output "/absolute/path/to/preview.mp4"
 ```
 
-不传 `--cue` 或 `--start` 时，默认从第一条有效译文 cue 附近生成 15 秒预览。预览要求译文 QA 已通过，使用与正式烧录相同的字体、分辨率自适应码率和硬件回退逻辑，但不会修改正式 `burn`、`media_qa` stage，也不会覆盖 `bilingual.ass` 或 `burned.mp4`。本地纯音频 Job 以及没有有效 `source_video` 的远程 Job 必须通过 `--media` 提供视频。
+不传 `--cue` 或 `--start` 时，默认从第一条有效译文 cue 附近生成 15 秒预览。预览使用与正式烧录相同的字体、分辨率自适应码率和硬件回退逻辑，但不会修改正式 `burn`、`media_qa` stage，也不会覆盖 `bilingual.ass` 或 `burned.mp4`。本地纯音频 Job 以及没有有效 `source_video` 的远程 Job 必须通过 `--media` 提供视频。
+
+预览与烧录共用同一道 fail-closed 译文 QA 门（见下文“译文 QA 门”）。缺少 checksum 有效的译文 cue 或译文 QA 报告时，命令以退出码 4（`workflow` 类别）失败——这是 Job 状态问题，不是参数错误。
 
 ### 9. 单独烧录双语字幕
 
@@ -838,6 +848,18 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 ```
 
 默认优先 VideoToolbox，仅在硬件编码器不可用或繁忙时回退 libx264。使用 `--software` 可直接指定软件编码。远程作业未传 `--media` 时会下载视频流；本地音频作业则必须通过 `--media` 提供视频。
+
+烧录和预览把 `bilingual.ass` / `preview.ass` 作为 `-vf ass=filename=...` 传给 FFmpeg，字幕路径按 filtergraph 的两层规则转义，因此 Job 目录（由 `--output` 决定）路径中的单引号、逗号、分号、方括号和冒号都不影响烧录，例如 `--output "/Users/me/Tom's Videos"` 可正常工作。
+
+#### 译文 QA 门
+
+原子 `xvt burn` 和 `xvt preview` 与端到端链路共用同一道 fail-closed 的译文字幕 QA 门，不能用来绕过 QA：
+
+- 必须同时存在 checksum 有效的译文 cue 和译文 QA 报告；任一缺失或 checksum 失效都会被拒绝。
+- 报告为 `pass` / `warning` 时放行；出现 error 级问题或报告结构异常一律拒绝。
+- 报告为 `needs_review` 时，只有报告内**全部** review 级问题都已被对当前源 cue 仍然有效的确认记录覆盖才放行。确认通道只有 `xvt continue JOB --acknowledge-subtitle-review`，因此确认必须在 `xvt run` 创建的端到端 Job 上完成。
+- 原子 Job（单独 `xvt translate` 创建、没有持久化 `config.workflow`）上 `xvt continue` 不可用，报错会引导重跑 `xvt translate JOB --target-language LANG` 重新生成译文与 QA 报告。
+- `burn` 的 QA 门在远程媒体下载之前执行：注定被拒的 Job 不会先下载整段视频。
 
 ## 输出与质量控制
 
@@ -861,6 +883,8 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 固定为“译文一行 + 原文一行”。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的单行限制。
 
+字幕文本里的字面花括号会被保留：`bilingual.ass` 渲染时把 cue 文本中的 `{` `}` 转义为 libass 的 `\{` `\}`，因此 `{x}`、`{0}` 一类占位符会正常显示，而 `{\an8}`、`{\pos(...)}` 只作为文本呈现、不会真的改变字幕位置或样式；`source.srt`、`translated.srt`、`bilingual.srt` 导出时同样原样保留花括号。已知边界（后续项）：导入字幕（`--subtitles`、`--translation-subtitles`、`import-translation`）仍按 SSA 标签块规则剥除 `{...}`，因此“导出 SRT → 用字幕工具编辑 → 再 `import-translation` 导回”这条链路会丢失花括号内容。人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）使用独立的纯文本解析器，不受该边界影响。
+
 若译文 QA 因超过硬显示阈值而失败，可对具有词级时间戳的 ASR cue 执行重切：
 
 ```bash
@@ -879,9 +903,9 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 ```
 
-`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 翻译、润色或语义校对中断会复用各自批次进度，Agent 等待会停在 `apply-translation`、`apply-polish-translation` 或 `apply-semantic-review`，烧录失败只重跑烧录。烧录成品只有在 checksum、派生指纹和媒体 QA 全部有效时才会复用；媒体 QA 失败不会被 `status` 或批处理误判为完成。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
+`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 翻译、润色或语义校对中断会复用各自批次进度，Agent 等待会停在 `apply-translation`、`apply-polish-translation` 或 `apply-semantic-review`，烧录失败只重跑烧录。烧录成品只有在 checksum、派生指纹和媒体 QA 全部有效时才会复用；媒体 QA 失败不会被 `status` 或批处理误判为完成。`polished` Job 的润色草稿（`translation-draft-cues.json`）缺失或 checksum 失效时，只有翻译进度 checkpoint 能零 API 成本重建草稿，`continue` 才会继续；否则它以人工修复提示停下，不会静默重新翻译并重新润色全文，`status` 的分类与该判定一致。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
 
-任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C（SIGINT）或向进程发送 SIGTERM 时，外部命令的整个进程组会被清理，当前运行阶段记录为失败，CLI 分别返回退出码 130 和 143 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。 对 `needs_review` 级的报告（例如导入字幕折叠后超宽），确认可接受后可用 `xvt continue JOB --acknowledge-subtitle-review` 显式放行：确认记录绑定当前字幕内容与具体问题集合，字幕变化或出现新的 review 问题后自动失效；error 级问题（时间轴无效、缺失译文、术语违规等）永远不能通过该通道放行。当前 schema 的 Job 缺少必填字段、stage 或正确字段类型时会返回无效输入错误，不输出 Python traceback。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
+任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C（SIGINT）或向进程发送 SIGTERM 时，外部命令的整个进程组会被清理，当前运行阶段记录为失败，CLI 分别返回退出码 130 和 143 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。 对 `needs_review` 级的报告（例如导入字幕折叠后超宽），确认可接受后可用 `xvt continue JOB --acknowledge-subtitle-review` 显式放行：确认记录绑定当前字幕内容与具体问题集合，字幕变化或出现新的 review 问题后自动失效；error 级问题（时间轴无效、缺失译文、术语违规等）永远不能通过该通道放行。当前 schema 的 Job 缺少必填字段、stage 或正确字段类型时会返回无效输入错误，不输出 Python traceback；`source-cues.json`、`translated-cues.json` 等 cue 产物结构损坏时同样收口为无效输入错误（退出码 2 并发出 `cli_failed`），未知字段按前向兼容忽略。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
 `run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply`、`apply-translation`、`polish-translation`、`apply-polish-translation`、`apply-semantic-review`、`acknowledge-translation-review`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_planned`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数。
 
@@ -896,7 +920,7 @@ CLI 使用集中定义的退出码表达终态语义（见 `src/xvt/errors.py`�
 | 0 | 命令成功完成 |
 | 2 | 用户输入或配置错误，需修正后重试 |
 | 3 | 外部依赖或子进程故障（`doctor` 未通过、翻译提供方故障等） |
-| 4 | 内部工作流不变量被破坏，属于程序侧问题 |
+| 4 | 内部工作流不变量被破坏，或 Job 状态不满足命令前置条件（例如 `preview` / `burn` 缺少 checksum 有效的译文与 QA 报告，或译文 QA 未放行） |
 | 5 | `verify` 校验未通过，artifact checksum 不一致 |
 | 6 | 批处理整体完成但存在失败条目 |
 | 7 | 目标 Job 或 batch 正被另一个 XVT 进程独占执行 |

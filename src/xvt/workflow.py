@@ -23,6 +23,7 @@ from xvt.events import EventSink, EventType, create_event, error_event_fields, j
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
+    REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
     agent_semantic_review_waiting,
     agent_translation_polish_core_satisfied,
     agent_translation_polish_manifest_valid,
@@ -47,6 +48,7 @@ from xvt.pipeline import (
     semantic_review_satisfied,
     semantic_review_waiting,
     translation_polish_satisfied,
+    translation_progress_rebuildable,
 )
 from xvt.recovery import file_checksum, subtitle_qa_failure_guidance, valid_artifact_path
 from xvt.segment import SEGMENTATION_PRESETS
@@ -994,6 +996,17 @@ def _advance_workflow(
             artifacts=waiting_artifacts,
             event_sink=event_sink,
         )
+
+    # planner 的 repair_polish_draft 表示「draft 失效需人工恢复」。执行侧此前不拦截，
+    # 直接落到 _ensure_translation 的 run_translation，在 checkpoint 也失效时会静默
+    # 全量重翻 + 重润色（真实 API 成本）。只有 checkpoint 能零成本重建时才放行。
+    if (
+        goals.needs_translation
+        and advance_steps
+        and advance_steps[0] == "repair_polish_draft"
+        and not translation_progress_rebuildable(job, config)
+    ):
+        raise RuntimeError(REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE)
 
     if goals.needs_translation:
         if not _translation_satisfied(job, config):
