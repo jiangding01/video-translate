@@ -110,6 +110,28 @@ def select_subtitle_language(requested: str, available: tuple[str, ...]) -> str 
     )
 
 
+def _preferred_subtitle(candidates: list[Path], language: str) -> Path:
+    """Pick the subtitle file matching the requested language.
+
+    yt-dlp writes the language into the output template, so a job directory can
+    hold ``source.en.srt``, ``source.en-orig.srt`` and ``source.zh-Hans.srt`` at
+    once. Prefer an exact ``source.<language>.srt`` match, then any
+    ``source.<language>-*`` / ``source.<language>.*`` variant, and only fall back
+    to the first sorted candidate when nothing carries the requested language.
+    """
+
+    prefix = f"source.{language.casefold()}"
+    exact = [item for item in candidates if item.name.casefold() == f"{prefix}.srt"]
+    if exact:
+        return exact[0]
+    variants = [
+        item for item in candidates if item.name.casefold().startswith((f"{prefix}.", f"{prefix}-"))
+    ]
+    if variants:
+        return variants[0]
+    return candidates[0]
+
+
 def download_remote_subtitles(
     url: str,
     output_directory: str | Path,
@@ -151,7 +173,7 @@ def download_remote_subtitles(
     candidates = sorted(root.glob("source*.srt"))
     if not candidates:
         raise RuntimeError("yt-dlp completed without producing a subtitle file")
-    subtitle_path = candidates[0].resolve()
+    subtitle_path = _preferred_subtitle(candidates, language).resolve()
     try:
         subtitle_path.relative_to(root.resolve())
     except ValueError as error:

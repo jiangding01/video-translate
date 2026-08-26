@@ -2100,6 +2100,110 @@ class CliTest(unittest.TestCase):
         self.assertEqual(apply.call_args.kwargs["target_language"], "zh-CN")
         self.assertIn("/tmp/bilingual.srt", output.getvalue())
 
+    def _job_with_source_cues(self, root: Path, cues: list) -> str:
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\nHello.\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        artifact = next(item for item in job.artifacts if item.kind == "source_cues")
+        path = Path(artifact.path)
+        path.write_text(json.dumps(cues, ensure_ascii=False), encoding="utf-8")
+        artifact.checksum = file_checksum(path)
+        save_job(job)
+        return str(get_job_file(job))
+
+    def test_import_translation_tolerates_unknown_cue_fields(self) -> None:
+        """跨版本 cues 产物的未知字段应被忽略，而不是抛裸 TypeError。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_source_cues(
+                root,
+                [
+                    {
+                        "id": 1,
+                        "start_ms": 0,
+                        "end_ms": 2000,
+                        "source_text": "Hello.",
+                        "words": [],
+                        "future_field": "from-newer-version",
+                    }
+                ],
+            )
+            translated = root / "zh.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\n你好。\n",
+                encoding="utf-8",
+            )
+            with redirect_stdout(StringIO()):
+                return_code = main(
+                    [
+                        "import-translation",
+                        job_file,
+                        str(translated),
+                        "--target-language",
+                        "zh-CN",
+                    ]
+                )
+
+        self.assertEqual(return_code, 0)
+
+    def test_import_translation_reports_malformed_cue_artifact_as_user_error(self) -> None:
+        """坏 cues 产物必须走 ValueError → 退出码 2 + cli_failed，而不是裸 traceback。"""
+        errors = StringIO()
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_source_cues(root, [{"id": 1, "start_ms": 0, "end_ms": 2000}])
+            translated = root / "zh.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\n你好。\n",
+                encoding="utf-8",
+            )
+            with redirect_stderr(errors), redirect_stdout(output):
+                return_code = main(
+                    [
+                        "import-translation",
+                        job_file,
+                        str(translated),
+                        "--target-language",
+                        "zh-CN",
+                        "--events-jsonl",
+                    ]
+                )
+
+        self.assertEqual(return_code, 2)
+        streams = output.getvalue().splitlines() + errors.getvalue().splitlines()
+        events = [json.loads(line) for line in streams if line.startswith("{")]
+        failure = next(event for event in events if event["type"] == "cli_failed")
+        self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+        self.assertIn("invalid cue artifact", failure["data"]["error"]["message"])
+
+    def test_import_translation_rejects_non_object_cue_entries(self) -> None:
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_source_cues(root, ["not-a-cue"])
+            translated = root / "zh.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\n你好。\n",
+                encoding="utf-8",
+            )
+            with redirect_stderr(errors), redirect_stdout(StringIO()):
+                return_code = main(
+                    [
+                        "import-translation",
+                        job_file,
+                        str(translated),
+                        "--target-language",
+                        "zh-CN",
+                    ]
+                )
+
+        self.assertEqual(return_code, 2)
+        self.assertIn("invalid cue artifact", errors.getvalue())
+
     def test_import_translation_jsonl_review_waiting_has_no_cli_completed(self) -> None:
         output = StringIO()
         job = Job("job-1", "", "", "input", "/tmp", {})

@@ -46,6 +46,7 @@ from xvt.translate import (
     SemanticRepairBatch,
     SemanticReviewBatch,
     SemanticSuggestedItem,
+    TranslationPolicy,
     apply_semantic_repairs,
     build_semantic_groups,
     build_semantic_repair_batches,
@@ -115,6 +116,18 @@ def _ensure_candidate_qa(
     return path, issues
 
 
+def _resolved_policy(job: Job, config: WorkflowConfig) -> TranslationPolicy:
+    """语义链构建侧与校验侧共用的 policy 回退。
+
+    workflow 配置没有快照 policy 时回退到 ``job.config["translation_policy"]``；
+    两侧口径必须一致，否则校验侧会与构建侧产出不同的批次/指纹，语义链永不收敛。
+    """
+
+    return config.translation_policy or translation_policy_from_dict(
+        job.config.get("translation_policy")
+    )
+
+
 def _config_for_job(job: Job, config: WorkflowConfig | None) -> WorkflowConfig:
     if config is not None:
         return config
@@ -176,8 +189,7 @@ def _review_batches(
         source_language=_source_language(job, source),
         target_language=config.target_language,
         batch_size=config.batch_size,
-        policy=config.translation_policy
-        or translation_policy_from_dict(job.config.get("translation_policy")),
+        policy=_resolved_policy(job, config),
         review_cue_ids=review_cue_ids,
     )
 
@@ -308,10 +320,7 @@ def _fingerprint(
         "base_url": base_url,
         "model": model,
         "batch_size": config.batch_size,
-        "policy": (
-            config.translation_policy
-            or translation_policy_from_dict(job.config.get("translation_policy"))
-        ).to_dict(),
+        "policy": _resolved_policy(job, config).to_dict(),
         "phase": phase,
         "prompt_version": (
             SEMANTIC_REPAIR_PROMPT_VERSION if phase == "repair" else SEMANTIC_REVIEW_PROMPT_VERSION
@@ -686,8 +695,7 @@ def _run_repair_phase(
         issues,
         source_language=_source_language(job, source),
         target_language=config.target_language,
-        policy=config.translation_policy
-        or translation_policy_from_dict(job.config.get("translation_policy")),
+        policy=_resolved_policy(job, config),
     )
     fingerprint = _fingerprint(
         job,
@@ -914,7 +922,7 @@ def _repair_chain_satisfied(
             all_issues,
             source_language=_source_language(job, source),
             target_language=config.target_language,
-            policy=config.translation_policy,
+            policy=_resolved_policy(job, config),
         )
         repair_data = json.loads(repair_path.read_text(encoding="utf-8"))
         if repair_data.get("batches") != _serialized_batches(repair_batches):
@@ -1432,7 +1440,7 @@ def apply_agent_semantic_review(
             initial_issues,
             source_language=_source_language(job, source),
             target_language=resolved.target_language,
-            policy=resolved.translation_policy,
+            policy=_resolved_policy(job, resolved),
         )
         repair_raw = response.get("repair_results")
         if not isinstance(repair_raw, list):
@@ -1464,7 +1472,7 @@ def apply_agent_semantic_review(
             source_language=_source_language(job, source),
             target_language=resolved.target_language,
             batch_size=resolved.batch_size,
-            policy=resolved.translation_policy,
+            policy=_resolved_policy(job, resolved),
         )
         final_results = _agent_results(
             "final_results", response.get("final_results"), final_batches

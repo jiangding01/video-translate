@@ -62,6 +62,42 @@ class DownloadTest(unittest.TestCase):
         self.assertIn("--write-subs", calls[0])
         self.assertNotIn("--write-auto-subs", calls[0])
 
+    def test_picks_requested_language_when_several_subtitle_files_exist(self) -> None:
+        cases = (
+            # (写出的文件, 请求语言, 期望文件)
+            (("source.de.srt", "source.en.srt", "source.zh-Hans.srt"), "en", "source.en.srt"),
+            (
+                ("source.de.srt", "source.en.srt", "source.zh-Hans.srt"),
+                "zh-Hans",
+                "source.zh-Hans.srt",
+            ),
+            (("source.de.srt", "source.zh-Hans.srt"), "zh", "source.zh-Hans.srt"),
+            # yt-dlp 的 -orig 变体没有精确命中，仍应按语言前缀选中。
+            (("source.de.srt", "source.en-orig.srt"), "en", "source.en-orig.srt"),
+            # 大小写不敏感。
+            (("source.de.srt", "source.EN.srt"), "en", "source.EN.srt"),
+            # 无命中时退回既有 sorted glob 行为。
+            (("source.de.srt", "source.fr.srt"), "en", "source.de.srt"),
+        )
+        for written, language, expected in cases:
+            with self.subTest(language=language, written=written):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+
+                    def runner(args, files=written):
+                        for name in files:
+                            (root / name).write_text("subtitle", encoding="utf-8")
+                        return CommandResult(tuple(args), 0, "", "")
+
+                    result = download_remote_subtitles(
+                        "https://youtu.be/abc",
+                        root,
+                        language=language,
+                        runner=runner,
+                    )
+
+                self.assertEqual(result.name, expected)
+
     def test_downloads_audio_without_using_browser_cookies_by_default(self) -> None:
         calls = []
         with tempfile.TemporaryDirectory() as directory:

@@ -32,7 +32,7 @@ from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
 from xvt.subtitles import save_subtitles
 from xvt.translate import SemanticIssue, SemanticSuggestedItem
 from xvt.translation_provider import ProviderResponseError
-from xvt.workflow_config import WorkflowConfig, set_workflow_config
+from xvt.workflow_config import WorkflowConfig, get_workflow_config, set_workflow_config
 
 
 def _load_target_text(path: Path, cue_id: int) -> str | None:
@@ -210,6 +210,57 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             )
             translated = json.loads(translated_path.read_text(encoding="utf-8"))
             self.assertEqual(translated[0]["target_text"], "您好")
+
+    def test_repair_chain_reuse_honours_job_config_policy_fallback(self) -> None:
+        """workflow 未快照 policy 时，构建侧与校验侧必须走同一份 job.config 回退。
+
+        修复前校验侧直接读 ``config.translation_policy``（None），重建出的 repair
+        批次与落盘批次不一致 → ``_repair_chain_satisfied`` 恒 False → 语义链永不收敛。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            job = load_job(job_file)
+            # workflow 快照里 translation_policy 为 None，只有 job.config 有非默认 policy。
+            self.assertIsNone(get_workflow_config(job).translation_policy)
+            job.config["translation_policy"] = {"style": "concise", "terms": []}
+            save_job(job)
+
+            issue = SemanticIssue(
+                "meaning_error",
+                (1,),
+                "review",
+                "meaning is wrong",
+                (SemanticSuggestedItem(1, "您好。"),),
+            )
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    side_effect=[(issue,), ()],
+                ) as review,
+                patch(
+                    "xvt.pipeline.semantic.semantic_repair_batch",
+                    return_value={1: "您好，"},
+                ) as repair,
+            ):
+                result = run_translation_semantic_review(job_file)
+                self.assertEqual(result.status, "completed")
+
+                reused = run_translation_semantic_review(job_file)
+
+            # 复用判定成立说明校验侧重建的批次与构建侧逐字节一致。
+            self.assertEqual(reused.mode, "reused")
+            self.assertEqual(review.call_count, 2)
+            repair.assert_called_once()
+
+            # 落盘的 policy 也必须是回退后的那份，而不是默认空 policy。
+            repair_payload = json.loads(
+                valid_artifact_path(load_job(job_file), "translation_semantic_repair").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(repair_payload["batches"][0]["policy"]["style"], "concise")
 
     def test_api_final_review_issues_wait_for_acknowledgment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1266,6 +1317,77 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             )
             repaired = json.loads(repaired_path.read_text(encoding="utf-8"))
             self.assertEqual(repaired[0]["target_text"], "您好")
+
+    def test_manifest_rebuilt_after_apply_crash_keeps_the_same_fingerprint(self) -> None:
+        """apply 原地覆盖 manifest 后崩溃，仍有可恢复路径（A6 决策留痕）。
+
+        恢复依赖 manifest fingerprint 的确定性：``continue`` 重建的 manifest 必须与
+        崩溃前逐位相同，同一份 Agent 响应才能原样重放。若未来 payload 引入非确定性
+        字段，本测试先红，而不是让可恢复性悄悄失效。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root, provider="agent")
+            manifest_path = prepare_agent_semantic_review(job_file)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            original_fingerprint = manifest["fingerprint"]
+            response = root / "semantic-response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": original_fingerprint,
+                        "initial_results": [
+                            {
+                                "batch": manifest["batches"][0]["id"],
+                                "issues": [
+                                    {
+                                        "category": "meaning_error",
+                                        "cue_ids": [1],
+                                        "severity": "review",
+                                        "message": "wrong meaning",
+                                        "suggested_items": [{"id": 1, "text": "您好。"}],
+                                    }
+                                ],
+                            }
+                        ],
+                        "repair_results": [{"batch": 1, "items": [{"id": 1, "text": "您好，"}]}],
+                        "final_results": [{"batch": manifest["batches"][0]["id"], "issues": []}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            # 崩溃窗口：manifest 已被就地覆盖为 report，repair checkpoint 尚未落盘。
+            with patch(
+                "xvt.pipeline.semantic._write_repair_checkpoint",
+                side_effect=RuntimeError("crash after manifest overwrite"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    apply_agent_semantic_review(job_file, response)
+
+            self.assertFalse(agent_semantic_review_waiting(load_job(job_file)))
+            with self.assertRaises(ValueError):
+                apply_agent_semantic_review(job_file, response)
+
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "retryable")
+
+            # continue 内部路径：重建 manifest。
+            rerun = run_translation_semantic_review(job_file)
+
+            self.assertEqual(rerun.status, "awaiting_agent")
+            rebuilt = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(rebuilt["fingerprint"], original_fingerprint)
+            self.assertEqual(rebuilt["batches"], manifest["batches"])
+            self.assertTrue(agent_semantic_review_waiting(load_job(job_file)))
+
+            # 同一份响应原样重放成功。
+            final = apply_agent_semantic_review(job_file, response)
+
+            self.assertEqual(final.status, "completed")
+            self.assertTrue(semantic_review_satisfied(load_job(job_file)))
 
     def test_agent_invalid_repair_keeps_manifest_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

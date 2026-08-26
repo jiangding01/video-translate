@@ -535,6 +535,90 @@ class TranscriptionPipelineTest(unittest.TestCase):
             self.assertEqual(data["stages"]["align"]["status"], "failed")
             self.assertTrue((job_file.parent / "artifacts" / "alignment.json").exists())
 
+    def test_forced_alignment_allows_low_confidence_when_post_qa_is_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Unrelated", 1500, 2200, 0.9),),
+            )
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                job = run_local_transcription(
+                    media,
+                    root,
+                    subtitles=subtitles,
+                    align_subtitles=True,
+                    allow_low_confidence_alignment=True,
+                )
+
+            self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SUCCEEDED)
+            selection = next(item for item in job.artifacts if item.kind == "source_selection")
+            self.assertEqual(
+                json.loads(Path(selection.path).read_text())["selected_kind"],
+                "aligned_subtitles",
+            )
+
+    def test_forced_alignment_rejects_error_level_post_alignment_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            # 媒体时长短于对齐后的 cue：对齐结果高置信但触发 outside_media error。
+            media_info = MediaInfo(
+                str(media), 1000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello", 1500, 2200, 0.9),),
+            )
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                with self.assertRaisesRegex(ValueError, "error-level issues"):
+                    run_local_transcription(
+                        media,
+                        root,
+                        subtitles=subtitles,
+                        align_subtitles=True,
+                    )
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            data = json.loads(job_file.read_text())
+            self.assertEqual(data["stages"]["align"]["status"], "failed")
+
     def test_remote_pipeline_downloads_audio_then_reuses_local_processing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

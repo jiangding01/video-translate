@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from xvt.models import Transcript, Word
+from xvt.qa import check_subtitles
 from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
 from xvt.transcribe import (
     TranscriptionError,
@@ -162,6 +163,47 @@ class TranscriptionTest(unittest.TestCase):
         cues = segment_transcript(transcript, SegmentationConfig(tail_padding_ms=0))
 
         self.assertEqual(cues[0].end_ms, cues[1].start_ms)
+
+    def _assert_monotonic(self, cues: list) -> None:
+        for index, cue in enumerate(cues):
+            self.assertGreater(cue.end_ms, cue.start_ms, f"cue {cue.id} has non-positive duration")
+            if index:
+                self.assertGreaterEqual(cue.start_ms, cues[index - 1].end_ms)
+
+    def test_backwards_word_timestamps_do_not_produce_degenerate_cues(self) -> None:
+        # 词时间戳严重回退（跨段），旧的中点归一会把两条 cue 都压成 end <= start。
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(Word("aaa. ", 2000, 3000, 0.9), Word("bbb. ", 0, 100, 0.9)),
+        )
+
+        cues = segment_transcript(transcript, SegmentationConfig())
+
+        self._assert_monotonic(cues)
+        self.assertEqual((cues[0].start_ms, cues[0].end_ms), (2000, 3000))
+        self.assertEqual(cues[1].start_ms, 3000)
+        self.assertIn(
+            "shifted cue start past the previous cue to resolve a degenerate overlap",
+            cues[1].warnings,
+        )
+        self.assertEqual(
+            [issue for issue in check_subtitles(cues).issues if issue.severity == "error"], []
+        )
+
+    def test_media_duration_shorter_than_cue_keeps_positive_duration(self) -> None:
+        # 探测时长短于 ASR 输出时，min(limits) 会把 end 压到 start 之前。
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(Word("hello. ", 0, 1000, 0.9), Word("tail. ", 9000, 9500, 0.9)),
+        )
+
+        cues = segment_transcript(transcript, SegmentationConfig(), media_duration_ms=8000)
+
+        self._assert_monotonic(cues)
+        self.assertEqual((cues[1].start_ms, cues[1].end_ms), (9000, 9001))
+        self.assertIn("extended cue end to keep a positive duration", cues[1].warnings)
 
     def test_trims_low_confidence_repeated_tail_and_records_warning(self) -> None:
         transcript = Transcript(

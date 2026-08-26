@@ -431,6 +431,13 @@ def _process_adaptive_media(
                         "subtitle alignment confidence is below the required threshold "
                         f"({alignment.confidence:.3f} < {minimum_alignment_confidence:.3f})"
                     )
+                # 强制对齐同样受对齐后 QA error 门约束（置信度门保持既有语义，
+                # --allow-low-confidence-alignment 仍可放行低置信但 QA 干净的对齐）。
+                if any(issue.severity == "error" for issue in aligned_report.issues):
+                    raise ValueError(
+                        "aligned subtitles failed subtitle QA with error-level issues; "
+                        "rerun without --align-subtitles to fall back to ASR segmentation"
+                    )
                 cues = aligned_cues
                 selected_kind = "aligned_subtitles"
                 selection_reason = "manual_subtitles_aligned"
