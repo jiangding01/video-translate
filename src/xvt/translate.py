@@ -911,7 +911,7 @@ def parse_translation_response(
     for item in response:
         cue_id = item.get("id")
         text = item.get("text")
-        if not isinstance(cue_id, int) or cue_id in translations:
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool) or cue_id in translations:
             raise ValueError("translation response contains an invalid or duplicate cue id")
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"translation for cue {cue_id} is empty")

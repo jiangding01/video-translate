@@ -293,6 +293,17 @@ class TranslateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"missing=\[2\]"):
             parse_translation_response(batch, [{"id": 1, "text": "一"}])
 
+    def test_translation_response_rejects_boolean_cue_ids(self) -> None:
+        # bool 是 int 的子类，`True == 1` 会让布尔 id 被误收为 cue 1；
+        # 与其余解析器保持一致，必须显式拒绝。
+        batch = build_translation_batches(
+            self.cues[:1], source_language="en", target_language="zh-CN"
+        )[0]
+
+        for value in (True, False):
+            with self.assertRaisesRegex(ValueError, "invalid or duplicate cue id"):
+                parse_translation_response(batch, [{"id": value, "text": "一"}])
+
     def test_applies_translations_without_changing_timeline(self) -> None:
         translated = apply_translations(
             self.cues,

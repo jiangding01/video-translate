@@ -19,9 +19,12 @@ from xvt.pipeline import (
     run_subtitle_transcription,
     run_translation,
 )
+from xvt.pipeline.translation import load_translation_response
 from xvt.process import CommandResult
 from xvt.recovery import file_checksum
+from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.translation_provider import ProviderResponseError, TranslationProviderError
+from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 class TranslationPipelineTest(unittest.TestCase):
@@ -168,15 +171,15 @@ class TranslationPipelineTest(unittest.TestCase):
             media_path.write_text(json.dumps({"duration_ms": 2000}), encoding="utf-8")
             job.artifacts.extend(
                 [
-                    Artifact("source_cues", str(cues_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                 ]
             )
             save_job(job)
             response_path = root / "response.json"
             response_path.write_text(json.dumps({"items": []}), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "cover every cue"):
+            with self.assertRaisesRegex(ValueError, "cover the requested cue ids exactly once"):
                 apply_agent_translation(
                     job_directory / "job.json",
                     response_path,
@@ -207,8 +210,8 @@ class TranslationPipelineTest(unittest.TestCase):
             media_path.write_text(json.dumps({"duration_ms": 2000}), encoding="utf-8")
             job.artifacts.extend(
                 [
-                    Artifact("source_cues", str(cues_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                 ]
             )
             job_file = save_job(job)
@@ -242,7 +245,10 @@ class TranslationPipelineTest(unittest.TestCase):
             media_path = artifacts / "media.json"
             media_path.write_text(json.dumps({"duration_ms": 3000}), encoding="utf-8")
             job.artifacts.extend(
-                [Artifact("source_cues", str(source_path)), Artifact("media_info", str(media_path))]
+                [
+                    Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
             )
             save_job(job)
             translation_path = root / "translation.srt"
@@ -271,7 +277,9 @@ class TranslationPipelineTest(unittest.TestCase):
                 json.dumps([asdict(Cue(1, 0, 1000, "One")), asdict(Cue(2, 1000, 2000, "Two"))]),
                 encoding="utf-8",
             )
-            job.artifacts.append(Artifact("source_cues", str(source_path)))
+            job.artifacts.append(
+                Artifact("source_cues", str(source_path), file_checksum(source_path))
+            )
             save_job(job)
             translation_path = root / "translation.srt"
             translation_path.write_text(
@@ -497,6 +505,218 @@ class TranslationPipelineTest(unittest.TestCase):
         self.assertEqual(raised.exception.category, "dependency_or_process")
         self.assertEqual(int(raised.exception.exit_code), 3)
         self.assertEqual(provider_call.call_count, 2)
+
+    def test_workflow_api_translation_blocks_glossary_violations(self) -> None:
+        # 回归测试：workflow + API 模式（await_input=False）下 translation_policy 必须
+        # 在 prepare 阶段落盘，否则 run_translation 重载 Job 后术语表 QA 会静默失效。
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        policy = TranslationPolicy(terms=(GlossaryTerm("OpenAI", "OpenAI"),))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nOpenAI is useful.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN", translation_policy=policy),
+            )
+            job_file = save_job(job)
+
+            def provider(batch, _config, *, correction=None, **_kwargs):
+                return {item.id: "开放人工智能很有用" for item in batch.items}
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=provider),
+                self.assertRaisesRegex(RuntimeError, "subtitle QA failed"),
+            ):
+                run_translation(
+                    job_file,
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    policy=policy,
+                )
+
+            persisted = json.loads(job_file.read_text(encoding="utf-8"))
+            report = json.loads(
+                (root / "jobs" / job.id / "artifacts" / "qa-translated.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(persisted["config"]["translation_policy"], policy.to_dict())
+        self.assertEqual(persisted["stages"]["subtitle_qa"]["status"], "failed")
+        self.assertIn("glossary_violation", {issue["code"] for issue in report["issues"]})
+
+    def test_workflow_glossary_qa_survives_missing_top_level_policy(self) -> None:
+        # 回归测试：即便顶层 config 没有 translation_policy（旧 Job 或被清理），
+        # workflow 快照里的术语表也必须参与译文 QA。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nOpenAI is useful.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            set_workflow_config(
+                job,
+                WorkflowConfig(
+                    target_language="zh-CN",
+                    translation_policy=TranslationPolicy(terms=(GlossaryTerm("OpenAI", "OpenAI"),)),
+                ),
+            )
+            job_file = save_job(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            self.assertTrue(manifest_path.exists())
+            stale = load_job(job_file)
+            stale.config.pop("translation_policy")
+            save_job(stale)
+
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "开放人工智能很有用"}]}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                apply_agent_translation(job_file, response_path, target_language="zh-CN")
+
+            report = json.loads(
+                (root / "jobs" / job.id / "artifacts" / "qa-translated.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertIn("glossary_violation", {issue["code"] for issue in report["issues"]})
+
+    def test_prepare_agent_translation_persists_policy_for_api_mode(self) -> None:
+        # 回归测试：API 模式（await_input=False）没有 set_stage 兜底保存，
+        # prepare 返回后重新 load_job 必须能读到策略与语言配置。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            set_workflow_config(job, WorkflowConfig(target_language="zh-CN"))
+            job_file = save_job(job)
+            policy = TranslationPolicy(style="natural", terms=(GlossaryTerm("Hello", "你好"),))
+
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                policy=policy,
+                await_input=False,
+            )
+
+            persisted = load_job(job_file)
+
+        self.assertEqual(persisted.config["translation_policy"], policy.to_dict())
+        self.assertEqual(persisted.config["target_language"], "zh-CN")
+        self.assertEqual(persisted.config["source_language"], "en")
+        # workflow Job 的质量由 workflow 配置派生，不得写入顶层 config。
+        self.assertNotIn("translation_quality", persisted.config)
+
+    def test_load_translation_response_rejects_boolean_cue_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for value in (True, False):
+                response_path = root / f"response-{value}.json"
+                response_path.write_text(
+                    json.dumps({"items": [{"id": value, "text": "你好"}]}),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "invalid or duplicate cue id"):
+                    load_translation_response(response_path, {1})
+
+    def test_agent_translation_rejects_stale_source_cues(self) -> None:
+        # 回归测试：prepare 之后源 cue 变更，旧响应必须被拒绝而不是错位回填。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+
+            persisted = load_job(job_file)
+            source_cues = next(item for item in persisted.artifacts if item.kind == "source_cues")
+            cues_path = Path(source_cues.path)
+            cues_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Completely different source."))]),
+                encoding="utf-8",
+            )
+            source_cues.checksum = file_checksum(cues_path)
+            save_job(persisted)
+
+            with self.assertRaisesRegex(ValueError, "prepared for different source cues"):
+                apply_agent_translation(job_file, response_path, target_language="zh-CN")
+
+    def test_agent_translation_accepts_manifest_without_source_checksum(self) -> None:
+        # 前向兼容：修复前生成的标准 manifest 没有 source_cues_checksum，仍必须可回填。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("source_cues_checksum")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            persisted = load_job(job_file)
+            artifact = next(
+                item for item in persisted.artifacts if item.kind == "translation_batches"
+            )
+            artifact.checksum = file_checksum(manifest_path)
+            save_job(persisted)
+
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+
+            translated, *_outputs = apply_agent_translation(
+                job_file,
+                response_path,
+                target_language="zh-CN",
+            )
+
+            self.assertTrue(translated.exists())
 
 
 if __name__ == "__main__":
