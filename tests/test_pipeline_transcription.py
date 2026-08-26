@@ -354,6 +354,76 @@ class TranscriptionPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "media_info checkpoint"):
                 resume_job(save_job(job))
 
+    def _remote_media_info_only_job(self, root: Path):
+        """构造远程 Job 的「media_info 有效 + source_cues 缺失 + 有 source_strategy」断点态。"""
+        job = create_job(
+            "https://youtu.be/abc",
+            root,
+            {"engine": "mlx", "source_language": "en", "source_strategy": "asr"},
+        )
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir()
+        media_path = artifacts / "media.json"
+        media_info = MediaInfo(
+            "https://youtu.be/abc", 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+        )
+        media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+        job.artifacts.append(Artifact("media_info", str(media_path), file_checksum(media_path)))
+        return job, artifacts
+
+    def test_resume_remote_job_uses_downloaded_media_instead_of_url(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job, artifacts = self._remote_media_info_only_job(root)
+            downloaded = root / "jobs" / job.id / "input" / "video.mp4"
+            downloaded.parent.mkdir(parents=True)
+            downloaded.write_bytes(b"video")
+            job.artifacts.append(
+                Artifact("downloaded_media", str(downloaded), file_checksum(downloaded))
+            )
+            job_file = save_job(job)
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+            with (
+                patch(
+                    "xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg
+                ) as run_command_mock,
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                resume_job(job_file)
+
+            ffmpeg_args = run_command_mock.call_args.args[0]
+            self.assertIn(str(downloaded), ffmpeg_args)
+            self.assertFalse(
+                any(arg.startswith("https:/") for arg in ffmpeg_args),
+                f"remote URL leaked into ffmpeg arguments: {ffmpeg_args}",
+            )
+
+    def test_resume_remote_job_without_local_media_delegates_to_remote_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job, _artifacts = self._remote_media_info_only_job(root)
+            job_file = save_job(job)
+
+            with (
+                patch("xvt.pipeline.transcription.run_command") as run_command_mock,
+                patch(
+                    "xvt.pipeline.transcription.resume_remote_transcription", return_value=job
+                ) as remote_resume,
+            ):
+                resume_job(job_file)
+
+            run_command_mock.assert_not_called()
+            remote_resume.assert_called_once_with(job_file, event_sink=None)
+
     def test_source_subtitles_skip_asr_and_preserve_timeline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

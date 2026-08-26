@@ -5,9 +5,9 @@ from pathlib import Path
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt" / "pipeline"
 
 # 声明的依赖白名单，见 AGENTS.md「代码结构」一节的依赖方向说明：
-# common ← review ← {transcription, translation}
+# common ← review ← {transcription, translation, burnin}
 # semantic 与 retranslate 依赖 translation
-# resegment 与 burnin 只依赖 common
+# resegment 只依赖 common；burnin 依赖 common 与 review（共用 QA 放行谓词）
 # polish 依赖 translation
 # revision 只依赖 common
 #
@@ -17,7 +17,7 @@ PIPELINE_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt" / "pipelin
 # 打破循环的转义手段，不代表模块加载期的静态依赖方向，因此不计入本守卫测试的
 # 依赖边集合，只需要看顶层 import 是否遵守既定方向。
 EXPECTED_DEPENDENCIES: dict[str, set[str]] = {
-    "burnin": {"common"},
+    "burnin": {"common", "review"},
     "common": set(),
     "polish": {"common", "translation"},
     "resegment": {"common"},

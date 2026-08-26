@@ -871,6 +871,111 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.artifacts, (source_srt,))
         self.assertEqual(events[-1].data["artifacts"], [str(source_srt)])
 
+    def _polished_job_with_invalid_draft(self, root: Path):
+        """构造 repair_polish_draft 断点态：draft checksum 已失效，progress checkpoint 完整。
+
+        draft 与 progress 都由真实 workflow 路径产出，因此 fingerprint 与持久化
+        目标严格一致（不在测试里复刻 fingerprint 计算）。
+        """
+        source = root / "source.srt"
+        source.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello.\n", encoding="utf-8")
+        options = WorkflowOptions(
+            input=str(source),
+            output=root / "output",
+            target_language="zh-CN",
+            translation_quality="polished",
+            provider="openai-compatible",
+            base_url="https://example.com/v1",
+            model="model",
+            api_key_env="TEST_TRANSLATION_API_KEY",
+        )
+        with (
+            patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+            patch("xvt.pipeline.translation.translate_batch", return_value={1: "草稿"}),
+            patch("xvt.pipeline.polish.polish_batch", side_effect=RuntimeError("polish crashed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "polish crashed"):
+                run_workflow(options)
+
+        job_file = next((root / "output" / "jobs").iterdir()) / "job.json"
+        job = load_job(job_file)
+        draft = valid_artifact_path(job, "translation_draft_cues")
+        progress = valid_artifact_path(job, "translation_progress")
+        self.assertIsNotNone(draft)
+        self.assertIsNotNone(progress)
+        assert draft is not None and progress is not None
+        # 只破坏 draft 内容（checksum 随之失效），progress checkpoint 保持完整。
+        draft.write_text("corrupt", encoding="utf-8")
+        config = WorkflowConfig.from_dict(load_job(job_file).config["workflow"])
+        self.assertEqual(plan_advance_steps(load_job(job_file), config), ("repair_polish_draft",))
+        return job_file, progress
+
+    def test_continue_rebuilds_polish_draft_from_complete_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _progress = self._polished_job_with_invalid_draft(root)
+
+            with patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}):
+                plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "retryable")
+            self.assertIn("continue", plan.primary_command or "")
+            self.assertEqual(plan.advance_steps, ("repair_polish_draft",))
+
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.translation.translate_batch") as translate,
+                patch("xvt.pipeline.polish.polish_batch", return_value={1: "润色"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+            ):
+                result = continue_workflow(job_file)
+
+            # 零 API 成本重建：全部批次都已在 checkpoint 中完成。
+            translate.assert_not_called()
+            self.assertEqual(result.status, "completed")
+            rebuilt = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(rebuilt, "translation_draft_cues"))
+
+    def test_continue_blocks_repair_polish_draft_without_usable_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, progress = self._polished_job_with_invalid_draft(root)
+            # checkpoint 也失效：继续推进只能靠真实 API 全量重翻，必须拦截。
+            progress.write_text("corrupt", encoding="utf-8")
+
+            with patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}):
+                plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertIsNone(plan.primary_command)
+
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.translation.translate_batch") as translate,
+                patch("xvt.pipeline.polish.polish_batch") as polish,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "润色草稿"):
+                    continue_workflow(job_file)
+
+            translate.assert_not_called()
+            polish.assert_not_called()
+
+    def test_continue_blocks_repair_polish_draft_when_provider_unresolved(self) -> None:
+        """provider 无法解析（Agent 模式）时没有确定性零成本重建路径，必须 fail-closed。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _progress = self._polished_job_with_invalid_draft(root)
+
+            # 不提供 API key：resolve_provider 回退到 agent 模式。
+            with patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": ""}):
+                plan = build_recovery_plan(job_file)
+                self.assertEqual(plan.category, "manual_fix")
+                with (
+                    patch("xvt.pipeline.translation.translate_batch") as translate,
+                    self.assertRaisesRegex(RuntimeError, "润色草稿"),
+                ):
+                    continue_workflow(job_file)
+
+            translate.assert_not_called()
+
     def test_continue_stops_at_failed_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job(

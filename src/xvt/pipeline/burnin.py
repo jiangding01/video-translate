@@ -19,20 +19,53 @@ from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job
 from xvt.media import probe_media
-from xvt.models import StageName, StageStatus
+from xvt.models import Job, StageName, StageStatus
 from xvt.paths import assert_safe_output, protected_job_paths, resolve_absolute_output
 from xvt.pipeline.common import (
     add_artifact,
-    artifact_path,
     error_category,
     invalidate_preview_artifacts,
     load_cues,
     set_stage,
     write_json,
 )
+from xvt.pipeline.review import review_gate_satisfied
 from xvt.recovery import valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.workflow_config import get_workflow_config
+
+_QA_GATE_GUIDANCE = (
+    "run `xvt status JOB` and `xvt continue JOB` to finish subtitle QA first; "
+    "a needs_review report can be released with "
+    "`xvt continue JOB --acknowledge-subtitle-review`"
+)
+
+
+def _assert_translated_qa_gate(job: Job, *, action: str) -> Path:
+    """译文 QA 安全门：checksum 有效 + 报告放行判定通过，返回 translated_cues 路径。
+
+    原子 `xvt burn` / `xvt preview` 直达 pipeline，不经 workflow 的
+    `subtitle_qa_failure_guidance`，因此门必须落在这里。Fail-closed：没有逃生口，
+    `needs_review` 的合法放行走既有 acknowledge 通道。
+    """
+    translated_path = valid_artifact_path(job, "translated_cues")
+    qa_path = valid_artifact_path(job, "translated_subtitle_qa")
+    if translated_path is None or qa_path is None:
+        raise RuntimeError(
+            f"{action} requires checksum-valid translated subtitles and QA report; "
+            f"{_QA_GATE_GUIDANCE}"
+        )
+    try:
+        qa_data = json.loads(qa_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"translated subtitle QA report is not readable: {error}") from error
+    if not review_gate_satisfied(job, qa_data):
+        raise RuntimeError(
+            f"translated subtitle QA must pass before {action} "
+            f"(status={qa_data.get('status') if isinstance(qa_data, dict) else 'unknown'}); "
+            f"{_QA_GATE_GUIDANCE}"
+        )
+    return translated_path
 
 
 def preview_translated_job(
@@ -60,13 +93,7 @@ def preview_translated_job(
     job = load_job(job_file)
     if job.config.get("input_kind") == "subtitle":
         raise ValueError("preview requires media input")
-    translated_path = valid_artifact_path(job, "translated_cues")
-    qa_path = valid_artifact_path(job, "translated_subtitle_qa")
-    if translated_path is None or qa_path is None:
-        raise ValueError("preview requires checksum-valid translated subtitles and QA")
-    qa_data = json.loads(qa_path.read_text(encoding="utf-8"))
-    if qa_data.get("status") not in {"pass", "warning"}:
-        raise RuntimeError("translated subtitle QA must pass before preview")
+    translated_path = _assert_translated_qa_gate(job, action="preview")
 
     workflow_config = get_workflow_config(job)
     if hardware_encoding is None:
@@ -233,6 +260,8 @@ def burn_translated_job(
     job = load_job(job_file)
     if job.config.get("input_kind") == "subtitle":
         raise ValueError("burn-in requires media input")
+    # QA 门必须先于远程媒体下载，避免为一个注定被拒的 Job 白下载整段视频。
+    translated_cues_path = _assert_translated_qa_gate(job, action="burn-in")
     current_stage = StageName.RENDER
     try:
         if media:
@@ -259,7 +288,7 @@ def burn_translated_job(
         if not media_info.has_video or not media_info.width or not media_info.height:
             raise ValueError("burn-in requires a video stream with known dimensions")
 
-        translated = load_cues(artifact_path(job, "translated_cues"))
+        translated = load_cues(translated_cues_path)
         # 路径校验放在 RENDER/BURN 记账之前，避免错误输出先留下半成品 stage 状态。
         artifacts_directory = get_job_directory(job) / "artifacts"
         ass_path = artifacts_directory / "bilingual.ass"

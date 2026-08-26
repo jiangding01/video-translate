@@ -57,6 +57,47 @@ def acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
     return acknowledged
 
 
+def review_gate_satisfied(job: Job, report: Any) -> bool:
+    """判断已序列化的字幕 QA 报告（JSON dict）是否满足放行条件。**无任何副作用。**
+
+    放行判定与 `complete_qa_stage` 保持一致，供不做 stage 记账的消费方（预览、
+    烧录）共用同一口径：
+
+    - `pass` / `warning` 直接放行；
+    - `needs_review` 仅当报告中全部 review 级问题都落在仍然有效的确认集合内时
+      放行（确认通道不改写报告 status，因此这里必须认 acknowledge）；
+    - `failed`、含 error 级问题、报告结构异常或 status 未知一律拒绝（fail-closed）。
+    """
+    if not isinstance(report, dict):
+        return False
+    status = report.get("status")
+    if status in {"pass", "warning"}:
+        return True
+    if status != "needs_review":
+        return False
+    issues = report.get("issues")
+    if not isinstance(issues, list):
+        return False
+    acknowledged = acknowledged_review_issues(job)
+    if acknowledged is None:
+        return False
+    review_issues: set[tuple[str, int]] = set()
+    for issue in issues:
+        if not isinstance(issue, dict):
+            return False
+        severity = issue.get("severity")
+        if severity == "error":
+            return False
+        if severity != "review":
+            continue
+        code = issue.get("code")
+        cue_id = issue.get("cue_id")
+        if not isinstance(code, str) or isinstance(cue_id, bool) or not isinstance(cue_id, int):
+            return False
+        review_issues.add(_canonical_review_issue(code, cue_id))
+    return bool(review_issues) and review_issues <= acknowledged
+
+
 def complete_qa_stage(
     job: Job,
     report: Any,

@@ -68,6 +68,7 @@ from xvt.pipeline.transcription import (
     run_transcription,
 )
 from xvt.pipeline.translation import (
+    REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
     TranslationRunResult,
     agent_translation_polish_core_satisfied,
     agent_translation_polish_progress_ready,
@@ -79,9 +80,11 @@ from xvt.pipeline.translation import (
     complete_translated_outputs,
     prepare_agent_translation,
     run_translation,
+    translation_progress_rebuildable,
 )
 
 __all__ = [
+    "REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE",
     "REVISION_FINGERPRINT_LENGTH",
     "SOURCE_REVIEW_STEM_PREFIX",
     "TRANSLATION_REVIEW_STEM_PREFIX",
@@ -131,6 +134,7 @@ __all__ = [
     "run_translation_semantic_review",
     "run_translation_polish",
     "translation_polish_satisfied",
+    "translation_progress_rebuildable",
     "translation_review_input_path",
     "semantic_review_approved",
     "semantic_review_satisfied",

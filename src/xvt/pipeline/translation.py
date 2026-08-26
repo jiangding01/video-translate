@@ -18,6 +18,7 @@ from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
+from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -61,6 +62,7 @@ from xvt.translation_provider import (
     translate_batch,
 )
 from xvt.workflow_config import (
+    WorkflowConfig,
     clear_burn_fingerprint,
     get_workflow_config,
     resolve_translation_quality,
@@ -235,6 +237,95 @@ def _atomic_draft_matches_translation_progress(
         return draft_path if load_cues(draft_path) == expected else None
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         return None
+
+
+# `repair_polish_draft` 无法零成本重建时的统一文案：status（recovery）与
+# continue（workflow）必须给出同一句话，避免两处口径漂移。
+REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE = (
+    "润色草稿缺失或 checksum 已失效，不能从最终译文安全重建，"
+    "且 translation_progress checkpoint 不足以零成本重建；"
+    "请重新导入或生成原始译文草稿。"
+)
+
+
+def translation_progress_rebuildable(job: Job, config: WorkflowConfig) -> bool:
+    """判定 translation_progress checkpoint 能否**零 API 成本**重建译文草稿。
+
+    `plan_advance_steps` 在「polished 且 draft 失效」时给出 `repair_polish_draft`。
+    该步骤对应的执行路径是 `run_translation`：只有当 checkpoint 覆盖全部批次且
+    fingerprint 与当前配置一致时，逐批循环才会全部命中 `continue` 分支、一次
+    provider 调用都不发生。任一条件不满足就会真实调用 API 全量重翻，因此这里
+    fail-closed。
+
+    `status`（recovery）与 `continue`（workflow）必须共用本谓词，否则两边对
+    provider 可解析性的判断会因环境变量差异而漂移。
+
+    provider 无法解析（Agent 模式或缺少 base URL / model / API key）时返回 False
+    而不抛异常——status 只是查询，不应因环境不全而失败。
+    """
+    target_language = config.target_language
+    if not target_language:
+        return False
+    source_path = valid_artifact_path(job, "source_cues")
+    progress_path = valid_artifact_path(job, "translation_progress")
+    if source_path is None or progress_path is None:
+        return False
+    try:
+        mode, provider_config, _fallback = resolve_provider(
+            config.provider,
+            base_url=config.base_url,
+            model=config.model,
+            api_key_env=config.api_key_env,
+            timeout_seconds=config.timeout_seconds,
+        )
+    except UserInputError:
+        # 显式 openai-compatible provider 缺配置时会抛错；查询路径不应因此失败。
+        return False
+    if provider_config is None:
+        # Agent 模式没有确定性的零成本重建路径。
+        return False
+    # 与 workflow._translation_policy 同口径，保证 fingerprint 与实际执行一致。
+    policy = (
+        config.translation_policy if config.translation_policy is not None else TranslationPolicy()
+    )
+    try:
+        cues = load_cues(source_path)
+        if not cues:
+            return False
+        source_language = next(
+            (cue.source_language for cue in cues if cue.source_language),
+            job.config.get("source_language", "auto"),
+        )
+        batches = build_translation_batches(
+            cues,
+            source_language=source_language,
+            target_language=target_language,
+            batch_size=config.batch_size,
+            policy=policy,
+        )
+        fingerprint = _translation_fingerprint(
+            source_cues_checksum=checksum(source_path),
+            source_language=source_language,
+            target_language=target_language,
+            provider=mode,
+            base_url=provider_config.base_url,
+            model=provider_config.model,
+            batch_size=config.batch_size,
+            policy=policy,
+        )
+        data = json.loads(progress_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(data, dict)
+            or data.get("fingerprint") != fingerprint
+            or data.get("completed_batches") != [batch.id for batch in batches]
+        ):
+            return False
+        expected_ids = {item.id for batch in batches for item in batch.items}
+        # 每个批次的全部 cue 都必须已有译文，否则该批次仍会被重新调用。
+        load_translation_response(progress_path, expected_ids)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _translation_manifest(job: Job) -> dict[str, Any] | None:

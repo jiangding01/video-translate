@@ -592,6 +592,10 @@ def _recovery_for_workflow(
     延迟导入 ``xvt.workflow``，避免 ``workflow → recovery → workflow`` 循环导入。
     """
 
+    from xvt.pipeline.translation import (
+        REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
+        translation_progress_rebuildable,
+    )
     from xvt.workflow import burned_output_relink_recovery_available, plan_advance_steps
 
     steps = plan_advance_steps(job, workflow)
@@ -677,10 +681,18 @@ def _recovery_for_workflow(
         )
 
     if steps[0] == "repair_polish_draft":
+        # 分类必须与 continue 的实际行为一致：checkpoint 可零成本重建时
+        # continue 会放行，此时报 manual_fix 会误导用户；两侧共用同一谓词。
+        if translation_progress_rebuildable(job, workflow):
+            return plan(
+                "retryable",
+                "润色草稿已失效，但翻译进度 checkpoint 完整，可零 API 成本重建草稿后继续。",
+                primary_command=_job_command("continue", job_file),
+                advance_steps=steps,
+            )
         return plan(
             "manual_fix",
-            "润色草稿缺失或 checksum 已失效，不能从最终译文安全重建；"
-            "请重新导入或生成原始译文草稿。",
+            REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
             primary_command=None,
             advance_steps=steps,
         )

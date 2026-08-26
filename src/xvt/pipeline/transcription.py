@@ -1577,10 +1577,23 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         return _finish_resumed_source(job, load_cues(cues_path), media_info, event_sink)
 
     if "source_strategy" in job.config:
+        # 远程 Job 的 job.input 是 URL，Path(URL) 会把 "https://host" 折叠成
+        # "https:/host" 并被当作本地文件传给 ffmpeg。优先复用已下载的本地媒体，
+        # 否则委派 resume_remote_transcription 重新获取。
+        parsed_input = urlparse(job.input)
+        if parsed_input.scheme in {"http", "https"} and parsed_input.hostname:
+            local_media = valid_artifact_path(job, "source_video") or valid_artifact_path(
+                job, "downloaded_media"
+            )
+            if local_media is None:
+                return resume_remote_transcription(job_file, event_sink=event_sink)
+            adaptive_source: Path | None = local_media
+        else:
+            adaptive_source = Path(job.input)
         candidate = _candidate_from_job(job)
         return _process_adaptive_media(
             job,
-            Path(job.input),
+            adaptive_source,
             media_info,
             engine=str(job.config.get("engine", DEFAULT_ENGINE)),
             language=(

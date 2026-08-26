@@ -15,6 +15,39 @@ from xvt.models import Artifact, Cue, StageStatus
 from xvt.pipeline import burn_translated_job, preview_translated_job
 from xvt.recovery import file_checksum
 
+_QA_KIND = "translated_subtitle_qa"
+
+
+def _register_translated_qa(
+    job,
+    artifacts: Path,
+    status: str = "pass",
+    issues: list[dict] | None = None,
+) -> Path:
+    """为烧录/预览 fixture 登记一份 checksum 有效的译文 QA 报告。"""
+    qa_path = artifacts / "qa-translated.json"
+    qa_path.write_text(
+        json.dumps({"status": status, "cue_count": 1, "issues": issues or []}), encoding="utf-8"
+    )
+    job.artifacts = [artifact for artifact in job.artifacts if artifact.kind != _QA_KIND]
+    job.artifacts.append(Artifact(_QA_KIND, str(qa_path), file_checksum(qa_path)))
+    return qa_path
+
+
+def _acknowledge_review_issues(job, artifacts: Path, issues: list[list]) -> None:
+    """写入一条对当前 source_cues 有效的人工确认记录（不改写 QA 报告 status）。"""
+    source_cues = artifacts / "source-cues.json"
+    source_cues.write_text(json.dumps([asdict(Cue(1, 0, 1000, "Hello"))]), encoding="utf-8")
+    checksum = file_checksum(source_cues)
+    job.artifacts.append(Artifact("source_cues", str(source_cues), checksum))
+    job.config["subtitle_review_acknowledgment"] = {
+        "report_kind": _QA_KIND,
+        "report_checksum": None,
+        "source_cues_checksum": checksum,
+        "acknowledged_issues": issues,
+        "acknowledged_at": "2026-01-01T00:00:00+00:00",
+    }
+
 
 class BurnPreviewPipelineTest(unittest.TestCase):
     def test_burn_translated_job_generates_ass_and_validates_media(self) -> None:
@@ -45,8 +78,11 @@ class BurnPreviewPipelineTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            job.artifacts.append(Artifact("translated_cues", str(translated_path)))
+            job.artifacts.append(
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
+            )
             job.artifacts.append(Artifact("source_video", str(media), file_checksum(media)))
+            _register_translated_qa(job, artifacts)
             save_job(job)
             input_info = MediaInfo(
                 str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
@@ -248,6 +284,224 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "QA must pass"):
                 preview_translated_job(job_file)
 
+    def _run_burn(self, job_file: Path, artifacts: Path, media: Path):
+        input_info = MediaInfo(
+            str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+        )
+        output_info = MediaInfo(
+            str(artifacts / "burned.mp4"),
+            2000,
+            10,
+            "mp4",
+            1920,
+            1080,
+            30.0,
+            "h264",
+            "aac",
+            True,
+            True,
+        )
+
+        def burn(_media, _subtitles, output, **_kwargs):
+            Path(output).write_bytes(b"burned")
+            return Path(output)
+
+        with (
+            patch("xvt.pipeline.burnin.probe_media", side_effect=[input_info, output_info]),
+            patch("xvt.pipeline.burnin.burn_subtitles", side_effect=burn),
+        ):
+            return burn_translated_job(job_file)
+
+    def test_burn_rejects_failed_translated_subtitle_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            _register_translated_qa(job, artifacts, status="failed")
+            job_file = save_job(job)
+
+            with (
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(RuntimeError, "QA must pass before burn-in"),
+            ):
+                burn_translated_job(job_file)
+
+            burn.assert_not_called()
+
+    def test_burn_rejects_missing_translated_subtitle_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, _artifacts = self._burn_ready_job(root, media)
+            job.artifacts = [artifact for artifact in job.artifacts if artifact.kind != _QA_KIND]
+            job_file = save_job(job)
+
+            with (
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(RuntimeError, "requires checksum-valid"),
+            ):
+                burn_translated_job(job_file)
+
+            burn.assert_not_called()
+
+    def test_burn_rejects_tampered_translated_cues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            job_file = save_job(job)
+            # 篡改译文文件而不更新 checksum：原子 burn 必须拒绝而不是照样烧录。
+            (artifacts / "translated-cues.json").write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello", target_text="被篡改"))]),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(RuntimeError, "requires checksum-valid"),
+            ):
+                burn_translated_job(job_file)
+
+            burn.assert_not_called()
+
+    def test_burn_accepts_warning_translated_subtitle_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            _register_translated_qa(job, artifacts, status="warning")
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media)
+
+            self.assertTrue(result.exists())
+
+    def test_burn_accepts_acknowledged_needs_review_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            _register_translated_qa(
+                job,
+                artifacts,
+                status="needs_review",
+                issues=[
+                    {
+                        "code": "bilingual_overflow_risk",
+                        "severity": "review",
+                        "cue_id": 1,
+                        "message": "line may overflow",
+                    }
+                ],
+            )
+            # 用户此前确认的是源字幕 QA 的 line_too_wide：同族问题只需确认一次。
+            _acknowledge_review_issues(job, artifacts, [["line_too_wide", 1]])
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media)
+
+            self.assertTrue(result.exists())
+            qa_report = json.loads((artifacts / "qa-translated.json").read_text(encoding="utf-8"))
+            self.assertEqual(qa_report["status"], "needs_review")
+
+    def test_burn_rejects_needs_review_qa_without_acknowledgment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            _register_translated_qa(
+                job,
+                artifacts,
+                status="needs_review",
+                issues=[
+                    {
+                        "code": "bilingual_overflow_risk",
+                        "severity": "review",
+                        "cue_id": 1,
+                        "message": "line may overflow",
+                    }
+                ],
+            )
+            job_file = save_job(job)
+
+            with (
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaisesRegex(RuntimeError, "QA must pass before burn-in"),
+            ):
+                burn_translated_job(job_file)
+
+            burn.assert_not_called()
+
+    def test_burn_qa_gate_runs_before_remote_media_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("https://youtu.be/abc", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello", target_text="你好"))]),
+                encoding="utf-8",
+            )
+            job.artifacts.append(
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
+            )
+            _register_translated_qa(job, artifacts, status="failed")
+            job_file = save_job(job)
+
+            with (
+                patch("xvt.pipeline.burnin.download_remote_media") as download,
+                patch("xvt.pipeline.burnin.probe_media") as probe,
+                self.assertRaisesRegex(RuntimeError, "QA must pass before burn-in"),
+            ):
+                burn_translated_job(job_file)
+
+            download.assert_not_called()
+            probe.assert_not_called()
+
+    def test_preview_accepts_acknowledged_needs_review_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            _register_translated_qa(
+                job,
+                artifacts,
+                status="needs_review",
+                issues=[
+                    {
+                        "code": "line_too_wide",
+                        "severity": "review",
+                        "cue_id": 1,
+                        "message": "line may overflow",
+                    }
+                ],
+            )
+            _acknowledge_review_issues(job, artifacts, [["line_too_wide", 1]])
+            job_file = save_job(job)
+            source_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+
+            def burn(_media, _subtitles, output, **_kwargs):
+                Path(output).write_bytes(b"preview")
+                return Path(output)
+
+            with (
+                patch("xvt.pipeline.burnin.probe_media", return_value=source_info),
+                patch("xvt.pipeline.burnin.burn_subtitles", side_effect=burn),
+            ):
+                preview = preview_translated_job(job_file)
+
+            self.assertTrue(preview.exists())
+
     def test_preview_rejects_non_finite_time_values_before_loading_job(self) -> None:
         with self.assertRaisesRegex(ValueError, "--start"):
             preview_translated_job("/tmp/missing-job.json", start_seconds=float("nan"))
@@ -281,7 +535,10 @@ class BurnPreviewPipelineTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            job.artifacts.append(Artifact("translated_cues", str(translated_path)))
+            job.artifacts.append(
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
+            )
+            _register_translated_qa(job, artifacts)
             save_job(job)
             input_info = MediaInfo(
                 str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
@@ -343,6 +600,7 @@ class BurnPreviewPipelineTest(unittest.TestCase):
         job.artifacts.append(
             Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
         )
+        _register_translated_qa(job, artifacts)
         save_job(job)
         return job, artifacts
 
