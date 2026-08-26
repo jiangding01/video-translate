@@ -393,6 +393,33 @@ class CliTest(unittest.TestCase):
         self.assertEqual(event["data"]["next_action"], "rerun_preview")
         self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
 
+    def test_preview_missing_artifacts_exits_with_workflow_error(self) -> None:
+        """契约锁定：preview 缺产物是 Job 状态问题，不是用户输入错误。
+
+        RuntimeError → category `workflow` → 退出码 4（此前为 ValueError → 2）。
+        """
+        output = StringIO()
+        error_output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job = create_job(str(media), root)
+            (root / "jobs" / job.id / "artifacts").mkdir(parents=True, exist_ok=True)
+            job_file = save_job(job)
+            with redirect_stdout(output), redirect_stderr(error_output):
+                return_code = main(["preview", str(job_file), "--events-jsonl"])
+
+        self.assertEqual(return_code, 4)
+        streams = output.getvalue().splitlines() + error_output.getvalue().splitlines()
+        events = [json.loads(line) for line in streams if line.startswith("{")]
+        failure = next(event for event in events if event["type"] == "cli_failed")
+        self.assertEqual(failure["data"]["error"]["category"], "workflow")
+        self.assertIn(
+            "requires checksum-valid translated subtitles",
+            failure["data"]["error"]["message"],
+        )
+
     def test_resegment_translation_shows_continue_command_for_workflow_jobs(self) -> None:
         output = StringIO()
         job = Job("job-1", "", "", "input", "/tmp", {"workflow": {}})

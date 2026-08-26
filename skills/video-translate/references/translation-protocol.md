@@ -53,6 +53,8 @@ For model-generated explicit Simplified Chinese targets (`zh-CN`, `zh-Hans`, and
 
 Before applying the response, verify that the response ID set exactly matches the ID set requested by the current manifest. The CLI performs the same validation and will fail on any mismatch.
 
+A standard translation manifest records `source_cues_checksum`. Do not copy it into the response; the CLI uses it to reject a response whose source cues changed after the manifest was prepared. If the source cues were revised in the meantime, rerun `prepare-translation` and translate the regenerated manifest. The CLI also refuses to apply a registered manifest file that was edited or is otherwise unreadable, so read the manifest but never modify it in place.
+
 ## Semantic review and one repair
 
 When the manifest has `task=semantic_review_and_repair`, copy its fingerprint and return every review batch exactly once in `initial_results`. Review each semantic group as joined source and candidate text as well as cue by cue. Issues may use only `meaning_error`, `omission`, `terminology`, `awkward_join`, or `source_suspect`, always with `severity=review`. Report only genuine actionable issues, not stylistic preferences; never propose timing, ID, source-text, or cue-boundary changes.

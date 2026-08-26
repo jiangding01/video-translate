@@ -339,6 +339,31 @@ def _translation_manifest(job: Job) -> dict[str, Any] | None:
     return manifest if isinstance(manifest, dict) else None
 
 
+def _require_usable_translation_manifest(job: Job) -> None:
+    """回填前收紧已登记 manifest 的可信度，避免可疑状态与极旧 Job 走同一放行路径。
+
+    `_translation_manifest` 对「从未登记」「已登记但 checksum 失效或文件缺失」
+    「内容不是 JSON 对象」一律返回 None。只有第一种是合法的历史状态（极旧 Job 没有
+    manifest artifact，回填按无 manifest 处理）；后两种一旦被同样放行，`task` 路由会
+    静默退化成标准翻译，并跳过 `_require_manifest_source_cues` 的源 cue 绑定。
+
+    只在回填这一写路径收紧：`agent_translation_polish_waiting` 等只读谓词仍使用不抛
+    异常的 `_translation_manifest`，`status` 不应因 manifest 损坏而失败。
+    """
+    if not any(item.kind == "translation_batches" for item in job.artifacts):
+        return
+    if valid_artifact_path(job, "translation_batches") is None:
+        raise ValueError(
+            "translation batch manifest is missing or its checksum is stale; "
+            "rerun prepare-translation and translate the regenerated manifest"
+        )
+    if _translation_manifest(job) is None:
+        raise ValueError(
+            "translation batch manifest is not a readable JSON object; "
+            "rerun prepare-translation and translate the regenerated manifest"
+        )
+
+
 def _require_manifest_source_cues(manifest: dict[str, Any] | None, source_path: Path) -> None:
     """确认 manifest 与当前源 cue 同源，避免陈旧响应错位回填。
 
@@ -1104,6 +1129,7 @@ def apply_agent_translation(
         {target_language} if quality == "polished" else {None, target_language}
     ):
         raise ValueError("target language must match the persisted atomic job goal")
+    _require_usable_translation_manifest(job)
     manifest = _translation_manifest(job)
     task = manifest.get("task") if manifest is not None else None
     if task not in {None, "translate_and_polish"}:

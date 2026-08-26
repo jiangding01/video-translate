@@ -329,6 +329,62 @@ class BurnPreviewPipelineTest(unittest.TestCase):
 
             burn.assert_not_called()
 
+    def test_atomic_burn_qa_gate_guidance_avoids_continue(self) -> None:
+        # 原子 Job 没有持久化 workflow 目标，`xvt continue` 必然报错，
+        # QA 门文案不得把用户导向这条死路。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            self.assertNotIn("workflow", job.config)
+            _register_translated_qa(job, artifacts, status="failed")
+            job_file = save_job(job)
+
+            with self.assertRaises(RuntimeError) as raised:
+                burn_translated_job(job_file)
+
+            message = str(raised.exception)
+            # 不得推荐 `xvt continue JOB`（原子 Job 上必然报错），只能点明它不适用。
+            self.assertNotIn("xvt continue JOB", message)
+            self.assertIn("`xvt continue` does not apply", message)
+            self.assertIn("xvt translate JOB --target-language LANG", message)
+            self.assertIn("no persisted workflow goal", message)
+
+    def test_workflow_burn_qa_gate_guidance_points_to_continue(self) -> None:
+        # 端到端 Job 维持既有文案：`continue` 与 acknowledge 通道都可用。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
+            _register_translated_qa(job, artifacts, status="failed")
+            job_file = save_job(job)
+
+            with self.assertRaises(RuntimeError) as raised:
+                burn_translated_job(job_file)
+
+            message = str(raised.exception)
+            self.assertIn("xvt continue JOB --acknowledge-subtitle-review", message)
+            self.assertNotIn("xvt translate JOB", message)
+
+    def test_atomic_preview_qa_gate_guidance_avoids_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            job_file = save_job(job)
+
+            with self.assertRaises(RuntimeError) as raised:
+                preview_translated_job(job_file)
+
+            message = str(raised.exception)
+            self.assertIn("requires checksum-valid", message)
+            self.assertNotIn("xvt continue JOB", message)
+            self.assertIn("xvt translate JOB --target-language LANG", message)
+
     def test_burn_rejects_missing_translated_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

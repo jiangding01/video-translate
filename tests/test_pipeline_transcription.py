@@ -607,13 +607,20 @@ class TranscriptionPipelineTest(unittest.TestCase):
                 patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
                 patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
             ):
-                with self.assertRaisesRegex(ValueError, "error-level issues"):
+                with self.assertRaisesRegex(ValueError, "error-level issues") as raised:
                     run_local_transcription(
                         media,
                         root,
                         subtitles=subtitles,
                         align_subtitles=True,
                     )
+
+            # 去掉 --align-subtitles 后走的是「保留用户原时间轴」，不是 ASR 分段：
+            # 文案不得再承诺 ASR 回退，须指出 --source-strategy asr 才是 ASR 路径。
+            message = str(raised.exception)
+            self.assertNotIn("fall back to ASR", message)
+            self.assertIn("keep the source subtitle timeline as-is", message)
+            self.assertIn("--source-strategy asr", message)
 
             job_file = next((root / "jobs").glob("*/job.json"))
             data = json.loads(job_file.read_text())

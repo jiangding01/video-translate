@@ -434,9 +434,15 @@ def _process_adaptive_media(
                 # 强制对齐同样受对齐后 QA error 门约束（置信度门保持既有语义，
                 # --allow-low-confidence-alignment 仍可放行低置信但 QA 干净的对齐）。
                 if any(issue.severity == "error" for issue in aligned_report.issues):
+                    # `--align-subtitles` 必须与 `--subtitles` 同用，去掉该 flag 后
+                    # 源选择走 SourceSelectionAction.SUBTITLES（user_subtitles_preserved），
+                    # 保留的是用户原时间轴，不是 ASR 分段；要用 ASR 时间轴须显式
+                    # `--source-strategy asr`（该策略不能与 `--align-subtitles` 同用）。
                     raise ValueError(
                         "aligned subtitles failed subtitle QA with error-level issues; "
-                        "rerun without --align-subtitles to fall back to ASR segmentation"
+                        "rerun without --align-subtitles to keep the source subtitle "
+                        "timeline as-is, use --source-strategy asr to build the timeline "
+                        "from speech instead, or fix the source subtitles"
                     )
                 cues = aligned_cues
                 selected_kind = "aligned_subtitles"

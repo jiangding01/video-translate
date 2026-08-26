@@ -51,7 +51,9 @@ def acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
         if not (isinstance(item, list) and len(item) == 2):
             return None
         code, cue_id = item
-        if not isinstance(code, str) or not isinstance(cue_id, int):
+        # bool 是 int 的子类：`true` 会被 isinstance(cue_id, int) 放行并与 cue 1 相等，
+        # 使伪造的确认记录匹配真实 review 问题，因此显式排除（与 review_gate_satisfied 对称）。
+        if not isinstance(code, str) or isinstance(cue_id, bool) or not isinstance(cue_id, int):
             return None
         acknowledged.add(_canonical_review_issue(code, cue_id))
     return acknowledged

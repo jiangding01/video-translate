@@ -678,6 +678,70 @@ class TranslationPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "prepared for different source cues"):
                 apply_agent_translation(job_file, response_path, target_language="zh-CN")
 
+    def test_agent_translation_rejects_tampered_manifest(self) -> None:
+        # 回归测试：manifest 已登记但 checksum 失效属于可疑状态，不能与「极旧 Job
+        # 从未登记 manifest」走同一放行路径，否则会绕过源 cue 绑定门。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_cues_checksum"] = "0" * 64
+            # 只改文件、不更新已登记 checksum。
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "checksum is stale"):
+                apply_agent_translation(job_file, response_path, target_language="zh-CN")
+
+    def test_agent_translation_rejects_unreadable_manifest(self) -> None:
+        # checksum 有效但内容不是 JSON 对象时同样 fail closed。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest_path.write_text("not json at all", encoding="utf-8")
+            persisted = load_job(job_file)
+            artifact = next(
+                item for item in persisted.artifacts if item.kind == "translation_batches"
+            )
+            artifact.checksum = file_checksum(manifest_path)
+            save_job(persisted)
+
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not a readable JSON object"):
+                apply_agent_translation(job_file, response_path, target_language="zh-CN")
+
     def test_agent_translation_accepts_manifest_without_source_checksum(self) -> None:
         # 前向兼容：修复前生成的标准 manifest 没有 source_cues_checksum，仍必须可回填。
         with tempfile.TemporaryDirectory() as directory:
