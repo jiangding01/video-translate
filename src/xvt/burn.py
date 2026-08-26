@@ -17,8 +17,24 @@ HARDWARE_ENCODER_ERRORS = (
 )
 
 
+# FFmpeg filtergraph 描述是两层解析：先按 filtergraph 语法切分链路与 filter，再由
+# 每个 filter 解析自己的选项值。路径必须逐层转义，且顺序为「先选项值层、后 filtergraph
+# 层」，否则第一层加出来的反斜杠会被第二层重新吃掉。
+# 注意：不要退回 `ass=filename='...'` 的单引号包裹写法——包裹内单引号无法表示
+# （shell 风格的 `'\''` 在 filtergraph 里不成立），含单引号的路径必定烧录失败。
+_FILTER_OPTION_SPECIALS = frozenset("\\':")
+_FILTERGRAPH_SPECIALS = frozenset("\\',;[]")
+
+
+def _escape_characters(value: str, specials: frozenset[str]) -> str:
+    return "".join(f"\\{character}" if character in specials else character for character in value)
+
+
 def escape_filter_path(path: Path) -> str:
-    return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    """把路径转义成可直接嵌入 filtergraph 的裸值（不加引号包裹）。"""
+
+    option_value = _escape_characters(str(path), _FILTER_OPTION_SPECIALS)
+    return _escape_characters(option_value, _FILTERGRAPH_SPECIALS)
 
 
 def recommended_video_bitrate(video_height: int) -> str:
@@ -50,7 +66,7 @@ def build_burn_command(
     clip_duration_ms: int | None = None,
 ) -> list[str]:
     video_codec = "h264_videotoolbox" if hardware_encoding else "libx264"
-    subtitle_filter = f"ass=filename='{escape_filter_path(subtitle_path)}'"
+    subtitle_filter = f"ass=filename={escape_filter_path(subtitle_path)}"
     command = ["ffmpeg", "-y"]
     if start_ms is not None:
         command.extend(["-ss", f"{start_ms / 1000:.3f}"])

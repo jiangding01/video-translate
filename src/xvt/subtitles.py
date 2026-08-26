@@ -106,7 +106,10 @@ def save_subtitles(
         )
 
     subtitle_path.parent.mkdir(parents=True, exist_ok=True)
-    subtitles.save(str(subtitle_path), encoding="utf-8")
+    # keep_ssa_tags=True：pysubs2 写 SRT/VTT 时默认会剥掉 `{...}` 块，译文里的字面
+    # 花括号（例如 `变量 {x}`）会被静默丢内容。该 kwarg 让文本原样落盘，`\N` 仍正常
+    # 拆行；.ass/.ssa writer 对该参数容忍，输出不变。
+    subtitles.save(str(subtitle_path), encoding="utf-8", keep_ssa_tags=True)
     return subtitle_path
 
 

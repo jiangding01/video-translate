@@ -65,6 +65,37 @@ class SubtitlesTest(unittest.TestCase):
 
         self.assertEqual(saved[0].plaintext.splitlines(), ["你 好", "Hello world"])
 
+    def test_srt_export_keeps_literal_braces(self) -> None:
+        cue = Cue(
+            id=1,
+            start_ms=1000,
+            end_ms=2500,
+            source_text="set {\\an8} here",
+            target_text="变量 {x} 的值",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            translated = save_subtitles([cue], root / "translated.srt", mode="translated")
+            bilingual = save_subtitles([cue], root / "bilingual.srt", mode="bilingual")
+            # 导入端会剥除花括号，这里必须断言写出的原始文件文本。
+            translated_text = translated.read_text(encoding="utf-8")
+            bilingual_text = bilingual.read_text(encoding="utf-8")
+
+        self.assertIn("变量 {x} 的值", translated_text)
+        self.assertIn("变量 {x} 的值", bilingual_text)
+        self.assertIn("set {\\an8} here", bilingual_text)
+        # `\N` 仍然拆成真实换行，不留字面标签。
+        self.assertNotIn("\\N", bilingual_text)
+        self.assertIn("变量 {x} 的值\nset {\\an8} here", bilingual_text)
+
+    def test_ass_export_keeps_literal_braces(self) -> None:
+        cue = Cue(id=1, start_ms=0, end_ms=1000, source_text="变量 {x} 的值")
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_subtitles([cue], Path(directory) / "source.ass")
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn("变量 {x} 的值", content)
+
     def test_translated_export_rejects_missing_translation(self) -> None:
         cue = Cue(id=1, start_ms=0, end_ms=1000, source_text="Hello")
         with tempfile.TemporaryDirectory() as directory:

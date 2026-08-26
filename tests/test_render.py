@@ -52,6 +52,32 @@ class RenderTest(unittest.TestCase):
         self.assertIn(r"\N{\rSource}", subtitles.events[0].text)
         self.assertNotIn("Hello\\Nworld", subtitles.events[0].text)
 
+    def test_escapes_literal_braces_in_cue_text(self) -> None:
+        cue = Cue(
+            id=1,
+            start_ms=0,
+            end_ms=1000,
+            source_text="set {\\an8} here",
+            target_text="变量 {x} 的值",
+            source_language="en",
+            target_language="zh-CN",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_bilingual_ass(
+                [cue],
+                Path(directory) / "bilingual.ass",
+                video_width=1280,
+                video_height=720,
+            )
+            content = path.read_text(encoding="utf-8")
+
+        dialogue = next(line for line in content.splitlines() if line.startswith("Dialogue:"))
+        self.assertIn(r"变量 \{x\} 的值", dialogue)
+        self.assertIn(r"set \{\an8\} here", dialogue)
+        # 刻意拼接的换行与样式切换结构必须保持原样。
+        self.assertIn(r"\N{\rSource}", dialogue)
+        self.assertNotIn(r"\N\{\rSource\}", dialogue)
+
     def test_rejects_missing_translation(self) -> None:
         cue = Cue(id=1, start_ms=0, end_ms=1000, source_text="Hello")
         with tempfile.TemporaryDirectory() as directory:

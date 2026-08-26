@@ -19,6 +19,19 @@ class AssStyleOptions:
     margin_vertical: int = 16
 
 
+def escape_ass_text(text: str) -> str:
+    """转义 cue 文本里的花括号，避免被 libass 当成覆盖标签块吞掉。
+
+    ASS 用 ``{...}`` 包裹覆盖标签，未转义时译文里的字面 ``{x}`` 会被静默丢弃，
+    而 ``{\\an8}`` 之类会真的改变字幕位置。``\\{`` / ``\\}`` 是 libass 的扩展转义
+    （VSFilter 不支持），本项目烧录固定走 ffmpeg/libass，可以接受。
+    反斜杠刻意不处理：ASS 没有标准的反斜杠转义，而 libass 逐字符解析下未知的
+    ``\\x`` 序列（含结尾悬挂的 ``\\``）会被原样输出，转义反而会引入可见杂字符。
+    """
+
+    return text.replace("{", "\\{").replace("}", "\\}")
+
+
 def font_for_language(language: str | None, platform_name: str | None = None) -> str:
     normalized = (language or "").casefold()
     platform_key = platform_name or sys.platform
@@ -102,8 +115,9 @@ def save_bilingual_ass(
     for cue in cues:
         if not cue.target_text:
             raise ValueError(f"cue {cue.id} has no translated text")
-        target_text = normalize_display_text(cue.target_text)
-        source_text = normalize_display_text(cue.source_text)
+        target_text = escape_ass_text(normalize_display_text(cue.target_text))
+        source_text = escape_ass_text(normalize_display_text(cue.source_text))
+        # `\N` 与 `{\rSource}` 是这里刻意拼接的换行与样式切换结构，不参与转义。
         text = f"{target_text}\\N{{\\rSource}}{source_text}"
         subtitles.events.append(
             pysubs2.SSAEvent(
