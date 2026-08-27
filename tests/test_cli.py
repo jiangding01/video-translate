@@ -747,6 +747,29 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(return_code, 0)
         self.assertIn("not_a_real_task", errors.getvalue())
 
+    def test_apply_points_retranslate_cues_responses_at_the_manual_command(self) -> None:
+        """retranslate_cues 有真实响应但不可自动路由，报错必须给出可复制的手工命令。"""
+        errors = StringIO()
+        events = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(
+                directory,
+                {"task": "retranslate_cues", "fingerprint": "abc", "items": []},
+            )
+            with redirect_stderr(errors), redirect_stdout(events):
+                return_code = main(["apply", "/tmp/job.json", response, "--events-jsonl"])
+
+        message = errors.getvalue()
+        event = json.loads(events.getvalue())
+        self.assertEqual(return_code, 2)
+        self.assertEqual(event["type"], "cli_failed")
+        self.assertEqual(event["data"]["error"]["category"], "invalid_input")
+        self.assertIn("xvt apply-cue-retranslation", message)
+        self.assertIn("--cue", message)
+        self.assertIn("--target-language", message)
+        self.assertIn("cue-retranslation-batches.json", message)
+        self.assertNotIn("unknown task", message)
+
     def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
         """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
         paths = (Path("/tmp/revision.json"),)

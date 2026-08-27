@@ -159,6 +159,10 @@ def align_source_cues(
                     start_ms=max(0, round(cue.start_ms * scale + offset)),
                     end_ms=max(0, round(cue.end_ms * scale + offset)),
                     timing_confidence=0.0,
+                    # ``replace`` shares mutable field values with the input cue; copy the
+                    # word list so later mutation cannot reach the caller's cues (the
+                    # matched branch above copies it as a by-product of re-slicing).
+                    words=list(cue.words),
                     warnings=[*cue.warnings, "timeline inferred from neighboring anchors"],
                 )
             )

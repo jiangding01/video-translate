@@ -46,6 +46,22 @@ class AlignTest(unittest.TestCase):
         self.assertEqual((result.cues[1].start_ms, result.cues[1].end_ms), (2000, 2500))
         self.assertIn("inferred", result.cues[1].warnings[0])
 
+    def test_unmatched_cue_does_not_alias_the_input_word_list(self) -> None:
+        # 守卫：unmatched 分支的 replace() 必须复制 words，否则对齐结果与调用方的
+        # 原始 cue 共享同一个列表对象（matched 分支因重新切片天然不共享）。
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(Word("Hello", 1000, 1500),),
+        )
+        original = Cue(2, 1000, 1500, "Unknown phrase", words=[Word("Unknown", 0, 500)])
+        cues = [Cue(1, 0, 500, "Hello"), original]
+
+        result = align_source_cues(cues, transcript)
+
+        self.assertEqual(result.cues[1].words, original.words)
+        self.assertIsNot(result.cues[1].words, original.words)
+
     def test_nested_overlap_is_pushed_after_the_previous_cue(self) -> None:
         # 源字幕 cue1 可匹配 ASR，cue2 与 cue1 重叠且匹配不上：平移后完全嵌套，
         # 旧的中点归一在这里会产出 end <= start 的 cue。

@@ -744,7 +744,7 @@ uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-revi
 
 `translation-draft-cues.json` 是恢复润色的必要检查点。它缺失或 checksum 失效时，`status` 会要求人工恢复原始译文草稿，不会把已润色的最终译文再次复制为 draft。
 
-对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
+对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略（端到端 Job 以 workflow 的策略快照为准，与译文 QA 的术语校验同源；原子 Job 读顶层配置）；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
 
 ```bash
 uv run --no-sync xvt retranslate-cues "/path/to/job.json" \

@@ -129,16 +129,22 @@ def translate_batch_with_retries(
             raise_if_cancelled()
 
 
-def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
-    # workflow Job 的策略快照存在 job.config["workflow"] 里，顶层 translation_policy 只是
-    # 原子 Job 的回退位置；两处都要读，否则 workflow 路径的术语表校验会静默失效。
+def resolved_translation_policy(job: Job) -> TranslationPolicy:
+    """按 Job 类型解析生效的翻译策略：workflow 快照优先，顶层配置是原子 Job 的回退位置。
+
+    workflow Job 的策略快照存在 ``job.config["workflow"]`` 里，顶层 ``translation_policy``
+    只是原子 Job 的回退位置；两处都要读，否则 workflow 路径的术语表校验会静默失效。
+    译文 QA、Agent 润色 manifest 与局部重译 manifest 共用本函数，避免同一语义出现多份
+    实现后各自漂移。
+    """
     workflow = get_workflow_config(job)
-    policy = (
-        workflow.translation_policy
-        if workflow is not None and workflow.translation_policy is not None
-        else translation_policy_from_dict(job.config.get("translation_policy"))
-    )
-    return tuple((term.source, term.target) for term in policy.terms)
+    if workflow is not None and workflow.translation_policy is not None:
+        return workflow.translation_policy
+    return translation_policy_from_dict(job.config.get("translation_policy"))
+
+
+def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
+    return tuple((term.source, term.target) for term in resolved_translation_policy(job).terms)
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
@@ -389,11 +395,7 @@ def _agent_polished_manifest(job: Job) -> dict[str, Any] | None:
     target_language = (
         workflow.target_language if workflow is not None else job.config.get("target_language")
     )
-    policy = (
-        workflow.translation_policy.to_dict()
-        if workflow is not None and workflow.translation_policy is not None
-        else translation_policy_from_dict(job.config.get("translation_policy")).to_dict()
-    )
+    policy = resolved_translation_policy(job).to_dict()
     source_language = manifest.get("source_language")
     batch_size = manifest.get("batch_size")
     fingerprint = manifest.get("fingerprint")

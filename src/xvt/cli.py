@@ -1777,12 +1777,26 @@ def _cmd_preview(arguments: argparse.Namespace) -> int:
 #   CLI 生成的 manifest 里；Agent 回填响应契约
 #   （skills/video-translate/references/translation-protocol.md）不含 task 字段，所以真实
 #   Agent 响应走下面的 _STEP_ROUTES 步骤回退。保留这三个 key 只为前向兼容。
+# 还有一类 task 有真实响应但无法自动路由（目标子命令需要 xvt apply 拿不到的参数），它们登记
+# 在 _MANUAL_TASK_GUIDANCE 里换成可复制的手工命令提示，而不是落到「unknown task」。
 _TASK_ROUTES: dict[str, str] = {
     "source_review_fixes": "apply-source-review-fixes",
     "translation_review_fixes": "apply-translation-review-fixes",
     "semantic_review_only": "apply-semantic-review",
     "semantic_review_and_repair": "apply-semantic-review",
     "translate_and_polish": "apply-translation",
+}
+
+# 有响应但不可自动路由的 task：apply-cue-retranslation 必须显式收 --cue 与
+# --target-language，而 xvt apply 的命令行里没有这两个参数，也不能从响应里安全地推出来。
+_MANUAL_TASK_GUIDANCE: dict[str, str] = {
+    "retranslate_cues": (
+        "xvt apply cannot route retranslate_cues responses: applying one needs the cue ids "
+        "and the target language as explicit arguments; run xvt apply-cue-retranslation JOB "
+        "RESPONSE --cue ID [--cue ID ...] --target-language LANG instead — the "
+        "xvt retranslate-cues run that produced this manifest printed the exact command, and "
+        "cue-retranslation-batches.json lists the cue ids"
+    ),
 }
 
 _STEP_ROUTES: dict[str, str] = {
@@ -1829,6 +1843,9 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
 
         task = response_data.get("task")
         if isinstance(task, str):
+            guidance = _MANUAL_TASK_GUIDANCE.get(task)
+            if guidance is not None:
+                raise UserInputError(guidance)
             route = _TASK_ROUTES.get(task)
             if route is None:
                 raise ValueError(f"unknown task in response file: {task}")

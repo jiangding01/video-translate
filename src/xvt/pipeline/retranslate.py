@@ -28,6 +28,7 @@ from xvt.pipeline.translation import (
     TranslationRunResult,
     finalize_translation,
     load_translation_response,
+    resolved_translation_policy,
     translate_batch_with_retries,
 )
 from xvt.process import raise_if_cancelled
@@ -38,7 +39,6 @@ from xvt.translate import (
     agent_translation_manifest_fingerprint,
     build_cue_retranslation_batches,
     normalize_generated_subtitle_text,
-    translation_policy_from_dict,
 )
 from xvt.translation_provider import (
     TRANSLATION_PROMPT_VERSION,
@@ -75,7 +75,9 @@ def _cue_retranslation_manifest(
         (cue.source_language for cue in source_cues if cue.source_language),
         job.config.get("source_language", "auto"),
     )
-    policy = translation_policy_from_dict(job.config.get("translation_policy"))
+    # 与译文 QA 的术语校验共用同一解析口径（workflow 快照优先、顶层配置回退），
+    # 避免端到端 Job 上重译 manifest 与 QA 判定读到两份不同的策略。
+    policy = resolved_translation_policy(job)
     batches = build_cue_retranslation_batches(
         source_cues,
         cue_ids,

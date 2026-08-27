@@ -71,6 +71,7 @@
 - ASR / `asr_resegmented` 来源的 `low_timing_confidence` 由 `review` 降为 `warning`，避免端到端几乎必卡人工确认；`aligned` 与用户导入字幕仍为 `review`。硬显示超限（`line_too_wide` / `bilingual_overflow_risk`）与跨门 display_width 确认族映射不变。
 - YouTube/远程视频下载格式选择改为 `bv*+ba/b/18/best`（分离流失败时可回退渐进式 360p 与 best）；HTTP 403 时给出可操作提示（`continue` 重试、更新 yt-dlp、显式 `--cookies-from-browser`），仍不默认读取浏览器 Cookie。
 - CLI 人类可读进度打磨：计划性跳过（translate/burn/media_qa）不再逐条刷屏，其余跳过合并为一行；同一 stage 连续失败去重；`acquire` / 源·译文 QA·渲染标签区分；翻译重试行显示尝试序号与等待秒数；API 翻译准备批次不再误报「等待」；`status` 将可确认的 QA 显示为 `needs_review`；完成摘要按视频/字幕/其他分类，并显示总耗时。stage 事件可选 `detail` 字段见 `docs/EVENTS.md`。
+- 局部重译（`retranslate-cues`）解析翻译策略的口径与译文 QA 统一：两侧现在共用 `pipeline.translation.resolved_translation_policy`（workflow 策略快照优先，顶层 `config.translation_policy` 是原子 Job 的回退位置）。此前重译 manifest 只读顶层配置，而译文 QA 的术语校验读 workflow 快照，同一语义存在两份实现。绝大多数端到端 Job 上两处内容一致，行为不变；唯一会分叉的形态是在已有 workflow 目标的 Job 上再显式跑 `xvt translate --glossary NEW` 覆盖顶层配置——此时重译提示词现在跟随 workflow 快照，与随后回填时的 QA 判定使用同一份术语表和风格，不会再出现「按 A 表翻译、按 B 表判定」。Agent 润色 manifest 的同型解析一并收敛到该函数。另外，`xvt apply` 收到 `task: retranslate_cues` 的响应时不再报「unknown task」，改为直接给出 `xvt apply-cue-retranslation JOB RESPONSE --cue ID [--cue ID ...] --target-language LANG` 这条必须手工执行的命令（该子命令需要 `xvt apply` 拿不到的 cue ID 与目标语言）；错误类别与退出码不变，仍是 `invalid_input` 与 2。
 
 ## [0.1.1] - 2026-07-24
 
