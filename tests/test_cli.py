@@ -56,6 +56,8 @@ class CliTest(unittest.TestCase):
         translated_srt.write_text("", encoding="utf-8")
         bilingual_srt = root / "bilingual.srt"
         bilingual_srt.write_text("", encoding="utf-8")
+        translated_qa = root / "qa-translated.json"
+        translated_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
         media_qa = root / "media-qa.json"
         media_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
         job = create_job(
@@ -69,6 +71,11 @@ class CliTest(unittest.TestCase):
                 Artifact("translated_cues", str(cues), file_checksum(cues)),
                 Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
                 Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                Artifact(
+                    "translated_subtitle_qa",
+                    str(translated_qa),
+                    file_checksum(translated_qa),
+                ),
                 Artifact("burned_video", str(burned), file_checksum(burned)),
                 Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
             ]

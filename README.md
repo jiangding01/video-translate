@@ -860,6 +860,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 - 报告为 `needs_review` 时，只有报告内**全部** review 级问题都已被对当前源 cue 仍然有效的确认记录覆盖才放行。确认通道只有 `xvt continue JOB --acknowledge-subtitle-review`，因此确认必须在 `xvt run` 创建的端到端 Job 上完成。
 - 原子 Job（单独 `xvt translate` 创建、没有持久化 `config.workflow`）上 `xvt continue` 不可用，报错会引导重跑 `xvt translate JOB --target-language LANG` 重新生成译文与 QA 报告。
 - `burn` 的 QA 门在远程媒体下载之前执行：注定被拒的 Job 不会先下载整段视频。
+- 端到端 Job 上，QA 报告单独缺失或 checksum 失效（译文 cue 与字幕文件都仍然有效）时，`xvt status` 归为 `retryable`，`xvt continue` 会从现有译文 cue 重算 QA 并重新写出字幕渲染产物，**不会重新翻译**（零翻译 API 调用）。重算内容与旧产物一致时 checksum 不变，也不会触发重新烧录。`needs_review` 的既有确认记录仍然有效，重算后依旧放行；重算结果为 `failed` 或出现新的 review 级问题时按常规 QA 阻断处理（`failed` 以退出码 4 失败）。
 
 ## 输出与质量控制
 

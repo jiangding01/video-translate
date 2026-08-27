@@ -87,6 +87,7 @@ class WorkflowTest(unittest.TestCase):
                     "translated_cues",
                     "translated_srt",
                     "bilingual_srt",
+                    "translated_subtitle_qa",
                 }
                 <= kinds
             )
@@ -657,6 +658,7 @@ class WorkflowTest(unittest.TestCase):
                         "translated_cues",
                         "translated_srt",
                         "bilingual_srt",
+                        "translated_subtitle_qa",
                     }
                     else None
                 )
@@ -698,6 +700,7 @@ class WorkflowTest(unittest.TestCase):
                         "translated_cues",
                         "translated_srt",
                         "bilingual_srt",
+                        "translated_subtitle_qa",
                         "burned_video",
                     }
                     else None
@@ -740,6 +743,7 @@ class WorkflowTest(unittest.TestCase):
                         "translated_cues",
                         "translated_srt",
                         "bilingual_srt",
+                        "translated_subtitle_qa",
                         "burned_video",
                     }
                     else None
@@ -853,6 +857,177 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(updated.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
             self.assertTrue((artifacts / "translated.srt").is_file())
             self.assertTrue((artifacts / "bilingual.srt").is_file())
+
+    def _standard_job_with_translated_outputs(
+        self,
+        root: Path,
+        target_text: str,
+    ) -> tuple[Path, Path]:
+        """构造 standard 质量、译文四产物齐备的端到端 Job；返回 (job_file, qa_path)。"""
+
+        from dataclasses import asdict
+
+        from xvt.models import Cue
+        from xvt.qa import check_subtitles
+
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n",
+            encoding="utf-8",
+        )
+        job = create_job(
+            str(source),
+            root,
+            {
+                "input_kind": "subtitle",
+                "workflow": {"target_language": "zh-CN", "burn": False},
+            },
+        )
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+
+        source_cue = Cue(1, 0, 2000, "Hello world.", source_language="en")
+        translated_cue = Cue(
+            1,
+            0,
+            2000,
+            "Hello world.",
+            target_text,
+            source_language="en",
+            target_language="zh-CN",
+        )
+        paths = {
+            "source_cues": (artifacts / "source-cues.json", [asdict(source_cue)]),
+            "translated_cues": (artifacts / "translated-cues.json", [asdict(translated_cue)]),
+        }
+        for path, payload in paths.values():
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        source_srt_path = artifacts / "source.srt"
+        source_srt_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        translated_srt_path = artifacts / "translated.srt"
+        translated_srt_path.write_text("stale-render", encoding="utf-8")
+        bilingual_srt_path = artifacts / "bilingual.srt"
+        bilingual_srt_path.write_text("stale-render", encoding="utf-8")
+        qa_path = artifacts / "qa-translated.json"
+        qa_path.write_text(
+            json.dumps(
+                asdict(check_subtitles([translated_cue], require_translation=True)),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        job.artifacts.extend(
+            [
+                Artifact(kind, str(path), file_checksum(path))
+                for kind, (path, _payload) in paths.items()
+            ]
+        )
+        job.artifacts.extend(
+            [
+                Artifact("source_srt", str(source_srt_path), file_checksum(source_srt_path)),
+                Artifact(
+                    "translated_srt",
+                    str(translated_srt_path),
+                    file_checksum(translated_srt_path),
+                ),
+                Artifact(
+                    "bilingual_srt",
+                    str(bilingual_srt_path),
+                    file_checksum(bilingual_srt_path),
+                ),
+                Artifact("translated_subtitle_qa", str(qa_path), file_checksum(qa_path)),
+            ]
+        )
+        for stage in (
+            StageName.IMPORT_SUBTITLES,
+            StageName.TRANSLATE,
+            StageName.SUBTITLE_QA,
+            StageName.RENDER,
+        ):
+            job.stages[stage].status = StageStatus.SUCCEEDED
+        return save_job(job), qa_path
+
+    def test_continue_rebuilds_translated_qa_report_without_retranslating(self) -> None:
+        """译文 QA 报告单独失效必须能被 continue 零 API 成本重建，且二次 continue 幂等。
+
+        修复前：三产物有效 → plan 为空 → continue 报 completed 什么也不修，而
+        burn/preview 门又因缺有效 QA 报告拒绝放行，形成闭环死锁。
+        """
+
+        config = WorkflowConfig(target_language="zh-CN", burn=False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, qa_path = self._standard_job_with_translated_outputs(root, "你好世界。")
+
+            # 只让 QA 报告失效：cue 与两份 SRT 全部保持有效。
+            qa_path.write_text("{}", encoding="utf-8")
+            stale = load_job(job_file)
+            self.assertIsNone(valid_artifact_path(stale, "translated_subtitle_qa"))
+            self.assertIsNotNone(valid_artifact_path(stale, "translated_cues"))
+            self.assertIsNotNone(valid_artifact_path(stale, "translated_srt"))
+            self.assertIsNotNone(valid_artifact_path(stale, "bilingual_srt"))
+            self.assertEqual(plan_advance_steps(stale, config), ("render",))
+
+            with (
+                patch("xvt.workflow.run_translation") as translate,
+                patch("xvt.workflow.apply_subtitle_translation") as import_translation,
+            ):
+                result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            translate.assert_not_called()
+            import_translation.assert_not_called()
+
+            rebuilt = load_job(job_file)
+            rebuilt_qa = valid_artifact_path(rebuilt, "translated_subtitle_qa")
+            self.assertIsNotNone(rebuilt_qa)
+            self.assertEqual(
+                json.loads(rebuilt_qa.read_text(encoding="utf-8"))["status"],
+                "pass",
+            )
+            self.assertEqual(rebuilt.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+            # 幂等：重建后目标已满足，再次 continue 不再有任何步骤。
+            self.assertEqual(plan_advance_steps(rebuilt, config), ())
+            with patch("xvt.workflow.run_translation") as translate_again:
+                repeated = continue_workflow(job_file)
+            self.assertEqual(repeated.status, "completed")
+            translate_again.assert_not_called()
+            self.assertEqual(plan_advance_steps(load_job(job_file), config), ())
+
+    def test_continue_rebuilt_qa_keeps_stored_review_acknowledgment(self) -> None:
+        """重算出 needs_review 时，已存量确认的老 Job 必须仍被放行而不是二次阻断。"""
+
+        from xvt.pipeline import acknowledge_subtitle_review
+
+        # 宽度足够大才会产生 review 级 bilingual_overflow_risk（needs_review）。
+        overflowing = "这是一句非常长的中文译文，用来触发双语行宽度溢出风险" + "哦" * 30
+        config = WorkflowConfig(target_language="zh-CN", burn=False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, qa_path = self._standard_job_with_translated_outputs(root, overflowing)
+            self.assertEqual(
+                json.loads(qa_path.read_text(encoding="utf-8"))["status"],
+                "needs_review",
+            )
+            acknowledge_subtitle_review(job_file)
+
+            qa_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(plan_advance_steps(load_job(job_file), config), ("render",))
+
+            with patch("xvt.workflow.run_translation") as translate:
+                result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            translate.assert_not_called()
+            rebuilt = load_job(job_file)
+            rebuilt_qa = valid_artifact_path(rebuilt, "translated_subtitle_qa")
+            self.assertIsNotNone(rebuilt_qa)
+            self.assertEqual(
+                json.loads(rebuilt_qa.read_text(encoding="utf-8"))["status"],
+                "needs_review",
+            )
+            self.assertEqual(rebuilt.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+            self.assertEqual(plan_advance_steps(rebuilt, config), ())
 
     def test_source_only_workflow_reports_source_subtitle_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1035,6 +1210,8 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
         translated_srt.write_text("", encoding="utf-8")
         bilingual_srt = root / "bilingual.srt"
         bilingual_srt.write_text("", encoding="utf-8")
+        translated_qa = root / "qa-translated.json"
+        translated_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
         media_qa = root / "media-qa.json"
         media_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
         job = create_job(
@@ -1054,6 +1231,11 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
                 Artifact("source_cues", str(source_cues), file_checksum(source_cues)),
                 Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
                 Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                Artifact(
+                    "translated_subtitle_qa",
+                    str(translated_qa),
+                    file_checksum(translated_qa),
+                ),
                 Artifact("burned_video", str(burned), file_checksum(burned)),
                 Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
             ]
@@ -1650,6 +1832,7 @@ class WorkflowPlannerTest(unittest.TestCase):
                             "translated_cues",
                             "translated_srt",
                             "bilingual_srt",
+                            "translated_subtitle_qa",
                             "burned_video",
                         }
                         else None

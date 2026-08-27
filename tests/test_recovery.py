@@ -378,6 +378,12 @@ class RecoveryTest(unittest.TestCase):
             self._add_artifact(job, root, "translated_cues")
             self._add_artifact(job, root, "translated_srt", content="1\n")
             self._add_artifact(job, root, "bilingual_srt", content="1\n")
+            self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                content='{"status":"pass","issues":[]}',
+            )
             self._add_artifact(job, root, "burned_video")
             job.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
             job_file = save_job(job)
@@ -398,6 +404,12 @@ class RecoveryTest(unittest.TestCase):
             self._add_artifact(job, root, "translated_cues")
             self._add_artifact(job, root, "translated_srt", content="1\n")
             self._add_artifact(job, root, "bilingual_srt", content="1\n")
+            self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                content='{"status":"pass","issues":[]}',
+            )
             job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
             job_file = save_job(job)
 
@@ -423,6 +435,12 @@ class RecoveryTest(unittest.TestCase):
             self._add_artifact(job, root, "translated_cues")
             self._add_artifact(job, root, "translated_srt", content="1\n")
             self._add_artifact(job, root, "bilingual_srt", content="1\n")
+            self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                content='{"status":"pass","issues":[]}',
+            )
             self._add_artifact(job, root, "burned_video")
             job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
             job_file = save_job(job)
@@ -449,6 +467,75 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(plan.advance_steps, ("render",))
         self.assertIn("渲染", plan.reason)
         self.assertIn("continue", plan.primary_command or "")
+
+    def test_recovery_plan_render_step_when_translated_qa_report_is_invalid(self) -> None:
+        """译文 QA 报告单独失效必须归为 retryable + continue，而不是「已完成」。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": False}
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "translated_cues")
+            self._add_artifact(job, root, "translated_srt", content="1\n")
+            self._add_artifact(job, root, "bilingual_srt", content="1\n")
+            qa_report = self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                content='{"status":"pass","issues":[]}',
+            )
+            job_file = save_job(job)
+            qa_report.write_text("{}", encoding="utf-8")
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertEqual(plan.advance_steps, ("render",))
+        self.assertIn("渲染", plan.reason)
+        self.assertIn("continue", plan.primary_command or "")
+
+    def test_recovery_plan_keeps_relink_navigation_when_translated_qa_is_invalid(self) -> None:
+        """QA 报告失效让计划变成 ("render", "burn") 时，relink 导航不能丢。
+
+        丢了导航用户就会被引导做一次完整重编码，而成品本可零成本重新关联。
+        """
+
+        from xvt.workflow import _record_burn_fingerprint
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "video.mp4"
+            media.write_bytes(b"media")
+            burned = root / "burned.mp4"
+            burned.write_bytes(b"burned-output")
+            job = create_job(str(media), root, {})
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
+            self._add_artifact(job, root, "source_cues")
+            self._add_artifact(job, root, "translated_cues")
+            self._add_artifact(job, root, "translated_srt", content="1\n")
+            self._add_artifact(job, root, "bilingual_srt", content="1\n")
+            self._add_artifact(job, root, "media_qa", content='{"status":"pass","issues":[]}')
+            qa_report = self._add_artifact(
+                job,
+                root,
+                "translated_subtitle_qa",
+                content='{"status":"pass","issues":[]}',
+            )
+            job.artifacts.append(Artifact("burned_video", str(burned), file_checksum(burned)))
+            job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+            job_file = save_job(job)
+            _record_burn_fingerprint(job_file)
+            # 成品被移走 + QA 报告失效：两处同时失效才会命中 ("render", "burn")。
+            burned.unlink()
+            qa_report.write_text("{}", encoding="utf-8")
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.advance_steps, ("render", "burn"))
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertIn("relink-burned-output", plan.primary_command or "")
+        self.assertIn("continue", plan.alternative_commands[0])
 
     def test_recovery_plan_describes_agent_translation_prerequisite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

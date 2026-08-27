@@ -697,7 +697,14 @@ def _recovery_for_workflow(
             advance_steps=steps,
         )
 
-    if steps[0] == "burn" and burned_output_relink_recovery_available(
+    # 不能只看 ``steps[0]``：译文 QA 报告单独失效时计划会变成 ("render", "burn")，
+    # 按首元素匹配会丢掉 relink 导航，把本可零成本重新关联的成品引导成完整重编码。
+    # render 只从现有 cue 重算 QA 与字幕文件、不改写 translated_cues，因此烧录派生
+    # 指纹仍然成立，relink 依旧有效（relink 命令本身也不依赖 QA/渲染产物）。
+    # 其余会改写 translated_cues 的前置步骤（translate/polish/semantic_review）不放行，
+    # 那些情况下重新关联的成品随后必然被重烧录取代。
+    relink_reachable = "burn" in steps and set(steps) <= {"render", "burn"}
+    if relink_reachable and burned_output_relink_recovery_available(
         job,
         workflow,
         burned_video_valid="burned_video" in valid_artifacts,
