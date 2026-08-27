@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import shutil
 import time
 from collections.abc import Callable
@@ -72,6 +73,27 @@ _RESPONSE_CORRECTION = (
     "The previous response was invalid. Return every requested id "
     "exactly once with non-empty translated text."
 )
+# 传输退避的硬上限：2**5=32 已越界，因此指数序列止步于 30 秒。
+_MAX_BACKOFF_SECONDS = 30
+# 结构性无效响应的纠错预算，独立于 --max-retries（传输预算）：最多 2 次纠错重试，
+# 连同首次请求共 3 次。挂在 --max-retries 上会让「网络别重试」的用户连纠错也失去。
+# 纯内存态，不进 fingerprint/checkpoint，旧 Job 恢复零影响。
+_RESPONSE_RETRY_BUDGET = 2
+# 坏响应重发几乎不存在惊群同步性，抖动无收益，固定短延迟即可。
+_RESPONSE_RETRY_DELAY_SECONDS = 0.5
+
+
+def _backoff_delay(base: float) -> float:
+    """在 ``[base/2, base]`` 内取一次 equal jitter 退避秒数。
+
+    equal jitter 既保留退避下界（不会退化成立刻重发），又不会把上界拖长。
+    ``round(..., 2)`` 让 ``translation_batch_retrying`` 事件里的 ``delay_seconds``
+    与实际 sleep 值完全一致，且人类进度渲染可读。
+
+    边界：``random`` 在本模块只服务于这一处退避抖动。它的取值绝不能进入 fingerprint、
+    checkpoint、artifact 内容或事件语义判定，否则同样的输入会产出不同的产物 checksum。
+    """
+    return round(random.uniform(base / 2, base), 2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,24 +124,30 @@ def translate_batch_with_retries(
         except TranslationProviderError as error:
             if not error.retryable or transport_retries >= max_retries:
                 raise
-            delay = 30 if transport_retries >= 5 else 2**transport_retries
             if (
                 error.retry_after is not None
                 and math.isfinite(error.retry_after)
                 and error.retry_after >= 0
             ):
-                delay = min(error.retry_after, 30)
+                # 服务端显式指定了重试时刻，尊重原值不加抖动，只做上限钳位。
+                # provider 侧已保证非负有限，这里的检查是防御冗余。
+                delay = round(min(error.retry_after, _MAX_BACKOFF_SECONDS), 2)
+            else:
+                delay = _backoff_delay(min(2**transport_retries, _MAX_BACKOFF_SECONDS))
             transport_retries += 1
             request_attempt += 1
-            correction = None
+            # 传输失败意味着请求没有被服务端消费，上一轮的纠正提示词还没有起效，
+            # 因此原样保留 correction。清空它会让「坏响应 → 纠正 → 429 → 回到原始
+            # 提示 → 又坏」白烧纠错预算。_RESPONSE_CORRECTION 里的「上一次响应」在此
+            # 仍准确指向最近一次真正收到的（无效的）响应。
             if on_retry:
                 on_retry(request_attempt, delay, "provider temporarily unavailable")
             time.sleep(delay)
             raise_if_cancelled()
         except ProviderResponseError:
-            if response_retries >= 1:
+            if response_retries >= _RESPONSE_RETRY_BUDGET:
                 raise
-            delay = 0.5
+            delay = _RESPONSE_RETRY_DELAY_SECONDS
             response_retries += 1
             request_attempt += 1
             correction = response_correction

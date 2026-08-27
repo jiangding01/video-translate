@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from http.client import BadStatusLine, HTTPException, IncompleteRead, LineTooLong
 from ssl import SSLEOFError, SSLError, SSLSyscallError, SSLZeroReturnError
 from typing import Any
@@ -298,6 +301,37 @@ def semantic_repair_batch(
     )
 
 
+def _parse_retry_after(value: str | None) -> float | None:
+    """按 RFC 9110 解析 ``Retry-After``：delta-seconds 或 HTTP-date，返回非负秒数。
+
+    返回值**不设上限**，退避上限由调用侧（``xvt.pipeline.translation``）钳位：本模块
+    不能反向 import pipeline 包，那既会成环也违反包内依赖方向。
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    # delta-seconds 必须用 ASCII 字符类判定：``'²'.isdigit()`` 为真但 ``float('²')`` 抛
+    # ValueError，正则 ``\d`` 还会放行 ``'٥'`` 一类非 ASCII 数字——两者都会让异常逃出
+    # 本函数、污染上层的错误分类。整数以外的形态（``1.5``、``inf``、``nan``、下划线、
+    # 负号）一律不按 delta-seconds 接受，落到 HTTP-date 分支后返回 None、退回指数退避。
+    if re.fullmatch(r"[0-9]+", text):
+        return float(text)
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if moment is None:
+        # 旧实现对畸形日期返回 None 而不是抛异常，两路都要接住。
+        return None
+    if moment.tzinfo is None:
+        # HTTP-date 无时区即 GMT；naive datetime 直接与 aware datetime 相减会 TypeError。
+        moment = moment.replace(tzinfo=UTC)
+    # 服务端时钟偏慢或日期已过期时钳到 0，立即重试而不是拿到负延迟。
+    return max((moment - datetime.now(UTC)).total_seconds(), 0.0)
+
+
 def _request_batch(
     batch: TranslationBatch | PolishBatch | SemanticReviewBatch | SemanticRepairBatch,
     config: CompatibleProviderConfig,
@@ -336,11 +370,7 @@ def _request_batch(
     except HTTPError as error:
         retry_after = None
         if error.headers:
-            value = error.headers.get("Retry-After")
-            try:
-                retry_after = float(value) if value is not None else None
-            except ValueError:
-                retry_after = None
+            retry_after = _parse_retry_after(error.headers.get("Retry-After"))
         raise TranslationProviderError(
             f"translation provider returned HTTP {error.code}",
             retryable=error.code in RETRYABLE_HTTP_STATUS,

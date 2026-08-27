@@ -100,7 +100,7 @@ xvt batch-continue BATCH.json
 | `--model NAME` | 翻译模型名称。 |
 | `--api-key-env NAME` | 保存 API Key 的环境变量名，默认 `XVT_TRANSLATION_API_KEY`；参数值是变量名，不是密钥。 |
 | `--batch-size N` | 每个翻译请求最多包含的 cue 数，默认 `25`；语义组不会被批次边界拆开。 |
-| `--max-retries N` | 翻译传输失败后的额外重试次数，默认 `4`（连同首次请求最多 5 次传输尝试）；结构性无效响应另有独立纠错预算。 |
+| `--max-retries N` | 翻译传输失败后的额外重试次数，默认 `4`（连同首次请求最多 5 次传输尝试）；退避为带抖动的指数退避（每次在上一档退避的一半到全额之间随机取值，上限 30 秒），服务端给出 `Retry-After` 时按其指定时刻等待、不加抖动；结构性无效响应另有独立纠错预算。 |
 | `--timeout-seconds SECONDS` | 单次翻译 API 请求超时，默认 `180` 秒。 |
 | `--glossary PATH` | JSON 术语表；命中源 cue 的术语会进入请求并由确定性 QA 检查。 |
 | `--translation-style faithful\|natural\|concise` | 翻译风格，默认 `faithful`。 |

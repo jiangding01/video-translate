@@ -19,7 +19,7 @@ from xvt.pipeline import (
     run_subtitle_transcription,
     run_translation,
 )
-from xvt.pipeline.translation import load_translation_response
+from xvt.pipeline.translation import _backoff_delay, load_translation_response
 from xvt.process import CommandResult
 from xvt.recovery import file_checksum
 from xvt.translate import GlossaryTerm, TranslationPolicy
@@ -324,6 +324,7 @@ class TranslationPipelineTest(unittest.TestCase):
             with (
                 patch.dict(os.environ, provider_env, clear=False),
                 patch("xvt.pipeline.translation.translate_batch", side_effect=flaky_provider),
+                patch("xvt.pipeline.translation.time.sleep"),
             ):
                 result = run_translation(
                     get_job_file(job),
@@ -409,6 +410,7 @@ class TranslationPipelineTest(unittest.TestCase):
                 patch.dict(os.environ, provider_env, clear=False),
                 patch("xvt.pipeline.translation.translate_batch", side_effect=flaky_provider),
                 patch("xvt.pipeline.translation.time.sleep") as sleep,
+                patch("xvt.pipeline.translation._backoff_delay", lambda base: float(base)),
             ):
                 run_translation(
                     get_job_file(job),
@@ -421,7 +423,9 @@ class TranslationPipelineTest(unittest.TestCase):
         self.assertIsNone(corrections[0])
         self.assertIsNone(corrections[1])
         self.assertIn("previous response was invalid", corrections[2] or "")
-        self.assertIsNone(corrections[3])
+        # 第 3 次请求是传输失败（请求没被服务端消费），纠正提示词必须原样带到第 4 次；
+        # 清空它会退回原始提示词，让纠错预算白烧。
+        self.assertIn("previous response was invalid", corrections[3] or "")
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 0.5, 2])
         retry_events = [event for event in events if event.type == "translation_batch_retrying"]
         self.assertEqual([event.data["attempt"] for event in retry_events], [2, 3, 4])
@@ -463,6 +467,7 @@ class TranslationPipelineTest(unittest.TestCase):
                     side_effect=unavailable_then_success,
                 ),
                 patch("xvt.pipeline.translation.time.sleep") as sleep,
+                patch("xvt.pipeline.translation._backoff_delay", lambda base: float(base)),
             ):
                 run_translation(
                     get_job_file(job),
@@ -493,6 +498,7 @@ class TranslationPipelineTest(unittest.TestCase):
                     "xvt.pipeline.translation.translate_batch",
                     side_effect=ProviderResponseError("always malformed"),
                 ) as provider_call,
+                patch("xvt.pipeline.translation.time.sleep") as sleep,
                 self.assertRaises(ProviderResponseError) as raised,
             ):
                 run_translation(
@@ -504,7 +510,120 @@ class TranslationPipelineTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.category, "dependency_or_process")
         self.assertEqual(int(raised.exception.exit_code), 3)
-        self.assertEqual(provider_call.call_count, 2)
+        # 纠错预算 _RESPONSE_RETRY_BUDGET=2：首次请求 + 2 次纠错重试 = 3 次调用后才放弃。
+        # 传输预算 max_retries=4 不参与该判定。
+        self.assertEqual(provider_call.call_count, 3)
+        # 坏响应退避恒为 0.5 秒，不加抖动。
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.5, 0.5])
+
+    def test_second_correction_retry_still_inside_response_budget(self) -> None:
+        # 预算 _RESPONSE_RETRY_BUDGET=2 的另一条路径：第 1 次纠错仍是坏响应，
+        # 第 2 次纠错成功。预算若退回 1，这条路径会在第 3 次请求前直接放弃。
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, directory, language="en")
+            corrections: list[str | None] = []
+
+            def flaky_provider(batch, config, *, correction=None, **_kwargs):
+                corrections.append(correction)
+                if len(corrections) <= 2:
+                    raise ProviderResponseError("invalid response")
+                return {item.id: "你好，世界。" for item in batch.items}
+
+            events = []
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=flaky_provider),
+                patch("xvt.pipeline.translation.time.sleep") as sleep,
+            ):
+                run_translation(
+                    get_job_file(job),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=0,
+                    event_sink=events.append,
+                )
+
+        self.assertEqual(len(corrections), 3)
+        self.assertIsNone(corrections[0])
+        self.assertIn("previous response was invalid", corrections[1] or "")
+        self.assertIn("previous response was invalid", corrections[2] or "")
+        # 纠错预算独立于 --max-retries：这里 max_retries=0 仍然给出两次纠错机会。
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.5, 0.5])
+        retry_events = [event for event in events if event.type == "translation_batch_retrying"]
+        self.assertEqual([event.data["attempt"] for event in retry_events], [2, 3])
+        self.assertEqual(
+            {event.data["reason"] for event in retry_events}, {"invalid provider response"}
+        )
+
+    def test_backoff_delay_stays_inside_equal_jitter_interval(self) -> None:
+        # 真随机（不 patch）的区间断言：equal jitter 取 [base/2, base]，恒真无 flaky。
+        for base in (1, 2, 4, 8, 16, 30):
+            with self.subTest(base=base):
+                for _ in range(50):
+                    delay = _backoff_delay(base)
+                    self.assertGreaterEqual(delay, base / 2)
+                    self.assertLessEqual(delay, base)
+                    self.assertLessEqual(delay, 30)
+                    # 事件里的 delay_seconds 与 sleep 值同源，最多两位小数。
+                    self.assertEqual(delay, round(delay, 2))
+
+    def test_transport_backoff_bases_follow_capped_exponential(self) -> None:
+        # jitter 确定化：把 _backoff_delay 钉成恒等函数后，可以直接断言喂给它的 base
+        # 序列——指数增长并在 _MAX_BACKOFF_SECONDS 处封顶。
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, directory, language="en")
+            calls = 0
+
+            def unavailable_then_success(batch, config, *, correction=None, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls <= 7:
+                    raise TranslationProviderError("disconnected", retryable=True)
+                return {item.id: "你好，世界。" for item in batch.items}
+
+            bases: list[float] = []
+
+            def record_base(base):
+                bases.append(base)
+                return float(base)
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    side_effect=unavailable_then_success,
+                ),
+                patch("xvt.pipeline.translation.time.sleep"),
+                patch("xvt.pipeline.translation._backoff_delay", record_base),
+            ):
+                run_translation(
+                    get_job_file(job),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=7,
+                )
+
+        self.assertEqual(bases, [1, 2, 4, 8, 16, 30, 30])
 
     def test_workflow_api_translation_blocks_glossary_violations(self) -> None:
         # 回归测试：workflow + API 模式（await_input=False）下 translation_policy 必须

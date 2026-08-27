@@ -299,6 +299,7 @@ class CueRetranslationTest(unittest.TestCase):
                 patch.dict(os.environ, provider_env, clear=False),
                 patch("xvt.pipeline.translation.translate_batch", side_effect=flaky_provider),
                 patch("xvt.pipeline.translation.time.sleep") as sleep,
+                patch("xvt.pipeline.translation._backoff_delay", lambda base: float(base)),
             ):
                 retranslate_cues(
                     job_file,
