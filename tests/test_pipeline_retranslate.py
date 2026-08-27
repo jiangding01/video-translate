@@ -195,7 +195,11 @@ class CueRetranslationTest(unittest.TestCase):
             current[1]["target_text"] = "等待期间人工改过"
             translated_path.write_text(json.dumps(current), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "manifest no longer matches current inputs"):
+            # 文案要涵盖「输入没变、但策略/版本解析变了」这条真实路径，并给出处置。
+            with self.assertRaisesRegex(
+                ValueError,
+                "manifest does not match what this xvt version would generate",
+            ):
                 apply_cue_retranslation(
                     job_file,
                     stale_response,
@@ -221,13 +225,17 @@ class CueRetranslationTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "manifest no longer matches current inputs"):
+            # 文案要涵盖「输入没变、但策略/版本解析变了」这条真实路径，并给出处置。
+            with self.assertRaises(ValueError) as captured:
                 apply_cue_retranslation(
                     job_file,
                     old_prompt_response,
                     cue_ids=(2,),
                     target_language="zh-CN",
                 )
+            message = str(captured.exception)
+            self.assertIn("does not match what this xvt version would generate", message)
+            self.assertIn("rerun xvt retranslate-cues", message)
 
         batch = batch_data["batches"][0]
         self.assertEqual(result.mode, "agent")
@@ -299,6 +307,7 @@ class CueRetranslationTest(unittest.TestCase):
                 patch.dict(os.environ, provider_env, clear=False),
                 patch("xvt.pipeline.translation.translate_batch", side_effect=flaky_provider),
                 patch("xvt.pipeline.translation.time.sleep") as sleep,
+                patch("xvt.pipeline.translation._backoff_delay", lambda base: float(base)),
             ):
                 retranslate_cues(
                     job_file,
@@ -333,6 +342,87 @@ class CueRetranslationTest(unittest.TestCase):
             ],
         )
         self.assertTrue(all(event.data["batch_total"] == 1 for event in batch_events))
+
+
+class CueRetranslationPolicyResolutionTest(unittest.TestCase):
+    """守卫：重译 manifest 的策略解析与译文 QA 的术语校验必须走同一口径。
+
+    workflow 快照优先、顶层 ``translation_policy`` 是原子 Job 的回退位置。两处都锁住，
+    否则任一侧单独改动会让端到端 Job 的重译提示词与 QA 判定读到不同的策略。
+    """
+
+    def _prepare_job(self, root: Path, config: dict) -> Path:
+        job = create_job("/tmp/input.mp4", root)
+        job.config.update(config)
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir()
+        source_path = artifacts / "source-cues.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    asdict(Cue(1, 0, 1000, "First widget", source_language="en")),
+                    asdict(Cue(2, 1000, 2000, "Second widget", source_language="en")),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        translated_path = artifacts / "translated-cues.json"
+        translated_path.write_text(
+            json.dumps(
+                [
+                    asdict(Cue(1, 0, 1000, "First widget", "一", target_language="zh-CN")),
+                    asdict(Cue(2, 1000, 2000, "Second widget", "二", target_language="zh-CN")),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_path)),
+                Artifact("translated_cues", str(translated_path)),
+            ]
+        )
+        return save_job(job)
+
+    def test_manifest_policy_follows_the_workflow_snapshot(self) -> None:
+        policy = {"style": "concise", "terms": [{"source": "widget", "target": "小组件"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._prepare_job(
+                root,
+                {
+                    "workflow": {
+                        "target_language": "zh-CN",
+                        "translation_policy": policy,
+                    }
+                },
+            )
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["policy"], policy)
+        self.assertEqual(manifest["batches"][0]["policy"], policy)
+
+    def test_manifest_policy_still_falls_back_to_the_top_level_config(self) -> None:
+        policy = {"style": "natural", "terms": [{"source": "widget", "target": "部件"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._prepare_job(root, {"translation_policy": policy})
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["policy"], policy)
+        self.assertEqual(manifest["batches"][0]["policy"], policy)
 
 
 if __name__ == "__main__":

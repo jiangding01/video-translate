@@ -802,9 +802,11 @@ def _finalize_candidate(
     candidate = load_cues(candidate_path)
     translated_path = valid_artifact_path(job, "translated_cues")
     if translated_path is not None and load_cues(translated_path) == candidate:
+        # 复用短路必须与 workflow._translation_satisfied 同口径：译文 QA 报告也是
+        # 完成条件，漏检会让 polished 链路在 QA 失效时空转短路、continue 永不重建。
         if all(
             valid_artifact_path(job, kind) is not None
-            for kind in ("translated_srt", "bilingual_srt")
+            for kind in ("translated_srt", "bilingual_srt", "translated_subtitle_qa")
         ):
             record = job.stages[StageName.TRANSLATE]
             if record.status is not StageStatus.SUCCEEDED or record.error is not None:

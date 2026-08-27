@@ -8,7 +8,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 - 本地视频、音频、YouTube URL 输入
 - MLX Whisper 或 faster-whisper 转写，保留词级时间戳；超宽 ASR 片段会优先按语义边界切分；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
-- 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴
+- 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴；输入字幕必须是 UTF-8（容忍 BOM）
 - YouTube 平台字幕仅在显式请求时下载；新 Job 以候选 QA 和 `--source-strategy auto|subtitles|asr` 选择最终时间轴
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议；确定性语义组避免在 provider 批次边界切开句意
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
@@ -47,7 +47,7 @@ xvt apply JOB.json RESPONSE
 xvt apply JOB.json RESPONSE --continue  # 回填后在同一进程继续端到端任务
 ```
 
-`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。增加 `--continue` 可在回填成功后立即继续同一端到端任务；源文修订不接受该参数，因为它会失效译文及下游产物，回填后请先查看 `status`。各 `apply-*` 命令仍是稳定入口，行为不变。
+`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。局部重译（`retranslate-cues`）的响应不由 `xvt apply` 路由——`apply-cue-retranslation` 需要 `xvt apply` 拿不到的 cue ID 与目标语言：无论响应带不带 `task: retranslate_cues`，`xvt apply` 都会以退出码 2 报错并给出可复制的 `xvt apply-cue-retranslation` 命令形状（cue ID 与目标语言可从 `artifacts/cue-retranslation-batches.json` 的 `batches[].items[].id` 与 `target_language` 读出）。增加 `--continue` 可在回填成功后立即继续同一端到端任务；源文修订不接受该参数，因为它会失效译文及下游产物，回填后请先查看 `status`。各 `apply-*` 命令仍是稳定入口，行为不变。
 
 目录批处理：
 
@@ -100,7 +100,7 @@ xvt batch-continue BATCH.json
 | `--model NAME` | 翻译模型名称。 |
 | `--api-key-env NAME` | 保存 API Key 的环境变量名，默认 `XVT_TRANSLATION_API_KEY`；参数值是变量名，不是密钥。 |
 | `--batch-size N` | 每个翻译请求最多包含的 cue 数，默认 `25`；语义组不会被批次边界拆开。 |
-| `--max-retries N` | 翻译传输失败后的额外重试次数，默认 `4`（连同首次请求最多 5 次传输尝试）；结构性无效响应另有独立纠错预算。 |
+| `--max-retries N` | 翻译传输失败后的额外重试次数，默认 `4`（连同首次请求最多 5 次传输尝试）；退避为带抖动的指数退避（每次在上一档退避的一半到全额之间随机取值，上限 30 秒），服务端给出 `Retry-After` 时按其指定时刻等待、不加抖动；结构性无效响应另有独立纠错预算。 |
 | `--timeout-seconds SECONDS` | 单次翻译 API 请求超时，默认 `180` 秒。 |
 | `--glossary PATH` | JSON 术语表；命中源 cue 的术语会进入请求并由确定性 QA 检查。 |
 | `--translation-style faithful\|natural\|concise` | 翻译风格，默认 `faithful`。 |
@@ -744,7 +744,7 @@ uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-revi
 
 `translation-draft-cues.json` 是恢复润色的必要检查点。它缺失或 checksum 失效时，`status` 会要求人工恢复原始译文草稿，不会把已润色的最终译文再次复制为 draft。
 
-对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
+对 QA 报告中定位出的单个或多个 cue，可使用 `retranslate-cues`。它只发送指定 cue，带相邻源 cue 作为只读上下文，复用 Job 已保存的术语策略（端到端 Job 以 workflow 的策略快照为准，与译文 QA 的术语校验同源；原子 Job 读顶层配置）；回填后保留其他译文与全部时间轴，重新执行完整译文 QA，并使旧 ASS、烧录视频和媒体 QA 失效：
 
 ```bash
 uv run --no-sync xvt retranslate-cues "/path/to/job.json" \
@@ -860,6 +860,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 - 报告为 `needs_review` 时，只有报告内**全部** review 级问题都已被对当前源 cue 仍然有效的确认记录覆盖才放行。确认通道只有 `xvt continue JOB --acknowledge-subtitle-review`，因此确认必须在 `xvt run` 创建的端到端 Job 上完成。
 - 原子 Job（单独 `xvt translate` 创建、没有持久化 `config.workflow`）上 `xvt continue` 不可用，报错会引导重跑 `xvt translate JOB --target-language LANG` 重新生成译文与 QA 报告。
 - `burn` 的 QA 门在远程媒体下载之前执行：注定被拒的 Job 不会先下载整段视频。
+- 端到端 Job 上，QA 报告单独缺失或 checksum 失效（译文 cue 与字幕文件都仍然有效）时，`xvt status` 归为 `retryable`，`xvt continue` 会从现有译文 cue 重算 QA 并重新写出字幕渲染产物，**不会重新翻译**（零翻译 API 调用）。重算内容与旧产物一致时 checksum 不变，也不会触发重新烧录。`needs_review` 的既有确认记录仍然有效，重算后依旧放行；重算结果为 `failed` 或出现新的 review 级问题时按常规 QA 阻断处理（`failed` 以退出码 4 失败）。
 
 ## 输出与质量控制
 
@@ -883,7 +884,14 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 固定为“译文一行 + 原文一行”。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的单行限制。
 
-字幕文本里的字面花括号会被保留：`bilingual.ass` 渲染时把 cue 文本中的 `{` `}` 转义为 libass 的 `\{` `\}`，因此 `{x}`、`{0}` 一类占位符会正常显示，而 `{\an8}`、`{\pos(...)}` 只作为文本呈现、不会真的改变字幕位置或样式；`source.srt`、`translated.srt`、`bilingual.srt` 导出时同样原样保留花括号。已知边界（后续项）：导入字幕（`--subtitles`、`--translation-subtitles`、`import-translation`）仍按 SSA 标签块规则剥除 `{...}`，因此“导出 SRT → 用字幕工具编辑 → 再 `import-translation` 导回”这条链路会丢失花括号内容。人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）使用独立的纯文本解析器，不受该边界影响。
+字幕文本里的字面花括号会被保留：`bilingual.ass` 渲染时把 cue 文本中的 `{` `}` 转义为 libass 的 `\{` `\}`，因此 `{x}`、`{0}` 一类占位符会正常显示，而 `{\an8}`、`{\pos(...)}` 只作为文本呈现、不会真的改变字幕位置或样式；`source.srt`、`translated.srt`、`bilingual.srt` 导出时同样原样保留花括号。导入端按字幕的实际格式分叉（判定依据是解析出的格式而不是文件后缀，`.srt` 后缀装着 ASS 内容仍按 ASS 处理）：
+
+- SRT/VTT（`--subtitles`、`--translation-subtitles`、`import-translation`）保留字面花括号，因此“导出 SRT → 用字幕工具编辑 → 再 `import-translation` 导回”这条链路不再丢失花括号内容。人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）使用独立的纯文本解析器，同样保留。
+- ASS/SSA 里的 `{...}` 是覆盖标签或注释块的语法本身，导入时仍整段剥除。
+
+**输入字幕必须是 UTF-8（容忍 BOM）。** `--subtitles`、`--translation-subtitles`、`import-translation`、纯字幕输入以及人工修订 SRT 都按 UTF-8 读取，文件开头的 BOM 会被自动去掉（带 BOM 的 VTT 因此不再被误判成 SRT）。GBK、Big5、Shift_JIS、带 BOM 的 UTF-16/32 等非 UTF-8 文件会以退出码 2 报错并给出转码建议（例如 `iconv -f gb18030 -t utf-8 old.srt > new.srt`，或用编辑器另存为 UTF-8）；只有命中 UTF-16/32 的 BOM 时才会在消息里点名疑似编码。不带 BOM 的 UTF-16/32 能被 UTF-8 解码器「成功」解出夹带 NUL 的文本，因此它走的是解析失败分支（同样是退出码 2），消息会提示文件含 NUL 字节、疑似无 BOM 的 UTF-16/32。XVT 不猜测本地编码——猜错会把乱码写进翻译请求、checksum 和成品画面。内容无法按字幕解析时同样以退出码 2 报错，而不是抛出裸 traceback。
+
+已知限制：SRT/VTT 里任何 `{\…}` 形态的字面文本（`{\an8}`、`{\alpha}` 一类公式或转义写法）与真正的覆盖标签无法区分，仍会被剥除，`{` 与 `\` 之间有空白也一样；SRT 文本里的字面 `\N` 仍被当作换行标签转换。字幕的写出只支持 `.srt` / `.vtt`，`.ass` / `.ssa` 会以 `unsupported subtitle output format` 拒绝——带样式的 ASS 输出由 `bilingual.ass` 的渲染路径负责。
 
 若译文 QA 因超过硬显示阈值而失败，可对具有词级时间戳的 ASR cue 执行重切：
 

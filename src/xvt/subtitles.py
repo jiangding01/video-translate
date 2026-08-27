@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import tempfile
@@ -7,9 +8,29 @@ from pathlib import Path
 
 import pysubs2
 
+from xvt.errors import UserInputError
 from xvt.models import Cue
 
 SUPPORTED_SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass", ".ssa"})
+# 写侧只支持纯文本字幕：ASS/SSA 的 `{...}` 是覆盖标签语法，直接写入 cue 原文会让字面
+# 花括号被 libass 吞掉。真正需要 ASS 输出的路径走 `render.save_bilingual_ass`（它会转义）。
+SAVE_SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt"})
+
+# SRT/VTT 里 `{...}` 是普通文本，只有 `{\...}` 形态才是 pysubs2 由 HTML 标签转换出来的
+# SSA 覆盖块。libass 忽略 `{` 与 `\` 之间的空白，所以 `{ \an8}` 同样按覆盖块处理。
+_SSA_OVERRIDE_BLOCK = re.compile(r"\{\s*\\[^}]*\}")
+# pysubs2 读到的格式名（`SSAFile.format`），按实际内容而非文件后缀判定，避免
+# 「`.srt` 后缀装着 ASS 内容」被误当成纯文本字幕。
+_LITERAL_BRACE_INPUT_FORMATS = frozenset({"srt", "vtt"})
+
+# UTF-16/32 的 BOM 字节序列，只用于把「不是 UTF-8」的报错文案说得更准，不做编码探测。
+# 长的（UTF-32）必须先判：UTF-32 LE 的前两字节与 UTF-16 LE 完全相同。
+_UTF_BOM_PREFIXES = (
+    b"\xff\xfe\x00\x00",
+    b"\x00\x00\xfe\xff",
+    b"\xff\xfe",
+    b"\xfe\xff",
+)
 
 # 人工修订 SRT 每条正文的首行 cue ID 注释，供用户与语义报告的 cue_ids 对照。
 # 只匹配整行的 `#<数字>`，正常译文不会以这种形式独占一行。
@@ -30,8 +51,18 @@ def load_subtitles(
     role: str = "source",
     source_language: str | None = None,
     target_language: str | None = None,
+    display_path: str | Path | None = None,
 ) -> list[Cue]:
+    """读入字幕文件为 cue 列表。
+
+    ``display_path`` 只影响编码/解析报错里出现的路径：调用方若先把用户文件 copy2 成
+    Job 内部副本再读（``artifacts/input-subtitles.srt``），必须把用户传入的原始路径传进
+    来——让用户去转码内部副本是没有意义的。内容由 copy2 保证与原文件一致。
+    """
+
     subtitle_path = Path(path).expanduser()
+    # 存在性/后缀校验针对真实读取的文件，不替换成展示路径（内部副本缺失时指向原始路径
+    # 会指错地方）；只有编码与解析报错用展示路径。
     if not subtitle_path.is_file():
         raise ValueError(f"subtitle file does not exist: {subtitle_path}")
     if subtitle_path.suffix.lower() not in SUPPORTED_SUBTITLE_EXTENSIONS:
@@ -39,14 +70,36 @@ def load_subtitles(
     if role not in {"source", "translated"}:
         raise ValueError(f"unsupported subtitle role: {role}")
 
-    subtitles = pysubs2.load(str(subtitle_path), encoding="utf-8")
+    reported_path = Path(display_path).expanduser() if display_path is not None else subtitle_path
+    try:
+        # utf-8-sig 与 load_review_srt 口径一致：无 BOM 时与 utf-8 完全等价，带 BOM 时把
+        # ﻿ 去掉。BOM 残留会让 pysubs2 的格式嗅探（`lstrip().startswith("WEBVTT")`）漏判
+        # VTT——轻则按 SRT 解析出错位内容，重则抛 FormatAutodetectionError。
+        subtitles = pysubs2.load(str(subtitle_path), encoding="utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise UserInputError(_encoding_error_message(subtitle_path, reported_path)) from error
+    except OSError:
+        # pysubs2.load 自己 open 文件，读取失败（权限、被删、坏 I/O）属于依赖/环境错误，
+        # 不是「字幕内容不合法」，保持原异常语义交给上层分类。
+        raise
+    except Exception as error:
+        # 这里必须兜住解析阶段的全部 Exception，而不只是 Pysubs2Error：pysubs2 各格式
+        # parser（sami/ttml/substation/webvtt/subrip 等）在遇到坏内容时抛的是裸
+        # KeyError/ValueError/TypeError/NotImplementedError，而不是 Pysubs2Error；并且
+        # pysubs2 按文件内容嗅探格式而非后缀，所以任意后缀都可能落到任意 parser 上
+        # （`.srt` 装 SAMI 内容 → sami parser 抛裸 KeyError）。不统一归到 invalid_input，
+        # 轻则穿透 CLI 顶层兜底变成裸 traceback，重则被错分成 workflow/依赖错误。
+        raise UserInputError(_parse_error_message(subtitle_path, reported_path, error)) from error
+    keep_literal_braces = subtitles.format in _LITERAL_BRACE_INPUT_FORMATS
     cues = []
     for event in subtitles:
-        if event.is_comment or not event.plaintext.strip():
+        raw = _event_text(event, keep_literal_braces=keep_literal_braces)
+        # 空判定必须用最终文本：`{x}` 这类只含字面花括号的 cue 在保留后不再是空的。
+        if event.is_comment or not raw.strip():
             continue
         if event.end <= event.start:
             raise ValueError(f"invalid subtitle timestamp: {event.start} --> {event.end}")
-        text = "\n".join(line.strip() for line in event.plaintext.splitlines() if line.strip())
+        text = "\n".join(line.strip() for line in raw.splitlines() if line.strip())
         cue = Cue(
             id=len(cues) + 1,
             start_ms=event.start,
@@ -60,6 +113,74 @@ def load_subtitles(
         )
         cues.append(cue)
     return cues
+
+
+def _encoding_error_message(subtitle_path: Path, reported_path: Path) -> str:
+    """拼非 UTF-8 字幕的可操作报错；命中 UTF-16/32 BOM 时点名疑似编码。
+
+    只做 BOM 前缀比对（零误判），不做字符集探测：gb18030 之类的宽松解码器会把 Big5、
+    Shift_JIS、cp1252 的内容「成功」解成乱码，乱码流进翻译 API 与 checksum 的代价远高
+    于直接报错。消息只含路径与建议，不回显文件内容。
+    """
+
+    header = b""
+    with contextlib.suppress(OSError):
+        with subtitle_path.open("rb") as handle:
+            header = handle.read(4)
+    matched = next((prefix for prefix in _UTF_BOM_PREFIXES if header.startswith(prefix)), None)
+    if matched is None:
+        hint, source_encoding = "", "gb18030"
+    else:
+        family = "UTF-32" if len(matched) == 4 else "UTF-16"
+        hint, source_encoding = f"it looks like {family}; ", family.lower()
+    return (
+        f"subtitle file is not UTF-8 encoded: {reported_path}; {hint}"
+        f"convert it to UTF-8 first (for example "
+        f"iconv -f {source_encoding} -t utf-8 old.srt > new.srt, "
+        "or re-save it as UTF-8 in an editor)"
+    )
+
+
+def _parse_error_message(subtitle_path: Path, reported_path: Path, error: Exception) -> str:
+    """拼解析失败的报错；文件头含 NUL 字节时补一句「疑似无 BOM 的 UTF-16/32」提示。
+
+    无 BOM 的 UTF-16/32 能被 utf-8 解码器「成功」解出夹带 NUL 的字符串，于是不会走
+    UnicodeDecodeError 分支，而是在 parser 里以各种奇怪异常炸掉。合法 UTF-8 字幕正文
+    几乎不含 NUL，因此这个判据高精度、低误报。只读头部 4KB，不回显文件内容。
+    """
+
+    header = b""
+    with contextlib.suppress(OSError):
+        with subtitle_path.open("rb") as handle:
+            header = handle.read(4096)
+    encoding_hint = ""
+    if b"\x00" in header:
+        encoding_hint = (
+            "; the file contains NUL bytes, so it may be UTF-16/32 without a BOM — "
+            "convert it to UTF-8 first"
+        )
+    return (
+        f"subtitle file could not be parsed as "
+        f"{subtitle_path.suffix.lower().lstrip('.')}: {reported_path} "
+        f"({type(error).__name__}: {error}){encoding_hint}"
+    )
+
+
+def _event_text(event: pysubs2.SSAEvent, *, keep_literal_braces: bool) -> str:
+    """取事件正文；SRT/VTT 保留字面花括号，ASS/SSA 仍走 pysubs2 的 ``plaintext``。
+
+    ``plaintext`` 会剥掉全部 ``{...}``，对 ASS/SSA 是正确的（那里 ``{...}`` 是覆盖标签
+    或注释块），但对 SRT/VTT 会把 ``{x}`` 这类普通文本整段吞掉。保留分支的替换顺序与
+    ``plaintext`` 一致：先剥覆盖块，再依次处理 ``\\h``、``\\n``、``\\N``。
+    """
+
+    if not keep_literal_braces:
+        return event.plaintext
+    text = _SSA_OVERRIDE_BLOCK.sub("", event.text)
+    text = text.replace(r"\h", " ")
+    text = text.replace(r"\n", "\n")
+    text = text.replace(r"\N", "\n")
+    return text
 
 
 def _cue_text(cue: Cue, mode: str, target_first: bool) -> str:
@@ -90,8 +211,8 @@ def save_subtitles(
     target_first: bool = True,
 ) -> Path:
     subtitle_path = Path(path).expanduser()
-    if subtitle_path.suffix.lower() not in SUPPORTED_SUBTITLE_EXTENSIONS:
-        raise ValueError(f"unsupported subtitle format: {subtitle_path.suffix}")
+    if subtitle_path.suffix.lower() not in SAVE_SUBTITLE_EXTENSIONS:
+        raise ValueError(f"unsupported subtitle output format: {subtitle_path.suffix}")
 
     subtitles = pysubs2.SSAFile()
     for cue in cues:
@@ -108,7 +229,8 @@ def save_subtitles(
     subtitle_path.parent.mkdir(parents=True, exist_ok=True)
     # keep_ssa_tags=True：pysubs2 写 SRT/VTT 时默认会剥掉 `{...}` 块，译文里的字面
     # 花括号（例如 `变量 {x}`）会被静默丢内容。该 kwarg 让文本原样落盘，`\N` 仍正常
-    # 拆行；.ass/.ssa writer 对该参数容忍，输出不变。
+    # 拆行。写侧只接受 SRT/VTT（见 SAVE_SUBTITLE_EXTENSIONS），ASS 由
+    # `render.save_bilingual_ass` 负责，它会把花括号转义成 libass 的 `\{` / `\}`。
     subtitles.save(str(subtitle_path), encoding="utf-8", keep_ssa_tags=True)
     return subtitle_path
 

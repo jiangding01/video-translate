@@ -28,6 +28,7 @@ from xvt.pipeline import (
     ResegmentationResult,
     TranslationRunResult,
     prepare_agent_translation,
+    retranslate_cues,
     run_subtitle_transcription,
 )
 from xvt.pipeline.revision import (
@@ -56,6 +57,8 @@ class CliTest(unittest.TestCase):
         translated_srt.write_text("", encoding="utf-8")
         bilingual_srt = root / "bilingual.srt"
         bilingual_srt.write_text("", encoding="utf-8")
+        translated_qa = root / "qa-translated.json"
+        translated_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
         media_qa = root / "media-qa.json"
         media_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
         job = create_job(
@@ -69,6 +72,11 @@ class CliTest(unittest.TestCase):
                 Artifact("translated_cues", str(cues), file_checksum(cues)),
                 Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
                 Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                Artifact(
+                    "translated_subtitle_qa",
+                    str(translated_qa),
+                    file_checksum(translated_qa),
+                ),
                 Artifact("burned_video", str(burned), file_checksum(burned)),
                 Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
             ]
@@ -739,6 +747,113 @@ class CliTest(unittest.TestCase):
 
         self.assertNotEqual(return_code, 0)
         self.assertIn("not_a_real_task", errors.getvalue())
+
+    def test_apply_points_retranslate_cues_responses_at_the_manual_command(self) -> None:
+        """retranslate_cues 有真实响应但不可自动路由，报错必须给出可复制的手工命令。"""
+        errors = StringIO()
+        events = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = self._write_response(
+                directory,
+                {"task": "retranslate_cues", "fingerprint": "abc", "items": []},
+            )
+            with redirect_stderr(errors), redirect_stdout(events):
+                return_code = main(["apply", "/tmp/job.json", response, "--events-jsonl"])
+
+        message = errors.getvalue()
+        event = json.loads(events.getvalue())
+        self.assertEqual(return_code, 2)
+        self.assertEqual(event["type"], "cli_failed")
+        self.assertEqual(event["data"]["error"]["category"], "invalid_input")
+        self.assertIn("xvt apply-cue-retranslation", message)
+        self.assertIn("--cue", message)
+        self.assertIn("--target-language", message)
+        self.assertIn("cue-retranslation-batches.json", message)
+        self.assertNotIn("unknown task", message)
+
+    def test_apply_guides_task_less_cue_retranslation_responses(self) -> None:
+        """协议一致的重译响应只有 fingerprint + items，没有 task：只能靠 Job 状态识别。
+
+        此前它落到步骤路由回退，被报成「job is not awaiting Agent input」——而这个 Job 的
+        TRANSLATE stage 明明是 awaiting_input，用户按提示去看 status 又被告知已完成，死环。
+        """
+
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps(
+                    [
+                        {"id": 1, "start_ms": 0, "end_ms": 1000, "source_text": "First"},
+                        {"id": 2, "start_ms": 1000, "end_ms": 2000, "source_text": "Second"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": 1,
+                            "start_ms": 0,
+                            "end_ms": 1000,
+                            "source_text": "First",
+                            "target_text": "旧译文一",
+                            "target_language": "zh-CN",
+                        },
+                        {
+                            "id": 2,
+                            "start_ms": 1000,
+                            "end_ms": 2000,
+                            "source_text": "Second",
+                            "target_text": "旧译文二",
+                            "target_language": "zh-CN",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            # 必须带 checksum：没有 checksum 的产物在 valid_artifact_path 里算不上有效，
+            # 计划会退化成「重新翻译」，测不到本用例要盯的步骤路由回退。
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                    Artifact(
+                        "translated_cues", str(translated_path), file_checksum(translated_path)
+                    ),
+                ]
+            )
+            # 端到端 Job（有 workflow 目标）才会走到步骤路由回退，正是报「not awaiting」的那条路。
+            job.config["workflow"] = {"target_language": "zh-CN"}
+            job_file = save_job(job)
+            manifest = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            fingerprint = json.loads(manifest.read_text(encoding="utf-8"))["fingerprint"]
+            persisted = json.loads(Path(job_file).read_text(encoding="utf-8"))
+            self.assertEqual(persisted["stages"]["translate"]["status"], "awaiting_input")
+
+            response = self._write_response(
+                directory,
+                {"fingerprint": fingerprint, "items": [{"id": 1, "text": "新译文一"}]},
+            )
+            with redirect_stderr(errors):
+                return_code = main(["apply", str(job_file), response])
+
+        message = errors.getvalue()
+        self.assertEqual(return_code, 2)
+        self.assertIn("xvt apply-cue-retranslation", message)
+        self.assertIn("--cue", message)
+        self.assertIn("--target-language", message)
+        self.assertNotIn("not awaiting Agent input", message)
 
     def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
         """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
@@ -2230,6 +2345,143 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 2)
         self.assertIn("invalid cue artifact", errors.getvalue())
+
+    def test_run_reports_non_utf8_source_subtitle_as_user_error(self) -> None:
+        """GBK 源字幕必须走 UserInputError → 退出码 2 + cli_failed(invalid_input)，不是裸栈。
+
+        不 mock 管线：错误消息必须指向用户传入的原始路径，指向 Job 内部副本
+        （artifacts/input-subtitles.srt）对用户没有任何可操作性。
+        """
+
+        output = StringIO()
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "源字幕.srt"
+            source.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好世界\n".encode("gbk"))
+            with redirect_stdout(output), redirect_stderr(errors):
+                return_code = main(
+                    [
+                        "run",
+                        str(source),
+                        "--output",
+                        str(root / "out"),
+                        "--target-language",
+                        "zh-CN",
+                        "--provider",
+                        "agent",
+                        "--events-jsonl",
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            events = [
+                json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")
+            ]
+            failure = next(event for event in events if event["type"] == "cli_failed")
+            stage_failure = next(event for event in events if event["type"] == "stage_failed")
+            self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+            # stage 与 CLI 两处 category 必须同口径（此前 UnicodeDecodeError 记成 workflow）。
+            self.assertEqual(stage_failure["data"]["error"]["category"], "invalid_input")
+            self.assertEqual(stage_failure["data"]["stage"], "import_subtitles")
+            message = failure["data"]["error"]["message"]
+            self.assertIn("not UTF-8 encoded", message)
+            self.assertIn("convert it to UTF-8", message)
+            self.assertIn(str(source), message)
+            self.assertNotIn("input-subtitles", message)
+
+        self.assertNotIn("Traceback", errors.getvalue())
+        self.assertEqual(errors.getvalue().splitlines(), [f"error: {message}"])
+
+    def test_import_translation_reports_unparsable_subtitle_as_user_error(self) -> None:
+        """pysubs2 的解析异常不被顶层兜底认得，必须包装成 UserInputError。"""
+
+        output = StringIO()
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_source_cues(
+                root,
+                [{"id": 1, "start_ms": 0, "end_ms": 2000, "source_text": "Hello."}],
+            )
+            translated = root / "zh.srt"
+            translated.write_text("这不是字幕\n只是一段散文\n", encoding="utf-8")
+            with redirect_stdout(output), redirect_stderr(errors):
+                return_code = main(
+                    [
+                        "import-translation",
+                        job_file,
+                        str(translated),
+                        "--target-language",
+                        "zh-CN",
+                        "--events-jsonl",
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            events = [
+                json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")
+            ]
+            failure = next(event for event in events if event["type"] == "cli_failed")
+            self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+            self.assertIn("could not be parsed as srt", failure["data"]["error"]["message"])
+            self.assertIn(str(translated), failure["data"]["error"]["message"])
+
+        self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_import_translation_reports_foreign_format_parse_failures_as_user_error(self) -> None:
+        """pysubs2 按内容嗅探格式：`.srt` 里装 SAMI/TTML 会落到别的 parser。
+
+        那些 parser 抛的是裸 KeyError / NotImplementedError，既不是 Pysubs2Error 也不是
+        ValueError——只捕获 Pysubs2Error 时 SAMI 会穿透成裸 traceback（退出码 1、JSONL 无
+        cli_failed 终态），TTML 的 NotImplementedError 是 RuntimeError 子类，会被错分成
+        workflow（退出码 4）且消息不含路径。
+        """
+
+        cases = {
+            "sami": "<SAMI><BODY><SYNC><P>hi</SYNC></BODY></SAMI>",
+            "ttml": (
+                '<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+                '<p begin="banana" end="orange">hi</p></div></body></tt>'
+            ),
+        }
+        for label, body in cases.items():
+            with self.subTest(content=label):
+                output = StringIO()
+                errors = StringIO()
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    job_file = self._job_with_source_cues(
+                        root,
+                        [{"id": 1, "start_ms": 0, "end_ms": 2000, "source_text": "Hello."}],
+                    )
+                    translated = root / "zh.srt"
+                    translated.write_text(body, encoding="utf-8")
+                    with redirect_stdout(output), redirect_stderr(errors):
+                        return_code = main(
+                            [
+                                "import-translation",
+                                job_file,
+                                str(translated),
+                                "--target-language",
+                                "zh-CN",
+                                "--events-jsonl",
+                            ]
+                        )
+
+                    self.assertEqual(return_code, 2)
+                    events = [
+                        json.loads(line)
+                        for line in output.getvalue().splitlines()
+                        if line.startswith("{")
+                    ]
+                    failure = next(event for event in events if event["type"] == "cli_failed")
+                    self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+                    message = failure["data"]["error"]["message"]
+                    self.assertIn("could not be parsed as srt", message)
+                    self.assertIn(str(translated), message)
+
+                self.assertNotIn("Traceback", errors.getvalue())
 
     def test_import_translation_jsonl_review_waiting_has_no_cli_completed(self) -> None:
         output = StringIO()

@@ -140,6 +140,40 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 tracked,
             )
 
+    def test_reused_review_rebuilds_invalid_translated_qa_report(self) -> None:
+        """复用短路必须把译文 QA 报告算进完成条件。
+
+        漏检时 polished 链路会在 QA 报告失效后空转短路：语义校对报「已完成」，
+        而 burn/preview 门仍因缺有效报告拒绝放行，用户没有任何修复路径。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    return_value=(),
+                ) as provider,
+            ):
+                run_translation_semantic_review(job_file)
+
+                qa_path = valid_artifact_path(load_job(job_file), "translated_subtitle_qa")
+                self.assertIsNotNone(qa_path)
+                qa_path.write_text("{}", encoding="utf-8")
+                self.assertIsNone(valid_artifact_path(load_job(job_file), "translated_subtitle_qa"))
+
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "completed")
+            provider.assert_called_once()
+            rebuilt_qa = valid_artifact_path(load_job(job_file), "translated_subtitle_qa")
+            self.assertIsNotNone(rebuilt_qa)
+            self.assertEqual(
+                json.loads(rebuilt_qa.read_text(encoding="utf-8"))["status"],
+                "pass",
+            )
+
     def test_api_repairs_complete_group_once_then_reviews_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_file = self._job(Path(directory))

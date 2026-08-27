@@ -592,6 +592,7 @@ def _recovery_for_workflow(
     延迟导入 ``xvt.workflow``，避免 ``workflow → recovery → workflow`` 循环导入。
     """
 
+    from xvt.pipeline.semantic import semantic_review_satisfied
     from xvt.pipeline.translation import (
         REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
         translation_progress_rebuildable,
@@ -697,7 +698,21 @@ def _recovery_for_workflow(
             advance_steps=steps,
         )
 
-    if steps[0] == "burn" and burned_output_relink_recovery_available(
+    # 不能只看 ``steps[0]``：译文 QA 报告单独失效时计划会变成 ("render", "burn")，
+    # 按首元素匹配会丢掉 relink 导航，把本可零成本重新关联的成品引导成完整重编码。
+    # standard 质量下 render 只从现有 cue 重算 QA 与字幕文件、不改写 translated_cues，
+    # 因此烧录派生指纹仍然成立，relink 依旧有效（relink 命令本身也不依赖 QA/渲染产物）。
+    # 其余会改写 translated_cues 的前置步骤（translate/polish/semantic_review）不放行，
+    # 那些情况下重新关联的成品随后必然被重烧录取代。
+    # polished 质量另有一条会改写 translated_cues 的 render：语义校对已 approved 但
+    # finalize 中途断掉时，计划同样是 ("render", "burn")，而 continue 走的是
+    # ``_finalize_candidate`` —— 它发现 translated_cues 与最终候选不一致就会改写它，
+    # 指纹随即失效、relink 白做。因此 polished 额外要求「候选已落到 translated_cues」
+    # （``semantic_review_satisfied``），此时 render 只补渲染产物，与 standard 同构。
+    relink_reachable = "burn" in steps and set(steps) <= {"render", "burn"}
+    if relink_reachable and workflow.translation_quality == "polished":
+        relink_reachable = semantic_review_satisfied(job)
+    if relink_reachable and burned_output_relink_recovery_available(
         job,
         workflow,
         burned_video_valid="burned_video" in valid_artifacts,

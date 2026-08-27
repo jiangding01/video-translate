@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import shutil
 import time
 from collections.abc import Callable
@@ -72,6 +73,28 @@ _RESPONSE_CORRECTION = (
     "The previous response was invalid. Return every requested id "
     "exactly once with non-empty translated text."
 )
+# 传输退避的硬上限：指数基数与服务端 Retry-After 都经 min() 钳到这里，指数序列从
+# 2**5=32 起一律按 30 秒计。
+_MAX_BACKOFF_SECONDS = 30
+# 结构性无效响应的纠错预算，独立于 --max-retries（传输预算）：最多 2 次纠错重试，
+# 连同首次请求共 3 次。挂在 --max-retries 上会让「网络别重试」的用户连纠错也失去。
+# 纯内存态，不进 fingerprint/checkpoint，旧 Job 恢复零影响。
+_RESPONSE_RETRY_BUDGET = 2
+# 坏响应重发几乎不存在惊群同步性，抖动无收益，固定短延迟即可。
+_RESPONSE_RETRY_DELAY_SECONDS = 0.5
+
+
+def _backoff_delay(base: float) -> float:
+    """在 ``[base/2, base]`` 内取一次 equal jitter 退避秒数。
+
+    equal jitter 既保留退避下界（不会退化成立刻重发），又不会把上界拖长。
+    ``round(..., 2)`` 让 ``translation_batch_retrying`` 事件里的 ``delay_seconds``
+    与实际 sleep 值完全一致，且人类进度渲染可读。
+
+    边界：``random`` 在本模块只服务于这一处退避抖动。它的取值绝不能进入 fingerprint、
+    checkpoint、artifact 内容或事件语义判定，否则同样的输入会产出不同的产物 checksum。
+    """
+    return round(random.uniform(base / 2, base), 2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,24 +125,31 @@ def translate_batch_with_retries(
         except TranslationProviderError as error:
             if not error.retryable or transport_retries >= max_retries:
                 raise
-            delay = 30 if transport_retries >= 5 else 2**transport_retries
             if (
                 error.retry_after is not None
                 and math.isfinite(error.retry_after)
                 and error.retry_after >= 0
             ):
-                delay = min(error.retry_after, 30)
+                # 服务端显式指定了重试时刻，尊重原值不加抖动，只做上限钳位。
+                # `_parse_retry_after` 已过滤掉非有限值与负值，这里再查一遍是针对
+                # `retry_after` 这个公开字段的防御：它也可由 provider 之外的调用方构造。
+                delay = round(min(error.retry_after, _MAX_BACKOFF_SECONDS), 2)
+            else:
+                delay = _backoff_delay(min(2**transport_retries, _MAX_BACKOFF_SECONDS))
             transport_retries += 1
             request_attempt += 1
-            correction = None
+            # 传输失败意味着请求没有被服务端消费，上一轮的纠正提示词还没有起效，
+            # 因此原样保留 correction。清空它会让「坏响应 → 纠正 → 429 → 回到原始
+            # 提示 → 又坏」白烧纠错预算。_RESPONSE_CORRECTION 里的「上一次响应」在此
+            # 仍准确指向最近一次真正收到的（无效的）响应。
             if on_retry:
                 on_retry(request_attempt, delay, "provider temporarily unavailable")
             time.sleep(delay)
             raise_if_cancelled()
         except ProviderResponseError:
-            if response_retries >= 1:
+            if response_retries >= _RESPONSE_RETRY_BUDGET:
                 raise
-            delay = 0.5
+            delay = _RESPONSE_RETRY_DELAY_SECONDS
             response_retries += 1
             request_attempt += 1
             correction = response_correction
@@ -129,16 +159,22 @@ def translate_batch_with_retries(
             raise_if_cancelled()
 
 
-def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
-    # workflow Job 的策略快照存在 job.config["workflow"] 里，顶层 translation_policy 只是
-    # 原子 Job 的回退位置；两处都要读，否则 workflow 路径的术语表校验会静默失效。
+def resolved_translation_policy(job: Job) -> TranslationPolicy:
+    """按 Job 类型解析生效的翻译策略：workflow 快照优先，顶层配置是原子 Job 的回退位置。
+
+    workflow Job 的策略快照存在 ``job.config["workflow"]`` 里，顶层 ``translation_policy``
+    只是原子 Job 的回退位置；两处都要读，否则 workflow 路径的术语表校验会静默失效。
+    译文 QA、Agent 润色 manifest 与局部重译 manifest 共用本函数，避免同一语义出现多份
+    实现后各自漂移。
+    """
     workflow = get_workflow_config(job)
-    policy = (
-        workflow.translation_policy
-        if workflow is not None and workflow.translation_policy is not None
-        else translation_policy_from_dict(job.config.get("translation_policy"))
-    )
-    return tuple((term.source, term.target) for term in policy.terms)
+    if workflow is not None and workflow.translation_policy is not None:
+        return workflow.translation_policy
+    return translation_policy_from_dict(job.config.get("translation_policy"))
+
+
+def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
+    return tuple((term.source, term.target) for term in resolved_translation_policy(job).terms)
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
@@ -389,11 +425,7 @@ def _agent_polished_manifest(job: Job) -> dict[str, Any] | None:
     target_language = (
         workflow.target_language if workflow is not None else job.config.get("target_language")
     )
-    policy = (
-        workflow.translation_policy.to_dict()
-        if workflow is not None and workflow.translation_policy is not None
-        else translation_policy_from_dict(job.config.get("translation_policy")).to_dict()
-    )
+    policy = resolved_translation_policy(job).to_dict()
     source_language = manifest.get("source_language")
     batch_size = manifest.get("batch_size")
     fingerprint = manifest.get("fingerprint")

@@ -28,6 +28,7 @@ from xvt.pipeline.translation import (
     TranslationRunResult,
     finalize_translation,
     load_translation_response,
+    resolved_translation_policy,
     translate_batch_with_retries,
 )
 from xvt.process import raise_if_cancelled
@@ -38,7 +39,6 @@ from xvt.translate import (
     agent_translation_manifest_fingerprint,
     build_cue_retranslation_batches,
     normalize_generated_subtitle_text,
-    translation_policy_from_dict,
 )
 from xvt.translation_provider import (
     TRANSLATION_PROMPT_VERSION,
@@ -75,7 +75,9 @@ def _cue_retranslation_manifest(
         (cue.source_language for cue in source_cues if cue.source_language),
         job.config.get("source_language", "auto"),
     )
-    policy = translation_policy_from_dict(job.config.get("translation_policy"))
+    # 与译文 QA 的术语校验共用同一解析口径（workflow 快照优先、顶层配置回退），
+    # 避免端到端 Job 上重译 manifest 与 QA 判定读到两份不同的策略。
+    policy = resolved_translation_policy(job)
     batches = build_cue_retranslation_batches(
         source_cues,
         cue_ids,
@@ -121,7 +123,15 @@ def apply_cue_retranslation(
             raise ValueError("job has no valid cue retranslation manifest")
         stored_manifest = json.loads(batches_path.read_text(encoding="utf-8"))
         if stored_manifest != manifest:
-            raise ValueError("cue retranslation manifest no longer matches current inputs")
+            # 失配不等于「输入被改动」：manifest 里还压了翻译策略、prompt 版本与语义分组
+            # 版本，升级 XVT 后同一份输入也会生成不同的 manifest。文案必须涵盖这条路径，
+            # 否则用户会去核对一个字节都没变的输入。
+            raise ValueError(
+                "cue retranslation manifest does not match what this xvt version would "
+                "generate (inputs or translation policy resolution may have changed, "
+                "e.g. after an upgrade); rerun xvt retranslate-cues to regenerate the "
+                "manifest and retranslate with the new batches"
+            )
         expected_ids = set(cue_ids)
         response = json.loads(Path(response_file).read_text(encoding="utf-8"))
         if not isinstance(response, dict) or response.get("fingerprint") != manifest["fingerprint"]:

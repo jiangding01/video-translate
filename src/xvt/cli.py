@@ -65,6 +65,7 @@ from xvt.recovery import (
     RecoveryPlan,
     build_recovery_plan,
     subtitle_qa_failure_guidance,
+    valid_artifact_path,
     verify_job,
 )
 from xvt.segment import SEGMENTATION_PRESETS
@@ -1775,8 +1776,15 @@ def _cmd_preview(arguments: argparse.Namespace) -> int:
 #   原样提交，因此这两个 key 会真实命中（模板写入点见 xvt.pipeline.revision）。
 # - semantic_review_only / semantic_review_and_repair / translate_and_polish：当前只出现在
 #   CLI 生成的 manifest 里；Agent 回填响应契约
-#   （skills/video-translate/references/translation-protocol.md）不含 task 字段，所以真实
-#   Agent 响应走下面的 _STEP_ROUTES 步骤回退。保留这三个 key 只为前向兼容。
+#   （skills/video-translate/references/translation-protocol.md）只要求 fingerprint + items，
+#   不含 task 字段，所以协议一致的真实 Agent 响应走下面的 _STEP_ROUTES 步骤回退。保留这三个
+#   key 只为前向兼容（用户手抄 manifest 的 task 字段时仍能命中）。
+# 还有一类 task 有真实响应但无法自动路由（目标子命令需要 xvt apply 拿不到的参数），它们登记
+# 在 _MANUAL_TASK_GUIDANCE 里换成可复制的手工命令提示，而不是落到「unknown task」。同一份
+# 指引在步骤回退分支里也要能给出：retranslate_cues 的协议一致响应没有 task 字段，只能靠 Job
+# 状态识别（见 _cmd_apply 的 cue-retranslation 分支）。
+# 不变量：_MANUAL_TASK_GUIDANCE 与 _TASK_ROUTES 不得出现同名 key——同一个 task 既给手工指引
+# 又自动路由是自相矛盾的，见 _assert_disjoint_task_tables()。
 _TASK_ROUTES: dict[str, str] = {
     "source_review_fixes": "apply-source-review-fixes",
     "translation_review_fixes": "apply-translation-review-fixes",
@@ -1785,6 +1793,38 @@ _TASK_ROUTES: dict[str, str] = {
     "translate_and_polish": "apply-translation",
 }
 
+# 手工命令指引的共用正文：apply-cue-retranslation 必须显式收 --cue 与 --target-language，
+# 而 xvt apply 的命令行里没有这两个参数，也不能从响应里安全地推出来。
+# 事实口径：只有人类可读模式的 xvt retranslate-cues 会打印现成命令，--events-jsonl 模式不打
+# 印，所以指引只能承诺 manifest 里有拼命令所需的字段，不能承诺「上一条命令已经打印过」。
+_RETRANSLATE_CUES_MANUAL_COMMAND = (
+    "applying one needs the cue ids and the target language as explicit arguments; run "
+    "xvt apply-cue-retranslation JOB RESPONSE --cue ID [--cue ID ...] --target-language LANG "
+    "instead — cue-retranslation-batches.json carries everything that command needs: "
+    "batches[].items[].id are the cue ids and target_language is the language"
+)
+
+# 有响应但不可自动路由的 task。
+_MANUAL_TASK_GUIDANCE: dict[str, str] = {
+    "retranslate_cues": (
+        f"xvt apply cannot route retranslate_cues responses: {_RETRANSLATE_CUES_MANUAL_COMMAND}"
+    ),
+}
+
+
+def _assert_disjoint_task_tables() -> None:
+    """同一个 task 不能既登记手工指引又登记自动路由：先命中的那张表会静默吃掉另一张。"""
+
+    overlap = _MANUAL_TASK_GUIDANCE.keys() & _TASK_ROUTES.keys()
+    if overlap:
+        raise AssertionError(f"task appears in both routing tables: {sorted(overlap)}")
+
+
+_assert_disjoint_task_tables()
+
+# 步骤回退表。Agent 回填响应按协议不带 task 字段，绝大多数情况靠这里的下一步识别；
+# 但原子重译（retranslate-cues）不在 plan_advance_steps 的推进步骤里，需要单独识别，
+# 否则协议一致的重译响应会落到「job is not awaiting Agent input」的死环。
 _STEP_ROUTES: dict[str, str] = {
     "await_agent_translation": "apply-translation",
     "await_agent_polish": "apply-polish-translation",
@@ -1800,6 +1840,19 @@ _SOURCE_REVIEW_SRT_NAME = re.compile(
 _TRANSLATION_REVIEW_SRT_NAME = re.compile(
     rf"^{re.escape(TRANSLATION_REVIEW_STEM_PREFIX)}[0-9a-f]{{{REVISION_FINGERPRINT_LENGTH}}}$"
 )
+
+
+def _awaiting_cue_retranslation(job: Job) -> bool:
+    """Job 是否停在原子重译的等待态（有未回填的 manifest，且 TRANSLATE 在等输入）。
+
+    两个条件缺一不可：manifest 必须仍有效（checksum 门由 valid_artifact_path 把守），
+    stage 必须真的在等输入——否则会把「重译已回填、Job 已推进」的旧 manifest 误判成等待。
+    """
+
+    stage = job.stages.get(StageName.TRANSLATE)
+    if stage is None or stage.status is not StageStatus.AWAITING_INPUT:
+        return False
+    return valid_artifact_path(job, "cue_retranslation_batches") is not None
 
 
 def _cmd_apply(arguments: argparse.Namespace) -> int:
@@ -1829,11 +1882,24 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
 
         task = response_data.get("task")
         if isinstance(task, str):
+            guidance = _MANUAL_TASK_GUIDANCE.get(task)
+            if guidance is not None:
+                raise UserInputError(guidance)
             route = _TASK_ROUTES.get(task)
             if route is None:
                 raise ValueError(f"unknown task in response file: {task}")
         else:
             job = load_job(arguments.job_file)
+            if _awaiting_cue_retranslation(job):
+                # 原子重译的等待态既不产生推进步骤，协议一致的重译响应又不带 task，两条
+                # 识别路径同时落空：此前这里报「no persisted workflow goal」或「job is not
+                # awaiting Agent input」，与 TRANSLATE stage 明明在 awaiting_input 的事实
+                # 直接冲突，用户无路可走。
+                raise UserInputError(
+                    "this job is awaiting a cue retranslation response, and per the Agent "
+                    "protocol that response carries no task field: "
+                    f"{_RETRANSLATE_CUES_MANUAL_COMMAND}"
+                )
             workflow = get_workflow_config(job)
             if workflow is None:
                 raise ValueError(

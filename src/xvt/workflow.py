@@ -559,12 +559,19 @@ def workflow_goals(config: WorkflowConfig) -> WorkflowGoals:
 
 
 def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bool:
-    """译文目标完成：cue 与用户可见的译文字幕文件均 checksum 有效。"""
+    """译文目标完成：cue、用户可见的译文字幕文件与译文 QA 报告均 checksum 有效。
+
+    QA 报告是 burn/preview 安全门的硬前置：门失去有效报告就会拒绝放行，因此它
+    单独失效时必须被视为「译文目标未完成」，让 continue 能从现有译文 cue 零成本
+    重建（重算 QA + 重渲染，不调用翻译 API）。否则「门让你跑 continue、continue
+    说已完成」会闭环打死。
+    """
 
     standard = (
         valid_artifact_path(job, "translated_cues") is not None
         and valid_artifact_path(job, "translated_srt") is not None
         and valid_artifact_path(job, "bilingual_srt") is not None
+        and valid_artifact_path(job, "translated_subtitle_qa") is not None
     )
     if not standard or config is None or config.translation_quality == "standard":
         return standard

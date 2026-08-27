@@ -44,12 +44,14 @@ class BatchTest(unittest.TestCase):
             bilingual_srt = artifacts / "bilingual.srt"
             burned = artifacts / "burned.mp4"
             media_qa = artifacts / "media-qa.json"
+            translated_qa = artifacts / "qa-translated.json"
             source_cues.write_text("[]", encoding="utf-8")
             translated_cues.write_text("[]", encoding="utf-8")
             translated_srt.write_text("", encoding="utf-8")
             bilingual_srt.write_text("", encoding="utf-8")
             burned.write_bytes(b"burned-output")
             media_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
+            translated_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
             job.artifacts.extend(
                 [
                     Artifact("source_cues", str(source_cues), file_checksum(source_cues)),
@@ -60,6 +62,11 @@ class BatchTest(unittest.TestCase):
                     ),
                     Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
                     Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                    Artifact(
+                        "translated_subtitle_qa",
+                        str(translated_qa),
+                        file_checksum(translated_qa),
+                    ),
                     Artifact("burned_video", str(burned), file_checksum(burned)),
                     Artifact("media_qa", str(media_qa), file_checksum(media_qa)),
                 ]

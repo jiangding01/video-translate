@@ -3,7 +3,9 @@ import os
 import tempfile
 import unittest
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from email.message import Message
+from email.utils import format_datetime
 from http.client import IncompleteRead, RemoteDisconnected, ResponseNotReady
 from pathlib import Path
 from ssl import SSLCertVerificationError, SSLEOFError, SSLZeroReturnError
@@ -538,6 +540,91 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertTrue(raised.exception.retryable)
         self.assertEqual(raised.exception.retry_after, 3)
 
+    def _retry_after_for_header(self, value: str) -> float | None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+        headers = Message()
+        headers["Retry-After"] = value
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 429, "rate limited", headers, None)
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                opener=opener,
+            )
+        return raised.exception.retry_after
+
+    def test_retry_after_parses_http_dates_and_rejects_non_integer_deltas(self) -> None:
+        # RFC 9110 的 Retry-After 只有两种形态：delta-seconds（纯整数）与 HTTP-date。
+        # 此前的裸 float() 会把 "1.5"/"inf"/"nan"/"-1" 全部接受，也完全读不懂 HTTP-date。
+        now = datetime.now(UTC)
+        self.assertEqual(self._retry_after_for_header("3"), 3.0)
+        # 首部值两侧的空白按 HTTP 语义无意义，strip 后仍是合法的 delta-seconds。
+        self.assertEqual(self._retry_after_for_header(" 5 "), 5.0)
+
+        future = self._retry_after_for_header(format_datetime(now + timedelta(seconds=5)))
+        self.assertIsNotNone(future)
+        # 断言区间而不是等值：格式化到秒会截断亚秒部分，且解析与断言之间会流逝时间。
+        self.assertGreaterEqual(future, 3.0)
+        self.assertLessEqual(future, 5.0)
+
+        # 无时区的 HTTP-date 按 GMT 处理；不补 tzinfo 会在与 aware datetime 相减时 TypeError。
+        naive = (now + timedelta(seconds=5)).strftime("%a, %d %b %Y %H:%M:%S")
+        naive_delta = self._retry_after_for_header(naive)
+        self.assertIsNotNone(naive_delta)
+        self.assertGreaterEqual(naive_delta, 3.0)
+        self.assertLessEqual(naive_delta, 5.0)
+
+        # 已过期的日期（或服务端时钟偏慢）钳到 0，而不是负延迟。
+        past = self._retry_after_for_header(format_datetime(now - timedelta(days=1)))
+        self.assertEqual(past, 0.0)
+
+        # 本函数不设上限，30 秒钳位是调用侧（pipeline.translation）的职责。
+        far = self._retry_after_for_header(format_datetime(now + timedelta(days=1)))
+        self.assertIsNotNone(far)
+        self.assertGreater(far, 30.0)
+
+        # 纯数字串也能溢出成 inf：float("1" * 400) 不报错，直接返回 inf。放行它会让
+        # retry_after 这个公开字段带出非有限值，只靠调用侧的 isfinite 兜底太脆。
+        self.assertIsNone(self._retry_after_for_header("1" * 400))
+
+        for value in ("soon", "inf", "nan", "1.5", "-1", "1_0", "²", "٥", "", "   "):
+            with self.subTest(value=value):
+                # '²'.isdigit() 为 True 但 float('²') 抛 ValueError，正则 \d 又会放行 '٥'：
+                # 两者都必须落在 None 分支，不能让异常逃出解析函数。
+                self.assertIsNone(self._retry_after_for_header(value))
+
+    def test_retry_after_path_clamps_to_cap_and_skips_jitter(self) -> None:
+        # 服务端指定的重试时刻不参与抖动：只做 30 秒上限钳位，_backoff_delay 零调用。
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+        calls: list[str | None] = []
+
+        def request(_batch, _config, correction=None):
+            calls.append(correction)
+            if len(calls) == 1:
+                raise TranslationProviderError("rate limited", retryable=True, retry_after=86400.0)
+            return {1: "你好"}
+
+        delays: list[float] = []
+        with (
+            patch("xvt.pipeline.translation.time.sleep", lambda delay: delays.append(delay)),
+            patch("xvt.pipeline.translation._backoff_delay") as backoff,
+        ):
+            result = translate_batch_with_retries(
+                batch,
+                CompatibleProviderConfig("https://example.com/v1", "model", "secret"),
+                max_retries=2,
+                request=request,
+            )
+
+        self.assertEqual(result, {1: "你好"})
+        self.assertEqual(delays, [30])
+        backoff.assert_not_called()
+
     def test_provider_does_not_retry_authentication_errors(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")
         batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
@@ -683,7 +770,10 @@ class TranslationProviderTest(unittest.TestCase):
 
         retries = []
 
-        with patch("xvt.pipeline.translation.time.sleep", lambda delay: retries.append(delay)):
+        with (
+            patch("xvt.pipeline.translation.time.sleep", lambda delay: retries.append(delay)),
+            patch("xvt.pipeline.translation._backoff_delay", lambda base: float(base)),
+        ):
             result = translate_batch_with_retries(
                 batch,
                 CompatibleProviderConfig("https://example.com/v1", "model", "secret"),

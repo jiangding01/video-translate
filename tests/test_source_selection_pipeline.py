@@ -517,6 +517,52 @@ class SourceSelectionPipelineTest(unittest.TestCase):
         self.assertFalse(selection["reference_allowed"])
         self.assertEqual(report["report"]["issues"][0]["code"], "invalid_candidate")
 
+    def test_non_utf8_candidate_is_downgraded_instead_of_failing_the_job(self) -> None:
+        """候选字幕的编码错误仍走「降级为 invalid_candidate」，不能让 Job 失败。
+
+        降级消息里的路径必须是用户传入的原始字幕，不是 Job 内部副本。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好世界\n".encode("gbk"))
+            with (
+                patch(
+                    "xvt.pipeline.transcription.probe_media",
+                    return_value=self._media_info(media),
+                ),
+                patch(
+                    "xvt.pipeline.transcription.run_command",
+                    side_effect=self._write_normalized_audio,
+                ),
+                patch(
+                    "xvt.pipeline.transcription.transcribe_audio",
+                    return_value=self._transcript(),
+                ),
+            ):
+                job = run_local_transcription(
+                    media,
+                    root,
+                    subtitles=subtitles,
+                    source_strategy="asr",
+                )
+                selection = self._selection(job)
+                candidate_qa = next(
+                    item for item in job.artifacts if item.kind == "source_candidate_qa"
+                )
+                report = json.loads(Path(candidate_qa.path).read_text(encoding="utf-8"))
+
+        self.assertEqual(selection["selected_kind"], "asr")
+        self.assertEqual(job.stages[StageName.IMPORT_SUBTITLES].status, StageStatus.SUCCEEDED)
+        issue = report["report"]["issues"][0]
+        self.assertEqual(issue["code"], "invalid_candidate")
+        self.assertIn("not UTF-8 encoded", issue["message"])
+        self.assertIn(str(subtitles), issue["message"])
+        self.assertNotIn("input-subtitles", issue["message"])
+
     def test_subtitle_input_writes_selection_without_candidate_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
