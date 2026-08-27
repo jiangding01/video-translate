@@ -10,6 +10,16 @@ import pysubs2
 from xvt.models import Cue
 
 SUPPORTED_SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass", ".ssa"})
+# 写侧只支持纯文本字幕：ASS/SSA 的 `{...}` 是覆盖标签语法，直接写入 cue 原文会让字面
+# 花括号被 libass 吞掉。真正需要 ASS 输出的路径走 `render.save_bilingual_ass`（它会转义）。
+SAVE_SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt"})
+
+# SRT/VTT 里 `{...}` 是普通文本，只有 `{\...}` 形态才是 pysubs2 由 HTML 标签转换出来的
+# SSA 覆盖块。libass 忽略 `{` 与 `\` 之间的空白，所以 `{ \an8}` 同样按覆盖块处理。
+_SSA_OVERRIDE_BLOCK = re.compile(r"\{\s*\\[^}]*\}")
+# pysubs2 读到的格式名（`SSAFile.format`），按实际内容而非文件后缀判定，避免
+# 「`.srt` 后缀装着 ASS 内容」被误当成纯文本字幕。
+_LITERAL_BRACE_INPUT_FORMATS = frozenset({"srt", "vtt"})
 
 # 人工修订 SRT 每条正文的首行 cue ID 注释，供用户与语义报告的 cue_ids 对照。
 # 只匹配整行的 `#<数字>`，正常译文不会以这种形式独占一行。
@@ -40,13 +50,16 @@ def load_subtitles(
         raise ValueError(f"unsupported subtitle role: {role}")
 
     subtitles = pysubs2.load(str(subtitle_path), encoding="utf-8")
+    keep_literal_braces = subtitles.format in _LITERAL_BRACE_INPUT_FORMATS
     cues = []
     for event in subtitles:
-        if event.is_comment or not event.plaintext.strip():
+        raw = _event_text(event, keep_literal_braces=keep_literal_braces)
+        # 空判定必须用最终文本：`{x}` 这类只含字面花括号的 cue 在保留后不再是空的。
+        if event.is_comment or not raw.strip():
             continue
         if event.end <= event.start:
             raise ValueError(f"invalid subtitle timestamp: {event.start} --> {event.end}")
-        text = "\n".join(line.strip() for line in event.plaintext.splitlines() if line.strip())
+        text = "\n".join(line.strip() for line in raw.splitlines() if line.strip())
         cue = Cue(
             id=len(cues) + 1,
             start_ms=event.start,
@@ -60,6 +73,23 @@ def load_subtitles(
         )
         cues.append(cue)
     return cues
+
+
+def _event_text(event: pysubs2.SSAEvent, *, keep_literal_braces: bool) -> str:
+    """取事件正文；SRT/VTT 保留字面花括号，ASS/SSA 仍走 pysubs2 的 ``plaintext``。
+
+    ``plaintext`` 会剥掉全部 ``{...}``，对 ASS/SSA 是正确的（那里 ``{...}`` 是覆盖标签
+    或注释块），但对 SRT/VTT 会把 ``{x}`` 这类普通文本整段吞掉。保留分支的替换顺序与
+    ``plaintext`` 一致：先剥覆盖块，再依次处理 ``\\h``、``\\n``、``\\N``。
+    """
+
+    if not keep_literal_braces:
+        return event.plaintext
+    text = _SSA_OVERRIDE_BLOCK.sub("", event.text)
+    text = text.replace(r"\h", " ")
+    text = text.replace(r"\n", "\n")
+    text = text.replace(r"\N", "\n")
+    return text
 
 
 def _cue_text(cue: Cue, mode: str, target_first: bool) -> str:
@@ -90,8 +120,8 @@ def save_subtitles(
     target_first: bool = True,
 ) -> Path:
     subtitle_path = Path(path).expanduser()
-    if subtitle_path.suffix.lower() not in SUPPORTED_SUBTITLE_EXTENSIONS:
-        raise ValueError(f"unsupported subtitle format: {subtitle_path.suffix}")
+    if subtitle_path.suffix.lower() not in SAVE_SUBTITLE_EXTENSIONS:
+        raise ValueError(f"unsupported subtitle output format: {subtitle_path.suffix}")
 
     subtitles = pysubs2.SSAFile()
     for cue in cues:
@@ -108,7 +138,8 @@ def save_subtitles(
     subtitle_path.parent.mkdir(parents=True, exist_ok=True)
     # keep_ssa_tags=True：pysubs2 写 SRT/VTT 时默认会剥掉 `{...}` 块，译文里的字面
     # 花括号（例如 `变量 {x}`）会被静默丢内容。该 kwarg 让文本原样落盘，`\N` 仍正常
-    # 拆行；.ass/.ssa writer 对该参数容忍，输出不变。
+    # 拆行。写侧只接受 SRT/VTT（见 SAVE_SUBTITLE_EXTENSIONS），ASS 由
+    # `render.save_bilingual_ass` 负责，它会把花括号转义成 libass 的 `\{` / `\}`。
     subtitles.save(str(subtitle_path), encoding="utf-8", keep_ssa_tags=True)
     return subtitle_path
 
