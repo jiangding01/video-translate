@@ -1,9 +1,12 @@
+import codecs
 import tempfile
 import unittest
 from pathlib import Path
 
 import pysubs2
+from pysubs2.exceptions import Pysubs2Error
 
+from xvt.errors import ExitCode, UserInputError
 from xvt.models import Cue
 from xvt.subtitles import load_subtitles, save_subtitles
 from xvt.translate import map_subtitle_translations
@@ -154,6 +157,123 @@ class SubtitlesTest(unittest.TestCase):
 
         # 判定按 pysubs2 解析出的实际格式，不按文件后缀。
         self.assertEqual([cue.source_text for cue in cues], ["Hello\nworld"])
+
+    def test_bom_srt_import_drops_byte_order_mark(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bom.srt"
+            path.write_text(
+                "1\n00:00:01,000 --> 00:00:02,500\nHello world\n",
+                encoding="utf-8-sig",
+            )
+
+            cues = load_subtitles(path, source_language="en")
+
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(cues[0].source_text, "Hello world")
+        self.assertNotIn("﻿", cues[0].source_text)
+        self.assertEqual((cues[0].start_ms, cues[0].end_ms), (1000, 2500))
+
+    def test_bom_vtt_import_parses_both_timestamp_forms(self) -> None:
+        """带 BOM 的 VTT：BOM 残留会让格式嗅探漏判 WEBVTT 头。
+
+        hh:mm:ss.mmm 会被误当成 SRT 解析（内容错位），mm:ss.mmm 直接抛
+        FormatAutodetectionError（裸 traceback）。两种都必须正常解析成 VTT。
+        """
+
+        bodies = {
+            "hh:mm:ss.mmm": "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n你好\n",
+            "mm:ss.mmm": "WEBVTT\n\n00:01.000 --> 00:02.000\n你好\n",
+        }
+        for label, body in bodies.items():
+            with self.subTest(timestamps=label), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "bom.vtt"
+                path.write_text(body, encoding="utf-8-sig")
+
+                cues = load_subtitles(path, role="translated", target_language="zh-CN")
+
+                self.assertEqual(len(cues), 1)
+                self.assertEqual(cues[0].target_text, "你好")
+                self.assertEqual((cues[0].start_ms, cues[0].end_ms), (1000, 2000))
+
+    def test_non_utf8_subtitle_is_an_actionable_user_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gbk.srt"
+            path.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好世界\n".encode("gbk"))
+
+            with self.assertRaises(UserInputError) as captured:
+                load_subtitles(path)
+
+        message = str(captured.exception)
+        self.assertIn("not UTF-8 encoded", message)
+        self.assertIn("转成 UTF-8", message)
+        self.assertIn(str(path), message)
+        self.assertEqual(captured.exception.category, "invalid_input")
+        self.assertEqual(captured.exception.exit_code, ExitCode.USER_ERROR)
+        # 消息只含路径与建议，不回显文件内容。
+        self.assertNotIn("你好世界", message)
+
+    def test_utf16_and_utf32_subtitles_name_the_suspected_encoding(self) -> None:
+        body = "1\n00:00:01,000 --> 00:00:02,500\nHello\n"
+        # 显式拼 BE 的 BOM：`str.encode("utf-16-be")` 不带 BOM，而 ASCII 正文的
+        # 高位字节全是 \x00，那样的字节流反而是合法 UTF-8，测不到本分支。
+        for encoding, payload, family in (
+            ("utf-16 (LE BOM)", body.encode("utf-16"), "UTF-16"),
+            ("utf-16-be", codecs.BOM_UTF16_BE + body.encode("utf-16-be"), "UTF-16"),
+            ("utf-32 (LE BOM)", body.encode("utf-32"), "UTF-32"),
+            ("utf-32-be", codecs.BOM_UTF32_BE + body.encode("utf-32-be"), "UTF-32"),
+        ):
+            with self.subTest(encoding=encoding), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "wide.srt"
+                path.write_bytes(payload)
+
+                with self.assertRaises(UserInputError) as captured:
+                    load_subtitles(path)
+
+                self.assertIn(f"疑似 {family} 编码", str(captured.exception))
+
+    def test_utf8_decode_failure_without_bom_omits_the_encoding_guess(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gbk.srt"
+            path.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好\n".encode("gbk"))
+
+            with self.assertRaises(UserInputError) as captured:
+                load_subtitles(path)
+
+        self.assertNotIn("疑似", str(captured.exception))
+
+    def test_encoding_error_reports_the_display_path(self) -> None:
+        """调用方先 copy2 成 Job 内部副本时，报错必须指向用户传入的原始路径。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "用户字幕.srt"
+            original.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好\n".encode("gbk"))
+            internal = root / "input-subtitles.srt"
+            internal.write_bytes(original.read_bytes())
+
+            with self.assertRaises(UserInputError) as captured:
+                load_subtitles(internal, display_path=original)
+
+        message = str(captured.exception)
+        self.assertIn(str(original), message)
+        self.assertNotIn("input-subtitles.srt", message)
+
+    def test_unparsable_subtitle_becomes_user_input_error(self) -> None:
+        """Pysubs2Error 直接继承 Exception，不包装会穿透 CLI 顶层兜底变成裸 traceback。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prose.srt"
+            path.write_text("this is not a subtitle at all\njust prose\n", encoding="utf-8")
+
+            with self.assertRaises(UserInputError) as captured:
+                load_subtitles(path)
+
+        self.assertNotIsInstance(captured.exception, Pysubs2Error)
+        message = str(captured.exception)
+        self.assertIn("could not be parsed as srt", message)
+        self.assertIn(str(path), message)
+        self.assertEqual(captured.exception.exit_code, ExitCode.USER_ERROR)
+        self.assertNotIn("just prose", message)
 
     def test_saves_bilingual_srt_with_target_first(self) -> None:
         cue = Cue(

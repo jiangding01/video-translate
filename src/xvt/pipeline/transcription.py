@@ -338,6 +338,8 @@ def _process_adaptive_media(
                     imported_path,
                     role="source",
                     source_language=language,
+                    # 报错要指向用户/下载得到的原始文件，不是 Job 内部副本。
+                    display_path=candidate.path,
                 )
             except Exception as error:
                 evaluation = invalid_source_candidate(candidate_kind, str(error))
@@ -603,6 +605,8 @@ def _process_acquired_media(
                 imported_path,
                 role="source",
                 source_language=language,
+                # 报错要指向用户传入的字幕文件，不是 Job 内部副本。
+                display_path=subtitle_path,
             )
             if not imported_cues:
                 raise ValueError("subtitle file contains no usable cues")
@@ -958,6 +962,8 @@ def run_subtitle_transcription(
             imported_path,
             role="source",
             source_language=language,
+            # 报错要指向用户传入的字幕文件，不是 Job 内部副本。
+            display_path=source,
         )
         if not cues:
             raise ValueError("subtitle file contains no usable cues")

@@ -2231,6 +2231,89 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 2)
         self.assertIn("invalid cue artifact", errors.getvalue())
 
+    def test_run_reports_non_utf8_source_subtitle_as_user_error(self) -> None:
+        """GBK 源字幕必须走 UserInputError → 退出码 2 + cli_failed(invalid_input)，不是裸栈。
+
+        不 mock 管线：错误消息必须指向用户传入的原始路径，指向 Job 内部副本
+        （artifacts/input-subtitles.srt）对用户没有任何可操作性。
+        """
+
+        output = StringIO()
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "源字幕.srt"
+            source.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好世界\n".encode("gbk"))
+            with redirect_stdout(output), redirect_stderr(errors):
+                return_code = main(
+                    [
+                        "run",
+                        str(source),
+                        "--output",
+                        str(root / "out"),
+                        "--target-language",
+                        "zh-CN",
+                        "--provider",
+                        "agent",
+                        "--events-jsonl",
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            events = [
+                json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")
+            ]
+            failure = next(event for event in events if event["type"] == "cli_failed")
+            stage_failure = next(event for event in events if event["type"] == "stage_failed")
+            self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+            # stage 与 CLI 两处 category 必须同口径（此前 UnicodeDecodeError 记成 workflow）。
+            self.assertEqual(stage_failure["data"]["error"]["category"], "invalid_input")
+            self.assertEqual(stage_failure["data"]["stage"], "import_subtitles")
+            message = failure["data"]["error"]["message"]
+            self.assertIn("not UTF-8 encoded", message)
+            self.assertIn("转成 UTF-8", message)
+            self.assertIn(str(source), message)
+            self.assertNotIn("input-subtitles", message)
+
+        self.assertNotIn("Traceback", errors.getvalue())
+        self.assertEqual(errors.getvalue().splitlines(), [f"error: {message}"])
+
+    def test_import_translation_reports_unparsable_subtitle_as_user_error(self) -> None:
+        """pysubs2 的解析异常不被顶层兜底认得，必须包装成 UserInputError。"""
+
+        output = StringIO()
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_source_cues(
+                root,
+                [{"id": 1, "start_ms": 0, "end_ms": 2000, "source_text": "Hello."}],
+            )
+            translated = root / "zh.srt"
+            translated.write_text("这不是字幕\n只是一段散文\n", encoding="utf-8")
+            with redirect_stdout(output), redirect_stderr(errors):
+                return_code = main(
+                    [
+                        "import-translation",
+                        job_file,
+                        str(translated),
+                        "--target-language",
+                        "zh-CN",
+                        "--events-jsonl",
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            events = [
+                json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")
+            ]
+            failure = next(event for event in events if event["type"] == "cli_failed")
+            self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+            self.assertIn("could not be parsed as srt", failure["data"]["error"]["message"])
+            self.assertIn(str(translated), failure["data"]["error"]["message"])
+
+        self.assertNotIn("Traceback", errors.getvalue())
+
     def test_import_translation_jsonl_review_waiting_has_no_cli_completed(self) -> None:
         output = StringIO()
         job = Job("job-1", "", "", "input", "/tmp", {})

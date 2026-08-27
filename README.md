@@ -8,7 +8,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 - 本地视频、音频、YouTube URL 输入
 - MLX Whisper 或 faster-whisper 转写，保留词级时间戳；超宽 ASR 片段会优先按语义边界切分；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
-- 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴
+- 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴；输入字幕必须是 UTF-8（容忍 BOM）
 - YouTube 平台字幕仅在显式请求时下载；新 Job 以候选 QA 和 `--source-strategy auto|subtitles|asr` 选择最终时间轴
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议；确定性语义组避免在 provider 批次边界切开句意
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
@@ -887,6 +887,8 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 - SRT/VTT（`--subtitles`、`--translation-subtitles`、`import-translation`）保留字面花括号，因此“导出 SRT → 用字幕工具编辑 → 再 `import-translation` 导回”这条链路不再丢失花括号内容。人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）使用独立的纯文本解析器，同样保留。
 - ASS/SSA 里的 `{...}` 是覆盖标签或注释块的语法本身，导入时仍整段剥除。
+
+**输入字幕必须是 UTF-8（容忍 BOM）。** `--subtitles`、`--translation-subtitles`、`import-translation`、纯字幕输入以及人工修订 SRT 都按 UTF-8 读取，文件开头的 BOM 会被自动去掉（带 BOM 的 VTT 因此不再被误判成 SRT）。GBK、Big5、Shift_JIS、UTF-16/32 等非 UTF-8 文件会以退出码 2 报错并给出转码建议（例如 `iconv -f gb18030 -t utf-8 old.srt > new.srt`，或用编辑器另存为 UTF-8），检测到 UTF-16/32 的 BOM 时会在消息中点名；XVT 不猜测本地编码——猜错会把乱码写进翻译请求、checksum 和成品画面。内容无法按字幕解析时同样以退出码 2 报错，而不是抛出裸 traceback。
 
 已知限制：SRT/VTT 里任何 `{\…}` 形态的字面文本（`{\an8}`、`{\alpha}` 一类公式或转义写法）与真正的覆盖标签无法区分，仍会被剥除，`{` 与 `\` 之间有空白也一样；SRT 文本里的字面 `\N` 仍被当作换行标签转换。字幕的写出只支持 `.srt` / `.vtt`，`.ass` / `.ssa` 会以 `unsupported subtitle output format` 拒绝——带样式的 ASS 输出由 `bilingual.ass` 的渲染路径负责。
 

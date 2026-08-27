@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import tempfile
 from pathlib import Path
 
 import pysubs2
+from pysubs2.exceptions import Pysubs2Error
 
+from xvt.errors import UserInputError
 from xvt.models import Cue
 
 SUPPORTED_SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass", ".ssa"})
@@ -20,6 +23,15 @@ _SSA_OVERRIDE_BLOCK = re.compile(r"\{\s*\\[^}]*\}")
 # pysubs2 读到的格式名（`SSAFile.format`），按实际内容而非文件后缀判定，避免
 # 「`.srt` 后缀装着 ASS 内容」被误当成纯文本字幕。
 _LITERAL_BRACE_INPUT_FORMATS = frozenset({"srt", "vtt"})
+
+# UTF-16/32 的 BOM 字节序列，只用于把「不是 UTF-8」的报错文案说得更准，不做编码探测。
+# 长的（UTF-32）必须先判：UTF-32 LE 的前两字节与 UTF-16 LE 完全相同。
+_UTF_BOM_PREFIXES = (
+    b"\xff\xfe\x00\x00",
+    b"\x00\x00\xfe\xff",
+    b"\xff\xfe",
+    b"\xfe\xff",
+)
 
 # 人工修订 SRT 每条正文的首行 cue ID 注释，供用户与语义报告的 cue_ids 对照。
 # 只匹配整行的 `#<数字>`，正常译文不会以这种形式独占一行。
@@ -40,8 +52,18 @@ def load_subtitles(
     role: str = "source",
     source_language: str | None = None,
     target_language: str | None = None,
+    display_path: str | Path | None = None,
 ) -> list[Cue]:
+    """读入字幕文件为 cue 列表。
+
+    ``display_path`` 只影响编码/解析报错里出现的路径：调用方若先把用户文件 copy2 成
+    Job 内部副本再读（``artifacts/input-subtitles.srt``），必须把用户传入的原始路径传进
+    来——让用户去转码内部副本是没有意义的。内容由 copy2 保证与原文件一致。
+    """
+
     subtitle_path = Path(path).expanduser()
+    # 存在性/后缀校验针对真实读取的文件，不替换成展示路径（内部副本缺失时指向原始路径
+    # 会指错地方）；只有编码与解析报错用展示路径。
     if not subtitle_path.is_file():
         raise ValueError(f"subtitle file does not exist: {subtitle_path}")
     if subtitle_path.suffix.lower() not in SUPPORTED_SUBTITLE_EXTENSIONS:
@@ -49,7 +71,20 @@ def load_subtitles(
     if role not in {"source", "translated"}:
         raise ValueError(f"unsupported subtitle role: {role}")
 
-    subtitles = pysubs2.load(str(subtitle_path), encoding="utf-8")
+    reported_path = Path(display_path).expanduser() if display_path is not None else subtitle_path
+    try:
+        # utf-8-sig 与 load_review_srt 口径一致：无 BOM 时与 utf-8 完全等价，带 BOM 时把
+        # ﻿ 去掉。BOM 残留会让 pysubs2 的格式嗅探（`lstrip().startswith("WEBVTT")`）漏判
+        # VTT——轻则按 SRT 解析出错位内容，重则抛 FormatAutodetectionError。
+        subtitles = pysubs2.load(str(subtitle_path), encoding="utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise UserInputError(_encoding_error_message(subtitle_path, reported_path)) from error
+    except Pysubs2Error as error:
+        # Pysubs2Error 直接继承 Exception，不包装会穿透 CLI 顶层兜底变成裸 traceback。
+        raise UserInputError(
+            f"subtitle file could not be parsed as "
+            f"{subtitle_path.suffix.lower().lstrip('.')}: {reported_path} ({error})"
+        ) from error
     keep_literal_braces = subtitles.format in _LITERAL_BRACE_INPUT_FORMATS
     cues = []
     for event in subtitles:
@@ -73,6 +108,31 @@ def load_subtitles(
         )
         cues.append(cue)
     return cues
+
+
+def _encoding_error_message(subtitle_path: Path, reported_path: Path) -> str:
+    """拼非 UTF-8 字幕的可操作报错；命中 UTF-16/32 BOM 时点名疑似编码。
+
+    只做 BOM 前缀比对（零误判），不做字符集探测：gb18030 之类的宽松解码器会把 Big5、
+    Shift_JIS、cp1252 的内容「成功」解成乱码，乱码流进翻译 API 与 checksum 的代价远高
+    于直接报错。消息只含路径与建议，不回显文件内容。
+    """
+
+    header = b""
+    with contextlib.suppress(OSError):
+        with subtitle_path.open("rb") as handle:
+            header = handle.read(4)
+    matched = next((prefix for prefix in _UTF_BOM_PREFIXES if header.startswith(prefix)), None)
+    if matched is None:
+        hint, source_encoding = "", "gb18030"
+    else:
+        family = "UTF-32" if len(matched) == 4 else "UTF-16"
+        hint, source_encoding = f"疑似 {family} 编码，", family.lower()
+    return (
+        f"subtitle file is not UTF-8 encoded: {reported_path}; {hint}"
+        f"请先转成 UTF-8（例如 iconv -f {source_encoding} -t utf-8 old.srt > new.srt，"
+        "或用编辑器另存为 UTF-8）"
+    )
 
 
 def _event_text(event: pysubs2.SSAEvent, *, keep_literal_braces: bool) -> str:
