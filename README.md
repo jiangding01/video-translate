@@ -47,7 +47,7 @@ xvt apply JOB.json RESPONSE
 xvt apply JOB.json RESPONSE --continue  # 回填后在同一进程继续端到端任务
 ```
 
-`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。增加 `--continue` 可在回填成功后立即继续同一端到端任务；源文修订不接受该参数，因为它会失效译文及下游产物，回填后请先查看 `status`。各 `apply-*` 命令仍是稳定入口，行为不变。
+`xvt apply` 的路由规则：人工修订 JSON 模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）按固定文件名识别为对应修订通道；Agent 翻译/润色/语义校对响应不含 `task` 字段，按 Job 当前等待的步骤路由——这要求 Job 是 `run`/`batch` 创建的端到端 Job（有持久化 `config.workflow` 目标）。原子 Job（例如 advanced 用法中单独 `xvt translate` 创建的等待）不受统一入口支持，请直接使用对应的 `apply-*` 命令。局部重译（`retranslate-cues`）的响应不由 `xvt apply` 路由——`apply-cue-retranslation` 需要 `xvt apply` 拿不到的 cue ID 与目标语言：无论响应带不带 `task: retranslate_cues`，`xvt apply` 都会以退出码 2 报错并给出可复制的 `xvt apply-cue-retranslation` 命令形状（cue ID 与目标语言可从 `artifacts/cue-retranslation-batches.json` 的 `batches[].items[].id` 与 `target_language` 读出）。增加 `--continue` 可在回填成功后立即继续同一端到端任务；源文修订不接受该参数，因为它会失效译文及下游产物，回填后请先查看 `status`。各 `apply-*` 命令仍是稳定入口，行为不变。
 
 目录批处理：
 
@@ -889,7 +889,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 - SRT/VTT（`--subtitles`、`--translation-subtitles`、`import-translation`）保留字面花括号，因此“导出 SRT → 用字幕工具编辑 → 再 `import-translation` 导回”这条链路不再丢失花括号内容。人工修订 SRT（`source-review-<fp12>.srt` / `translation-review-<fp12>.srt`）使用独立的纯文本解析器，同样保留。
 - ASS/SSA 里的 `{...}` 是覆盖标签或注释块的语法本身，导入时仍整段剥除。
 
-**输入字幕必须是 UTF-8（容忍 BOM）。** `--subtitles`、`--translation-subtitles`、`import-translation`、纯字幕输入以及人工修订 SRT 都按 UTF-8 读取，文件开头的 BOM 会被自动去掉（带 BOM 的 VTT 因此不再被误判成 SRT）。GBK、Big5、Shift_JIS、UTF-16/32 等非 UTF-8 文件会以退出码 2 报错并给出转码建议（例如 `iconv -f gb18030 -t utf-8 old.srt > new.srt`，或用编辑器另存为 UTF-8），检测到 UTF-16/32 的 BOM 时会在消息中点名；XVT 不猜测本地编码——猜错会把乱码写进翻译请求、checksum 和成品画面。内容无法按字幕解析时同样以退出码 2 报错，而不是抛出裸 traceback。
+**输入字幕必须是 UTF-8（容忍 BOM）。** `--subtitles`、`--translation-subtitles`、`import-translation`、纯字幕输入以及人工修订 SRT 都按 UTF-8 读取，文件开头的 BOM 会被自动去掉（带 BOM 的 VTT 因此不再被误判成 SRT）。GBK、Big5、Shift_JIS、带 BOM 的 UTF-16/32 等非 UTF-8 文件会以退出码 2 报错并给出转码建议（例如 `iconv -f gb18030 -t utf-8 old.srt > new.srt`，或用编辑器另存为 UTF-8）；只有命中 UTF-16/32 的 BOM 时才会在消息里点名疑似编码。不带 BOM 的 UTF-16/32 能被 UTF-8 解码器「成功」解出夹带 NUL 的文本，因此它走的是解析失败分支（同样是退出码 2），消息会提示文件含 NUL 字节、疑似无 BOM 的 UTF-16/32。XVT 不猜测本地编码——猜错会把乱码写进翻译请求、checksum 和成品画面。内容无法按字幕解析时同样以退出码 2 报错，而不是抛出裸 traceback。
 
 已知限制：SRT/VTT 里任何 `{\…}` 形态的字面文本（`{\an8}`、`{\alpha}` 一类公式或转义写法）与真正的覆盖标签无法区分，仍会被剥除，`{` 与 `\` 之间有空白也一样；SRT 文本里的字面 `\N` 仍被当作换行标签转换。字幕的写出只支持 `.srt` / `.vtt`，`.ass` / `.ssa` 会以 `unsupported subtitle output format` 拒绝——带样式的 ASS 输出由 `bilingual.ass` 的渲染路径负责。
 

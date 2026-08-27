@@ -73,7 +73,8 @@ _RESPONSE_CORRECTION = (
     "The previous response was invalid. Return every requested id "
     "exactly once with non-empty translated text."
 )
-# 传输退避的硬上限：2**5=32 已越界，因此指数序列止步于 30 秒。
+# 传输退避的硬上限：指数基数与服务端 Retry-After 都经 min() 钳到这里，指数序列从
+# 2**5=32 起一律按 30 秒计。
 _MAX_BACKOFF_SECONDS = 30
 # 结构性无效响应的纠错预算，独立于 --max-retries（传输预算）：最多 2 次纠错重试，
 # 连同首次请求共 3 次。挂在 --max-retries 上会让「网络别重试」的用户连纠错也失去。
@@ -130,7 +131,8 @@ def translate_batch_with_retries(
                 and error.retry_after >= 0
             ):
                 # 服务端显式指定了重试时刻，尊重原值不加抖动，只做上限钳位。
-                # provider 侧已保证非负有限，这里的检查是防御冗余。
+                # `_parse_retry_after` 已过滤掉非有限值与负值，这里再查一遍是针对
+                # `retry_after` 这个公开字段的防御：它也可由 provider 之外的调用方构造。
                 delay = round(min(error.retry_after, _MAX_BACKOFF_SECONDS), 2)
             else:
                 delay = _backoff_delay(min(2**transport_retries, _MAX_BACKOFF_SECONDS))

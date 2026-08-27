@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -302,10 +303,12 @@ def semantic_repair_batch(
 
 
 def _parse_retry_after(value: str | None) -> float | None:
-    """按 RFC 9110 解析 ``Retry-After``：delta-seconds 或 HTTP-date，返回非负秒数。
+    """按 RFC 9110 解析 ``Retry-After``：delta-seconds 或 HTTP-date，返回非负有限秒数。
 
     返回值**不设上限**，退避上限由调用侧（``xvt.pipeline.translation``）钳位：本模块
-    不能反向 import pipeline 包，那既会成环也违反包内依赖方向。
+    不能反向 import pipeline 包，那既会成环也违反包内依赖方向。但非有限值在这里就被
+    滤成 ``None``——``min(inf, 上限)`` 虽仍是上限，可这个字段本身是公开的重试语义，
+    不该向外传出 ``inf``。
     """
     if value is None:
         return None
@@ -317,7 +320,11 @@ def _parse_retry_after(value: str | None) -> float | None:
     # 本函数、污染上层的错误分类。整数以外的形态（``1.5``、``inf``、``nan``、下划线、
     # 负号）一律不按 delta-seconds 接受，落到 HTTP-date 分支后返回 None、退回指数退避。
     if re.fullmatch(r"[0-9]+", text):
-        return float(text)
+        seconds = float(text)
+        if not math.isfinite(seconds):
+            # 纯数字串仍可能溢出成 inf（例如 400 个 '1'），float 不会报错。
+            return None
+        return seconds
     try:
         moment = parsedate_to_datetime(text)
     except (TypeError, ValueError):

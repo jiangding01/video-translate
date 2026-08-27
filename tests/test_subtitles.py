@@ -2,9 +2,10 @@ import codecs
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pysubs2
-from pysubs2.exceptions import Pysubs2Error
+from pysubs2 import Pysubs2Error
 
 from xvt.errors import ExitCode, UserInputError
 from xvt.models import Cue
@@ -205,7 +206,7 @@ class SubtitlesTest(unittest.TestCase):
 
         message = str(captured.exception)
         self.assertIn("not UTF-8 encoded", message)
-        self.assertIn("转成 UTF-8", message)
+        self.assertIn("convert it to UTF-8", message)
         self.assertIn(str(path), message)
         self.assertEqual(captured.exception.category, "invalid_input")
         self.assertEqual(captured.exception.exit_code, ExitCode.USER_ERROR)
@@ -229,7 +230,7 @@ class SubtitlesTest(unittest.TestCase):
                 with self.assertRaises(UserInputError) as captured:
                     load_subtitles(path)
 
-                self.assertIn(f"疑似 {family} 编码", str(captured.exception))
+                self.assertIn(f"it looks like {family}", str(captured.exception))
 
     def test_utf8_decode_failure_without_bom_omits_the_encoding_guess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -239,7 +240,7 @@ class SubtitlesTest(unittest.TestCase):
             with self.assertRaises(UserInputError) as captured:
                 load_subtitles(path)
 
-        self.assertNotIn("疑似", str(captured.exception))
+        self.assertNotIn("it looks like", str(captured.exception))
 
     def test_encoding_error_reports_the_display_path(self) -> None:
         """调用方先 copy2 成 Job 内部副本时，报错必须指向用户传入的原始路径。"""
@@ -274,6 +275,89 @@ class SubtitlesTest(unittest.TestCase):
         self.assertIn(str(path), message)
         self.assertEqual(captured.exception.exit_code, ExitCode.USER_ERROR)
         self.assertNotIn("just prose", message)
+
+    def test_non_pysubs2_parse_errors_become_user_input_errors_with_the_path(self) -> None:
+        """各格式 parser 抛的是裸 KeyError/ValueError/NotImplementedError，不是 Pysubs2Error。
+
+        pysubs2 按内容而非后缀嗅探格式，所以 `.srt` 后缀同样可能落到 sami/ttml parser 上；
+        只捕获 Pysubs2Error 时这些异常会穿透（裸 traceback）或被错分成 workflow 错误。
+        """
+
+        cases = (
+            # sami parser 的 `int(dict(attrs)["start"] or 0)`：缺 start 属性 → 裸 KeyError。
+            ("sami-in-srt", "hi.srt", "<SAMI><BODY><SYNC><P>hi</SYNC></BODY></SAMI>"),
+            # ttml parser 的时间表达式不认识时抛 NotImplementedError（RuntimeError 子类，
+            # 只兜 Pysubs2Error/ValueError 时会被错分成 workflow 错误、退出码 4）。
+            (
+                "ttml-in-srt",
+                "hi.srt",
+                '<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+                '<p begin="banana" end="orange">hi</p></div></body></tt>',
+            ),
+            # substation parser 解析颜色的 int(..., 16) → 裸 ValueError，消息不含路径。
+            (
+                "bad-ass-color",
+                "hi.ass",
+                "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour\n"
+                "Style: Default,Arial,20,&HZZZZZZ&\n\n[Events]\n"
+                "Format: Layer, Start, End, Style, Text\n"
+                "Dialogue: 0,0:00:01.00,0:00:02.00,Default,hi\n",
+            ),
+        )
+        for label, name, body in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / name
+                path.write_text(body, encoding="utf-8")
+
+                with self.assertRaises(UserInputError) as captured:
+                    load_subtitles(path)
+
+                message = str(captured.exception)
+                self.assertIn("could not be parsed as", message)
+                self.assertIn(str(path), message)
+                self.assertEqual(captured.exception.category, "invalid_input")
+                self.assertEqual(captured.exception.exit_code, ExitCode.USER_ERROR)
+
+    def test_load_subtitles_lets_os_errors_through(self) -> None:
+        """读文件失败是依赖/环境错误，不能被兜成 invalid_input。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hi.srt"
+            _write_srt(path, ["Hello"])
+            with (
+                patch("pysubs2.load", side_effect=PermissionError("denied")),
+                self.assertRaises(PermissionError),
+            ):
+                load_subtitles(path)
+
+    def test_bom_less_utf16_parse_failure_names_the_suspected_encoding(self) -> None:
+        """无 BOM 的 UTF-16 能被 utf-8 解码「成功」，只会在 parser 里炸掉。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wide.srt"
+            # utf-16-be 的 ASCII 正文高位字节全是 \x00，是合法 UTF-8，走不到编码报错分支。
+            path.write_bytes(
+                "1\n00:00:01,000 --> 00:00:02,500\nHello\n".encode("utf-16-be"),
+            )
+
+            with self.assertRaises(UserInputError) as captured:
+                load_subtitles(path)
+
+        message = str(captured.exception)
+        self.assertIn("could not be parsed as srt", message)
+        self.assertIn("NUL bytes", message)
+        self.assertIn("UTF-16/32 without a BOM", message)
+
+    def test_plain_parse_failure_omits_the_nul_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prose.srt"
+            path.write_text("this is not a subtitle at all\n", encoding="utf-8")
+
+            with self.assertRaises(UserInputError) as captured:
+                load_subtitles(path)
+
+        self.assertNotIn("NUL bytes", str(captured.exception))
 
     def test_saves_bilingual_srt_with_target_first(self) -> None:
         cue = Cue(

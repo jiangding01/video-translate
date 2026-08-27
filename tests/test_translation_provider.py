@@ -587,6 +587,10 @@ class TranslationProviderTest(unittest.TestCase):
         self.assertIsNotNone(far)
         self.assertGreater(far, 30.0)
 
+        # 纯数字串也能溢出成 inf：float("1" * 400) 不报错，直接返回 inf。放行它会让
+        # retry_after 这个公开字段带出非有限值，只靠调用侧的 isfinite 兜底太脆。
+        self.assertIsNone(self._retry_after_for_header("1" * 400))
+
         for value in ("soon", "inf", "nan", "1.5", "-1", "1_0", "²", "٥", "", "   "):
             with self.subTest(value=value):
                 # '²'.isdigit() 为 True 但 float('²') 抛 ValueError，正则 \d 又会放行 '٥'：

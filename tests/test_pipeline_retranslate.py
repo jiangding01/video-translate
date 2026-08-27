@@ -195,7 +195,11 @@ class CueRetranslationTest(unittest.TestCase):
             current[1]["target_text"] = "等待期间人工改过"
             translated_path.write_text(json.dumps(current), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "manifest no longer matches current inputs"):
+            # 文案要涵盖「输入没变、但策略/版本解析变了」这条真实路径，并给出处置。
+            with self.assertRaisesRegex(
+                ValueError,
+                "manifest does not match what this xvt version would generate",
+            ):
                 apply_cue_retranslation(
                     job_file,
                     stale_response,
@@ -221,13 +225,17 @@ class CueRetranslationTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "manifest no longer matches current inputs"):
+            # 文案要涵盖「输入没变、但策略/版本解析变了」这条真实路径，并给出处置。
+            with self.assertRaises(ValueError) as captured:
                 apply_cue_retranslation(
                     job_file,
                     old_prompt_response,
                     cue_ids=(2,),
                     target_language="zh-CN",
                 )
+            message = str(captured.exception)
+            self.assertIn("does not match what this xvt version would generate", message)
+            self.assertIn("rerun xvt retranslate-cues", message)
 
         batch = batch_data["batches"][0]
         self.assertEqual(result.mode, "agent")

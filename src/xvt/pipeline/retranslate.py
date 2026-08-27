@@ -123,7 +123,15 @@ def apply_cue_retranslation(
             raise ValueError("job has no valid cue retranslation manifest")
         stored_manifest = json.loads(batches_path.read_text(encoding="utf-8"))
         if stored_manifest != manifest:
-            raise ValueError("cue retranslation manifest no longer matches current inputs")
+            # 失配不等于「输入被改动」：manifest 里还压了翻译策略、prompt 版本与语义分组
+            # 版本，升级 XVT 后同一份输入也会生成不同的 manifest。文案必须涵盖这条路径，
+            # 否则用户会去核对一个字节都没变的输入。
+            raise ValueError(
+                "cue retranslation manifest does not match what this xvt version would "
+                "generate (inputs or translation policy resolution may have changed, "
+                "e.g. after an upgrade); rerun xvt retranslate-cues to regenerate the "
+                "manifest and retranslate with the new batches"
+            )
         expected_ids = set(cue_ids)
         response = json.loads(Path(response_file).read_text(encoding="utf-8"))
         if not isinstance(response, dict) or response.get("fingerprint") != manifest["fingerprint"]:

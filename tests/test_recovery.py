@@ -537,6 +537,72 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("relink-burned-output", plan.primary_command or "")
         self.assertIn("continue", plan.alternative_commands[0])
 
+    def test_polished_relink_navigation_requires_the_candidate_to_be_final(self) -> None:
+        """polished 的 render 可能改写 translated_cues：那时 relink 会白做。
+
+        语义校对已 approved 但 finalize 中断（translated_cues 还不是最终候选）时，
+        continue 走 ``_finalize_candidate`` 会重写 translated_cues，烧录派生指纹随即失效，
+        重新关联的成品必然被重烧录取代——只能引导 continue，不能引导 relink。
+        """
+
+        from xvt.workflow import _record_burn_fingerprint
+
+        for satisfied, expected_category in ((False, "retryable"), (True, "awaiting_input")):
+            with self.subTest(semantic_review_satisfied=satisfied):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    media = root / "video.mp4"
+                    media.write_bytes(b"media")
+                    burned = root / "burned.mp4"
+                    burned.write_bytes(b"burned-output")
+                    job = create_job(str(media), root, {})
+                    job.config["workflow"] = {
+                        "target_language": "zh-CN",
+                        "burn": True,
+                        "translation_quality": "polished",
+                    }
+                    self._add_artifact(job, root, "source_cues")
+                    self._add_artifact(job, root, "translated_cues")
+                    self._add_artifact(job, root, "translated_srt", content="1\n")
+                    self._add_artifact(job, root, "bilingual_srt", content="1\n")
+                    self._add_artifact(
+                        job, root, "media_qa", content='{"status":"pass","issues":[]}'
+                    )
+                    qa_report = self._add_artifact(
+                        job,
+                        root,
+                        "translated_subtitle_qa",
+                        content='{"status":"pass","issues":[]}',
+                    )
+                    job.artifacts.append(
+                        Artifact("burned_video", str(burned), file_checksum(burned))
+                    )
+                    job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+                    job_file = save_job(job)
+                    _record_burn_fingerprint(job_file)
+                    burned.unlink()
+                    qa_report.write_text("{}", encoding="utf-8")
+
+                    with (
+                        patch("xvt.workflow.translation_polish_satisfied", return_value=True),
+                        patch("xvt.workflow.agent_semantic_review_waiting", return_value=False),
+                        patch("xvt.workflow.semantic_review_waiting", return_value=False),
+                        patch("xvt.workflow.semantic_review_approved", return_value=True),
+                        patch(
+                            "xvt.pipeline.semantic.semantic_review_satisfied",
+                            return_value=satisfied,
+                        ),
+                    ):
+                        plan = build_recovery_plan(job_file)
+
+                self.assertEqual(plan.advance_steps, ("render", "burn"))
+                self.assertEqual(plan.category, expected_category)
+                if satisfied:
+                    self.assertIn("relink-burned-output", plan.primary_command or "")
+                else:
+                    self.assertNotIn("relink-burned-output", plan.primary_command or "")
+                    self.assertIn("continue", plan.primary_command or "")
+
     def test_recovery_plan_describes_agent_translation_prerequisite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

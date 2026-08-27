@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 610 个测试、76 个子测试，全部通过 |
+| 自动化测试 | 648 个测试、108 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -43,6 +43,7 @@
 - 支持 MLX Whisper 和 faster-whisper，保留词级时间戳；faster-whisper 提供真实百分比，MLX 提供运行时长心跳。
 - 分段综合停顿、标点、字幕时长和显示宽度；`conservative`、`balanced`、`compact` 预设仅调整 ASR 的停顿和最大时长，默认保持平衡行为。
 - 可导入 SRT、VTT、ASS 和 SSA 源字幕，默认保留用户时间轴。
+- 输入字幕必须是 UTF-8（带不带 BOM 都可以）。非 UTF-8（GBK、Big5、Shift_JIS、带 BOM 的 UTF-16/32）与解析失败都归为 `invalid_input`（退出码 2），报错指向用户传入的原始路径并给出 `iconv` 转码建议；带 BOM 的 UTF-16/32 会点名疑似编码，无 BOM 的 UTF-16/32 走解析失败分支，消息里按 NUL 字节提示疑似宽字符编码。XVT 不做本地字符集探测——宽松解码器会把内容「成功」解成乱码，乱码会流进翻译 API 并固化进 checksum。
 - 源字幕可直接作为 `run` 输入创建纯字幕 Job，无需媒体即可翻译、QA、恢复和导出三种 SRT；无媒体时不生成 ASS，也不支持预览、烧录或重分段。
 - `--align-subtitles` 会额外运行 ASR，并用顺序模糊对齐修正整体偏移或漂移；它必须与 `--subtitles` 同用。强制对齐 fail-closed：置信度低于阈值失败（`--allow-low-confidence-alignment` 可显式放行），对齐后字幕 QA 出现 error 级问题同样失败且该参数不放行。去掉 `--align-subtitles` 保留的是源字幕原时间轴，不是 ASR 分段；需要 ASR 时间轴要用 `--source-strategy asr`。
 - cue 结束时间、相邻重叠和媒体边界会在分段与 QA 阶段校正或阻断。
@@ -59,7 +60,7 @@
 - 译文 QA 对命中源 cue 的术语确定性检查目标词；违规生成 `glossary_violation`、保留 QA 报告并阻断渲染和烧录。必需术语优先取端到端 Job 的 `config.workflow` 策略快照，顶层 `config.translation_policy` 只是原子 Job 的回退位置；`prepare-translation` 在最后一次落盘前写入该顶层配置，兼容 API 模式下也不会被随后的 `load_job` 丢弃。
 - API 翻译按批次保存进度，指纹包含源 cue checksum、语言、端点、模型、批次大小、提示词版本、语义分组版本和翻译策略。
 - 默认兼容 API 翻译批次为 25 个 cue，请求超时为 180 秒；单个新 Job 可通过 `--batch-size` / `--timeout-seconds` 覆盖，已创建 Job 始终复用持久化配置。
-- 429、部分 4xx、5xx、网络异常、远端断连、响应读取连接重置、分块响应中途断开（`IncompleteRead` / `BadStatusLine` / `LineTooLong`）和 TLS 连接中途终止（`SSLEOFError` / `SSLZeroReturnError` / `SSLSyscallError`）具有明确的传输重试分类；证书与握手类 `SSLError` 在请求和响应两个阶段都立即失败（请求阶段经 `URLError` 包装，按 `reason` 判定）。传输故障默认最多重试 4 次，优先使用最长 30 秒的有效 `Retry-After`，否则指数退避；结构性无效响应另有固定 1 次纠错重试，两个预算互不消耗。
+- 429、部分 4xx、5xx、网络异常、远端断连、响应读取连接重置、分块响应中途断开（`IncompleteRead` / `BadStatusLine` / `LineTooLong`）和 TLS 连接中途终止（`SSLEOFError` / `SSLZeroReturnError` / `SSLSyscallError`）具有明确的传输重试分类；证书与握手类 `SSLError` 在请求和响应两个阶段都立即失败（请求阶段经 `URLError` 包装，按 `reason` 判定）。传输故障默认最多重试 4 次，优先使用最长 30 秒的有效 `Retry-After`（RFC 9110 的 delta-seconds 与 HTTP-date 两种形态，其余值退回本地退避），否则按 equal jitter 指数退避；结构性无效响应另有固定 2 次纠错重试，两个预算互不消耗，且传输重试保留上一轮的纠正提示。
 - 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID；`id` 必须是真正的整数，JSON 布尔值（`true` / `false`）与全部其他解析器一致被拒绝，不再当作 cue 1。
 - 标准 Agent manifest 记录 `source_cues_checksum`，回填时拒绝源 cue 已变化的陈旧响应；已登记的 manifest 若 checksum 失效、缺失或内容损坏同样拒绝回填并引导重新 `prepare-translation`。从未登记 manifest 的极旧 Job 与没有该字段的旧 manifest 仍按原样接受，只读查询路径不受影响。
 - 翻译在不改动 cue 的前提下建立确定性语义组：句末标点或 650ms 间隔结束组，组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限按软标点、连接词前和最大停顿择边；单个超长 cue 单独成组。provider 批次只按完整组装箱，批次外前后各一个完整相邻组仅作只读上下文。
@@ -75,10 +76,11 @@
 - 16:9 横版英文在 64 个显示单位以内通过，65 到 72 为警告，超过 72 需要复核。窄画幅会收紧限制，中文限制更严格。
 - ASR / `asr_resegmented` 的 `low_timing_confidence` 为 warning；对齐或用户导入字幕的低置信度仍为 review，需确认后继续。
 - ASS 使用独立的中英文字体和字号。macOS 默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`。
-- cue 文本中的字面 `{` `}` 在 ASS 渲染时转义为 libass 的 `\{` `\}`，不再被当作覆盖标签块吞掉，`{\an8}` 一类内容也不会真的改变字幕位置；`\N` 换行与 `{\rSource}` 样式切换是渲染器拼接的结构，不参与转义。反斜杠刻意不转义（ASS 无标准反斜杠转义，libass 原样输出未知序列）。SRT/VTT 导出保留花括号。已知边界：`load_subtitles`（`--subtitles`、`--translation-subtitles`、`import-translation`）仍按 SSA 标签块剥除 `{...}`，导出→人工编辑→导回链路会丢内容；人工修订 SRT 走独立纯文本解析器，不受影响。
+- cue 文本中的字面 `{` `}` 在 ASS 渲染时转义为 libass 的 `\{` `\}`，不再被当作覆盖标签块吞掉，`{\an8}` 一类内容也不会真的改变字幕位置；`\N` 换行与 `{\rSource}` 样式切换是渲染器拼接的结构，不参与转义。反斜杠刻意不转义（ASS 无标准反斜杠转义，libass 原样输出未知序列）。SRT/VTT 导出保留花括号。导入端已同口径收口：`load_subtitles`（`--subtitles`、`--translation-subtitles`、`import-translation`）按 pysubs2 解析出的实际格式分叉，SRT/VTT 保留字面花括号、只剥 `{\…}` 形态的覆盖块，ASS/SSA 仍整段剥除（那里 `{...}` 是标签语法本身），导出→人工编辑→导回链路不再丢内容；人工修订 SRT 走独立纯文本解析器，同样保留。仍存在的限制：SRT/VTT 里 `{\…}` 形态的字面文本与真覆盖标签无法区分，仍会被剥除。
 - 字幕 QA error 记为 `failed`；纯 `needs_review` 记为 `awaiting_input`。两者都会停止工作流且不允许继续烧录，原子命令也不会误发 `cli_completed`。
 - 高级原子 `xvt burn` / `xvt preview` 与端到端链路共用同一道 fail-closed 译文 QA 门（`pipeline.review.review_gate_satisfied`），不能绕过 QA：要求 checksum 有效的译文 cue 与 QA 报告，`pass` / `warning` 放行，`needs_review` 只在报告内全部 review 问题都被当前有效确认覆盖时放行，error、缺失、checksum 失效或结构异常一律拒绝。确认通道只有 `continue --acknowledge-subtitle-review`，因此原子 Job 的报错文案指向重跑 `xvt translate`，不指向不可用的 `continue`。
 - 语义复核确认后，若译文候选和渲染产物已有效或被补齐，`translate` stage 会收口为 `succeeded` 并清除旧 QA 错误；字幕 QA 的独立 `needs_review` 仍需单独确认。
+- 「译文已满足」的判定包含译文 QA 报告：需要 checksum 有效的 `translated_cues`、`translated_srt`、`bilingual_srt` 与 `translated_subtitle_qa` 四者齐备（`workflow._translation_satisfied` 与 polished 链路的 finalize 短路共用同一口径）。漏掉 QA 报告会让报告单独失效的 Job 被判成「已完成」而空转，`continue` 永不重建。
 - 字幕 QA `needs_review` 被确认后，`continue` 会清除 `translate` stage 上的过期阻断错误（要求 QA 门已放行、确认仍对当前源 cue 有效、译文 cue 与两份 SRT 均有效）；旧 Job 下次 `continue` 自动收口。
 
 ### 烧录和媒体 QA
@@ -306,7 +308,7 @@ media-qa.json
 - 不支持远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。
 - `continue` 只适用于带 `job.config.workflow` 的端到端 Job。旧 Job 继续使用原子命令。
-- 字面花括号只在渲染和导出侧闭环。导入端 `load_subtitles` 读的是 pysubs2 `plaintext`，仍按 SSA 标签块剥除 `{...}`，因此「导出 SRT → 人工编辑 → `import-translation`（或 `--subtitles` / `--translation-subtitles`）导回」会丢失花括号内容；导入端保留字面花括号同时不误吞真实 SSA 标签，是待做的后续项。人工修订 SRT 走独立纯文本解析器，不受影响。
+- 字面花括号在渲染、导出和导入三侧已闭环（导入端按实际格式分叉，SRT/VTT 保留、ASS/SSA 剥除）。仍存在的边界：SRT/VTT 正文里 `{\…}` 形态的字面文本（`{\an8}`、`{\alpha}` 一类）与真覆盖标签无法区分，仍会被剥除，`{` 与 `\` 之间有空白也一样；SRT 文本里的字面 `\N` 仍被当作换行标签转换。
 
 ## 后续任务规划
 
@@ -345,9 +347,9 @@ media-qa.json
 - **已完成（PR #67）**：真实 Job 复现的两个恢复语义矛盾——R2.5 字幕 QA 确认后 `translate` stage 收口（2026-08-01 polished E2E Job 复现并实证修复）、R2.4 烧录成品缺失误报"媒体 QA 未过"的文案拆分（2026-07-16/18 Job 复现）。
 - **已完成（PR #68，堆叠于 #67）**：R1 全部四项——CI 增加 Python 3.11/3.13 矩阵与 `uv build`、补打并推送 `v0.1.0` / `v0.1.1` tag 且 AGENTS 记录发版流程、`tests/test_pipeline_imports.py` 守卫 pipeline 依赖方向、16 个跨模块 `_` 前缀符号公有化。R1.3 落地时发现 semantic ↔ review/revision 存在函数级惰性 import 打破加载期循环，留待 R3.1 一并消解。
 - **已完成**：R2.1 `_run_command` 分发拆解——26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表，`_run_command` 从 622 行缩减至 4 行查表逻辑，纯搬移不改行为。
-- **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
+- **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；局部重译是显式例外：`apply-cue-retranslation` 需要 `xvt apply` 拿不到的 cue ID 与目标语言，因此无论响应带不带 `task`（协议一致的重译响应只有 `fingerprint` + `items`，靠「有有效重译 manifest 且 `translate` 在等输入」识别）都以 `invalid_input` 报错并给出可复制的手工命令；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
 - **已完成**：R2.3 译文与源文修订 SRT 人工通道——两类 JSON 模板旁均写出同 fingerprint 的 `*-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前文本），可用任意字幕工具编辑；对应 `apply-*-review-fixes` 按后缀识别，统一入口 `xvt apply` 按固定文件名路由。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。JSON/SRT 汇聚为同一 `changes` 语义；旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出两种载体。
-- **已完成**：R2.4 两阶段——`relink-burned-output` 仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径；legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。恢复导航在其余静态条件满足、但已登记成品缺失或 checksum 失效时返回 `awaiting_input`，首选重新关联、备选显式重烧；建议仅表示可能可关联，relink 会复核源媒体内容。`batch-continue` 将该状态作为停止态，不自动重烧。媒体 QA、proof 或 fingerprint 无效仍为 `retryable`。详见 [R2.4 技术方案](docs/R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
+- **已完成**：R2.4 两阶段——`relink-burned-output` 仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径；legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。恢复导航在其余静态条件满足、但已登记成品缺失或 checksum 失效时返回 `awaiting_input`，首选重新关联、备选显式重烧；建议仅表示可能可关联，relink 会复核源媒体内容。`batch-continue` 将该状态作为停止态，不自动重烧。媒体 QA、proof 或 fingerprint 无效仍为 `retryable`。polished 质量另加一条限制：只有语义候选已收尾（语义校对通过且 `translated_cues` 与最终候选一致）才给 relink 导航，否则 continue 的收尾会改写译文 cue、让刚关联的成品指纹失效。详见 [R2.4 技术方案](docs/R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
 - **待做**：polished Agent 路径真实 E2E 与默认质量决策；随后按 R3.1 provider 传输统一 → R3.2 内容寻址 step 缓存推进架构演进。
 
 全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。

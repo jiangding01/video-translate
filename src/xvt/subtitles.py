@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 
 import pysubs2
-from pysubs2.exceptions import Pysubs2Error
 
 from xvt.errors import UserInputError
 from xvt.models import Cue
@@ -79,12 +78,18 @@ def load_subtitles(
         subtitles = pysubs2.load(str(subtitle_path), encoding="utf-8-sig")
     except UnicodeDecodeError as error:
         raise UserInputError(_encoding_error_message(subtitle_path, reported_path)) from error
-    except Pysubs2Error as error:
-        # Pysubs2Error 直接继承 Exception，不包装会穿透 CLI 顶层兜底变成裸 traceback。
-        raise UserInputError(
-            f"subtitle file could not be parsed as "
-            f"{subtitle_path.suffix.lower().lstrip('.')}: {reported_path} ({error})"
-        ) from error
+    except OSError:
+        # pysubs2.load 自己 open 文件，读取失败（权限、被删、坏 I/O）属于依赖/环境错误，
+        # 不是「字幕内容不合法」，保持原异常语义交给上层分类。
+        raise
+    except Exception as error:
+        # 这里必须兜住解析阶段的全部 Exception，而不只是 Pysubs2Error：pysubs2 各格式
+        # parser（sami/ttml/substation/webvtt/subrip 等）在遇到坏内容时抛的是裸
+        # KeyError/ValueError/TypeError/NotImplementedError，而不是 Pysubs2Error；并且
+        # pysubs2 按文件内容嗅探格式而非后缀，所以任意后缀都可能落到任意 parser 上
+        # （`.srt` 装 SAMI 内容 → sami parser 抛裸 KeyError）。不统一归到 invalid_input，
+        # 轻则穿透 CLI 顶层兜底变成裸 traceback，重则被错分成 workflow/依赖错误。
+        raise UserInputError(_parse_error_message(subtitle_path, reported_path, error)) from error
     keep_literal_braces = subtitles.format in _LITERAL_BRACE_INPUT_FORMATS
     cues = []
     for event in subtitles:
@@ -127,11 +132,37 @@ def _encoding_error_message(subtitle_path: Path, reported_path: Path) -> str:
         hint, source_encoding = "", "gb18030"
     else:
         family = "UTF-32" if len(matched) == 4 else "UTF-16"
-        hint, source_encoding = f"疑似 {family} 编码，", family.lower()
+        hint, source_encoding = f"it looks like {family}; ", family.lower()
     return (
         f"subtitle file is not UTF-8 encoded: {reported_path}; {hint}"
-        f"请先转成 UTF-8（例如 iconv -f {source_encoding} -t utf-8 old.srt > new.srt，"
-        "或用编辑器另存为 UTF-8）"
+        f"convert it to UTF-8 first (for example "
+        f"iconv -f {source_encoding} -t utf-8 old.srt > new.srt, "
+        "or re-save it as UTF-8 in an editor)"
+    )
+
+
+def _parse_error_message(subtitle_path: Path, reported_path: Path, error: Exception) -> str:
+    """拼解析失败的报错；文件头含 NUL 字节时补一句「疑似无 BOM 的 UTF-16/32」提示。
+
+    无 BOM 的 UTF-16/32 能被 utf-8 解码器「成功」解出夹带 NUL 的字符串，于是不会走
+    UnicodeDecodeError 分支，而是在 parser 里以各种奇怪异常炸掉。合法 UTF-8 字幕正文
+    几乎不含 NUL，因此这个判据高精度、低误报。只读头部 4KB，不回显文件内容。
+    """
+
+    header = b""
+    with contextlib.suppress(OSError):
+        with subtitle_path.open("rb") as handle:
+            header = handle.read(4096)
+    encoding_hint = ""
+    if b"\x00" in header:
+        encoding_hint = (
+            "; the file contains NUL bytes, so it may be UTF-16/32 without a BOM — "
+            "convert it to UTF-8 first"
+        )
+    return (
+        f"subtitle file could not be parsed as "
+        f"{subtitle_path.suffix.lower().lstrip('.')}: {reported_path} "
+        f"({type(error).__name__}: {error}){encoding_hint}"
     )
 
 

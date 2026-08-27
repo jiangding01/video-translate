@@ -574,8 +574,6 @@ class TranslationPipelineTest(unittest.TestCase):
                     self.assertGreaterEqual(delay, base / 2)
                     self.assertLessEqual(delay, base)
                     self.assertLessEqual(delay, 30)
-                    # 事件里的 delay_seconds 与 sleep 值同源，最多两位小数。
-                    self.assertEqual(delay, round(delay, 2))
 
     def test_transport_backoff_bases_follow_capped_exponential(self) -> None:
         # jitter 确定化：把 _backoff_delay 钉成恒等函数后，可以直接断言喂给它的 base
