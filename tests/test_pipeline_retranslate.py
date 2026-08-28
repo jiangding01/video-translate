@@ -391,6 +391,66 @@ class CueRetranslationTest(unittest.TestCase):
         self.assertTrue(all(event.data["batch_total"] == 1 for event in batch_events))
 
 
+class CueRetranslationInternalResponseReadTest(unittest.TestCase):
+    """API 模式读的是自己刚写下并登记的产物，不能借用户输入 helper 的错误归类。"""
+
+    def test_api_mode_does_not_route_its_own_response_through_the_user_input_helper(
+        self,
+    ) -> None:
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.test/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello", source_language="en"))]),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello", "旧译文", target_language="zh-CN"))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 1000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path)),
+                    Artifact("translated_cues", str(translated_path)),
+                    Artifact("media_info", str(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+
+            def forbidden(*_args, **_kwargs):
+                raise AssertionError("internal artifact must not go through the user-input helper")
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    side_effect=lambda *_a, **_k: {1: "新译文"},
+                ),
+                patch("xvt.pipeline.retranslate.load_user_response_json", forbidden),
+            ):
+                retranslate_cues(
+                    job_file,
+                    cue_ids=(1,),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                )
+
+            repaired = json.loads(translated_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(repaired[0]["target_text"], "新译文")
+
+
 class CueRetranslationPolicyResolutionTest(unittest.TestCase):
     """守卫：重译 manifest 的策略解析与译文 QA 的术语校验必须走同一口径。
 

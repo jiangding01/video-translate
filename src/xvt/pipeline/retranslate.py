@@ -28,9 +28,9 @@ from xvt.pipeline.common import (
 from xvt.pipeline.translation import (
     TranslationRunResult,
     finalize_translation,
-    load_translation_response,
     resolved_translation_policy,
     translate_batch_with_retries,
+    translations_from_response,
 )
 from xvt.process import raise_if_cancelled
 from xvt.recovery import file_checksum as readonly_file_checksum
@@ -209,6 +209,36 @@ def apply_cue_retranslation(
     target_language: str,
     event_sink: EventSink | None = None,
 ) -> tuple[Path, ...]:
+    """回填用户（或 Agent）提交的重译响应文件。"""
+
+    return _apply_cue_retranslation(
+        job_file,
+        response_file,
+        cue_ids=cue_ids,
+        target_language=target_language,
+        event_sink=event_sink,
+        from_job_artifact=False,
+    )
+
+
+def _apply_cue_retranslation(
+    job_file: str | Path,
+    response_file: str | Path,
+    *,
+    cue_ids: tuple[int, ...],
+    target_language: str,
+    event_sink: EventSink | None,
+    from_job_artifact: bool,
+) -> tuple[Path, ...]:
+    """回填实现。``from_job_artifact`` 区分响应文件的来源，只影响读失败的归类。
+
+    API 模式下这份文件是本模块自己刚 ``write_json`` 落盘并登记为
+    ``cue_retranslation_response`` 的产物，不是用户敲的命令行参数：走
+    ``load_user_response_json`` 会把内部 I/O 故障重贴成 ``UserInputError``（退出码 2），
+    还让用户去检查一个他从没输入过的路径。直读让 ``OSError`` / ``JSONDecodeError``
+    按内部故障归到退出码 3。
+    """
+
     job = load_job(job_file)
     current_stage = StageName.TRANSLATE
     set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
@@ -231,10 +261,14 @@ def apply_cue_retranslation(
                 "manifest and retranslate with the new batches"
             )
         expected_ids = set(cue_ids)
-        response = load_user_response_json(response_file, what="cue retranslation response")
+        response = (
+            json.loads(Path(response_file).read_text(encoding="utf-8"))
+            if from_job_artifact
+            else load_user_response_json(response_file, what="cue retranslation response")
+        )
         if not isinstance(response, dict) or response.get("fingerprint") != manifest["fingerprint"]:
             raise ValueError("cue retranslation response fingerprint does not match current inputs")
-        translations = load_translation_response(response_file, expected_ids)
+        translations = translations_from_response(response, expected_ids)
         repaired = [
             replace(
                 cue,
@@ -348,11 +382,12 @@ def retranslate_cues(
         },
     )
     add_artifact(job, "cue_retranslation_response", response_path, event_sink)
-    paths = apply_cue_retranslation(
+    paths = _apply_cue_retranslation(
         job_file,
         response_path,
         cue_ids=cue_ids,
         target_language=target_language,
         event_sink=event_sink,
+        from_job_artifact=True,
     )
     return TranslationRunResult(mode, (response_path, *paths))

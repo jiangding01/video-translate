@@ -33,6 +33,9 @@
 
 ### Fixed
 
+- Ctrl-C 的中断收尾不再被一个读不出的 `job.json` 顶掉。`interrupt_running_stage` 是中断处理块的第一条语句，而它的 `except` 元组里没有 `XvtError`：`job.json` 在运行期间被删除或改坏时 `load_job` 抛出的 `UserInputError` 会直接逃逸，整个收尾（`cli_failed` 事件、普通模式的恢复引导、130/143 退出码）全部落空，用户只看到一个退出码 1 的裸异常。中断记账本来就是尽力而为，任何一种读不出 Job 的方式现在都只让它安静地返回 `False`。
+- 批处理普通模式的条目导航会转义控制字符。条目里的 `input` 直接来自目录扫描，而文件名可以合法包含 `\r` 与 ESC：裸 `\r` 能覆盖已经打印的行，ESC 序列能改颜色和光标位置，合起来足以在 XVT 自己的输出里伪造一条 `next:` 命令（`shlex.quote` 挡不住——单引号内的控制字符照样被终端解释）。现在条目状态、`input`、`job.json` 路径、错误、恢复建议与全部命令都经统一转义，非可打印字符显示为 `\r` / `\x1b` 这样的可见形式，中文等正常 Unicode 不受影响。
+
 - 未回填的局部重译不再被字幕 QA 阻断分支遮蔽。术语死锁（阻断的 error 全是 `glossary_violation`）的唯一出口就是 `retranslate-cues`，而 Agent 模式跑完它之后译文 QA 还没重跑，`SUBTITLE_QA` 仍停在 `failed`——`qa_blocked` 分支排在重译等待之前，于是 `status` 把这段等待重报成 `manual_fix` 并**再次**给出用户刚跑过的那条 `retranslate-cues`，端到端 Job 上 `advance_steps` 还与 `plan_advance_steps` 的 `('await_cue_retranslation',)` 自相矛盾（`status` 说去重译，`continue` 说在等回填）。重译等待正是这次 QA 阻断的处置进行时，判定现在提到 `qa_blocked` 之前：`status` 归 `awaiting_input`，给出拼好 cue ID 与目标语言的 `apply-cue-retranslation`，端到端 Job 的 `advance_steps` 与 `continue` 一致。原子与端到端两条分支共用同一份文案与命令。
 - `polished` 质量的原子 Job 不再被引导去做一次会摧毁润色腿的「零 API 成本重建」。译文 QA 报告单独失效时，恢复计划此前无条件推荐 `xvt import-translation`，理由是它零翻译 API 成本重建 QA 与渲染产物；但 `import-translation` 与其余回填路径共用 `finalize_translation`，在 `polished` Job 上会走 draft 分支——只写出一份新的润色草稿，QA 不重建、渲染不执行，润色候选、语义校对结论与最终译文一并失效，整条润色腿要重跑（真实模型成本）。`atomic_translated_qa_rebuild_command` 现在对 `polished` Job 返回 `None`，`status` 落回诚实的 `manual_fix`（重跑 `translate`），`xvt burn` / `xvt preview` 的原子 QA 门也回到通用文案。同分支的术语死锁引导早已按质量档分岔，这个姊妹函数补齐了同一判定。
 - 翻译等待态残留时不再建议回填一份不存在的请求。`TRANSLATE` 停在 `awaiting_input` 但 Job 内已经没有 checksum 有效的 `translation_batches`（例如按旧文案手工删掉重译 manifest 之后）时，原子恢复分支照样给出 `apply-translation`，而任何响应都会被 fingerprint 校验拒绝。现在这条分支先校验批次 manifest，缺失时归 `retryable` 并引导重跑 `translate` 重建批次。

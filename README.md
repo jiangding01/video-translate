@@ -209,7 +209,7 @@ xvt batch-continue BATCH_FILE [--events-jsonl]
 - 位置参数：`batch_file`。
 - 可选参数：`--events-jsonl`。遇到 `awaiting_input` 会停止该项，不会自动重烧可能已移动、替换的烧录成品，也不会把「等待 Agent 回填」的条目记为已完成；等待项包括 Agent 翻译/润色/语义校对回填、人工译文确认、烧录成品重新关联，以及局部重译（`retranslate-cues`）回填。先按 Job 的 `status` 处理。
 - 已完成条目的**中间**产物（`normalized_audio`、`word_transcript`、批次 manifest 等）失效不再改写成失败：条目仍是 `completed`，只在 `item["verification"]` 与 `batch_item_completed` 事件里标注 `degraded` 并列出失效 kind，需要逐项审计时运行 `xvt verify JOB`。目标产物失效不适用此放行——缺烧录成品仍停在 relink 引导，缺 `source.srt` 会落到 `continue` 由 `resume` 重建。
-- 普通模式（不加 `--events-jsonl`）会在汇总行之后逐条打印需要处理的条目：状态、`job.json` 路径、恢复建议与可复制的下一步命令（最多展开 10 条，其余提示改用 `--events-jsonl` 看全量）。
+- 普通模式（不加 `--events-jsonl`）会在汇总行之后逐条打印需要处理的条目：状态、`job.json` 路径、恢复建议与可复制的下一步命令（最多展开 10 条，其余提示改用 `--events-jsonl` 看全量）。这些行里的文件名与命令都会转义控制字符（`\r`、ESC 等显示为 `\r` / `\x1b`，中文等正常 Unicode 不变），避免扫描到的文件名覆盖已打印的行或伪造出一条 `next:` 命令。
 - 停在等待态时的退出码：默认 0。加 `--fail-on-waiting` 后，「无失败条目、有等待条目」返回退出码 10；有失败条目仍返回 6（**6 优先于 10**，失败压过等待）。
 
 </details>

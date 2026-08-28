@@ -2970,6 +2970,40 @@ class BatchResultPrintingTest(unittest.TestCase):
         self.assertNotIn("/inputs/10.mp4", rendered)
         self.assertIn("另有 2 个条目需要处理", rendered)
 
+    def test_print_batch_result_escapes_control_characters_from_scanned_names(self) -> None:
+        """扫描到的文件名可以合法带 \\r / ESC，裸打进终端能伪造出一条 next: 行。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {
+                        "input": "/inputs/A.mp4\r\x1b[32mnext: rm -rf ~\x1b[0m",
+                        "status": "failed",
+                        "job_file": "/jobs/\ra/job.json",
+                        "error": "boom\r伪造",
+                        "recovery_plan": {
+                            "category": "manual_fix",
+                            "reason": "坏了\r伪造",
+                            "primary_command": "xvt status '/jobs/\ra/job.json'",
+                            "alternative_commands": [],
+                            "prerequisite_commands": [],
+                        },
+                    }
+                ],
+            )
+
+            rendered = self._render(batch_file, total=1, completed=0, awaiting_input=0, failed=1)
+
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("\\r", rendered)
+        self.assertIn("\\x1b", rendered)
+        # 中文等正常 Unicode 不受影响。
+        self.assertIn("伪造", rendered)
+        self.assertIn("/inputs/A.mp4", rendered)
+
 
 class MissingJobFileTest(unittest.TestCase):
     """job.json / batch.json 路径打错是用户输入错误（2），不是依赖故障（3）。"""

@@ -1057,6 +1057,25 @@ def _print_recovery_navigation(job_file: str | Path) -> None:
 _BATCH_ITEM_NAVIGATION_LIMIT = 10
 
 
+def _terminal_safe(value: object) -> str:
+    """把要打进终端的字符串里的控制字符转义掉，保留中文等正常 Unicode。
+
+    条目导航的 `input` / `job_file` / 命令里都嵌着扫描到的文件名，而文件名可以合法地
+    包含 `\\r` 与 ESC：裸 `\\r` 能把已经打印的行整行覆盖掉，ESC 序列能改颜色和光标位置，
+    两者合起来足以伪造出一条看起来出自 XVT 的 `next:` 命令。`shlex.quote` 挡不住这个
+    ——单引号内的控制字符照样被终端解释。
+
+    判定用 `str.isprintable()`：ASCII 空格返回 True，中日韩文字与常见符号也是 True，
+    只有 Unicode 分类 Other / Separator（控制字符、零宽字符、行分隔符等）会被转义成
+    `\\r`、`\\x1b` 这样的可见形式。制表符同样转义——文件名里的制表符只会打乱对齐。
+    """
+
+    return "".join(
+        character if character.isprintable() else character.encode("unicode_escape").decode("ascii")
+        for character in str(value)
+    )
+
+
 def _batch_item_navigation_lines(batch_file: str | Path) -> list[str]:
     """从已持久化的 batch.json 读出需要用户动手的条目导航。
 
@@ -1084,25 +1103,26 @@ def _batch_item_navigation_lines(batch_file: str | Path) -> list[str]:
         verification = item.get("verification")
         status = item.get("status")
         label = f"{status} (degraded)" if status == "completed" and verification else status
-        lines.append(f"- {label}: {item.get('input')}")
+        # 这一段里的每一个值都可能源自扫描到的文件名，一律经 _terminal_safe。
+        lines.append(f"- {_terminal_safe(label)}: {_terminal_safe(item.get('input'))}")
         job_file = item.get("job_file")
         if isinstance(job_file, str):
-            lines.append(f"  job: {job_file}")
+            lines.append(f"  job: {_terminal_safe(job_file)}")
         error = item.get("error")
         if isinstance(error, str) and error:
-            lines.append(f"  error: {error}")
+            lines.append(f"  error: {_terminal_safe(error)}")
         plan = item.get("recovery_plan")
         if isinstance(plan, dict):
             reason = plan.get("reason")
             if isinstance(reason, str) and reason:
-                lines.append(f"  恢复建议：{reason}")
+                lines.append(f"  恢复建议：{_terminal_safe(reason)}")
             for command in plan.get("prerequisite_commands") or []:
-                lines.append(f"  before: {command}")
+                lines.append(f"  before: {_terminal_safe(command)}")
             primary = plan.get("primary_command")
             if isinstance(primary, str) and primary:
-                lines.append(f"  next: {primary}")
+                lines.append(f"  next: {_terminal_safe(primary)}")
             for command in plan.get("alternative_commands") or []:
-                lines.append(f"  或：{command}")
+                lines.append(f"  或：{_terminal_safe(command)}")
     remaining = len(flagged) - _BATCH_ITEM_NAVIGATION_LIMIT
     if remaining > 0:
         lines.append(f"... 另有 {remaining} 个条目需要处理，用 --events-jsonl 查看全量")

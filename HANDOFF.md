@@ -105,7 +105,9 @@
 - `job_started` 在 Job 首次持久化后立即携带 `job_file`，早期素材获取失败也能定位任务文件。
 - 已有 Job 的原子命令会从 CLI 参数预先记录任务路径，早期失败不会误报为任务尚未创建。
 - `run` / `continue` / `batch` / `batch-continue` 停在 `awaiting_input` 时默认返回退出码 0；显式 `--fail-on-waiting` 时返回 10（`AWAITING_INPUT`），批处理有失败条目时仍是 6（6 优先于 10）。该旗标只改退出码，不发 `cli_failed`、不改 Job/batch 状态与事件流。Skill 不使用它。
-- Ctrl-C 返回退出码 130、SIGTERM 返回 143，两者都清理外部进程组并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`；改写既有 Job 的命令与 `batch-continue` 以 flock 独占执行，冲突退出码 7；独立预览中断不会生成正式工作流恢复计划，而是提示重新运行 preview。
+- Ctrl-C 返回退出码 130、SIGTERM 返回 143，两者都清理外部进程组并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`；改写既有 Job 的命令与 `batch-continue` 以 flock 独占执行，冲突退出码 7；独立预览中断不会生成正式工作流恢复计划，而是提示重新运行 preview。`interrupt_running_stage` 是中断处理块的第一条语句，因此它的 except 元组必须包含 `XvtError`（`job.json` 在运行期间被删除或改坏时 `load_job` 抛 `UserInputError`）：漏掉会让整个收尾落空，退出码退化成 1。
+- 批处理普通模式的条目导航打印前一律经 `cli._terminal_safe` 转义控制字符：`input` 直接来自目录扫描，文件名里的 `\r` / ESC 能覆盖已打印的行、伪造 `next:` 命令，`shlex.quote` 不设防（单引号内的控制字符照样被终端解释）。
+- `load_user_response_json` 只服务用户提交的响应文件，`translation.load_translation_response` 是它的间接路径；读已登记 artifact 用 `translation.translations_from_response`（接受已解析载荷）。以该 helper 为底的只读谓词，except 元组里必须有 `XvtError`。
 - artifact 使用 SHA-256 checksum，`verify` 会重新计算。
 - `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。远程 Job 的 `resume` 优先复用 checksum 有效的已下载媒体，没有可复用媒体时委派远程恢复路径重新获取，可能触发一次媒体下载。
 - 远程端到端 Job 在检查或下载阶段失败后，可以通过 `continue` 在同一个 Job 中重试；checksum 有效的远程元数据、字幕和媒体会被复用。

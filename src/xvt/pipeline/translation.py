@@ -19,7 +19,7 @@ from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
-from xvt.errors import UserInputError
+from xvt.errors import UserInputError, XvtError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -180,7 +180,18 @@ def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
-    response = load_user_response_json(response_file, what="translation response")
+    """读取**用户提交的**响应文件并解析出译文映射。
+
+    读不出或解析不了时抛 ``UserInputError``（经 ``load_user_response_json``）。已登记
+    artifact 的读取不要走这里，改用 ``translations_from_response``。
+    """
+    return translations_from_response(
+        load_user_response_json(response_file, what="translation response"), expected_ids
+    )
+
+
+def translations_from_response(response: Any, expected_ids: set[int]) -> dict[int, str]:
+    """从已解析的响应载荷里取出 ``{cue_id: 译文}``；结构或覆盖范围不符时抛 ``ValueError``。"""
     items = response.get("items") if isinstance(response, dict) else None
     if not isinstance(items, list):
         raise ValueError("translation response must contain an items array")
@@ -273,7 +284,9 @@ def _atomic_draft_matches_translation_progress(
             normalize_generated=True,
         )
         return draft_path if load_cues(draft_path) == expected else None
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+    # XvtError：本函数经 load_translation_response 间接调用 load_user_response_json，
+    # 已登记 artifact 读不出时抛的是 UserInputError；漏掉它会让只读谓词抛异常而不是判否。
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, XvtError):
         return None
 
 
@@ -361,7 +374,9 @@ def translation_progress_rebuildable(job: Job, config: WorkflowConfig) -> bool:
         expected_ids = {item.id for batch in batches for item in batch.items}
         # 每个批次的全部 cue 都必须已有译文，否则该批次仍会被重新调用。
         load_translation_response(progress_path, expected_ids)
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+    # XvtError：本函数经 load_translation_response 间接调用 load_user_response_json，
+    # 已登记 artifact 读不出时抛的是 UserInputError；漏掉它会让只读谓词抛异常而不是判否。
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, XvtError):
         return False
     return True
 
