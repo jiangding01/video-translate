@@ -10,7 +10,7 @@ from xvt.errors import JobLockedError
 from xvt.job_store import create_job, save_job
 from xvt.locking import job_lock, lock_scope
 from xvt.models import Artifact, StageName, StageStatus
-from xvt.pipeline import apply_subtitle_translation
+from xvt.pipeline import apply_subtitle_translation, retranslate_cues
 from xvt.process import CommandCancelled
 from xvt.recovery import build_recovery_plan, file_checksum
 from xvt.workflow import WorkflowOptions, WorkflowResult, _record_burn_fingerprint
@@ -519,3 +519,113 @@ class BatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BatchCueRetranslationTest(unittest.TestCase):
+    """等待项绝不由批处理自动推进：局部重译等待必须停在 awaiting_input。"""
+
+    def _waiting_batch(self, root: Path) -> tuple[Path, Path]:
+        output = root / "output"
+        media = root / "video.mp4"
+        media.write_bytes(b"media")
+        job = create_job(str(media), output, {"workflow": {"target_language": "zh-CN"}})
+        # 重译 manifest 会写进 Job 目录，先把它建出来。
+        (output / "jobs" / job.id / "artifacts").mkdir(parents=True)
+        artifacts = root / "artifacts"
+        artifacts.mkdir()
+        source_cues = artifacts / "source-cues.json"
+        source_cues.write_text(
+            json.dumps([{"id": 1, "start_ms": 0, "end_ms": 1000, "source_text": "Hello world."}]),
+            encoding="utf-8",
+        )
+        translated_cues = artifacts / "translated-cues.json"
+        translated_cues.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": 1,
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "source_text": "Hello world.",
+                        "target_text": "你好，世界",
+                        "target_language": "zh-CN",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        translated_srt = artifacts / "translated.srt"
+        translated_srt.write_text("", encoding="utf-8")
+        bilingual_srt = artifacts / "bilingual.srt"
+        bilingual_srt.write_text("", encoding="utf-8")
+        translated_qa = artifacts / "qa-translated.json"
+        translated_qa.write_text('{"status":"pass","issues":[]}\n', encoding="utf-8")
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_cues), file_checksum(source_cues)),
+                Artifact("translated_cues", str(translated_cues), file_checksum(translated_cues)),
+                Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt)),
+                Artifact("bilingual_srt", str(bilingual_srt), file_checksum(bilingual_srt)),
+                Artifact(
+                    "translated_subtitle_qa", str(translated_qa), file_checksum(translated_qa)
+                ),
+            ]
+        )
+        job_file = save_job(job)
+        batch_file = output / "batches" / "test" / "batch.json"
+        batch_file.parent.mkdir(parents=True)
+        batch_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": BATCH_SCHEMA_VERSION,
+                    "id": "test",
+                    "output_root": str(output.resolve()),
+                    "workflow": {},
+                    "items": [
+                        {
+                            "input": str(media.resolve()),
+                            "status": "pending",
+                            "job_file": str(job_file.resolve()),
+                            "artifacts": [],
+                            "error": None,
+                            "recovery_plan": None,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return batch_file, job_file
+
+    def test_pending_cue_retranslation_is_not_marked_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, job_file = self._waiting_batch(root)
+
+            # 请求重译之前，这个条目对批处理而言是「已完成」。
+            with patch("xvt.batch.continue_workflow") as continue_workflow:
+                completed = continue_batch(batch_file)
+            self.assertEqual(completed.status, "completed")
+            self.assertEqual(
+                json.loads(batch_file.read_text(encoding="utf-8"))["items"][0]["status"],
+                "completed",
+            )
+            continue_workflow.assert_not_called()
+
+            batch = json.loads(batch_file.read_text(encoding="utf-8"))
+            batch["items"][0]["status"] = "pending"
+            batch_file.write_text(json.dumps(batch), encoding="utf-8")
+            retranslate_cues(job_file, cue_ids=(1,), target_language="zh-CN", provider="agent")
+
+            with patch("xvt.batch.continue_workflow") as continue_workflow:
+                result = continue_batch(batch_file)
+            updated = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertEqual(updated["items"][0]["status"], "awaiting_input")
+        self.assertEqual(updated["items"][0]["recovery_plan"]["category"], "awaiting_input")
+        self.assertIn(
+            "apply-cue-retranslation",
+            updated["items"][0]["recovery_plan"]["prerequisite_commands"][0],
+        )
+        continue_workflow.assert_not_called()

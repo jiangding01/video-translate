@@ -17,6 +17,7 @@ from xvt.cli import (
     _STEP_ROUTES,
     _TASK_ROUTES,
     _TRANSLATION_REVIEW_SRT_NAME,
+    _UNROUTABLE_AWAIT_STEPS,
     main,
 )
 from xvt.errors import DependencyError, InternalError, UserInputError
@@ -27,9 +28,12 @@ from xvt.pipeline import (
     RebuildSourceResult,
     ResegmentationResult,
     TranslationRunResult,
+    apply_agent_translation,
+    apply_cue_retranslation,
     prepare_agent_translation,
     retranslate_cues,
     run_subtitle_transcription,
+    run_translation_polish,
 )
 from xvt.pipeline.revision import (
     SOURCE_REVIEW_TASK,
@@ -38,7 +42,7 @@ from xvt.pipeline.revision import (
     translation_review_stem,
 )
 from xvt.process import CommandCancelled
-from xvt.recovery import file_checksum
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.workflow import AWAIT_STEPS, WorkflowResult, _record_burn_fingerprint
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
@@ -855,6 +859,81 @@ class CliTest(unittest.TestCase):
         self.assertIn("--target-language", message)
         self.assertNotIn("not awaiting Agent input", message)
 
+    def test_apply_routes_polish_response_despite_a_stale_retranslation_manifest(self) -> None:
+        """回归修复：重译回填后再进入润色等待，残留 manifest 不得顶掉合法的润色回填。
+
+        ``cue_retranslation_batches`` 只派生自 ``source_cues``，译文被改写时不会失效，
+        因此回填后它仍然 checksum 有效。此前 `xvt apply` 只看「stage 在等输入 + manifest
+        有效」，会拒绝一条合法的润色响应并指向 apply-cue-retranslation，而同一时刻
+        `status` 说「等待润色回填，用 xvt apply」——两者互相矛盾。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN", provider="agent", batch_size=1),
+            )
+            save_job(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                await_input=False,
+            )
+            apply_agent_translation(
+                job_file,
+                self._write_response(directory, {"items": [{"id": 1, "text": "译文一"}]}),
+                target_language="zh-CN",
+            )
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            fingerprint = json.loads(manifest_path.read_text(encoding="utf-8"))["fingerprint"]
+            cue_response = root / "cue-response.json"
+            cue_response.write_text(
+                json.dumps({"fingerprint": fingerprint, "items": [{"id": 1, "text": "重译一"}]}),
+                encoding="utf-8",
+            )
+            apply_cue_retranslation(job_file, cue_response, cue_ids=(1,), target_language="zh-CN")
+            polish_manifest = run_translation_polish(job_file).paths[0]
+            polish_fingerprint = json.loads(polish_manifest.read_text(encoding="utf-8"))[
+                "fingerprint"
+            ]
+            polish_response = root / "polish-response.json"
+            polish_response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": polish_fingerprint,
+                        "items": [{"id": 1, "text": "润色一"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # 前提：残留 manifest 仍然 checksum 有效，否则这条用例测不到 E5。
+            self.assertIsNotNone(
+                valid_artifact_path(load_job(job_file), "cue_retranslation_batches")
+            )
+
+            with redirect_stdout(StringIO()):
+                return_code = main(["apply", str(job_file), str(polish_response)])
+
+            self.assertEqual(return_code, 0)
+            self.assertIn(
+                "translation_polished_cues",
+                {artifact.kind for artifact in load_job(job_file).artifacts},
+            )
+
     def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
         """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
         paths = (Path("/tmp/revision.json"),)
@@ -1050,8 +1129,15 @@ class CliTest(unittest.TestCase):
             self.assertIn("translated_cues", {artifact.kind for artifact in applied.artifacts})
 
     def test_step_routes_keys_match_workflow_await_steps(self) -> None:
-        """路由表的 key 必须与真实实现同源，避免改名后静默失配。"""
-        self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS))
+        """路由表的 key 必须与真实实现同源，避免改名后静默失配。
+
+        不可自动路由的等待步骤必须显式登记在 ``_UNROUTABLE_AWAIT_STEPS`` 里
+        （apply-cue-retranslation 需要 xvt apply 拿不到的 --cue / --target-language），
+        新增等待步骤时必须在两张表之一里表态，否则这条断言会红。
+        """
+        self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS) - _UNROUTABLE_AWAIT_STEPS)
+        self.assertLessEqual(_UNROUTABLE_AWAIT_STEPS, AWAIT_STEPS)
+        self.assertFalse(_UNROUTABLE_AWAIT_STEPS & set(_STEP_ROUTES))
         self.assertIn(SOURCE_REVIEW_TASK, _TASK_ROUTES)
         self.assertIn(TRANSLATION_REVIEW_TASK, _TASK_ROUTES)
 

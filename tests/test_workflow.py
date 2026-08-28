@@ -7,16 +7,20 @@ from unittest.mock import patch
 
 from xvt.errors import UserInputError
 from xvt.events import EventType
-from xvt.job_store import create_job, get_job_file, load_job, save_job
+from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import (
     TranslationRunResult,
     apply_agent_semantic_review,
     apply_agent_translation,
+    apply_cue_retranslation,
     apply_subtitle_translation,
+    cue_retranslation_waiting,
     prepare_agent_semantic_review,
     prepare_agent_translation,
+    retranslate_cues,
     run_subtitle_transcription,
+    run_translation_polish,
     source_review_input_path,
     translation_review_input_path,
 )
@@ -35,7 +39,12 @@ from xvt.workflow import (
     run_workflow,
     workflow_goals,
 )
-from xvt.workflow_config import WorkflowConfig, get_workflow_config, set_workflow_config
+from xvt.workflow_config import (
+    WorkflowConfig,
+    get_workflow_config,
+    require_workflow_config,
+    set_workflow_config,
+)
 
 
 class WorkflowTest(unittest.TestCase):
@@ -1956,6 +1965,206 @@ class WorkflowPlannerTest(unittest.TestCase):
             ),
             ["import_subtitles", "import_translation"],
         )
+
+
+class CueRetranslationWaitingTest(unittest.TestCase):
+    """局部重译等待必须对 planner 与 continue 可见，且不得盖掉其他等待态。"""
+
+    def _translated_job(self, root: Path, *, cue_count: int = 2) -> Path:
+        source = root / "source.srt"
+        source.write_text(
+            "".join(
+                f"{cue_id}\n00:00:0{cue_id - 1},000 --> 00:00:0{cue_id},000\nSource {cue_id}.\n\n"
+                for cue_id in range(1, cue_count + 1)
+            ),
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        job_file = get_job_file(job)
+        set_workflow_config(
+            job,
+            WorkflowConfig(
+                target_language="zh-CN",
+                requested_outputs=("translated_subtitles", "bilingual_subtitles"),
+                provider="agent",
+                batch_size=1,
+            ),
+        )
+        save_job(job)
+        prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+            await_input=False,
+        )
+        response = root / "translation-response.json"
+        response.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {"id": cue_id, "text": f"译文{cue_id}"}
+                        for cue_id in range(1, cue_count + 1)
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        apply_agent_translation(job_file, response, target_language="zh-CN")
+        return job_file
+
+    def _request_retranslation(self, job_file: Path, cue_id: int = 1) -> Path:
+        return retranslate_cues(
+            job_file,
+            cue_ids=(cue_id,),
+            target_language="zh-CN",
+            provider="agent",
+        ).paths[0]
+
+    def test_plan_and_continue_report_the_pending_cue_retranslation(self) -> None:
+        """端到端目标已满足的 Job 上，重译等待不得被 status / continue 报成已完成。"""
+
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertEqual(plan_advance_steps(job, config), ())
+
+            manifest_path = self._request_retranslation(job_file)
+
+            job = load_job(job_file)
+            self.assertEqual(plan_advance_steps(job, config), ("await_cue_retranslation",))
+
+            result = continue_workflow(job_file, event_sink=events.append)
+
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertEqual(result.artifacts, (manifest_path,))
+        types = [event.type for event in events]
+        self.assertIn(EventType.WORKFLOW_WAITING.value, types)
+        self.assertNotIn(EventType.WORKFLOW_COMPLETED.value, types)
+
+    def test_waiting_is_visible_without_a_persisted_target_language(self) -> None:
+        """重译等待分支必须排在 needs_translation 守卫之前。
+
+        用户 `run` 时没给目标语言、后来用原子命令补翻的 Job，其 workflow 目标里
+        `target_language` 为 None，走不进被 `goals.needs_translation` 守卫的等待分支。
+        """
+
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nFirst.\n"
+                "\n2\n00:00:01,000 --> 00:00:02,000\nSecond.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            # 无目标语言的端到端目标：转写腿已完成，翻译由原子命令补上。
+            set_workflow_config(job, WorkflowConfig())
+            translated_path = get_job_directory(job) / "artifacts" / "translated-cues.json"
+            source_cues = json.loads(
+                (get_job_directory(job) / "artifacts" / "source-cues.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        {**cue, "target_text": f"译文{cue['id']}", "target_language": "zh-CN"}
+                        for cue in source_cues
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts.append(
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
+            )
+            save_job(job)
+            self.assertIsNone(require_workflow_config(load_job(job_file)).target_language)
+            # 请求重译之前，这个 Job 对 continue 而言确实是「已完成」。
+            self.assertEqual(continue_workflow(job_file).status, "completed")
+
+            manifest_path = self._request_retranslation(job_file)
+            job = load_job(job_file)
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("await_cue_retranslation",),
+            )
+
+            result = continue_workflow(job_file, event_sink=events.append)
+
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertEqual(result.artifacts, (manifest_path,))
+        self.assertIn(EventType.WORKFLOW_WAITING.value, [event.type for event in events])
+
+    def test_stale_manifest_does_not_mask_the_polish_agent_wait(self) -> None:
+        """回归护栏：重译回填后再进入润色等待，残留 manifest 不得盖掉 await_agent_polish。
+
+        ``cue_retranslation_batches`` 在依赖图上只派生自 ``source_cues``，译文被改写时
+        不会失效，因此回填后它仍然 checksum 有效——严格谓词靠「manifest 记录的译文
+        checksum 与当前一致」把这份残留排除掉。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root, cue_count=1)
+            manifest_path = self._request_retranslation(job_file)
+            fingerprint = json.loads(manifest_path.read_text(encoding="utf-8"))["fingerprint"]
+            response = root / "cue-response.json"
+            response.write_text(
+                json.dumps({"fingerprint": fingerprint, "items": [{"id": 1, "text": "重译一"}]}),
+                encoding="utf-8",
+            )
+            apply_cue_retranslation(
+                job_file,
+                response,
+                cue_ids=(1,),
+                target_language="zh-CN",
+            )
+            run_translation_polish(job_file)
+
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            # 残留 manifest 仍然 checksum 有效，谓词只能靠译文 checksum 把它排除。
+            self.assertIsNotNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertIs(
+                job.stages[StageName.TRANSLATE].status,
+                StageStatus.AWAITING_INPUT,
+            )
+            self.assertFalse(cue_retranslation_waiting(job))
+            self.assertEqual(plan_advance_steps(job, config), ("await_agent_polish",))
+
+    def test_translated_cue_changes_invalidate_the_waiting_predicate(self) -> None:
+        """manifest 记录的译文 checksum 与当前不一致时谓词为假，计划回到既有结果。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root, cue_count=1)
+            self._request_retranslation(job_file)
+            job = load_job(job_file)
+            self.assertTrue(cue_retranslation_waiting(job))
+
+            translated = next(
+                artifact for artifact in job.artifacts if artifact.kind == "translated_cues"
+            )
+            path = Path(translated.path)
+            cues = json.loads(path.read_text(encoding="utf-8"))
+            cues[0]["target_text"] = "等待期间被改过"
+            path.write_text(json.dumps(cues), encoding="utf-8")
+            # 重新登记 checksum：译文本身仍是「有效产物」，失配的只有 manifest 的记录。
+            translated.checksum = file_checksum(path)
+            save_job(job)
+
+            job = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(job, "translated_cues"))
+            self.assertFalse(cue_retranslation_waiting(job))
+            # 计划回到既有结果：译文目标的四件产物仍全部有效，因此仍是空计划。
+            # 「TRANSLATE stage 停在 awaiting_input」是既有表象问题，本批次不动（放弃
+            # 一次重译目前仍靠手工删除 manifest）。
+            self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
 
 
 if __name__ == "__main__":

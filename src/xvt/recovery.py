@@ -127,6 +127,43 @@ def _job_command(command: str, job_file: Path, *arguments: str) -> str:
     return " ".join(parts)
 
 
+_CUE_RETRANSLATION_WAITING_REASON = (
+    "任务正在等待局部重译（retranslate-cues）结果回填；未回填前不要按已完成处理。"
+    "放弃这次重译需要手工删除 artifacts/cue-retranslation-batches.json。"
+)
+
+
+def _cue_retranslation_apply_command(job: Job, job_file: Path) -> str:
+    """拼出可直接复制的 ``apply-cue-retranslation`` 命令。
+
+    ``xvt apply`` 拿不到 ``--cue`` 与 ``--target-language``，所以这里从 manifest 读出
+    具体 cue id 与目标语言；manifest 结构不可解析时退回形状占位，绝不猜测 cue id。
+    惰性 import 与本文件其余 pipeline 引用同一模式，避免
+    ``recovery ↔ pipeline.retranslate`` 循环导入。
+    """
+
+    from xvt.pipeline.retranslate import cue_retranslation_request
+
+    request = cue_retranslation_request(job)
+    if request is None:
+        return _job_command(
+            "apply-cue-retranslation",
+            job_file,
+            "RESPONSE",
+            "--cue",
+            "ID",
+            "[--cue ID ...]",
+            "--target-language",
+            "LANG",
+        )
+    cue_ids, target_language = request
+    arguments: list[str] = ["RESPONSE"]
+    for cue_id in cue_ids:
+        arguments.extend(("--cue", str(cue_id)))
+    arguments.extend(("--target-language", shlex.quote(target_language)))
+    return _job_command("apply-cue-retranslation", job_file, *arguments)
+
+
 def _semantic_review_options(
     job: Job,
     job_file: Path,
@@ -585,6 +622,20 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             ),
         )
 
+    from xvt.pipeline.retranslate import cue_retranslation_waiting
+
+    if cue_retranslation_waiting(job):
+        # 原子分支此前只看「TRANSLATE 在等输入」，把重译等待当成初译等待，给出的
+        # apply-translation 命令对重译响应是错的（fingerprint 与覆盖 ID 都对不上）。
+        return plan(
+            "awaiting_input",
+            _CUE_RETRANSLATION_WAITING_REASON,
+            # apply-cue-retranslation 需要 xvt apply 拿不到的显式参数，因此不设首选命令。
+            primary_command=None,
+            prerequisite_commands=(_cue_retranslation_apply_command(job, job_file),),
+            report_paths=(str(valid_artifacts["cue_retranslation_batches"]),),
+        )
+
     agent_waiting = agent_translation_polish_waiting(job)
     agent_progress = agent_translation_polish_progress_ready(job)
     invalid_polished_agent = (
@@ -659,6 +710,18 @@ def _recovery_for_workflow(
             "当前目标已完成，可以校验已有产物。",
             primary_command=_job_command("verify", job_file),
             advance_steps=(),
+        )
+
+    if steps[0] == "await_cue_retranslation":
+        return plan(
+            "awaiting_input",
+            _CUE_RETRANSLATION_WAITING_REASON,
+            # 与原子分支同口径：apply-cue-retranslation 要显式 --cue / --target-language，
+            # xvt apply 与 continue 都推不动这一步，因此不给首选命令。
+            primary_command=None,
+            prerequisite_commands=(_cue_retranslation_apply_command(job, job_file),),
+            report_paths=(str(valid_artifacts["cue_retranslation_batches"]),),
+            advance_steps=steps,
         )
 
     if steps[0] == "await_agent_translation":

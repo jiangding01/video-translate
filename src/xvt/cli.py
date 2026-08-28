@@ -45,6 +45,7 @@ from xvt.pipeline import (
     apply_translation_review_fixes,
     burn_translated_job,
     complete_acknowledged_semantic_review,
+    cue_retranslation_waiting,
     inspect_input,
     interrupt_running_stage,
     prepare_agent_translation,
@@ -1822,15 +1823,21 @@ def _assert_disjoint_task_tables() -> None:
 
 _assert_disjoint_task_tables()
 
-# 步骤回退表。Agent 回填响应按协议不带 task 字段，绝大多数情况靠这里的下一步识别；
-# 但原子重译（retranslate-cues）不在 plan_advance_steps 的推进步骤里，需要单独识别，
-# 否则协议一致的重译响应会落到「job is not awaiting Agent input」的死环。
+# 步骤回退表。Agent 回填响应按协议不带 task 字段，绝大多数情况靠这里的下一步识别。
 _STEP_ROUTES: dict[str, str] = {
     "await_agent_translation": "apply-translation",
     "await_agent_polish": "apply-polish-translation",
     "await_agent_semantic_review": "apply-semantic-review",
     "await_translation_review": "apply-translation-review-fixes",
 }
+
+# 刻意不进 _STEP_ROUTES 的等待步骤，以及不进的理由。原子重译现在是
+# plan_advance_steps 的一个正式等待步骤（见 workflow.AWAIT_STEPS），但目标子命令
+# apply-cue-retranslation 必须显式收 --cue 与 --target-language，而 xvt apply 的命令行
+# 里没有这两个参数、也不能从响应里安全地推出来（AGENTS.md 已定调）。
+# 这张表存在的意义是让「新增等待步骤」必须表态：要么进路由表，要么在这里写明理由，
+# 否则守卫测试会红。
+_UNROUTABLE_AWAIT_STEPS: frozenset[str] = frozenset({"await_cue_retranslation"})
 
 # 人工修订 SRT 的固定命名形状。命名规则的唯一来源在 xvt.pipeline.revision（模板写入点与
 # 回填校验点共用），这里只按同样的前缀与 fingerprint 长度派生形状正则，不再独立硬编码。
@@ -1840,19 +1847,6 @@ _SOURCE_REVIEW_SRT_NAME = re.compile(
 _TRANSLATION_REVIEW_SRT_NAME = re.compile(
     rf"^{re.escape(TRANSLATION_REVIEW_STEM_PREFIX)}[0-9a-f]{{{REVISION_FINGERPRINT_LENGTH}}}$"
 )
-
-
-def _awaiting_cue_retranslation(job: Job) -> bool:
-    """Job 是否停在原子重译的等待态（有未回填的 manifest，且 TRANSLATE 在等输入）。
-
-    两个条件缺一不可：manifest 必须仍有效（checksum 门由 valid_artifact_path 把守），
-    stage 必须真的在等输入——否则会把「重译已回填、Job 已推进」的旧 manifest 误判成等待。
-    """
-
-    stage = job.stages.get(StageName.TRANSLATE)
-    if stage is None or stage.status is not StageStatus.AWAITING_INPUT:
-        return False
-    return valid_artifact_path(job, "cue_retranslation_batches") is not None
 
 
 def _cmd_apply(arguments: argparse.Namespace) -> int:
@@ -1890,11 +1884,12 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
                 raise ValueError(f"unknown task in response file: {task}")
         else:
             job = load_job(arguments.job_file)
-            if _awaiting_cue_retranslation(job):
-                # 原子重译的等待态既不产生推进步骤，协议一致的重译响应又不带 task，两条
-                # 识别路径同时落空：此前这里报「no persisted workflow goal」或「job is not
-                # awaiting Agent input」，与 TRANSLATE stage 明明在 awaiting_input 的事实
-                # 直接冲突，用户无路可走。
+            if cue_retranslation_waiting(job):
+                # 协议一致的重译响应不带 task，而 apply-cue-retranslation 不可自动路由，
+                # 两条识别路径同时落空：此前这里报「no persisted workflow goal」或「job is
+                # not awaiting Agent input」，与 TRANSLATE stage 明明在 awaiting_input 的
+                # 事实直接冲突，用户无路可走。谓词与 planner / status 共用同一份严格实现，
+                # 因此过期的残留 manifest 不会再把合法的润色回填顶掉。
                 raise UserInputError(
                     "this job is awaiting a cue retranslation response, and per the Agent "
                     "protocol that response carries no task field: "
@@ -1909,6 +1904,16 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
             steps = plan_advance_steps(job, workflow)
             route = _STEP_ROUTES.get(steps[0]) if steps else None
             if route is None:
+                if valid_artifact_path(job, "cue_retranslation_batches") is not None:
+                    # 宽松兜底：manifest 还在、checksum 也有效，但已经对不上当前译文
+                    # （多半是回填后的残留，或升级后需要重建）。严格谓词在上面已经判假，
+                    # 这里只能给出「重新生成 manifest」这条真正可执行的路径。
+                    raise UserInputError(
+                        "a cue retranslation manifest exists but no longer matches the current "
+                        "translation (it was most likely already applied, or needs regenerating "
+                        "after an upgrade); rerun xvt retranslate-cues to regenerate it, or "
+                        f"{_RETRANSLATE_CUES_MANUAL_COMMAND}"
+                    )
                 raise ValueError(
                     "response file has no task field, and the job is not awaiting Agent input; "
                     "run xvt status to see the current next step"

@@ -32,6 +32,7 @@ from xvt.pipeline.translation import (
     translate_batch_with_retries,
 )
 from xvt.process import raise_if_cancelled
+from xvt.recovery import file_checksum as readonly_file_checksum
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
@@ -46,6 +47,91 @@ from xvt.translation_provider import (
 )
 
 CUE_RETRANSLATION_TASK_VERSION = 1
+
+
+def _load_cue_retranslation_manifest(job: Job) -> dict | None:
+    """读出 checksum 有效的重译 manifest；不可读或不是对象时返回 None。
+
+    只读，不写任何产物，因此可以安全地在 ``build_recovery_plan`` 的只读判定链里调用。
+    """
+
+    manifest_path = valid_artifact_path(job, "cue_retranslation_batches")
+    if manifest_path is None:
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def cue_retranslation_waiting(job: Job) -> bool:
+    """Job 是否真的停在一次仍然挂得住的原子重译等待上。
+
+    严格四条件（缺一不可）：``TRANSLATE`` stage 在等输入；重译 manifest checksum 有效；
+    当前 ``translated_cues`` checksum 有效；manifest 记录的 source / translated cue
+    checksum 与当前逐一相等。
+
+    后两条不能省。``cue_retranslation_batches`` 在 artifact 依赖图上只派生自
+    ``source_cues``，译文被改写时它不会被失效，因此「重译已回填、manifest 只是残留」
+    的旧文件仍然 checksum 有效；只看 stage + manifest 有效会把随后的润色/语义等待
+    错误地盖成重译等待——真实回归形态是回填后再跑 ``polish-translation --provider
+    agent``，此时 ``translated_cues`` 已被失效移出登记，条件三直接为假。
+
+    checksum 走 ``recovery.file_checksum``：本函数是只读判定，在
+    ``build_recovery_plan`` 的记忆化作用域内能复用同一次判定里已经算过的哈希；
+    无作用域时与直连哈希逐字等价。
+    """
+
+    stage = job.stages.get(StageName.TRANSLATE)
+    if stage is None or stage.status is not StageStatus.AWAITING_INPUT:
+        return False
+    manifest = _load_cue_retranslation_manifest(job)
+    if manifest is None:
+        return False
+    source_path = valid_artifact_path(job, "source_cues")
+    translated_path = valid_artifact_path(job, "translated_cues")
+    if source_path is None or translated_path is None:
+        return False
+    return manifest.get("source_cues_checksum") == readonly_file_checksum(
+        source_path
+    ) and manifest.get("translated_cues_checksum") == readonly_file_checksum(translated_path)
+
+
+def cue_retranslation_request(job: Job) -> tuple[tuple[int, ...], str] | None:
+    """从有效 manifest 读出 ``(cue_ids, target_language)``，供恢复计划拼出可复制的回填命令。
+
+    cue id 取 ``batches[].items[].id``：``build_cue_retranslation_batches`` 为每个目标 cue
+    生成独立批次且 ``items`` 恰好一个元素，相邻上下文放在 ``context_before`` /
+    ``context_after``，不会混进来。manifest 结构不符合预期时返回 None，由调用方退回
+    形状占位，绝不猜测 cue id。
+    """
+
+    manifest = _load_cue_retranslation_manifest(job)
+    if manifest is None:
+        return None
+    target_language = manifest.get("target_language")
+    if not isinstance(target_language, str) or not target_language:
+        return None
+    batches = manifest.get("batches")
+    if not isinstance(batches, list):
+        return None
+    cue_ids: list[int] = []
+    for batch in batches:
+        items = batch.get("items") if isinstance(batch, dict) else None
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            cue_id = item.get("id")
+            # bool 是 int 的子类；与项目其余解析器同口径显式排除。
+            if isinstance(cue_id, bool) or not isinstance(cue_id, int):
+                return None
+            cue_ids.append(cue_id)
+    if not cue_ids:
+        return None
+    return tuple(sorted(dict.fromkeys(cue_ids))), target_language
 
 
 def _cue_retranslation_manifest(

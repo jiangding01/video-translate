@@ -25,7 +25,12 @@ from xvt.pipeline.polish import (
     translation_polish_satisfied,
 )
 from xvt.pipeline.resegment import ResegmentationResult, resegment_translation
-from xvt.pipeline.retranslate import apply_cue_retranslation, retranslate_cues
+from xvt.pipeline.retranslate import (
+    apply_cue_retranslation,
+    cue_retranslation_request,
+    cue_retranslation_waiting,
+    retranslate_cues,
+)
 from xvt.pipeline.review import (
     acknowledge_subtitle_review,
     acknowledge_translation_review,
@@ -124,6 +129,8 @@ __all__ = [
     "resegment_translation",
     "resume_job",
     "resume_remote_transcription",
+    "cue_retranslation_request",
+    "cue_retranslation_waiting",
     "retranslate_cues",
     "run_atomic_translation_polish",
     "run_local_transcription",

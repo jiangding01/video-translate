@@ -204,7 +204,7 @@ xvt batch-continue BATCH_FILE [--events-jsonl]
 ```
 
 - 位置参数：`batch_file`。
-- 可选参数：`--events-jsonl`。遇到 `awaiting_input` 会停止该项，不会自动重烧可能已移动、替换的烧录成品；先按 Job 的 `status` 处理重新关联或显式重烧。
+- 可选参数：`--events-jsonl`。遇到 `awaiting_input` 会停止该项，不会自动重烧可能已移动、替换的烧录成品，也不会把「等待 Agent 回填」的条目记为已完成；等待项包括 Agent 翻译/润色/语义校对回填、人工译文确认、烧录成品重新关联，以及局部重译（`retranslate-cues`）回填。先按 Job 的 `status` 处理。
 
 </details>
 
@@ -459,6 +459,7 @@ xvt retranslate-cues JOB_FILE --cue ID [--cue ID ...] --target-language LANG
 - 必填参数：可重复的 `--cue`、`--target-language`。
 - 翻译提供方：`--provider`、`--base-url`、`--model`、`--api-key-env`、`--max-retries`、`--timeout-seconds`。
 - 事件：`--events-jsonl`。
+- Agent 模式下 Job 会进入等待：`status` 归为 `awaiting_input`，并给出带具体 cue ID 与目标语言的可复制 `apply-cue-retranslation` 命令；未回填前 `continue` 不会宣告完成，`batch-continue` 也会停在该条目上。
 
 </details>
 
@@ -762,6 +763,10 @@ uv run --no-sync xvt apply-cue-retranslation "/path/to/job.json" \
   --target-language zh-CN
 ```
 
+Agent 模式请求重译后，Job 一直停在等待态直到回填：`status` 报 `awaiting_input` 并列出 manifest 路径与拼好的回填命令，`continue` 不会宣告完成、也不会继续渲染或烧录，`batch-continue` 把该条目记为 `awaiting_input` 而不是已完成。要放弃一次重译，目前只能手工删除 `artifacts/cue-retranslation-batches.json`（删除后 `status` 恢复原有分类）。
+
+回填的实际代价按质量档不同：`standard` Job 上只有选中的 cue 被改写，其余译文与全部时间轴保持不变，随后重跑确定性译文 QA 与渲染；`polished` Job 上回填结果会成为**新的翻译草稿**（`translation-draft-cues.json`），旧的润色候选、语义校对结论与最终译文一并失效，需要重新走一遍润色与语义校对——这条腿会真实调用模型，不是零成本。
+
 若端到端 Job 请求烧录，QA 通过并生成字幕后再执行 `xvt continue JOB`。局部修复不支持改变目标语言，也不接受重复或不存在的 cue ID。
 
 不使用 API 时，可走 Agent 协议：
@@ -912,7 +917,7 @@ uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
 uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 ```
 
-`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 翻译、润色或语义校对中断会复用各自批次进度，Agent 等待会停在 `apply-translation`、`apply-polish-translation` 或 `apply-semantic-review`，烧录失败只重跑烧录。烧录成品只有在 checksum、派生指纹和媒体 QA 全部有效时才会复用；媒体 QA 失败不会被 `status` 或批处理误判为完成。`polished` Job 的润色草稿（`translation-draft-cues.json`）缺失或 checksum 失效时，只有翻译进度 checkpoint 能零 API 成本重建草稿，`continue` 才会继续；否则它以人工修复提示停下，不会静默重新翻译并重新润色全文，`status` 的分类与该判定一致。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
+`continue` 根据 `run` 时持久化的目标补齐未完成步骤：远程检查或下载失败时会在同一个 Job 中重新获取素材，API 翻译、润色或语义校对中断会复用各自批次进度，Agent 等待会停在 `apply-translation`、`apply-polish-translation` 或 `apply-semantic-review`，局部重译（`retranslate-cues`）的等待停在 `apply-cue-retranslation`（`status` 会把具体 cue ID 与目标语言拼进命令；这一步不由 `continue` 或 `xvt apply` 推进），烧录失败只重跑烧录。烧录成品只有在 checksum、派生指纹和媒体 QA 全部有效时才会复用；媒体 QA 失败不会被 `status` 或批处理误判为完成。`polished` Job 的润色草稿（`translation-draft-cues.json`）缺失或 checksum 失效时，只有翻译进度 checkpoint 能零 API 成本重建草稿，`continue` 才会继续；否则它以人工修复提示停下，不会静默重新翻译并重新润色全文，`status` 的分类与该判定一致。`resume` 仅负责从规范化音频、词级转写或源 cue 恢复转写主链路。`verify` 会重新计算 artifact 的 SHA-256。`status` 使用同一套结构化恢复计划，区分可重试、等待输入、需要人工修复、不可自动恢复和已完成，并只把 checksum 有效的 artifact 视为可复用产物；`--json` 会额外输出 `recovery_plan`。
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。用户按 Ctrl-C（SIGINT）或向进程发送 SIGTERM 时，外部命令的整个进程组会被清理，当前运行阶段记录为失败，CLI 分别返回退出码 130 和 143 并重新计算恢复计划。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。 对 `needs_review` 级的报告（例如导入字幕折叠后超宽），确认可接受后可用 `xvt continue JOB --acknowledge-subtitle-review` 显式放行：确认记录绑定当前字幕内容与具体问题集合，字幕变化或出现新的 review 问题后自动失效；error 级问题（时间轴无效、缺失译文、术语违规等）永远不能通过该通道放行。当前 schema 的 Job 缺少必填字段、stage 或正确字段类型时会返回无效输入错误，不输出 Python traceback；`source-cues.json`、`translated-cues.json` 等 cue 产物结构损坏时同样收口为无效输入错误（退出码 2 并发出 `cli_failed`），未知字段按前向兼容忽略。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 

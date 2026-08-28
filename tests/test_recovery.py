@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.job_store import create_job, save_job
+from xvt.job_store import create_job, load_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
+from xvt.pipeline import retranslate_cues
 from xvt.recovery import (
     _semantic_review_options,
     build_recovery_plan,
@@ -841,3 +842,119 @@ class RecoveryTest(unittest.TestCase):
 
             self.assertEqual(snapshot(), before_files)
             self.assertEqual(job_file.read_text(encoding="utf-8"), before_job)
+
+
+class CueRetranslationRecoveryTest(unittest.TestCase):
+    """局部重译等待在端到端与原子两条恢复分支上都要给出可复制的回填命令。"""
+
+    def _waiting_job_file(self, root: Path, *, workflow: dict | None) -> Path:
+        config = {"workflow": workflow} if workflow is not None else {}
+        job = create_job("/tmp/input.mp4", root, config)
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+        source_path = artifacts / "source-cues.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": cue_id,
+                        "start_ms": (cue_id - 1) * 1000,
+                        "end_ms": cue_id * 1000,
+                        "source_text": f"S{cue_id}",
+                    }
+                    for cue_id in (1, 2, 3)
+                ]
+            ),
+            encoding="utf-8",
+        )
+        translated_path = artifacts / "translated-cues.json"
+        translated_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": cue_id,
+                        "start_ms": (cue_id - 1) * 1000,
+                        "end_ms": cue_id * 1000,
+                        "source_text": f"S{cue_id}",
+                        "target_text": f"译{cue_id}",
+                        "target_language": "zh-CN",
+                    }
+                    for cue_id in (1, 2, 3)
+                ]
+            ),
+            encoding="utf-8",
+        )
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path)),
+            ]
+        )
+        job_file = save_job(job)
+        retranslate_cues(job_file, cue_ids=(2,), target_language="zh-CN", provider="agent")
+        return job_file
+
+    def test_end_to_end_job_reports_the_pending_cue_retranslation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, workflow={"target_language": "zh-CN"})
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ("await_cue_retranslation",))
+            self.assertIsNone(plan.primary_command)
+            self.assertEqual(len(plan.prerequisite_commands), 1)
+            command = plan.prerequisite_commands[0]
+            self.assertIn("xvt apply-cue-retranslation", command)
+            self.assertIn("--cue 2", command)
+            self.assertIn("--target-language zh-CN", command)
+            self.assertNotIn("--cue 1", command)
+            self.assertNotIn("--cue 3", command)
+            self.assertEqual(len(plan.report_paths), 1)
+            self.assertTrue(plan.report_paths[0].endswith("cue-retranslation-batches.json"))
+
+    def test_atomic_job_no_longer_suggests_apply_translation(self) -> None:
+        """原子分支此前把重译等待当初译等待，给出的 apply-translation 命令对不上。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, workflow=None)
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ())
+            self.assertIsNone(plan.primary_command)
+            command = plan.prerequisite_commands[0]
+            self.assertIn("xvt apply-cue-retranslation", command)
+            self.assertIn("--cue 2", command)
+            self.assertIn("--target-language zh-CN", command)
+            self.assertNotIn("apply-translation ", command)
+            self.assertTrue(plan.report_paths[0].endswith("cue-retranslation-batches.json"))
+
+    def test_unreadable_manifest_body_falls_back_to_a_shape_placeholder(self) -> None:
+        """cue id 读不出来时退回形状占位，绝不猜测 cue id。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, workflow={"target_language": "zh-CN"})
+            job = load_job(job_file)
+            manifest = next(
+                artifact
+                for artifact in job.artifacts
+                if artifact.kind == "cue_retranslation_batches"
+            )
+            path = Path(manifest.path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["batches"] = "not a list"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            manifest.checksum = file_checksum(path)
+            save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+            # source / translated checksum 仍然对得上，因此确实还在等待；但 cue id
+            # 已经读不出来，命令必须退回形状占位而不是编一个 cue id 出来。
+            self.assertEqual(plan.category, "awaiting_input")
+            command = plan.prerequisite_commands[0]
+            self.assertIn("--cue ID [--cue ID ...]", command)
+            self.assertIn("--target-language LANG", command)
