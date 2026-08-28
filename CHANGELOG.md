@@ -65,6 +65,7 @@
 
 ### Changed
 
+- `xvt status` 不再在一次调用内重复哈希同一个文件：`build_recovery_plan` 的只读判定链共享一份进程内 checksum 记忆化（按 `路径 + dev + ino + size + mtime_ns` 定身份，作用域随调用结束即销毁，不跨命令、不跨进程、不落盘）。此前烧录成品会被哈希 2 次、burn proof 4 次，含大成品的 Job 上 `status` 比全量校验的 `verify` 还慢一倍；改后含 2 GB 成品的 Job 上 `status` 耗时约减半（本机实测 1.8 s → 0.9 s，与 `verify` 持平），哈希调用从 17 次降到 8 次。校验强度完全不变——仍是全量 checksum，没有引入 size/mtime 快速路径、阈值或 `--fast`；同时顺带修掉了「同一次判定内两次读同一文件、期间被改写会得出自相矛盾计划」的问题。
 - 兼容 API 翻译默认批次从 40 调整为 25 个 cue，请求默认超时从 60 秒调整为 180 秒，以降低 DeepSeek 等远程服务在大批次下的断连和超时概率；旧 Job 继续使用其持久化批次与超时配置。
 
 - `cli.py` 的 `_run_command`（~622 行 if/elif 链）拆分为 26 个独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表；纯搬移，不改变任何命令的行为和输出。

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -720,3 +721,123 @@ class RecoveryTest(unittest.TestCase):
             path = Path(directory) / "payload.bin"
             path.write_bytes(b"xvt" * 4096)
             self.assertEqual(file_checksum(path), checksums.file_checksum(path))
+
+    def _burned_complete_job(self, root: Path) -> Path:
+        """一个「烧录已完成」的端到端 Job：判定链会反复触碰同几个文件。"""
+
+        from xvt.workflow import _record_burn_fingerprint
+
+        media = root / "video.mp4"
+        media.write_bytes(b"media")
+        burned = root / "burned.mp4"
+        burned.write_bytes(b"burned-output")
+        job = create_job(str(media), root, {})
+        job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
+        self._add_artifact(job, root, "source_cues")
+        self._add_artifact(job, root, "translated_cues")
+        self._add_artifact(job, root, "translated_srt", content="1\n")
+        self._add_artifact(job, root, "bilingual_srt", content="1\n")
+        self._add_artifact(job, root, "media_qa", content='{"status":"pass","issues":[]}')
+        self._add_artifact(
+            job,
+            root,
+            "translated_subtitle_qa",
+            content='{"status":"pass","issues":[]}',
+        )
+        job.artifacts.append(Artifact("burned_video", str(burned), file_checksum(burned)))
+        job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+        job_file = save_job(job)
+        _record_burn_fingerprint(job_file)
+        return job_file
+
+    def test_build_recovery_plan_hashes_each_file_once(self) -> None:
+        """同一次判定内重复哈希同一个文件是纯浪费，且会让计划自相矛盾。"""
+
+        from xvt import recovery
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._burned_complete_job(root)
+
+            calls: list[str] = []
+            real_hash = recovery._hash_file
+
+            def counting_hash(path: Path) -> str:
+                calls.append(str(path))
+                return real_hash(path)
+
+            with patch.object(recovery, "_hash_file", counting_hash):
+                plan = build_recovery_plan(job_file)
+                memoized_calls = list(calls)
+                calls.clear()
+                # 同一个入口，去掉记忆化包装后重新算一遍。
+                bare_plan = recovery._build_recovery_plan(job_file)
+                bare_calls = list(calls)
+
+        self.assertEqual(plan, bare_plan)
+        self.assertEqual(len(memoized_calls), len(set(memoized_calls)))
+        self.assertLess(len(memoized_calls), len(bare_calls))
+
+    def test_readonly_checksum_scope_does_not_leak(self) -> None:
+        from xvt import recovery
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.bin"
+            path.write_bytes(b"first")
+            calls: list[str] = []
+            real_hash = recovery._hash_file
+
+            def counting_hash(target: Path) -> str:
+                calls.append(str(target))
+                return real_hash(target)
+
+            with patch.object(recovery, "_hash_file", counting_hash):
+                with recovery.readonly_checksum_scope():
+                    recovery.file_checksum(path)
+                    recovery.file_checksum(path)
+                    self.assertEqual(len(calls), 1)
+                    with recovery.readonly_checksum_scope():
+                        # 嵌套作用域建新字典，不复用外层结果。
+                        recovery.file_checksum(path)
+                        self.assertEqual(len(calls), 2)
+                # 作用域退出后不再记忆化。
+                recovery.file_checksum(path)
+                recovery.file_checksum(path)
+
+        self.assertEqual(len(calls), 4)
+
+    def test_checksum_cache_is_keyed_on_stat(self) -> None:
+        from xvt import recovery
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.bin"
+            path.write_bytes(b"first")
+            with recovery.readonly_checksum_scope():
+                before = recovery.file_checksum(path)
+                path.write_bytes(b"second-and-longer")
+                os.utime(path, ns=(0, 0))
+                after = recovery.file_checksum(path)
+
+        self.assertNotEqual(before, after)
+
+    def test_build_recovery_plan_does_not_touch_artifacts(self) -> None:
+        """记忆化的前提是判定链只读：任何一处偷偷写产物都会在这里炸掉。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._burned_complete_job(root)
+
+            def snapshot() -> dict[str, tuple[int, int]]:
+                return {
+                    str(path): (path.stat().st_mtime_ns, path.stat().st_size)
+                    for path in sorted(root.rglob("*"))
+                    if path.is_file()
+                }
+
+            before_files = snapshot()
+            before_job = job_file.read_text(encoding="utf-8")
+
+            build_recovery_plan(job_file)
+
+            self.assertEqual(snapshot(), before_files)
+            self.assertEqual(job_file.read_text(encoding="utf-8"), before_job)

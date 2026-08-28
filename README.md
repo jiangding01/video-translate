@@ -148,6 +148,7 @@ xvt status JOB_FILE [--json]
 
 - 位置参数：`job_file`。
 - 可选参数：`--json`。优先使用本命令提供的 `recovery_plan` / `advance_steps`，不要猜测该运行 `resume` 还是 `continue`。若烧录目标的其他静态条件和 v2 proof 均有效、但已登记成品缺失或 checksum 失效，状态为 `awaiting_input`：首选命令是 `relink-burned-output`，备选是显式 `continue` 重烧；这只表示成品**可能**可重新关联，命令仍会重新校验实际源媒体内容。
+- 校验强度：`status` 对产物做与 `continue` 完全相同的全量 checksum 校验，不是「轻量版 `verify`」；同一次调用内对同一个文件只哈希一次，因此哈希量与 `verify` 相同。两者的差别在输出粒度（`status` 给恢复计划，`verify` 给逐产物 pass/warn/fail）和退出码（`status` 恒为 0，`verify` 有 fail 时为 5）。
 
 </details>
 

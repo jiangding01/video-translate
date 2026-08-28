@@ -2,17 +2,65 @@ from __future__ import annotations
 
 import json
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from xvt.candidate_qa import translation_candidate_qa_issues
-from xvt.checksums import file_checksum
+from xvt.checksums import file_checksum as _hash_file
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.workflow_config import WorkflowConfig, get_workflow_config, resolve_target_language
+
+_checksum_cache: ContextVar[dict[tuple[Any, ...], str] | None] = ContextVar(
+    "xvt_readonly_checksum_cache", default=None
+)
+
+
+@contextmanager
+def readonly_checksum_scope() -> Iterator[None]:
+    """只读判定期间的进程内 checksum 记忆化作用域。
+
+    只能包住不写入任何产物的代码。作用域内同一
+    ``(path, st_dev, st_ino, st_size, st_mtime_ns)`` 只哈希一次；
+    不跨命令、不跨进程、不落盘。嵌套时内层建新字典，退出即复位。
+
+    文件元数据在这里只用于给"同一次判定内的同一个文件"定身份，
+    绝不用于替代内容校验：stat 只能证伪（元数据不符 ⇒ 内容必然已变），
+    永远不能证实（元数据相符不蕴含内容未变）。
+    """
+
+    token = _checksum_cache.set({})
+    try:
+        yield
+    finally:
+        _checksum_cache.reset(token)
+
+
+def file_checksum(path: Path) -> str:
+    """文件内容 SHA-256；在 ``readonly_checksum_scope`` 内做记忆化。
+
+    无作用域时逐字等价于 ``xvt.checksums.file_checksum``。
+    """
+
+    cache = _checksum_cache.get()
+    if cache is None:
+        return _hash_file(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        # 让原始 OSError 在真正读取时按现有路径抛出，不在这里吞掉。
+        return _hash_file(path)
+    key = (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    value = cache.get(key)
+    if value is None:
+        value = _hash_file(path)
+        cache[key] = value
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +353,19 @@ def _translated_qa_needs_rebuild(job: Job) -> bool:
 
 
 def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
+    """生成恢复计划。按契约只读，因此整段判定可以共享一份 checksum 记忆化。
+
+    ``plan_advance_steps`` / ``burned_output_relink_recovery_available`` /
+    ``_semantic_review_options`` / ``translation_candidate_qa_issues`` 都不写产物，
+    所以作用域内看到的是同一个文件系统快照——这比现状（同一个文件在一次调用里
+    被哈希两到四次，两次之间可能被改写）更自洽。
+    """
+
+    with readonly_checksum_scope():
+        return _build_recovery_plan(job_or_file)
+
+
+def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
     job = job_or_file if isinstance(job_or_file, Job) else load_job(job_or_file)
     job_file = get_job_file(job).resolve()
     valid_artifacts = {

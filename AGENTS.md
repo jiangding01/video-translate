@@ -57,7 +57,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 
 - `xvt run` 创建新 Job。没有 `--target-language` 时停在源字幕；提供目标语言后继续翻译；同时提供 `--burn` 时继续烧录。
 - `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。已登记烧录成品缺失、但具备重新关联资格的 Job 会停在 `awaiting_input`，绝不由批处理自动重烧；用户须先显式 `relink-burned-output`，或明确选择 `continue` 重烧。
-- `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum；符合资格时归类为 `awaiting_input`，优先给出 `relink-burned-output`，并列出显式 `continue` 重烧作为备选。
+- `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum；符合资格时归类为 `awaiting_input`，优先给出 `relink-burned-output`，并列出显式 `continue` 重烧作为备选。产物有效性判定与 `continue` 使用同一套全量 checksum 校验，只是同一次判定内对同一文件只哈希一次（进程内、单次调用作用域内的记忆化，不跨命令、不落盘）。size/mtime 等文件元数据只能用于**证伪**（元数据与登记值不符即判失效），不得用于**证实**有效——`cp -p` / `rsync -a` / 备份还原都会保留 mtime。既有成例同此界线：`add_artifact` 写后立即哈希登记，`_burn_fingerprint` 的 size+mtime 只参与身份指纹，不承担有效性判定。
 - `xvt continue JOB` 读取 `job.config.workflow`（类型化为 `WorkflowConfig`），补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
 - `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
