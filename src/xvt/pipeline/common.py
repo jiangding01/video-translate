@@ -19,6 +19,7 @@ from xvt.artifacts import ArtifactKind, downstream_of
 # 保持 pipeline 各模块既有的 `checksum(path)` 调用名不变（34 处调用点零改动）。
 from xvt.checksums import file_checksum as checksum
 from xvt.download import inspect_remote
+from xvt.errors import UserInputError
 from xvt.events import (
     EventSink,
     EventType,
@@ -203,6 +204,22 @@ def artifact_path(job: Job, kind: str) -> Path:
 # 新 schema 写入的额外键被忽略而不是抛裸 TypeError。
 _CUE_FIELDS = {field.name for field in fields(Cue)}
 _WORD_FIELDS = {field.name for field in fields(Word)}
+
+
+def load_user_response_json(response_file: str | Path, *, what: str) -> Any:
+    """读取用户提交的 response 文件。
+
+    `response_file` 永远是用户直接输入的 CLI 位置参数，读不出或解析不了都是用户输入
+    错误，不能逃逸成 OSError / JSONDecodeError 被顶层归到 dependency_or_process
+    （退出码 3）。**已登记 artifact 的读取不要走这个函数**：那些路径来自 Job 自己，
+    缺失是 Job 状态问题而不是用户敲错了命令行。
+    """
+
+    path = Path(response_file).expanduser()
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise UserInputError(f"cannot read {what}: {error}") from error
 
 
 def load_cues(path: Path) -> list[Cue]:

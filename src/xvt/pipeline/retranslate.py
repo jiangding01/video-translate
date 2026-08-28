@@ -21,6 +21,7 @@ from xvt.pipeline.common import (
     error_category,
     invalidate_rendered_artifacts,
     load_cues,
+    load_user_response_json,
     set_stage,
     write_json,
 )
@@ -219,7 +220,7 @@ def apply_cue_retranslation(
                 "manifest and retranslate with the new batches"
             )
         expected_ids = set(cue_ids)
-        response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+        response = load_user_response_json(response_file, what="cue retranslation response")
         if not isinstance(response, dict) or response.get("fingerprint") != manifest["fingerprint"]:
             raise ValueError("cue retranslation response fingerprint does not match current inputs")
         translations = load_translation_response(response_file, expected_ids)

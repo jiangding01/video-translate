@@ -19,6 +19,7 @@ from xvt.pipeline.common import (
     artifact_checksum_for,
     checksum,
     load_cues,
+    load_user_response_json,
     write_json,
 )
 from xvt.qa import check_subtitles
@@ -271,10 +272,7 @@ def apply_source_review_fixes(
             source_cues,
         )
     else:
-        try:
-            response = json.loads(response_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise UserInputError(f"cannot read source review response: {error}") from error
+        response = load_user_response_json(response_path, what="source review response")
         if not isinstance(response, dict):
             raise UserInputError("source review response must be a JSON object")
         if response.get("task") != SOURCE_REVIEW_TASK or response.get("scope") != "source":
@@ -709,10 +707,7 @@ def _json_review_changes(
 ) -> dict[int, str]:
     """解析 JSON 修订模板，返回 ``{cue id: 新译文}``。供 Agent 与脚本消费。"""
 
-    try:
-        response = json.loads(response_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise UserInputError(f"cannot read translation review response: {error}") from error
+    response = load_user_response_json(response_file, what="translation review response")
     if not isinstance(response, dict):
         raise UserInputError("translation review response must be a JSON object")
     if response.get("task") != TRANSLATION_REVIEW_TASK or response.get("scope") != "translation":

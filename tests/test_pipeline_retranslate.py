@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.errors import ExitCode, UserInputError
 from xvt.job_store import create_job, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline import (
@@ -97,6 +98,48 @@ class CueRetranslationTest(unittest.TestCase):
         self.assertEqual(persisted["stages"]["subtitle_qa"]["status"], "succeeded")
         self.assertNotIn("bilingual_ass", {item["kind"] for item in persisted["artifacts"]})
         self.assertNotIn("preview_video", {item["kind"] for item in persisted["artifacts"]})
+
+    def test_missing_response_file_is_a_user_input_error(self) -> None:
+        """等待态正确、只是 response 路径打错：属于用户输入错误（2），不是依赖故障（3）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "First", source_language="en"))]),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "First", "旧译文", target_language="zh-CN"))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 1000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path)),
+                    Artifact("translated_cues", str(translated_path)),
+                    Artifact("media_info", str(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            retranslate_cues(job_file, cue_ids=(1,), target_language="zh-CN", provider="agent")
+
+            with self.assertRaisesRegex(
+                UserInputError, "cannot read cue retranslation response"
+            ) as caught:
+                apply_cue_retranslation(
+                    job_file,
+                    root / "gone" / "response.json",
+                    cue_ids=(1,),
+                    target_language="zh-CN",
+                )
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
 
     def test_cue_retranslation_rejects_a_different_target_language(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

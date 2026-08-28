@@ -23,6 +23,7 @@ from xvt.pipeline.common import (
     error_category,
     invalidate_rendered_artifacts,
     load_cues,
+    load_user_response_json,
     set_stage,
     write_json,
 )
@@ -1414,7 +1415,7 @@ def apply_agent_semantic_review(
         preserved_revision_issues,
         review_scope,
     ) = _validated_agent_manifest(job, manifest_path)
-    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    response = load_user_response_json(response_file, what="semantic review response")
     if not isinstance(response, dict) or response.get("fingerprint") != manifest.get("fingerprint"):
         raise ValueError("Agent semantic response fingerprint does not match the current manifest")
     initial_results = _agent_results(

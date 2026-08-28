@@ -30,6 +30,7 @@ from xvt.pipeline.common import (
     error_category,
     invalidate_preview_artifacts,
     load_cues,
+    load_user_response_json,
     parse_cue_text_items,
     set_stage,
     write_json,
@@ -179,7 +180,7 @@ def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
-    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    response = load_user_response_json(response_file, what="translation response")
     items = response.get("items") if isinstance(response, dict) else None
     if not isinstance(items, list):
         raise ValueError("translation response must contain an items array")
@@ -492,7 +493,7 @@ def _load_agent_polished_response(
     response_file: str | Path, manifest: dict[str, Any]
 ) -> dict[int, str]:
     _batch_ids, cue_ids = _manifest_batch_ids_and_cue_ids(manifest)
-    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    response = load_user_response_json(response_file, what="polish response")
     if not isinstance(response, dict) or response.get("fingerprint") != manifest.get("fingerprint"):
         raise ValueError("translation response fingerprint does not match the current manifest")
     items = response.get("items")

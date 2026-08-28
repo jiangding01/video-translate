@@ -16,6 +16,7 @@ from xvt.pipeline.common import (
     checksum,
     error_category,
     load_cues,
+    load_user_response_json,
     parse_cue_text_items,
     set_stage,
     write_json,
@@ -692,7 +693,7 @@ def apply_agent_translation_polish(
     if fingerprint != expected_fingerprint:
         raise ValueError("polish batch manifest fingerprint no longer matches the draft")
     expected_ids = {item.id for batch in batches for item in batch.items}
-    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    response = load_user_response_json(response_file, what="polish response")
     if not isinstance(response, dict) or response.get("fingerprint") != fingerprint:
         raise ValueError("polish response fingerprint does not match the current draft")
     items = response.get("items") if isinstance(response, dict) else None

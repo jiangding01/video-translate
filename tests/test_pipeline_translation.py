@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.errors import ExitCode, UserInputError
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, Transcript, Word
@@ -185,6 +186,47 @@ class TranslationPipelineTest(unittest.TestCase):
                     response_path,
                     target_language="zh-CN",
                 )
+
+    def test_missing_translation_response_file_is_a_user_input_error(self) -> None:
+        """等待态正确、只是 response 路径打错：属于用户输入错误（2），不是依赖故障（3）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            job_directory = root / "jobs" / job.id
+            artifacts = job_directory / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(json.dumps([asdict(Cue(1, 0, 1000, "Hello"))]), encoding="utf-8")
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 2000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            save_job(job)
+
+            with self.assertRaisesRegex(
+                UserInputError, "cannot read translation response"
+            ) as caught:
+                apply_agent_translation(
+                    job_directory / "job.json",
+                    root / "gone" / "response.json",
+                    target_language="zh-CN",
+                )
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
+
+    def test_malformed_translation_response_json_is_a_user_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            response_path = root / "response.json"
+            response_path.write_text("{not json", encoding="utf-8")
+
+            with self.assertRaisesRegex(UserInputError, "cannot read translation response"):
+                load_translation_response(response_path, {1})
 
     def test_agent_translation_blocks_glossary_violations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
