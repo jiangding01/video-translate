@@ -547,7 +547,7 @@ uv run --no-sync xvt doctor
 uv run --no-sync xvt doctor --json
 ```
 
-`doctor` 会检查 FFmpeg、ffprobe、yt-dlp、libass、默认字幕字体的一帧实渲染、VideoToolbox、libx264 和已安装的 ASR 引擎。
+`doctor` 会检查 FFmpeg、ffprobe、yt-dlp、libass、默认字幕字体的一帧实渲染、VideoToolbox、libx264 和已安装的 ASR 引擎。ffmpeg 能力探测（30 秒）与字体渲染检查（60 秒）都有超时上限，任一探测超时按该检查项失败处理，不会让命令无限期挂住。
 
 ## 快速开始
 
