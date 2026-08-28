@@ -187,6 +187,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--target-font")
     run_parser.add_argument("--source-font")
     run_parser.add_argument("--events-jsonl", action="store_true")
+    run_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     batch_parser = subparsers.add_parser(
         "batch", help="Process supported files in a directory as independent jobs"
@@ -230,12 +237,26 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--target-font")
     batch_parser.add_argument("--source-font")
     batch_parser.add_argument("--events-jsonl", action="store_true")
+    batch_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     batch_continue_parser = subparsers.add_parser(
         "batch-continue", help="Continue incomplete jobs from a persisted batch"
     )
     batch_continue_parser.add_argument("batch_file")
     batch_continue_parser.add_argument("--events-jsonl", action="store_true")
+    batch_continue_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     status_parser = subparsers.add_parser(
         "status",
@@ -294,6 +315,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge the current semantic translation review report and proceed",
     )
     continue_parser.add_argument("--events-jsonl", action="store_true")
+    continue_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     unified_apply_parser = subparsers.add_parser(
         "apply",
@@ -1081,6 +1109,19 @@ def _batch_item_navigation_lines(batch_file: str | Path) -> list[str]:
     return lines
 
 
+def _waiting_exit_code(arguments: argparse.Namespace, status: str | None) -> ExitCode:
+    """`awaiting_input` 的退出码：默认 0，显式 `--fail-on-waiting` 时 10。
+
+    旗标唯一改变的是进程退出码：不发 `cli_failed`，不改 Job / batch 状态，
+    不改事件流，不改 stdout 文本。`awaiting_input` 是 Agent 协议的正常成功路径
+    （每一次 Agent 模式的 `run` 都会停在这里），所以默认必须保持 0。
+    """
+
+    if status == "awaiting_input" and getattr(arguments, "fail_on_waiting", False):
+        return ExitCode.AWAITING_INPUT
+    return ExitCode.OK
+
+
 def _print_batch_result(result: BatchResult) -> None:
     print(result.batch_file)
     print(
@@ -1224,7 +1265,7 @@ def _cmd_run(arguments: argparse.Namespace) -> int:
         )
     elif not arguments.events_jsonl:
         _print_workflow_result(result)
-    return 0
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_batch(arguments: argparse.Namespace) -> int:
@@ -1262,7 +1303,11 @@ def _cmd_batch(arguments: argparse.Namespace) -> int:
             _complete(arguments, batch_file=str(result.batch_file), status=result.status)
     else:
         _print_batch_result(result)
-    return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
+    # 6 优先于 10：有条目真的失败了是坏消息，压过「按设计停下等你」的中性消息。
+    # _result_status 的分支顺序（failed/pending -> partial_failure）保证两者互斥。
+    if result.status == "partial_failure":
+        return ExitCode.PARTIAL_FAILURE
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_batch_continue(arguments: argparse.Namespace) -> int:
@@ -1273,7 +1318,11 @@ def _cmd_batch_continue(arguments: argparse.Namespace) -> int:
             _complete(arguments, batch_file=str(result.batch_file), status=result.status)
     else:
         _print_batch_result(result)
-    return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
+    # 6 优先于 10：有条目真的失败了是坏消息，压过「按设计停下等你」的中性消息。
+    # _result_status 的分支顺序（failed/pending -> partial_failure）保证两者互斥。
+    if result.status == "partial_failure":
+        return ExitCode.PARTIAL_FAILURE
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_status(arguments: argparse.Namespace) -> int:
@@ -1412,7 +1461,7 @@ def _cmd_continue(arguments: argparse.Namespace) -> int:
         )
     elif not arguments.events_jsonl:
         _print_workflow_result(result)
-    return 0
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_prepare_translation(arguments: argparse.Namespace) -> int:

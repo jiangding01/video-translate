@@ -667,6 +667,26 @@ class BatchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "inside output_root/jobs"):
                 continue_batch(batch_file)
 
+    def test_failed_items_outrank_awaiting_items_in_the_batch_status(self) -> None:
+        """`--fail-on-waiting` 的「6 优先于 10」靠这条结构性保证：混合态必然是 partial_failure。"""
+
+        from xvt.batch import _result_status
+
+        mixed = {"total": 3, "completed": 1, "awaiting_input": 1, "failed": 1, "pending": 0}
+        self.assertEqual(_result_status(mixed), "partial_failure")
+        self.assertEqual(
+            _result_status({**mixed, "failed": 0, "pending": 1}),
+            "partial_failure",
+        )
+        self.assertEqual(
+            _result_status({**mixed, "failed": 0, "pending": 0}),
+            "awaiting_input",
+        )
+        self.assertEqual(
+            _result_status({**mixed, "failed": 0, "pending": 0, "awaiting_input": 0}),
+            "completed",
+        )
+
     def test_missing_batch_file_is_a_user_input_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "gone" / "batch.json"

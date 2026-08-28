@@ -21,7 +21,7 @@ from xvt.cli import (
     _print_batch_result,
     main,
 )
-from xvt.errors import DependencyError, InternalError, UserInputError
+from xvt.errors import DependencyError, ExitCode, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -2751,6 +2751,118 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 4)
         self.assertEqual(event["type"], "cli_failed")
         self.assertEqual(event["data"]["error"]["category"], "workflow")
+
+
+class FailOnWaitingTest(unittest.TestCase):
+    """`--fail-on-waiting` 只改退出码：默认 0 一字不改，6 优先于 10。"""
+
+    def _run(self, argv: list[str], *, workflow_status: str = "awaiting_input") -> int:
+        result = WorkflowResult(workflow_status, Path("/tmp/job.json"), (), "needs agent")
+        with (
+            patch("xvt.cli.run_workflow", return_value=result),
+            patch("xvt.cli.continue_workflow", return_value=result),
+            patch("xvt.cli.build_recovery_plan", side_effect=OSError("no job")),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            return main(argv)
+
+    def _run_batch(self, argv: list[str], status: str) -> int:
+        result = BatchResult(status, Path("/tmp/batch.json"), 2, 1, 1, 0)
+        with (
+            patch("xvt.cli.run_batch", return_value=result),
+            patch("xvt.cli.continue_batch", return_value=result),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            return main(argv)
+
+    def test_run_awaiting_input_defaults_to_success(self) -> None:
+        self.assertEqual(self._run(["run", "/tmp/in.mp4", "--output", "/tmp/out"]), 0)
+
+    def test_run_awaiting_input_with_flag_returns_awaiting_code(self) -> None:
+        return_code = self._run(["run", "/tmp/in.mp4", "--output", "/tmp/out", "--fail-on-waiting"])
+        self.assertEqual(return_code, ExitCode.AWAITING_INPUT)
+        self.assertEqual(return_code, 10)
+
+    def test_run_completed_with_flag_still_returns_success(self) -> None:
+        return_code = self._run(
+            ["run", "/tmp/in.mp4", "--output", "/tmp/out", "--fail-on-waiting"],
+            workflow_status="completed",
+        )
+        self.assertEqual(return_code, 0)
+
+    def test_continue_awaiting_input_both_ways(self) -> None:
+        self.assertEqual(self._run(["continue", "/tmp/job.json"]), 0)
+        self.assertEqual(
+            self._run(["continue", "/tmp/job.json", "--fail-on-waiting"]),
+            ExitCode.AWAITING_INPUT,
+        )
+
+    def test_batch_awaiting_input_both_ways(self) -> None:
+        argv = ["batch", "/tmp/inputs", "--output", "/tmp/out"]
+        self.assertEqual(self._run_batch(argv, "awaiting_input"), 0)
+        self.assertEqual(
+            self._run_batch([*argv, "--fail-on-waiting"], "awaiting_input"),
+            ExitCode.AWAITING_INPUT,
+        )
+
+    def test_batch_continue_awaiting_input_both_ways(self) -> None:
+        argv = ["batch-continue", "/tmp/batch.json"]
+        self.assertEqual(self._run_batch(argv, "awaiting_input"), 0)
+        self.assertEqual(
+            self._run_batch([*argv, "--fail-on-waiting"], "awaiting_input"),
+            ExitCode.AWAITING_INPUT,
+        )
+
+    def test_partial_failure_outranks_awaiting_input(self) -> None:
+        """混合态（有失败、也有等待）无论加不加旗标都必须是 6：失败压过等待。"""
+
+        for argv in (
+            ["batch", "/tmp/inputs", "--output", "/tmp/out"],
+            ["batch-continue", "/tmp/batch.json"],
+        ):
+            with self.subTest(command=argv[0]):
+                self.assertEqual(self._run_batch(argv, "partial_failure"), ExitCode.PARTIAL_FAILURE)
+                self.assertEqual(
+                    self._run_batch([*argv, "--fail-on-waiting"], "partial_failure"),
+                    ExitCode.PARTIAL_FAILURE,
+                )
+
+    def test_flag_does_not_change_the_event_stream(self) -> None:
+        """契约守卫：10 不对应任何失败事件，事件序列必须与不加旗标时逐条相等。"""
+
+        def emit(argv: list[str]) -> list[dict]:
+            result = WorkflowResult("awaiting_input", Path("/tmp/job.json"), (), "needs agent")
+
+            def run_waiting(_options, *, event_sink):
+                event_sink(
+                    create_event(EventType.WORKFLOW_STARTED, job_id="j", job_file="/tmp/job.json")
+                )
+                event_sink(
+                    create_event(EventType.WORKFLOW_WAITING, job_id="j", job_file="/tmp/job.json")
+                )
+                return result
+
+            output = StringIO()
+            with (
+                patch("xvt.cli.run_workflow", side_effect=run_waiting),
+                redirect_stdout(output),
+                redirect_stderr(StringIO()),
+            ):
+                main(argv)
+            return [json.loads(line) for line in output.getvalue().splitlines()]
+
+        base = ["run", "/tmp/in.mp4", "--output", "/tmp/out", "--events-jsonl"]
+        without = emit(base)
+        with_flag = emit([*base, "--fail-on-waiting"])
+
+        def stripped(events: list[dict]) -> list[tuple]:
+            return [(event["type"], json.dumps(event["data"], sort_keys=True)) for event in events]
+
+        self.assertEqual(stripped(without), stripped(with_flag))
+        self.assertNotIn("cli_failed", {event["type"] for event in with_flag})
+        self.assertNotIn("cli_completed", {event["type"] for event in with_flag})
 
 
 class BatchResultPrintingTest(unittest.TestCase):
