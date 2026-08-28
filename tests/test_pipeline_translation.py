@@ -617,6 +617,21 @@ class TranslationPipelineTest(unittest.TestCase):
                     self.assertLessEqual(delay, base)
                     self.assertLessEqual(delay, 30)
 
+    def test_backoff_delay_is_rounded_to_two_decimals(self) -> None:
+        # 非同源：不复算 random.uniform，也不 patch 全局 random（translation.random 就是
+        # 全局 random 模块对象，patch 它等于污染全局）—— 只断言返回值本身满足「已按两位
+        # 小数取整」这一属性。去掉 round 后 uniform 的 17 位有效数字几乎必然违反它
+        # （round(d, 2) != d），改成 round(..., 3) 也会被抓住（0.753 != 0.75）；而已取整的
+        # 值恒满足两条断言，所以误报率为 0，与上面的区间用例同一标准。
+        # 取整是 translation_batch_retrying 事件里的 delay_seconds 与实际 sleep 完全一致的
+        # 前提（见 _backoff_delay 的 docstring）。
+        for base in (1, 2, 4, 8, 16, 30):
+            with self.subTest(base=base):
+                for _ in range(50):
+                    delay = _backoff_delay(base)
+                    self.assertEqual(delay, round(delay, 2))
+                    self.assertLessEqual(len(repr(delay).partition(".")[2]), 2)
+
     def test_transport_backoff_bases_follow_capped_exponential(self) -> None:
         # jitter 确定化：把 _backoff_delay 钉成恒等函数后，可以直接断言喂给它的 base
         # 序列——指数增长并在 _MAX_BACKOFF_SECONDS 处封顶。
