@@ -769,7 +769,9 @@ uv run --no-sync xvt apply-cue-retranslation "/path/to/job.json" \
   --target-language zh-CN
 ```
 
-Agent 模式请求重译后，Job 一直停在等待态直到回填：`status` 报 `awaiting_input` 并列出 manifest 路径与拼好的回填命令，`continue` 不会宣告完成、也不会继续渲染或烧录，`batch-continue` 把该条目记为 `awaiting_input` 而不是已完成。要放弃一次重译，目前只能手工删除 `artifacts/cue-retranslation-batches.json`（删除后 `status` 恢复原有分类）。
+Agent 模式请求重译后，Job 一直停在等待态直到回填：`status` 报 `awaiting_input` 并列出 manifest 路径与拼好的回填命令，`continue` 不会宣告完成、也不会继续渲染或烧录，`batch-continue` 把该条目记为 `awaiting_input` 而不是已完成。要放弃一次重译，重新运行一轮完整翻译（`xvt translate JOB --target-language LANG`）即可取代它：准备新批次时会把这份重译 manifest 移出登记，Job 转为等待新的整轮回填。`xvt continue` 本身会停在这次重译等待上，不会替你放弃；仍然可以手工删除 `artifacts/cue-retranslation-batches.json`，删除后 `status` 恢复原有分类。
+
+拼回填命令时 `--cue` 的顺序必须与 manifest 里的批次顺序一致（也就是当初 `retranslate-cues` 的 `--cue` 顺序）：`apply-cue-retranslation` 会用传入的顺序重新构造 manifest 并做全等比对，顺序不同会被拒绝。`status` 给出的命令已经按 manifest 顺序拼好，直接复制即可。
 
 回填的实际代价按质量档不同：`standard` Job 上只有选中的 cue 被改写，其余译文与全部时间轴保持不变，随后重跑确定性译文 QA 与渲染；`polished` Job 上回填结果会成为**新的翻译草稿**（`translation-draft-cues.json`），旧的润色候选、语义校对结论与最终译文一并失效，需要重新走一遍润色与语义校对——这条腿会真实调用模型，不是零成本。
 

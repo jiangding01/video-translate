@@ -15,6 +15,7 @@ from xvt.pipeline import (
     apply_cue_retranslation,
     cue_retranslation_request,
     cue_retranslation_waiting,
+    prepare_agent_translation,
     retranslate_cues,
 )
 from xvt.recovery import file_checksum, valid_artifact_path
@@ -474,7 +475,7 @@ class CueRetranslationPolicyResolutionTest(unittest.TestCase):
 class CueRetranslationWaitingPredicateTest(unittest.TestCase):
     """恢复计划与 planner 共用的两个只读谓词。"""
 
-    def _waiting_job_file(self, root: Path) -> Path:
+    def _waiting_job_file(self, root: Path, *, cue_ids: tuple[int, ...] = (2,)) -> Path:
         job = create_job("/tmp/input.mp4", root)
         artifacts = root / "jobs" / job.id / "artifacts"
         artifacts.mkdir()
@@ -507,14 +508,17 @@ class CueRetranslationWaitingPredicateTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        media_path = artifacts / "media.json"
+        media_path.write_text(json.dumps({"duration_ms": 3000}), encoding="utf-8")
         job.artifacts.extend(
             [
                 Artifact("source_cues", str(source_path), file_checksum(source_path)),
                 Artifact("translated_cues", str(translated_path), file_checksum(translated_path)),
+                Artifact("media_info", str(media_path), file_checksum(media_path)),
             ]
         )
         job_file = save_job(job)
-        retranslate_cues(job_file, cue_ids=(2,), target_language="zh-CN", provider="agent")
+        retranslate_cues(job_file, cue_ids=cue_ids, target_language="zh-CN", provider="agent")
         return job_file
 
     def test_request_returns_only_the_targeted_cue_ids(self) -> None:
@@ -594,6 +598,70 @@ class CueRetranslationWaitingPredicateTest(unittest.TestCase):
             job = load_job(job_file)
 
             self.assertIsNone(cue_retranslation_request(job))
+            self.assertFalse(cue_retranslation_waiting(job))
+
+    def test_request_preserves_the_manifest_batch_order(self) -> None:
+        """`--cue 3 --cue 1` 的 manifest 就是 3、1 顺序；排序会让回填的全等比对必然失败。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, cue_ids=(3, 1))
+            job = load_job(job_file)
+            request = cue_retranslation_request(job)
+
+            assert request is not None
+            self.assertEqual(request, ((3, 1), "zh-CN"))
+
+            manifest_path = valid_artifact_path(job, "cue_retranslation_batches")
+            assert manifest_path is not None
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": cue_id, "text": f"新{cue_id}"} for cue_id in request[0]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # 恢复计划给出的 --cue 顺序必须能被原样复制执行。
+            apply_cue_retranslation(
+                job_file,
+                response_path,
+                cue_ids=request[0],
+                target_language=request[1],
+            )
+
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
+            )
+
+    def test_a_fresh_translation_round_supersedes_a_stale_retranslation_manifest(self) -> None:
+        """放弃重译后重新跑整轮翻译：残留 manifest 不得再遮蔽合法的初译等待。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            self.assertTrue(cue_retranslation_waiting(job))
+
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            job = load_job(job_file)
+
+            self.assertIsNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertNotIn(
+                "cue_retranslation_batches",
+                {artifact.kind for artifact in job.artifacts},
+            )
+            self.assertIsNotNone(valid_artifact_path(job, "translation_batches"))
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
             self.assertFalse(cue_retranslation_waiting(job))
 
 

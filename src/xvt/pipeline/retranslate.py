@@ -76,8 +76,14 @@ def cue_retranslation_waiting(job: Job) -> bool:
     后两条不能省。``cue_retranslation_batches`` 在 artifact 依赖图上只派生自
     ``source_cues``，译文被改写时它不会被失效，因此「重译已回填、manifest 只是残留」
     的旧文件仍然 checksum 有效；只看 stage + manifest 有效会把随后的润色/语义等待
-    错误地盖成重译等待——真实回归形态是回填后再跑 ``polish-translation --provider
-    agent``，此时 ``translated_cues`` 已被失效移出登记，条件三直接为假。
+    错误地盖成重译等待。真正挡住这种误判的是条件一与条件四：``apply-cue-retranslation``
+    走 ``finalize_translation``，standard 质量下把 ``translated_cues`` **重写**并重新登记
+    （条件四的 checksum 随之失配）、``TRANSLATE`` 置 succeeded（条件一为假）；polished
+    质量下结果被写成新草稿，``translated_cues`` 被失效移出登记（条件三也为假）、
+    ``TRANSLATE`` 回落 pending。三者任一都足以让谓词判否，缺一条就会误判。
+
+    残留 manifest 还有一条不靠本谓词的出口：``prepare_agent_translation`` 在写出新的
+    整轮 ``translation_batches`` 时会主动把它移出登记（整轮翻译取代局部重译）。
 
     checksum 走 ``recovery.file_checksum``：本函数是只读判定，在
     ``build_recovery_plan`` 的记忆化作用域内能复用同一次判定里已经算过的哈希；
@@ -106,6 +112,11 @@ def cue_retranslation_request(job: Job) -> tuple[tuple[int, ...], str] | None:
     生成独立批次且 ``items`` 恰好一个元素，相邻上下文放在 ``context_before`` /
     ``context_after``，不会混进来。manifest 结构不符合预期时返回 None，由调用方退回
     形状占位，绝不猜测 cue id。
+
+    **顺序必须与 manifest 内的批次顺序一致，不能排序**：``apply-cue-retranslation`` 会用
+    传入的 ``--cue`` 顺序重新构造 manifest 并与盘上那份做全等比对，用户写
+    ``--cue 3 --cue 1`` 时批次就是 3、1 的顺序；这里排成升序会让按恢复计划复制的命令必然
+    比对失败。去重保留首次出现的位置（manifest 本身不含重复 id，这里只是防御）。
     """
 
     manifest = _load_cue_retranslation_manifest(job)
@@ -132,7 +143,7 @@ def cue_retranslation_request(job: Job) -> tuple[tuple[int, ...], str] | None:
             cue_ids.append(cue_id)
     if not cue_ids:
         return None
-    return tuple(sorted(dict.fromkeys(cue_ids))), target_language
+    return tuple(dict.fromkeys(cue_ids)), target_language
 
 
 def _cue_retranslation_manifest(

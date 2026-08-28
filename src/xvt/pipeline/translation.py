@@ -875,6 +875,12 @@ def prepare_agent_translation(
         job.config["target_language"] = target_language
         job.config["source_language"] = source_language
         job.config["translation_policy"] = resolved_policy.to_dict()
+        # 整轮翻译准备取代任何未回填的局部重译：cue_retranslation_batches 在 artifact
+        # 依赖图上只派生自 source_cues，源 cue 没变时它不会被任何失效规则带走，于是
+        # 「放弃重译后重新翻译」的 Job 上四条件仍可全真，cue_retranslation_waiting 会把
+        # 合法的初译等待盖成重译等待，status 与 apply 一起指向作废的 manifest。
+        # 这里显式移出登记，让新的 translation_batches 成为唯一在途的翻译请求。
+        job.artifacts = [item for item in job.artifacts if item.kind != "cue_retranslation_batches"]
         if workflow is None:
             # workflow Job 的 quality 由 workflow 配置派生，不写入顶层 config。
             job.config["translation_quality"] = quality
