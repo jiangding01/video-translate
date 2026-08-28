@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 
-from xvt import cancellation
+from xvt import cancellation, events, process
 from xvt.events import EventType, create_event
 from xvt.process import CommandCancelled, CommandError, raise_if_cancelled, run_command
 
@@ -213,6 +213,11 @@ class ProcessTest(unittest.TestCase):
         self.assertIn("https://<redacted>@proxy.example.com/path", event_command)
         self.assertNotIn("secret", json.dumps(events[0].data))
         self.assertNotIn("password", json.dumps(events[0].data))
+
+    def test_url_redaction_has_a_single_implementation(self) -> None:
+        # 反向守卫：URL 脱敏只允许 events.py 一份实现，process 必须直接复用它。
+        # 一旦有人在 process 里抄回第二份（哪怕逐字相同），两边就会各自漂移。
+        self.assertIs(process.redact_url, events.redact_url)
 
     def test_event_serializes_as_json(self) -> None:
         event = create_event(EventType.STAGE_STARTED, stage="inspect")
