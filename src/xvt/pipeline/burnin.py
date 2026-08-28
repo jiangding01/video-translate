@@ -30,7 +30,7 @@ from xvt.pipeline.common import (
     write_json,
 )
 from xvt.pipeline.review import review_gate_satisfied
-from xvt.recovery import valid_artifact_path
+from xvt.recovery import atomic_translated_qa_rebuild_command, valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.workflow_config import get_workflow_config
 
@@ -53,12 +53,29 @@ _ATOMIC_QA_GATE_GUIDANCE = (
 )
 
 
-def _qa_gate_guidance(job: Job) -> str:
-    """按 Job 是否有持久化 workflow 目标给出实际可执行的恢复指引。"""
+def _qa_gate_guidance(job: Job, *, rebuildable: bool = False) -> str:
+    """按 Job 是否有持久化 workflow 目标给出实际可执行的恢复指引。
+
+    ``rebuildable=True`` 只用于「报告缺失或 checksum 失效」这条产物缺口——此时 Job 内
+    若还留着 checksum 有效的译文字幕，就能零 API 成本重建报告与渲染产物，门、`status`
+    与 CLI 三处必须给同一条出口。报告存在且判定不放行（error / 未确认的 needs_review）
+    时不适用：重建只会重新算出同一份阻断报告，真正的处置是修字幕或重跑翻译。
+    """
+
+    if get_workflow_config(job) is not None:
+        return _WORKFLOW_QA_GATE_GUIDANCE
+    rebuild = atomic_translated_qa_rebuild_command(job) if rebuildable else None
+    if rebuild is None:
+        return _ATOMIC_QA_GATE_GUIDANCE
     return (
-        _WORKFLOW_QA_GATE_GUIDANCE
-        if get_workflow_config(job) is not None
-        else _ATOMIC_QA_GATE_GUIDANCE
+        "this job has no persisted workflow goal, so `xvt continue` does not apply; "
+        "the translated subtitles in this job are still checksum-valid, so "
+        f"`{rebuild}` rebuilds the QA report and the rendered subtitles at zero "
+        "translation-API cost (it registers those subtitles as an imported translation); "
+        "rerun `xvt translate JOB --target-language LANG` instead when the translation "
+        "itself needs to change; "
+        "a needs_review report can only be acknowledged on an end-to-end job "
+        "created by `xvt run`"
     )
 
 
@@ -69,12 +86,12 @@ def _assert_translated_qa_gate(job: Job, *, action: str) -> Path:
     `subtitle_qa_failure_guidance`，因此门必须落在这里。Fail-closed：没有逃生口，
     `needs_review` 的合法放行走既有 acknowledge 通道。
     """
-    guidance = _qa_gate_guidance(job)
     translated_path = valid_artifact_path(job, "translated_cues")
     qa_path = valid_artifact_path(job, "translated_subtitle_qa")
     if translated_path is None or qa_path is None:
         raise RuntimeError(
-            f"{action} requires checksum-valid translated subtitles and QA report; {guidance}"
+            f"{action} requires checksum-valid translated subtitles and QA report; "
+            f"{_qa_gate_guidance(job, rebuildable=True)}"
         )
     try:
         qa_data = json.loads(qa_path.read_text(encoding="utf-8"))
@@ -84,7 +101,7 @@ def _assert_translated_qa_gate(job: Job, *, action: str) -> Path:
         raise RuntimeError(
             f"translated subtitle QA must pass before {action} "
             f"(status={qa_data.get('status') if isinstance(qa_data, dict) else 'unknown'}); "
-            f"{guidance}"
+            f"{_qa_gate_guidance(job)}"
         )
     return translated_path
 

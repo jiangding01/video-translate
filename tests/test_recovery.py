@@ -958,3 +958,103 @@ class CueRetranslationRecoveryTest(unittest.TestCase):
             command = plan.prerequisite_commands[0]
             self.assertIn("--cue ID [--cue ID ...]", command)
             self.assertIn("--target-language LANG", command)
+
+
+class AtomicTranslatedQaRebuildTest(unittest.TestCase):
+    """原子/历史 Job 上译文 QA 报告单独失效不能再归 complete。"""
+
+    def _job_with_stale_translated_qa(
+        self,
+        root: Path,
+        *,
+        translated_srt: bool = True,
+        qa_blocked: bool = False,
+    ) -> Path:
+        job = create_job("/tmp/input.mp4", root, {"target_language": "zh-CN"})
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+        source_cues = artifacts / "source-cues.json"
+        source_cues.write_text(
+            json.dumps([{"id": 1, "start_ms": 0, "end_ms": 1000, "source_text": "Hello"}]),
+            encoding="utf-8",
+        )
+        translated_cues = artifacts / "translated-cues.json"
+        translated_cues.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": 1,
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "source_text": "Hello",
+                        "target_text": "你好",
+                        "target_language": "zh-CN",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_cues), file_checksum(source_cues)),
+                Artifact("translated_cues", str(translated_cues), file_checksum(translated_cues)),
+            ]
+        )
+        if translated_srt:
+            path = artifacts / "translated.srt"
+            path.write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
+            job.artifacts.append(Artifact("translated_srt", str(path), file_checksum(path)))
+        # 登记过、但内容已被改写：checksum 失效，报告不再有效。
+        translated_qa = artifacts / "qa-translated.json"
+        translated_qa.write_text('{"status":"pass","issues":[]}', encoding="utf-8")
+        job.artifacts.append(
+            Artifact("translated_subtitle_qa", str(translated_qa), file_checksum(translated_qa))
+        )
+        translated_qa.write_text('{"status":"pass","issues":[],"stale":true}', encoding="utf-8")
+        if qa_blocked:
+            # _translated_qa_needs_rebuild 还要求一份有效且无 error 的源字幕 QA 报告。
+            source_qa = artifacts / "qa-source.json"
+            source_qa.write_text('{"status":"pass","issues":[]}', encoding="utf-8")
+            job.artifacts.append(Artifact("subtitle_qa", str(source_qa), file_checksum(source_qa)))
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+        return save_job(job)
+
+    def test_stale_report_with_reusable_subtitles_is_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_stale_translated_qa(root)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "retryable")
+            self.assertIn("xvt import-translation", plan.primary_command or "")
+            self.assertIn("--target-language zh-CN", plan.primary_command or "")
+            self.assertIn("translated.srt", plan.primary_command or "")
+            self.assertIn("零 API 成本", plan.reason)
+            self.assertIn("导入译文", plan.reason)
+            self.assertEqual(len(plan.alternative_commands), 1)
+            self.assertIn("xvt translate", plan.alternative_commands[0])
+
+    def test_stale_report_without_subtitles_needs_a_real_translation_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_stale_translated_qa(root, translated_srt=False)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertIn("xvt translate", plan.primary_command or "")
+            self.assertIn("重新调用翻译提供方", plan.reason)
+
+    def test_qa_blocked_atomic_job_is_no_longer_a_dead_end(self) -> None:
+        """此前这条分支对 workflow 为 None 的 Job 给 primary_command=None，无路可走。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_stale_translated_qa(root, qa_blocked=True)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "retryable")
+            self.assertIsNotNone(plan.primary_command)
+            self.assertIn("xvt import-translation", plan.primary_command or "")

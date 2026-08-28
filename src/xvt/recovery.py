@@ -127,6 +127,42 @@ def _job_command(command: str, job_file: Path, *arguments: str) -> str:
     return " ".join(parts)
 
 
+def atomic_translated_qa_rebuild_command(
+    job: Job,
+    job_file: str | Path | None = None,
+) -> str | None:
+    """原子 Job 上零 API 成本重建译文 QA 与渲染产物的命令；不可行时返回 None。
+
+    `import-translation` 与端到端 `continue` 的 render 步骤走同一个 ``finalize_translation``
+    收尾，只消费 Job 内已经 checksum 有效的 ``translated.srt``，不调用任何翻译提供方。
+    承诺仅限于「零 API 成本重建 QA 与渲染产物」——它按当前源 cue 重新映射译文，不承诺
+    ``translated_cues`` 逐字不变。代价是这份字幕会被登记为 ``input_translation_subtitles`` /
+    ``translation_mapping``，Job 从此带上「导入译文」的痕迹，reason 与文档都要写明。
+
+    三处共用：原子恢复分支的新判定、``qa_blocked`` 上 ``workflow`` 为 None 的死路，
+    以及 ``pipeline.burnin`` 的原子 QA 门文案。
+    """
+
+    target_language = resolve_target_language(job)
+    if not target_language:
+        return None
+    translated_srt = valid_artifact_path(job, "translated_srt")
+    if translated_srt is None:
+        return None
+    resolved = (
+        Path(job_file).expanduser().resolve()
+        if job_file is not None
+        else get_job_file(job).resolve()
+    )
+    return _job_command(
+        "import-translation",
+        resolved,
+        shlex.quote(str(translated_srt)),
+        "--target-language",
+        target_language,
+    )
+
+
 _CUE_RETRANSLATION_WAITING_REASON = (
     "任务正在等待局部重译（retranslate-cues）结果回填；未回填前不要按已完成处理。"
     "放弃这次重译需要手工删除 artifacts/cue-retranslation-batches.json。"
@@ -389,6 +425,42 @@ def _translated_qa_needs_rebuild(job: Job) -> bool:
     )
 
 
+def _atomic_translated_qa_recovery(
+    job: Job,
+    job_file: Path,
+    target_language: str | None,
+    plan: Callable[..., RecoveryPlan],
+) -> RecoveryPlan:
+    """原子 Job 上「译文 QA 报告失效」的统一分类与引导。
+
+    烧录与预览的 fail-closed 门以该报告为硬前置，报 ``complete`` 会让用户在
+    「门说去修、status 说已完成」之间打转。
+    """
+
+    rebuild = atomic_translated_qa_rebuild_command(job, job_file)
+    if rebuild is not None:
+        assert target_language is not None
+        return plan(
+            "retryable",
+            "译文 QA 报告已失效，烧录与预览会被安全门拒绝；可以从 Job 内仍然 checksum 有效的"
+            "译文字幕零 API 成本重建 QA 与渲染产物（该命令会把这份字幕登记为导入译文）。",
+            primary_command=rebuild,
+            alternative_commands=(
+                _job_command("translate", job_file, "--target-language", target_language),
+            ),
+        )
+    return plan(
+        "manual_fix",
+        "译文 QA 报告已失效且 Job 内没有可复用的译文字幕，只能重跑翻译重新生成报告"
+        "（会重新调用翻译提供方）。",
+        primary_command=(
+            _job_command("translate", job_file, "--target-language", target_language)
+            if target_language
+            else None
+        ),
+    )
+
+
 def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
     """生成恢复计划。按契约只读，因此整段判定可以共享一份 checksum 记忆化。
 
@@ -503,12 +575,14 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             _load_qa_report(translated_report_path) if translated_report_path else None
         )
         if _translated_qa_needs_rebuild(job):
+            if workflow is None:
+                # 原子 Job 上 continue 不适用，此前这里给 primary_command=None，是一条
+                # 没有出口的死路；改为与原子分支共用同一条零 API 成本重建引导。
+                return _atomic_translated_qa_recovery(job, job_file, target_language, plan)
             return plan(
                 "retryable",
                 "译文字幕 QA 报告缺失或 checksum 已失效，可以从现有译文重新执行 QA。",
-                primary_command=(
-                    _job_command("continue", job_file) if workflow is not None else None
-                ),
+                primary_command=_job_command("continue", job_file),
             )
         if source_report is None and "source_srt" not in valid_artifacts:
             command = "continue" if workflow is not None else "resume"
@@ -675,6 +749,17 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                 target_language,
             ),
         )
+
+    if (
+        target_language
+        and "translated_cues" in valid_artifacts
+        and any(item.kind == "translated_subtitle_qa" for item in job.artifacts)
+        and "translated_subtitle_qa" not in valid_artifacts
+    ):
+        # 译文 cue 仍有效，缺的只是可确定性重算的译文 QA 报告；但烧录/预览门以它为硬前置，
+        # 报 complete 会让用户在「门说去修、status 说已完成」之间打转。SUBTITLE_QA stage
+        # 仍是 succeeded 时走不到上面的 qa_blocked 分支，所以这条判定必须留在收尾之前。
+        return _atomic_translated_qa_recovery(job, job_file, target_language, plan)
 
     return plan(
         "complete",

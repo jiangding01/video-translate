@@ -385,6 +385,62 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             self.assertNotIn("xvt continue JOB", message)
             self.assertIn("xvt translate JOB --target-language LANG", message)
 
+    def test_atomic_missing_qa_report_offers_the_zero_cost_rebuild(self) -> None:
+        """报告缺失但译文字幕仍有效时，门必须给出零 API 成本的重建出口。
+
+        门、`status` 与 CLI 三处共用同一条命令；此前门无条件说「重跑 xvt translate」，
+        而重跑翻译是真金白银的全量重译。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            job.config["target_language"] = "zh-CN"
+            translated_srt = artifacts / "translated.srt"
+            translated_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
+            job.artifacts.append(
+                Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt))
+            )
+            job.artifacts = [artifact for artifact in job.artifacts if artifact.kind != _QA_KIND]
+            job_file = save_job(job)
+
+            with self.assertRaises(RuntimeError) as raised:
+                burn_translated_job(job_file)
+
+            message = str(raised.exception)
+            self.assertIn("xvt import-translation", message)
+            self.assertIn("translated.srt", message)
+            self.assertIn("--target-language zh-CN", message)
+            self.assertIn("zero", message)
+            self.assertIn("imported translation", message)
+            self.assertNotIn("xvt continue JOB", message)
+
+    def test_atomic_failing_qa_report_keeps_the_translate_guidance(self) -> None:
+        """报告存在且判定不放行时不能给重建出口：重建只会算出同一份阻断报告。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            job.config["target_language"] = "zh-CN"
+            translated_srt = artifacts / "translated.srt"
+            translated_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
+            job.artifacts.append(
+                Artifact("translated_srt", str(translated_srt), file_checksum(translated_srt))
+            )
+            _register_translated_qa(job, artifacts, status="failed")
+            job_file = save_job(job)
+
+            with self.assertRaises(RuntimeError) as raised:
+                burn_translated_job(job_file)
+
+            message = str(raised.exception)
+            self.assertNotIn("import-translation", message)
+            self.assertIn("xvt translate JOB --target-language LANG", message)
+
     def test_burn_rejects_missing_translated_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
