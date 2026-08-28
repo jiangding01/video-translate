@@ -723,6 +723,35 @@ class RecoveryTest(unittest.TestCase):
             path.write_bytes(b"xvt" * 4096)
             self.assertEqual(file_checksum(path), checksums.file_checksum(path))
 
+    def test_missing_registered_artifact_is_not_a_user_input_error(self) -> None:
+        """边界守卫：用户敲错 job_file 路径是 2，已登记产物被删是 Job 状态问题，不是 2。
+
+        `load_job` 对缺失的 job_file 抛 UserInputError（P2a）。这条测试把边界钉住，
+        防止后来者顺手把「登记的 artifact 文件不见了」也改成用户输入错误——
+        路径的责任归属只有入口知道，登记产物的路径来源是 Job 自己。
+        """
+
+        from xvt.errors import UserInputError
+        from xvt.pipeline.common import artifact_path, load_cues
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cues = root / "source-cues.json"
+            cues.write_text("[]", encoding="utf-8")
+            job = create_job("/tmp/source.mp4", root, {"workflow": {"target_language": "zh-CN"}})
+            job.artifacts.append(
+                Artifact(kind="source_cues", path=str(cues), checksum=file_checksum(cues))
+            )
+            job_file = save_job(job)
+            cues.unlink()
+
+            loaded = load_job(job_file)
+            path = artifact_path(loaded, "source_cues")
+            with self.assertRaises(FileNotFoundError) as caught:
+                load_cues(path)
+
+            self.assertNotIsInstance(caught.exception, UserInputError)
+
     def _burned_complete_job(self, root: Path) -> Path:
         """一个「烧录已完成」的端到端 Job：判定链会反复触碰同几个文件。"""
 

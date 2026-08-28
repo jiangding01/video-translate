@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 680 个测试、108 个子测试，全部通过 |
+| 自动化测试 | 688 个测试、126 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -110,7 +110,7 @@
 - `status`、普通失败输出和 Ctrl-C 共用结构化 `RecoveryPlan`，只复用 checksum 验证通过的 artifact。
 - 端到端 Job 的恢复计划通过 `plan_advance_steps` 与 `continue` 对齐，并暴露 `advance_steps`（人类可读 `steps:` 行与 JSON `recovery_plan`）。
 - 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
-- 当前 schema 的 Job 若缺少必填字段、stage 或字段类型错误，会作为可控的无效输入失败，不输出 Python traceback。cue 产物（`source-cues.json`、`translated-cues.json` 等）同样：未知字段前向兼容忽略，结构确实无法解析时报 `invalid cue artifact`（退出码 2 并发出 `cli_failed`），不再抛裸 `TypeError`。
+- 当前 schema 的 Job 若缺少必填字段、stage 或字段类型错误，会作为可控的无效输入失败，不输出 Python traceback。cue 产物（`source-cues.json`、`translated-cues.json` 等）同样：未知字段前向兼容忽略，结构确实无法解析时报 `invalid cue artifact`（退出码 2 并发出 `cli_failed`），不再抛裸 `TypeError`。命令行给出的 `job.json` / `batch.json` 路径不存在或指向目录时同样归退出码 2 并点名路径，不再报「外部依赖或子进程故障」；Job 内**已登记** artifact 缺失不走这条路——路径来源是 Job 自己，仍按依赖或工作流问题处理。
 - `polished` Job 的润色草稿失效时，只有 `translation_progress` 能零 API 成本重建草稿（fingerprint 匹配、覆盖全部批次、每个批次 cue 都有译文）才允许 `continue` 继续；否则以人工修复文案停下，不会静默重新翻译加润色。`status` 与 `continue` 共用该谓词，可重建时归 `retryable`、否则 `manual_fix`；谓词无副作用，provider 不可解析时按不可重建处理。
 - Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
 - JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。

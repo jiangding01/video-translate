@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.batch import BATCH_SCHEMA_VERSION, continue_batch, discover_batch_inputs, run_batch
-from xvt.errors import JobLockedError
+from xvt.errors import ExitCode, JobLockedError, UserInputError
 from xvt.job_store import create_job, save_job
 from xvt.locking import job_lock, lock_scope
 from xvt.models import Artifact, StageName, StageStatus
@@ -515,6 +515,32 @@ class BatchTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "inside output_root/jobs"):
                 continue_batch(batch_file)
+
+    def test_missing_batch_file_is_a_user_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "gone" / "batch.json"
+
+            with self.assertRaisesRegex(UserInputError, "batch file does not exist") as caught:
+                continue_batch(missing)
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
+
+    def test_batch_continue_cli_returns_user_error_for_missing_batch_file(self) -> None:
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+
+        from xvt.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            missing = str(Path(directory) / "gone" / "batch.json")
+            output, errors = StringIO(), StringIO()
+            with redirect_stdout(output), redirect_stderr(errors):
+                return_code = main(["batch-continue", missing])
+
+        self.assertEqual(return_code, ExitCode.USER_ERROR)
+        combined = output.getvalue() + errors.getvalue()
+        self.assertNotIn("Traceback", combined)
+        self.assertIn("batch file does not exist", combined)
 
 
 if __name__ == "__main__":

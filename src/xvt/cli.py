@@ -989,7 +989,9 @@ def _recovery_plan_for_sink(sink: EventSink) -> RecoveryPlan | None:
         return None
     try:
         return build_recovery_plan(sink.job_file)
-    except (OSError, RuntimeError, ValueError):
+    except (XvtError, OSError, RuntimeError, ValueError):
+        # 含 XvtError：job.json 缺失时 load_job 抛 UserInputError，
+        # 而这里是失败路径上的尽力而为导航，绝不能再抛出遮蔽原始错误。
         return None
 
 
@@ -1009,7 +1011,7 @@ def _human_review_waiting(job: Job) -> bool:
 def _print_recovery_navigation(job_file: str | Path) -> None:
     try:
         plan = build_recovery_plan(job_file)
-    except (OSError, RuntimeError, ValueError):
+    except (XvtError, OSError, RuntimeError, ValueError):
         print(f"next: xvt status {shlex.quote(str(job_file))}")
         return
     print(f"recovery: {plan.reason}")
@@ -1046,7 +1048,7 @@ def _print_workflow_result(result: object) -> None:
             job = load_job(job_file)
             if resolve_target_language(job):
                 print(f"翻译质量: {resolve_translation_quality(job)}")
-        except (OSError, ValueError):
+        except (XvtError, OSError, ValueError):
             pass
     videos: list[Path] = []
     subtitles: list[Path] = []
@@ -1078,7 +1080,7 @@ def _print_workflow_result(result: object) -> None:
     if status == "awaiting_input":
         try:
             plan = build_recovery_plan(job_file) if job_file is not None else None
-        except (OSError, RuntimeError, ValueError):
+        except (XvtError, OSError, RuntimeError, ValueError):
             plan = None
         if plan is not None:
             print(f"恢复建议：{plan.reason}")
@@ -1489,7 +1491,7 @@ def _cmd_translate(arguments: argparse.Namespace) -> int:
             )
     try:
         job = load_job(arguments.job_file)
-    except OSError:
+    except (XvtError, OSError):
         waiting = False
     else:
         waiting = _human_review_waiting(job)

@@ -2752,5 +2752,65 @@ class CliTest(unittest.TestCase):
         self.assertEqual(event["data"]["error"]["category"], "workflow")
 
 
+class MissingJobFileTest(unittest.TestCase):
+    """job.json / batch.json 路径打错是用户输入错误（2），不是依赖故障（3）。"""
+
+    def _cases(self, missing: str, root: Path) -> list[list[str]]:
+        return [
+            ["status", missing],
+            ["verify", missing],
+            ["continue", missing],
+            ["resume", missing],
+            ["translate", missing, "--target-language", "zh-CN"],
+            ["burn", missing],
+            ["preview", missing],
+            ["import-translation", missing, str(root / "zh.srt"), "--target-language", "zh-CN"],
+            ["relink-burned-output", missing, str(root / "moved.mp4")],
+            ["polish-translation", missing],
+        ]
+
+    def test_missing_job_file_returns_user_error_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = str(root / "gone" / "job.json")
+            for argv in self._cases(missing, root):
+                with self.subTest(command=argv[0]):
+                    output, errors = StringIO(), StringIO()
+                    # 守卫点：错误路径上的恢复导航自己会 load_job，防御 except 必须接住
+                    # UserInputError，否则 main 会抛出 traceback 而不是返回退出码。
+                    with redirect_stdout(output), redirect_stderr(errors):
+                        return_code = main(argv)
+                    self.assertEqual(return_code, 2)
+                    combined = output.getvalue() + errors.getvalue()
+                    self.assertNotIn("Traceback", combined)
+                    self.assertIn("job file does not exist", combined)
+
+    def test_missing_job_file_reports_invalid_input_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = str(root / "gone" / "job.json")
+            # status / verify 是只读展示命令，不接 --events-jsonl。
+            jsonl_cases = [
+                argv for argv in self._cases(missing, root) if argv[0] not in {"status", "verify"}
+            ]
+            for argv in jsonl_cases:
+                with self.subTest(command=argv[0]):
+                    output, errors = StringIO(), StringIO()
+                    with redirect_stdout(output), redirect_stderr(errors):
+                        return_code = main([*argv, "--events-jsonl"])
+                    self.assertEqual(return_code, 2)
+                    streams = output.getvalue().splitlines() + errors.getvalue().splitlines()
+                    events = [json.loads(line) for line in streams if line.startswith("{")]
+                    failure = next(event for event in events if event["type"] == "cli_failed")
+                    self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+
+    def test_job_file_pointing_at_a_directory_returns_user_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                return_code = main(["status", directory])
+
+        self.assertEqual(return_code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

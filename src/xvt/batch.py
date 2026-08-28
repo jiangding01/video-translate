@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from xvt.errors import JobLockedError
+from xvt.errors import JobLockedError, UserInputError, XvtError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
@@ -131,6 +131,9 @@ def _write_batch(batch_file: Path, batch: dict[str, Any]) -> None:
 
 def _load_batch(batch_file: str | Path) -> tuple[Path, dict[str, Any]]:
     path = Path(batch_file).expanduser().resolve()
+    if not path.is_file():
+        # batch_file 与 job_file 同理：永远是用户直接输入的位置参数。
+        raise UserInputError(f"batch file does not exist: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("batch file must contain a JSON object")
@@ -424,7 +427,7 @@ def _process_item(
             try:
                 _record_recovery(item)
                 _record_artifacts(item)
-            except (OSError, RuntimeError, ValueError):
+            except (XvtError, OSError, RuntimeError, ValueError):
                 item["recovery_plan"] = None
                 item["artifacts"] = []
         _write_batch(batch_file, batch)
