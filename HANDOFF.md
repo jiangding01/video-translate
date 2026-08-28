@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 693 个测试、126 个子测试，全部通过 |
+| 自动化测试 | 699 个测试、126 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -116,7 +116,7 @@
 - JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。
 - `workflow_completed` 和 `cli_completed` 会列出 checksum 有效的用户产物；仅生成源字幕的任务也会返回 `source.srt`。
 - `batch` 会固定目录输入清单并串行创建独立 Job；单项失败不会阻断后续文件，`batch.json` 原子记录汇总状态和恢复计划。
-- `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。
+- `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。已完成条目上只有中间 checkpoint（`normalized_audio`、`word_transcript`、批次 manifest 等）失效时保持 `completed`，只在 `item["verification"]` 与 `batch_item_completed` 事件里标注 `degraded` 并列出失效 kind（旧行为是 `failed` + 退出码 6，且引导只报告不修复，构成死循环）；目标产物失效不走这条放行——缺烧录成品停在 relink 的 `awaiting_input`，缺 `source.srt` 落到 `continue` 由 `resume` 重建。普通模式会在汇总行后逐条打印待处理条目及其恢复命令（取自已持久化的 `recovery_plan`，最多 10 条）。
 - `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
 - 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
 

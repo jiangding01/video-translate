@@ -1025,12 +1025,70 @@ def _print_recovery_navigation(job_file: str | Path) -> None:
         print(f"alternative: {command}")
 
 
+# 普通模式下逐条展开的上限：条目多时刷屏没有意义，剩余的指向 --events-jsonl。
+_BATCH_ITEM_NAVIGATION_LIMIT = 10
+
+
+def _batch_item_navigation_lines(batch_file: str | Path) -> list[str]:
+    """从已持久化的 batch.json 读出需要用户动手的条目导航。
+
+    数据全部来自条目里已经算好的 `recovery_plan`，不重算恢复状态、不新增哈希。
+    没有这一段时，普通模式只会打印 `next: xvt batch-continue`，而那条命令再跑一次
+    仍然停在同一处——relink 之类真正的出口只存在于 JSONL 事件里，普通模式看不见。
+    """
+
+    try:
+        data = json.loads(Path(batch_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+
+    def _needs_attention(item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        return item.get("status") != "completed" or bool(item.get("verification"))
+
+    flagged = [item for item in items if _needs_attention(item)]
+    lines: list[str] = []
+    for item in flagged[:_BATCH_ITEM_NAVIGATION_LIMIT]:
+        verification = item.get("verification")
+        status = item.get("status")
+        label = f"{status} (degraded)" if status == "completed" and verification else status
+        lines.append(f"- {label}: {item.get('input')}")
+        job_file = item.get("job_file")
+        if isinstance(job_file, str):
+            lines.append(f"  job: {job_file}")
+        error = item.get("error")
+        if isinstance(error, str) and error:
+            lines.append(f"  error: {error}")
+        plan = item.get("recovery_plan")
+        if isinstance(plan, dict):
+            reason = plan.get("reason")
+            if isinstance(reason, str) and reason:
+                lines.append(f"  恢复建议：{reason}")
+            for command in plan.get("prerequisite_commands") or []:
+                lines.append(f"  before: {command}")
+            primary = plan.get("primary_command")
+            if isinstance(primary, str) and primary:
+                lines.append(f"  next: {primary}")
+            for command in plan.get("alternative_commands") or []:
+                lines.append(f"  或：{command}")
+    remaining = len(flagged) - _BATCH_ITEM_NAVIGATION_LIMIT
+    if remaining > 0:
+        lines.append(f"... 另有 {remaining} 个条目需要处理，用 --events-jsonl 查看全量")
+    return lines
+
+
 def _print_batch_result(result: BatchResult) -> None:
     print(result.batch_file)
     print(
         f"batch: {result.completed} completed, "
         f"{result.awaiting_input} awaiting input, {result.failed} failed"
     )
+    for line in _batch_item_navigation_lines(result.batch_file):
+        print(line)
     if result.status != "completed":
         print(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
 

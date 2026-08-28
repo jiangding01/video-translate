@@ -18,6 +18,7 @@ from xvt.cli import (
     _TASK_ROUTES,
     _TRANSLATION_REVIEW_SRT_NAME,
     _UNROUTABLE_AWAIT_STEPS,
+    _print_batch_result,
     main,
 )
 from xvt.errors import DependencyError, InternalError, UserInputError
@@ -2750,6 +2751,112 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 4)
         self.assertEqual(event["type"], "cli_failed")
         self.assertEqual(event["data"]["error"]["category"], "workflow")
+
+
+class BatchResultPrintingTest(unittest.TestCase):
+    """普通模式必须看得见条目级的恢复出口，而不是只有一句 batch-continue。"""
+
+    def _batch_file(self, root: Path, items: list[dict]) -> Path:
+        batch_file = root / "batch.json"
+        batch_file.write_text(json.dumps({"items": items}), encoding="utf-8")
+        return batch_file
+
+    def _render(self, batch_file: Path, **counts: int) -> str:
+        result = BatchResult(
+            status=counts.pop("status", "awaiting_input"),  # type: ignore[arg-type]
+            batch_file=batch_file,
+            total=counts.get("total", 1),
+            completed=counts.get("completed", 0),
+            awaiting_input=counts.get("awaiting_input", 1),
+            failed=counts.get("failed", 0),
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_batch_result(result)
+        return output.getvalue()
+
+    def test_print_batch_result_shows_per_item_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {
+                        "input": "/inputs/A.mp4",
+                        "status": "awaiting_input",
+                        "job_file": "/jobs/a/job.json",
+                        "error": None,
+                        "recovery_plan": {
+                            "category": "awaiting_input",
+                            "reason": "烧录成品可能可重新关联；执行命令时会再次校验源媒体内容。",
+                            "primary_command": "xvt relink-burned-output /jobs/a/job.json VIDEO",
+                            "alternative_commands": ["xvt continue /jobs/a/job.json"],
+                            "prerequisite_commands": [],
+                        },
+                    },
+                    {"input": "/inputs/B.mp4", "status": "completed", "job_file": "/jobs/b/j.json"},
+                ],
+            )
+
+            rendered = self._render(batch_file, total=2, completed=1)
+
+        self.assertIn("- awaiting_input: /inputs/A.mp4", rendered)
+        self.assertIn("job: /jobs/a/job.json", rendered)
+        self.assertIn("next: xvt relink-burned-output /jobs/a/job.json VIDEO", rendered)
+        self.assertIn("或：xvt continue /jobs/a/job.json", rendered)
+        # 已完成且无标注的条目不刷屏。
+        self.assertNotIn("/inputs/B.mp4", rendered)
+        self.assertIn("next: xvt batch-continue", rendered)
+
+    def test_print_batch_result_flags_degraded_completed_items(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {
+                        "input": "/inputs/A.mp4",
+                        "status": "completed",
+                        "job_file": "/jobs/a/job.json",
+                        "verification": {
+                            "status": "degraded",
+                            "invalid_artifacts": ["normalized_audio"],
+                        },
+                        "recovery_plan": {
+                            "category": "complete",
+                            "reason": "当前目标已完成。以下中间产物已失效：normalized_audio。",
+                            "primary_command": None,
+                            "alternative_commands": [],
+                            "prerequisite_commands": [],
+                        },
+                    }
+                ],
+            )
+
+            rendered = self._render(
+                batch_file, status="completed", total=1, completed=1, awaiting_input=0
+            )
+
+        self.assertIn("- completed (degraded): /inputs/A.mp4", rendered)
+        self.assertIn("normalized_audio", rendered)
+        self.assertNotIn("next: xvt batch-continue", rendered)
+
+    def test_print_batch_result_caps_expanded_items(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {"input": f"/inputs/{index}.mp4", "status": "failed", "job_file": None}
+                    for index in range(12)
+                ],
+            )
+
+            rendered = self._render(batch_file, total=12, completed=0, awaiting_input=0, failed=12)
+
+        self.assertIn("/inputs/9.mp4", rendered)
+        self.assertNotIn("/inputs/10.mp4", rendered)
+        self.assertIn("另有 2 个条目需要处理", rendered)
 
 
 class MissingJobFileTest(unittest.TestCase):

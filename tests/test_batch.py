@@ -110,7 +110,184 @@ class BatchTest(unittest.TestCase):
             "relink-burned-output",
             updated["items"][0]["recovery_plan"]["primary_command"],
         )
+        # 场景 A 回归守卫：目标产物（burned_video）失效必须停在 relink 引导，
+        # 绝不能被「非目标产物失效只标注」的放行逻辑一起放成 completed/degraded。
+        self.assertIsNone(updated["items"][0].get("verification"))
         continue_workflow.assert_not_called()
+
+    def _burned_complete_batch(self, root: Path) -> tuple[Path, Path, Path]:
+        """构造一个目标全部达成的烧录条目，外加一个可删除的中间产物。"""
+
+        output = root / "output"
+        media = root / "video.mp4"
+        media.write_bytes(b"media")
+        job = create_job(
+            str(media),
+            output,
+            {"workflow": {"target_language": "zh-CN", "burn": True}},
+        )
+        artifacts = root / "artifacts"
+        artifacts.mkdir()
+        payloads = {
+            "source_cues": ("source-cues.json", "[]"),
+            "translated_cues": ("translated-cues.json", "[]"),
+            "translated_srt": ("translated.srt", ""),
+            "bilingual_srt": ("bilingual.srt", ""),
+            "translated_subtitle_qa": ("qa-translated.json", '{"status":"pass","issues":[]}\n'),
+            "media_qa": ("media-qa.json", '{"status":"pass","issues":[]}\n'),
+        }
+        for kind, (name, text) in payloads.items():
+            path = artifacts / name
+            path.write_text(text, encoding="utf-8")
+            job.artifacts.append(Artifact(kind, str(path), file_checksum(path)))
+        burned = artifacts / "burned.mp4"
+        burned.write_bytes(b"burned-output")
+        job.artifacts.append(Artifact("burned_video", str(burned), file_checksum(burned)))
+        audio = artifacts / "normalized.wav"
+        audio.write_bytes(b"normalized audio payload")
+        job.artifacts.append(Artifact("normalized_audio", str(audio), file_checksum(audio)))
+        job.stages[StageName.MEDIA_QA].status = StageStatus.SUCCEEDED
+        job_file = save_job(job)
+        _record_burn_fingerprint(job_file)
+        batch_file = output / "batches" / "test" / "batch.json"
+        batch_file.parent.mkdir(parents=True, exist_ok=True)
+        batch_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": BATCH_SCHEMA_VERSION,
+                    "id": "test",
+                    "output_root": str(output.resolve()),
+                    "workflow": {},
+                    "items": [
+                        {
+                            "input": str(media.resolve()),
+                            "status": "pending",
+                            "job_file": str(job_file.resolve()),
+                            "artifacts": [],
+                            "error": None,
+                            "recovery_plan": None,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return batch_file, job_file, audio
+
+    def test_completed_item_with_invalid_intermediate_artifact_stays_completed(self) -> None:
+        """用户删掉 normalized_audio 这类中间文件后，已达成目标的条目不再被改写成 failed。
+
+        旧行为是 `failed` + 退出码 6，且引导给的 `xvt verify` 只会报告失效不会修复——
+        再跑一次 `batch-continue` 仍是 6，条目永远走不出去。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, _job_file, audio = self._burned_complete_batch(root)
+            audio.unlink()
+
+            with patch("xvt.batch.continue_workflow") as continue_workflow:
+                result = continue_batch(batch_file)
+            updated = json.loads(batch_file.read_text(encoding="utf-8"))
+            item = updated["items"][0]
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(item["status"], "completed")
+        self.assertEqual(item["verification"]["status"], "degraded")
+        self.assertEqual(item["verification"]["invalid_artifacts"], ["normalized_audio"])
+        # 恢复计划仍是 complete（与单 Job status 一致），只在 reason 里追加说明。
+        self.assertEqual(item["recovery_plan"]["category"], "complete")
+        self.assertIn("normalized_audio", item["recovery_plan"]["reason"])
+        self.assertIn("xvt verify", item["recovery_plan"]["reason"])
+        continue_workflow.assert_not_called()
+
+    def test_batch_item_completed_event_carries_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, _job_file, audio = self._burned_complete_batch(root)
+            audio.unlink()
+
+            events: list = []
+            with patch("xvt.batch.continue_workflow"):
+                continue_batch(batch_file, event_sink=events.append)
+            degraded = next(event for event in events if event.type == "batch_item_completed")
+
+            fresh_root = root / "fresh"
+            inputs = fresh_root / "inputs"
+            _write_subtitle(inputs / "source.srt")
+            fresh_events: list = []
+            run_batch(
+                inputs,
+                WorkflowOptions(input="", output=fresh_root / "output"),
+                event_sink=fresh_events.append,
+            )
+            fresh = next(event for event in fresh_events if event.type == "batch_item_completed")
+
+        self.assertEqual(
+            degraded.data["verification"],
+            {"status": "degraded", "invalid_artifacts": ["normalized_audio"]},
+        )
+        # 刚跑完的条目也带该字段（值为 null），消费端不必按字段在不在分叉。
+        self.assertIn("verification", fresh.data)
+        self.assertIsNone(fresh.data["verification"])
+
+    def test_batch_continue_is_idempotent_for_degraded_items(self) -> None:
+        """连跑两次都必须是 completed / 退出码 0：旧行为是两次都 failed / 6（死循环）。"""
+
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from xvt.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, _job_file, audio = self._burned_complete_batch(root)
+            audio.unlink()
+
+            codes = []
+            for _ in range(2):
+                with redirect_stdout(StringIO()):
+                    codes.append(main(["batch-continue", str(batch_file)]))
+            updated = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(codes, [0, 0])
+        self.assertEqual(updated["items"][0]["status"], "completed")
+        self.assertEqual(updated["items"][0]["verification"]["status"], "degraded")
+
+    def test_completed_job_with_missing_source_srt_is_repaired_not_shortcut(self) -> None:
+        """`source_srt` 不在 `plan_advance_steps` 的判定里，但纯转写批次上它就是交付物。
+
+        因此它不能走「非目标产物失效只标注」的放行分支：条目必须落到 `continue`，
+        由 `resume_job` 真正重建 source.srt，而不是拿着不存在的成品报完成。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+            completed = run_batch(inputs, WorkflowOptions(input="", output=output))
+            report = json.loads(completed.batch_file.read_text(encoding="utf-8"))
+            source_srt = next(
+                Path(path)
+                for path in report["items"][0]["artifacts"]
+                if Path(path).name == "source.srt"
+            )
+            source_srt.unlink()
+
+            events: list = []
+            resumed = continue_batch(completed.batch_file, event_sink=events.append)
+            updated = json.loads(completed.batch_file.read_text(encoding="utf-8"))
+            rebuilt = source_srt.exists()
+
+        completed_event = next(event for event in events if event.type == "batch_item_completed")
+        self.assertEqual(resumed.status, "completed")
+        self.assertEqual(updated["items"][0]["status"], "completed")
+        self.assertTrue(rebuilt)
+        # 关键守卫：没有走 reused=True 的直通车，而是真的跑了一次 continue。
+        self.assertNotIn("reused", completed_event.data)
+        self.assertIsNone(updated["items"][0]["verification"])
+        self.assertTrue(any(event.type == "job_resumed" for event in events))
 
     def test_discovers_supported_files_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -312,32 +489,6 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(resumed.status, "completed")
         run_workflow.assert_not_called()
         continue_workflow.assert_not_called()
-
-    def test_continue_does_not_skip_completed_job_with_missing_artifact(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            inputs = root / "inputs"
-            output = root / "output"
-            _write_subtitle(inputs / "source.srt")
-            completed = run_batch(inputs, WorkflowOptions(input="", output=output))
-            report = json.loads(completed.batch_file.read_text(encoding="utf-8"))
-            source_srt = next(
-                Path(path)
-                for path in report["items"][0]["artifacts"]
-                if Path(path).name == "source.srt"
-            )
-            source_srt.unlink()
-
-            events: list = []
-            resumed = continue_batch(completed.batch_file, event_sink=events.append)
-            updated = json.loads(completed.batch_file.read_text(encoding="utf-8"))
-
-        self.assertEqual(resumed.status, "partial_failure")
-        self.assertEqual(updated["items"][0]["status"], "failed")
-        self.assertEqual(updated["items"][0]["recovery_plan"]["category"], "manual_fix")
-        failed = next(event for event in events if event.type == "batch_item_failed")
-        self.assertEqual(failed.data["index"], 1)
-        self.assertEqual(failed.data["total"], 1)
 
     def test_interruption_is_persisted_before_propagating(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
