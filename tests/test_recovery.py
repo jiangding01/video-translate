@@ -1058,3 +1058,139 @@ class AtomicTranslatedQaRebuildTest(unittest.TestCase):
             self.assertEqual(plan.category, "retryable")
             self.assertIsNotNone(plan.primary_command)
             self.assertIn("xvt import-translation", plan.primary_command or "")
+
+
+class GlossaryViolationDeadlockTest(unittest.TestCase):
+    """译文只因术语违规而 QA 失败时必须有出口，且文案按质量档如实分岔。"""
+
+    def _blocked_job(
+        self,
+        root: Path,
+        *,
+        quality: str = "standard",
+        translated_issues: list[dict] | None = None,
+        source_issues: list[dict] | None = None,
+    ) -> Path:
+        job = create_job(
+            "/tmp/input.mp4",
+            root,
+            {"workflow": {"target_language": "zh-CN", "translation_quality": quality}},
+        )
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+
+        def register(kind: str, name: str, payload: object) -> None:
+            path = artifacts / name
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            job.artifacts.append(Artifact(kind, str(path), file_checksum(path)))
+
+        register("source_cues", "source-cues.json", [])
+        register("translated_cues", "translated-cues.json", [])
+        register(
+            "subtitle_qa",
+            "qa-source.json",
+            {"status": "failed" if source_issues else "pass", "issues": source_issues or []},
+        )
+        register(
+            "translated_subtitle_qa",
+            "qa-translated.json",
+            {
+                "status": "failed",
+                "issues": translated_issues
+                if translated_issues is not None
+                else [
+                    {
+                        "code": "glossary_violation",
+                        "severity": "error",
+                        "cue_id": 7,
+                        "message": "glossary term 'widget' requires '小组件'",
+                    },
+                    {
+                        "code": "glossary_violation",
+                        "severity": "error",
+                        "cue_id": 3,
+                        "message": "glossary term 'widget' requires '小组件'",
+                    },
+                    {"code": "line_too_wide", "severity": "warning", "cue_id": 9},
+                ],
+            },
+        )
+        job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+        return save_job(job)
+
+    def test_standard_job_gets_a_retranslate_cues_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._blocked_job(root)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            command = plan.primary_command or ""
+            self.assertIn("xvt retranslate-cues", command)
+            # cue id 去重且按升序，只覆盖 error 级 glossary_violation。
+            self.assertIn("--cue 3 --cue 7", command)
+            self.assertNotIn("--cue 9", command)
+            self.assertIn("--target-language zh-CN", command)
+            self.assertIn("其余译文与全部时间轴保持不变", plan.reason)
+            self.assertIn("术语表冲突", plan.reason)
+
+    def test_polished_job_reason_does_not_promise_untouched_translations(self) -> None:
+        """polished Job 上回填会写成新草稿并重启整条润色腿，文案不得承诺其余译文不变。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._blocked_job(root, quality="polished")
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertIn("xvt retranslate-cues", plan.primary_command or "")
+            self.assertNotIn("其余译文与全部时间轴保持不变", plan.reason)
+            self.assertIn("新的翻译草稿", plan.reason)
+            self.assertIn("重新走一遍润色与语义校对", plan.reason)
+
+    def test_other_blocking_errors_keep_the_generic_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._blocked_job(
+                root,
+                translated_issues=[
+                    {"code": "glossary_violation", "severity": "error", "cue_id": 3},
+                    {"code": "missing_translation", "severity": "error", "cue_id": 4},
+                ],
+            )
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertIsNone(plan.primary_command)
+            self.assertIn("修复字幕", plan.reason)
+
+    def test_source_errors_block_the_retranslation_exit(self) -> None:
+        """源字幕自身有 error 时重译译文改不了问题，不能给这条出口。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._blocked_job(
+                root,
+                source_issues=[{"code": "cue_overlap", "severity": "error", "cue_id": 1}],
+            )
+
+            guidance = subtitle_qa_failure_guidance(load_job(job_file), job_file)
+
+            assert guidance is not None
+            self.assertIsNone(guidance.primary_command)
+            self.assertFalse(guidance.is_needs_review)
+
+    def test_guidance_message_carries_the_command_for_continue(self) -> None:
+        """continue 把 message 作为 RuntimeError 抛出，命令必须在消息里。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._blocked_job(root)
+
+            guidance = subtitle_qa_failure_guidance(load_job(job_file), job_file)
+
+            assert guidance is not None
+            self.assertIn("xvt retranslate-cues", guidance.message)
+            self.assertIn("--cue 3 --cue 7", guidance.message)

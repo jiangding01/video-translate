@@ -14,7 +14,12 @@ from xvt.candidate_qa import translation_candidate_qa_issues
 from xvt.checksums import file_checksum as _hash_file
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
-from xvt.workflow_config import WorkflowConfig, get_workflow_config, resolve_target_language
+from xvt.workflow_config import (
+    WorkflowConfig,
+    get_workflow_config,
+    resolve_target_language,
+    resolve_translation_quality,
+)
 
 _checksum_cache: ContextVar[dict[tuple[Any, ...], str] | None] = ContextVar(
     "xvt_readonly_checksum_cache", default=None
@@ -352,6 +357,86 @@ def _source_selection_is_asr(job: Job, valid_artifacts: dict[str, Path]) -> bool
     )
 
 
+def _glossary_violation_cue_ids(report: dict[str, Any]) -> tuple[int, ...] | None:
+    """全部 error 级问题都是 ``glossary_violation`` 时返回涉及的 cue id；否则 None。
+
+    只要混进任何一条别的 error（时间轴、缺译文、显示宽度……），局部重译就不是出口，
+    必须退回通用的「查看报告并修复字幕」引导。cue id 缺失或不是真整数时同样放弃——
+    命令必须能原样复制执行，猜出来的 id 会写坏译文。
+    """
+
+    issues = report.get("issues")
+    if not isinstance(issues, list):
+        return None
+    cue_ids: list[int] = []
+    for issue in issues:
+        if not isinstance(issue, dict) or issue.get("severity") != "error":
+            continue
+        if issue.get("code") != "glossary_violation":
+            return None
+        cue_id = issue.get("cue_id")
+        # bool 是 int 的子类；与项目其余解析器同口径显式排除。
+        if isinstance(cue_id, bool) or not isinstance(cue_id, int) or cue_id < 1:
+            return None
+        cue_ids.append(cue_id)
+    if not cue_ids:
+        return None
+    return tuple(sorted(dict.fromkeys(cue_ids)))
+
+
+def _glossary_violation_guidance(
+    job: Job,
+    job_file: Path,
+    reports: dict[str, dict[str, Any] | None],
+    blocking: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """译文 QA 只因术语违规而失败时，给出 ``retranslate-cues`` 出口 ``(reason, command)``。
+
+    没有这条出口时该状态是死路：术语校验的 `glossary_violation` 是 error 级，acknowledge
+    通道只覆盖 review 级，恢复计划因此给 ``primary_command=None``。出口本身早已存在
+    （`retranslate-cues` 复用 Job 保存的术语策略），只是没人告诉用户。
+
+    源字幕 QA 也有 error 时不给：重译译文改不了源文问题。
+    """
+
+    translated_report = reports.get("translated_subtitle_qa")
+    if translated_report is None or blocking is not translated_report:
+        return None
+    source_report = reports.get("subtitle_qa")
+    if source_report is not None and _qa_report_has_errors(source_report):
+        return None
+    cue_ids = _glossary_violation_cue_ids(translated_report)
+    target_language = resolve_target_language(job)
+    if cue_ids is None or not target_language:
+        return None
+
+    arguments: list[str] = []
+    for cue_id in cue_ids:
+        arguments.extend(("--cue", str(cue_id)))
+    arguments.extend(("--target-language", shlex.quote(target_language)))
+    command = _job_command("retranslate-cues", job_file, *arguments)
+
+    if resolve_translation_quality(job) == "polished":
+        # polished Job 上回填走 finalize_translation 且没有 polished_result=True：结果被
+        # 写成新的翻译草稿，润色候选、语义校对结论与最终译文一并失效，整条润色腿要重跑
+        # （真实模型成本）。因此这里绝不能承诺「其余译文保持不变」。
+        reason = (
+            "译文 QA 未通过，但阻断的 error 级问题全部是术语表冲突（glossary_violation）。"
+            "可以只重译这些 cue：retranslate-cues 复用 Job 保存的术语策略，时间轴保持不变。"
+            "注意这是 polished 质量的 Job——回填结果会成为新的翻译草稿，润色候选、语义校对"
+            "结论与最终译文一并失效，需要重新走一遍润色与语义校对（会真实调用模型）。"
+            "若认为译文没问题，另一条路是调整术语表后重跑翻译。"
+        )
+    else:
+        reason = (
+            "译文 QA 未通过，但阻断的 error 级问题全部是术语表冲突（glossary_violation）。"
+            "可以只重译这些 cue：retranslate-cues 复用 Job 保存的术语策略，只改写指定 cue，"
+            "其余译文与全部时间轴保持不变，回填后重跑完整译文 QA。"
+            "若认为译文没问题，另一条路是调整术语表后重跑翻译。"
+        )
+    return reason, command
+
+
 def subtitle_qa_failure_guidance(
     job: Job,
     job_file: str | Path | None = None,
@@ -376,13 +461,15 @@ def subtitle_qa_failure_guidance(
     )
     report_paths: list[str] = []
     blocking: dict[str, Any] | None = None
+    reports: dict[str, dict[str, Any] | None] = {}
     for kind in ("translated_subtitle_qa", "subtitle_qa"):
         path = valid_artifact_path(job, kind)
         if path is None:
             continue
         report_paths.append(str(path))
+        reports[kind] = _load_qa_report(path)
         if blocking is None:
-            blocking = _load_qa_report(path)
+            blocking = reports[kind]
 
     if blocking is not None and not _qa_report_has_errors(blocking):
         if blocking.get("status") == "needs_review":
@@ -402,6 +489,16 @@ def subtitle_qa_failure_guidance(
                 primary_command=command,
                 is_needs_review=True,
             )
+
+    glossary_guidance = _glossary_violation_guidance(job, resolved, reports, blocking)
+    if glossary_guidance is not None:
+        return SubtitleQaFailureGuidance(
+            reason=glossary_guidance[0],
+            message=f"{glossary_guidance[0]} 下一步：{glossary_guidance[1]}",
+            report_paths=tuple(report_paths),
+            primary_command=glossary_guidance[1],
+            is_needs_review=False,
+        )
 
     reason = "字幕 QA 未通过，需要检查报告并修复字幕后再继续。"
     return SubtitleQaFailureGuidance(
