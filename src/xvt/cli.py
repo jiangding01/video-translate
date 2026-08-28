@@ -1791,7 +1791,7 @@ def _cmd_resegment_translation(arguments: argparse.Namespace) -> int:
             if target_language:
                 print(
                     f'重新翻译: xvt translate "{arguments.job_file}" '
-                    f"--target-language {target_language}"
+                    f"--target-language {shlex.quote(target_language)}"
                 )
     return 0
 
@@ -1826,7 +1826,7 @@ def _cmd_retranslate_cues(arguments: argparse.Namespace) -> int:
             print(
                 "xvt apply-cue-retranslation "
                 f'"{arguments.job_file}" RESPONSE {cues} '
-                f"--target-language {arguments.target_language}"
+                f"--target-language {shlex.quote(arguments.target_language)}"
             )
         else:
             job = load_job(arguments.job_file)

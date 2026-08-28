@@ -80,7 +80,9 @@
 - 字幕 QA error 记为 `failed`；纯 `needs_review` 记为 `awaiting_input`。两者都会停止工作流且不允许继续烧录，原子命令也不会误发 `cli_completed`。
 - 高级原子 `xvt burn` / `xvt preview` 与端到端链路共用同一道 fail-closed 译文 QA 门（`pipeline.review.review_gate_satisfied`），不能绕过 QA：要求 checksum 有效的译文 cue 与 QA 报告，`pass` / `warning` 放行，`needs_review` 只在报告内全部 review 问题都被当前有效确认覆盖时放行，error、缺失、checksum 失效或结构异常一律拒绝。确认通道只有 `continue --acknowledge-subtitle-review`，因此原子 Job 的报错文案指向重跑 `xvt translate`，不指向不可用的 `continue`。
 - 语义复核确认后，若译文候选和渲染产物已有效或被补齐，`translate` stage 会收口为 `succeeded` 并清除旧 QA 错误；字幕 QA 的独立 `needs_review` 仍需单独确认。
-- 「译文已满足」的判定包含译文 QA 报告：需要 checksum 有效的 `translated_cues`、`translated_srt`、`bilingual_srt` 与 `translated_subtitle_qa` 四者齐备（`workflow._translation_satisfied` 与 polished 链路的 finalize 短路共用同一口径）。漏掉 QA 报告会让报告单独失效的 Job 被判成「已完成」而空转，`continue` 永不重建。
+- 「译文已满足」的判定包含译文 QA 报告：需要 checksum 有效的 `translated_cues`、`translated_srt`、`bilingual_srt` 与 `translated_subtitle_qa` 四者齐备（`workflow._translation_satisfied` 与 polished 链路的 finalize 短路共用同一口径）。漏掉 QA 报告会让报告单独失效的 Job 被判成「已完成」而空转，`continue` 永不重建。原子 Job 上这条缺口的零成本出口（`recovery.atomic_translated_qa_rebuild_command`，`status` 与 `pipeline.burnin` 的 QA 门共用）只对 `standard` 成立：`import-translation` 与其余回填路径共用 `finalize_translation`，在 `polished` Job 上走 draft 分支，QA 不重建、渲染不执行、整条润色腿失效，因此该函数对 `polished` 返回 `None`，两处调用方各自落回既有引导。
+- 恢复计划的判定顺序有一条硬约束：局部重译等待必须排在 `qa_blocked` 之前。术语死锁的出口就是 `retranslate-cues`，跑完后译文 QA 还没重跑、`SUBTITLE_QA` 仍是 `failed`，排在后面会把等待重报成 `manual_fix` 并重复给出同一条命令，端到端 Job 上还与 `plan_advance_steps` 的 `await_cue_retranslation` 自相矛盾。原子与端到端两条分支共用 `_cue_retranslation_waiting_plan`。
+- 恢复计划里出现的 `--target-language` 一律 `shlex.quote`：该值只被 Job 保存、没有内容校验，而恢复计划是「复制即执行」面。
 - 字幕 QA `needs_review` 被确认后，`continue` 会清除 `translate` stage 上的过期阻断错误（要求 QA 门已放行、确认仍对当前源 cue 有效、译文 cue 与两份 SRT 均有效）；旧 Job 下次 `continue` 自动收口。
 
 ### 烧录和媒体 QA

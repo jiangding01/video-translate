@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import retranslate_cues
 from xvt.recovery import (
     _semantic_review_options,
+    atomic_translated_qa_rebuild_command,
     build_recovery_plan,
     file_checksum,
     subtitle_qa_failure_guidance,
@@ -876,7 +878,13 @@ class RecoveryTest(unittest.TestCase):
 class CueRetranslationRecoveryTest(unittest.TestCase):
     """局部重译等待在端到端与原子两条恢复分支上都要给出可复制的回填命令。"""
 
-    def _waiting_job_file(self, root: Path, *, workflow: dict | None) -> Path:
+    def _waiting_job_file(
+        self,
+        root: Path,
+        *,
+        workflow: dict | None,
+        glossary_qa_blocked: bool = False,
+    ) -> Path:
         config = {"workflow": workflow} if workflow is not None else {}
         job = create_job("/tmp/input.mp4", root, config)
         artifacts = root / "jobs" / job.id / "artifacts"
@@ -921,7 +929,73 @@ class CueRetranslationRecoveryTest(unittest.TestCase):
         )
         job_file = save_job(job)
         retranslate_cues(job_file, cue_ids=(2,), target_language="zh-CN", provider="agent")
+        if glossary_qa_blocked:
+            # 术语死锁的真实形态：用户按 status 的出口跑完 retranslate-cues 后，译文 QA
+            # 报告还是那一份 failed 的旧报告，SUBTITLE_QA 仍停在 FAILED。
+            job = load_job(job_file)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            source_qa = artifacts / "qa-source.json"
+            source_qa.write_text(json.dumps({"status": "pass", "issues": []}), encoding="utf-8")
+            translated_qa = artifacts / "qa-translated.json"
+            translated_qa.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "issues": [
+                            {
+                                "code": "glossary_violation",
+                                "severity": "error",
+                                "cue_id": 2,
+                                "message": "glossary term 'widget' requires '小组件'",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts.extend(
+                [
+                    Artifact("subtitle_qa", str(source_qa), file_checksum(source_qa)),
+                    Artifact(
+                        "translated_subtitle_qa",
+                        str(translated_qa),
+                        file_checksum(translated_qa),
+                    ),
+                ]
+            )
+            job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+            job_file = save_job(job)
         return job_file
+
+    def test_glossary_qa_block_does_not_shadow_the_pending_retranslation(self) -> None:
+        """按术语死锁出口跑完 retranslate-cues 后，status 必须报等待而不是再劝一次重译。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(
+                root,
+                workflow={"target_language": "zh-CN"},
+                glossary_qa_blocked=True,
+            )
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ("await_cue_retranslation",))
+            self.assertIsNone(plan.primary_command)
+            self.assertIn("xvt apply-cue-retranslation", plan.prerequisite_commands[0])
+            self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
+
+    def test_atomic_glossary_qa_block_also_reports_the_pending_retranslation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, workflow=None, glossary_qa_blocked=True)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ())
+            self.assertIn("xvt apply-cue-retranslation", plan.prerequisite_commands[0])
 
     def test_end_to_end_job_reports_the_pending_cue_retranslation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -998,8 +1072,14 @@ class AtomicTranslatedQaRebuildTest(unittest.TestCase):
         *,
         translated_srt: bool = True,
         qa_blocked: bool = False,
+        target_language: str = "zh-CN",
+        translation_quality: str = "standard",
     ) -> Path:
-        job = create_job("/tmp/input.mp4", root, {"target_language": "zh-CN"})
+        job = create_job(
+            "/tmp/input.mp4",
+            root,
+            {"target_language": target_language, "translation_quality": translation_quality},
+        )
         artifacts = root / "jobs" / job.id / "artifacts"
         artifacts.mkdir(parents=True)
         source_cues = artifacts / "source-cues.json"
@@ -1087,6 +1167,80 @@ class AtomicTranslatedQaRebuildTest(unittest.TestCase):
             self.assertEqual(plan.category, "retryable")
             self.assertIsNotNone(plan.primary_command)
             self.assertIn("xvt import-translation", plan.primary_command or "")
+
+    def test_polished_job_is_not_offered_the_zero_cost_rebuild(self) -> None:
+        """polished Job 上 import-translation 走 draft 分支：QA 不重建、整条润色腿被摧毁。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_stale_translated_qa(root, translation_quality="polished")
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertNotIn("import-translation", plan.primary_command or "")
+            self.assertNotIn("import-translation", " ".join(plan.alternative_commands))
+            self.assertIn("xvt translate", plan.primary_command or "")
+            self.assertIsNone(atomic_translated_qa_rebuild_command(load_job(job_file), job_file))
+
+    def test_atomic_rebuild_command_quotes_a_target_language_with_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job_with_stale_translated_qa(root, target_language="zh CN")
+
+            plan = build_recovery_plan(job_file)
+
+            command = plan.primary_command or ""
+            self.assertIn("zh CN", shlex.split(command))
+            self.assertIn("zh CN", shlex.split(plan.alternative_commands[0]))
+
+
+class AtomicWaitingWithoutBatchesTest(unittest.TestCase):
+    """TRANSLATE 停在等待态、但批次 manifest 已经不在时不能再劝 apply-translation。"""
+
+    def _waiting_job(self, root: Path, *, batches: bool) -> Path:
+        job = create_job("/tmp/input.mp4", root, {"target_language": "zh CN"})
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+        source_cues = artifacts / "source-cues.json"
+        source_cues.write_text(
+            json.dumps([{"id": 1, "start_ms": 0, "end_ms": 1000, "source_text": "Hello"}]),
+            encoding="utf-8",
+        )
+        job.artifacts.append(Artifact("source_cues", str(source_cues), file_checksum(source_cues)))
+        if batches:
+            manifest = artifacts / "translation-batches.json"
+            manifest.write_text(json.dumps({"batches": []}), encoding="utf-8")
+            job.artifacts.append(
+                Artifact("translation_batches", str(manifest), file_checksum(manifest))
+            )
+        job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+        return save_job(job)
+
+    def test_missing_batches_manifest_points_at_a_rerun_instead_of_a_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job(root, batches=False)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "retryable")
+            self.assertIn("xvt translate", plan.primary_command or "")
+            self.assertEqual(plan.prerequisite_commands, ())
+            self.assertIn("没有任何响应能回填这次等待", plan.reason)
+            # 含空格的目标语言必须被 quote，命令才能原样复制执行。
+            self.assertIn("zh CN", shlex.split(plan.primary_command or ""))
+
+    def test_valid_batches_manifest_keeps_the_backfill_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job(root, batches=True)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertIn("xvt apply-translation", plan.prerequisite_commands[0])
+            self.assertIn("zh CN", shlex.split(plan.prerequisite_commands[0]))
 
 
 class GlossaryViolationDeadlockTest(unittest.TestCase):
