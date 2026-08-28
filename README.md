@@ -92,7 +92,7 @@ xvt batch-continue BATCH.json
 | `--allow-auto-subtitles` | 人工字幕不可用时允许下载 YouTube 自动字幕候选。 |
 | `--cookies-from-browser BROWSER` | 让 yt-dlp 从指定浏览器读取登录 Cookie，例如 `chrome`；只记录浏览器名称，不持久化 Cookie 内容。 |
 | `--proxy URL` | 为远程检查与下载显式指定代理；凭据会在事件和错误边界脱敏。 |
-| `--translation-subtitles PATH` | 导入已有译文字幕，跳过翻译提供方并映射到源 cue 时间轴。 |
+| `--translation-subtitles PATH` | 导入已有译文字幕，跳过翻译提供方并映射到源 cue 时间轴；不能与 `--glossary` 同时使用。 |
 | `--target-language LANG` | 目标语言代码，例如 `zh-CN`。 |
 | `--translation-quality standard\|polished` | 翻译质量链，默认 `standard`；`polished` 增加润色、语义校对和最多一次定向修复。 |
 | `--provider auto\|openai-compatible\|agent` | 翻译提供方，默认 `auto`：配置完整时调用兼容 API，否则生成 Agent 批次。 |
@@ -102,7 +102,7 @@ xvt batch-continue BATCH.json
 | `--batch-size N` | 每个翻译请求最多包含的 cue 数，默认 `25`；语义组不会被批次边界拆开。 |
 | `--max-retries N` | 翻译传输失败后的额外重试次数，默认 `4`（连同首次请求最多 5 次传输尝试）；退避为带抖动的指数退避（每次在上一档退避的一半到全额之间随机取值，上限 30 秒），服务端给出 `Retry-After` 时按其指定时刻等待、不加抖动；结构性无效响应另有独立纠错预算。 |
 | `--timeout-seconds SECONDS` | 单次翻译 API 请求超时，默认 `180` 秒。 |
-| `--glossary PATH` | JSON 术语表；命中源 cue 的术语会进入请求并由确定性 QA 检查。 |
+| `--glossary PATH` | JSON 术语表；命中源 cue 的术语会进入请求并由确定性 QA 检查。不能与 `--translation-subtitles` 同时使用（术语校验的前提是译文由 XVT 按术语表生成）。 |
 | `--translation-style faithful\|natural\|concise` | 翻译风格，默认 `faithful`。 |
 | `--burn` | 在端到端工作流中生成双语 ASS、烧录视频并执行媒体 QA。 |
 | `--burn-media PATH` | 为本地纯音频 Job 显式提供烧录所需的视频。 |
@@ -682,7 +682,7 @@ API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`�
 }
 ```
 
-`translate`、`prepare-translation` 和端到端 `run` 都支持该策略。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。译文 QA 会确定性检查命中源 cue 的术语是否包含要求的目标词；违规会以 `glossary_violation` 写入 `qa-translated.json`，阻断渲染和烧录。
+`translate`、`prepare-translation` 和端到端 `run` 都支持该策略。`--glossary` 与 `--translation-subtitles` 互斥：导入译文时 XVT 没有按术语表翻译过，把用户自写译文里的术语偏差判成 error 级 `glossary_violation` 只会造成无出口的死锁，因此该组合在 `run` 入口就以退出码 2 拒绝，Job 不会创建。确实需要按术语表校对导入的译文时，先 `import-translation`，再用 `retranslate-cues` 逐条重译需要修正的 cue（该命令复用 Job 保存的策略快照）。`--translation-style` 不受此限制：导入译文的 Job 同样保存风格快照，风格不影响导入本身，但会对后续 `retranslate-cues` / `polish-translation` 生效。端到端 Job 会保存解析后的策略快照而不是术语表路径，因此 `continue` 即使在原术语表文件移动、修改或删除后，仍使用首次运行时的相同术语和风格。策略也会进入 API 翻译指纹；修改风格或术语表后不会复用旧的批次进度。译文 QA 会确定性检查命中源 cue 的术语是否包含要求的目标词；违规会以 `glossary_violation` 写入 `qa-translated.json`，阻断渲染和烧录。
 
 Q4 在翻译前按已有 cue 确定性建立语义组：句末标点、相邻 cue 间隔达到 650ms、20 个 cue 或 30 秒会形成边界；达到上限时优先在句末、软标点、连接词前或最大停顿处分界。provider 批次默认最多容纳 25 个 cue，但只以完整语义组装箱，不会从组中切开；可通过 `--batch-size` 调整。批次中的 `semantic_groups` 仅记录各组的 cue ID，时间轴、cue 数量和顺序始终不变。
 

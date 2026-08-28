@@ -1067,9 +1067,12 @@ def run_workflow(
     event_sink: EventSink | None = None,
 ) -> WorkflowResult:
     options.validate()
+    # validate 已保证 glossary 与 translation_subtitles 互斥，这里只按有无目标语言决定是否
+    # 落策略快照。导入译文时 terms 必为空（glossary 传不进来），但 style 仍要落盘：后续
+    # retranslate-cues / polish-translation 读的是同一份快照，用户在 run 时选的风格不应凭空消失。
     policy = (
         load_translation_policy(options.glossary, style=options.translation_style)
-        if options.target_language and not options.translation_subtitles
+        if options.target_language
         else None
     )
     steps = planned_run_steps(options)

@@ -2017,6 +2017,51 @@ class CliTest(unittest.TestCase):
         self.assertEqual(options.segmentation_preset, "compact")
         self.assertTrue(options.burn)
 
+    def test_run_rejects_glossary_with_imported_translation_subtitles(self) -> None:
+        """术语表 + 导入译文在 run 入口即被拒绝，退出码 2 且不落任何 Job。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好。\n",
+                encoding="utf-8",
+            )
+            glossary = root / "glossary.json"
+            glossary.write_text(
+                json.dumps({"terms": [{"source": "Hello", "target": "你好"}]}),
+                encoding="utf-8",
+            )
+            output = root / "output"
+            error_output = StringIO()
+            with redirect_stderr(error_output), redirect_stdout(StringIO()):
+                return_code = main(
+                    [
+                        "run",
+                        str(source),
+                        "--output",
+                        str(output),
+                        "--target-language",
+                        "zh-CN",
+                        "--translation-subtitles",
+                        str(translated),
+                        "--glossary",
+                        str(glossary),
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            self.assertIn(
+                "--glossary cannot be combined with --translation-subtitles",
+                error_output.getvalue(),
+            )
+            self.assertEqual(list((output / "jobs").glob("*/job.json")), [])
+
     def test_align_subtitles_requires_subtitle_file(self) -> None:
         error_output = StringIO()
         with redirect_stderr(error_output):

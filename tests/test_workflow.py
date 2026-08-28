@@ -35,7 +35,7 @@ from xvt.workflow import (
     run_workflow,
     workflow_goals,
 )
-from xvt.workflow_config import WorkflowConfig, set_workflow_config
+from xvt.workflow_config import WorkflowConfig, get_workflow_config, set_workflow_config
 
 
 class WorkflowTest(unittest.TestCase):
@@ -448,6 +448,66 @@ class WorkflowTest(unittest.TestCase):
                 source_strategy="asr",
                 align_subtitles=True,
             ).validate()
+
+    def test_glossary_rejects_translation_subtitles_combination(self) -> None:
+        """术语表与导入译文互斥：术语校验的语义前提是「模型按表翻的」，导入译文不成立。"""
+
+        with self.assertRaisesRegex(
+            ValueError, r"--glossary cannot be combined with --translation-subtitles"
+        ):
+            WorkflowOptions(
+                input="/tmp/source.srt",
+                output="/tmp/output",
+                target_language="zh-CN",
+                translation_subtitles="/tmp/translated.srt",
+                glossary="/tmp/glossary.json",
+            ).validate()
+        # 单独给术语表仍然合法，拒绝只针对组合本身。
+        WorkflowOptions(
+            input="/tmp/source.srt",
+            output="/tmp/output",
+            target_language="zh-CN",
+            glossary="/tmp/glossary.json",
+        ).validate()
+
+    def test_imported_translation_persists_requested_translation_style(self) -> None:
+        """导入译文的 Job 也要落策略快照：显式 --translation-style 必须对后续命令生效。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            result = run_workflow(
+                WorkflowOptions(
+                    input=str(source),
+                    output=root / "output",
+                    language="en",
+                    target_language="zh-CN",
+                    translation_subtitles=translated,
+                    translation_style="natural",
+                )
+            )
+            job = load_job(result.job_file)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            job.config["workflow"]["translation_policy"],
+            {"style": "natural", "terms": []},
+        )
+        workflow = get_workflow_config(job)
+        assert workflow is not None
+        assert workflow.translation_policy is not None
+        self.assertEqual(workflow.translation_policy.style, "natural")
+        self.assertEqual(workflow.translation_policy.terms, ())
 
     def test_subtitle_workflow_imports_translation_without_media(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
