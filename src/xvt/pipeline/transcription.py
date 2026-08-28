@@ -239,6 +239,40 @@ def _source_selection_matches(job: Job) -> bool:
     )
 
 
+def _normalize_audio(
+    job: Job,
+    source: Path | str,
+    audio_path: Path,
+    event_sink: EventSink | None,
+) -> None:
+    """把源媒体转成 16 kHz 单声道 PCM WAV 并登记 normalized_audio artifact。
+
+    NORMALIZE_AUDIO 的 stage 迁移与 checkpoint 复用判断都留在调用方：
+    两个调用点的失败归属分别挂在 StageName.NORMALIZE_AUDIO 与局部 current_stage 上，
+    把 set_stage 挪进来会改变异常路径的 stage 归属。
+    """
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(audio_path),
+        ],
+        event_sink=event_sink,
+    )
+    if not audio_path.is_file():
+        raise RuntimeError("FFmpeg completed without producing normalized audio")
+    add_artifact(job, "normalized_audio", audio_path, event_sink)
+
+
 def _normalize_audio_and_transcribe(
     job: Job,
     source: Path | None,
@@ -259,26 +293,7 @@ def _normalize_audio_and_transcribe(
     if audio_path is None:
         set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.RUNNING, event_sink)
         audio_path = artifacts_directory / "audio.wav"
-        run_command(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(source),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-c:a",
-                "pcm_s16le",
-                str(audio_path),
-            ],
-            event_sink=event_sink,
-        )
-        if not audio_path.is_file():
-            raise RuntimeError("FFmpeg completed without producing normalized audio")
-        add_artifact(job, "normalized_audio", audio_path, event_sink)
+        _normalize_audio(job, source, audio_path, event_sink)
     set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SUCCEEDED, event_sink)
 
     set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
@@ -294,6 +309,57 @@ def _normalize_audio_and_transcribe(
     add_artifact(job, "word_transcript", transcript_path, event_sink)
     set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
     return transcript
+
+
+def _run_source_subtitle_qa(
+    job: Job,
+    cues: list[Cue],
+    artifacts_directory: Path,
+    *,
+    media_info: MediaInfo | None,
+    event_sink: EventSink | None,
+) -> bool:
+    """跑源字幕 QA、写 qa.json、登记 subtitle_qa artifact，返回 QA 是否放行。
+
+    只覆盖 SUBTITLE_QA 一段。调用方仍要在调用前把自己的 current_stage 置为
+    StageName.SUBTITLE_QA —— 失败归属留在调用方，渲染段的失败才不会被记到 QA 上。
+    """
+    set_stage(
+        job,
+        StageName.SUBTITLE_QA,
+        StageStatus.RUNNING,
+        event_sink,
+        extras={"detail": "source"},
+    )
+    report = check_subtitles(
+        cues,
+        media_duration_ms=media_info.duration_ms if media_info is not None else None,
+        video_width=media_info.width if media_info is not None else None,
+        video_height=media_info.height if media_info is not None else None,
+    )
+    qa_path = artifacts_directory / "qa.json"
+    write_json(qa_path, asdict(report))
+    add_artifact(job, "subtitle_qa", qa_path, event_sink)
+    return complete_qa_stage(job, report, event_sink)
+
+
+def _render_source_srt(
+    job: Job,
+    cues: list[Cue],
+    artifacts_directory: Path,
+    event_sink: EventSink | None,
+) -> None:
+    """写 source.srt、登记 source_srt artifact，并把 RENDER 记为成功。"""
+    set_stage(
+        job,
+        StageName.RENDER,
+        StageStatus.RUNNING,
+        event_sink,
+        extras={"detail": "source"},
+    )
+    subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
+    add_artifact(job, "source_srt", subtitle_path, event_sink)
+    set_stage(job, StageName.RENDER, StageStatus.SUCCEEDED, event_sink)
 
 
 def _process_adaptive_media(
@@ -513,36 +579,13 @@ def _process_adaptive_media(
         )
 
         current_stage = StageName.SUBTITLE_QA
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.RUNNING,
-            event_sink,
-            extras={"detail": "source"},
-        )
-        report = check_subtitles(
-            cues,
-            media_duration_ms=media_info.duration_ms,
-            video_width=media_info.width,
-            video_height=media_info.height,
-        )
-        qa_path = artifacts_directory / "qa.json"
-        write_json(qa_path, asdict(report))
-        add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        if not complete_qa_stage(job, report, event_sink):
+        if not _run_source_subtitle_qa(
+            job, cues, artifacts_directory, media_info=media_info, event_sink=event_sink
+        ):
             return job
 
         current_stage = StageName.RENDER
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.RUNNING,
-            event_sink,
-            extras={"detail": "source"},
-        )
-        subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-        add_artifact(job, "source_srt", subtitle_path, event_sink)
-        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        _render_source_srt(job, cues, artifacts_directory, event_sink)
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
             set_stage(
@@ -620,26 +663,7 @@ def _process_acquired_media(
             current_stage = StageName.NORMALIZE_AUDIO
             set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             audio_path = artifacts_directory / "audio.wav"
-            run_command(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(source),
-                    "-vn",
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "16000",
-                    "-c:a",
-                    "pcm_s16le",
-                    str(audio_path),
-                ],
-                event_sink=event_sink,
-            )
-            if not audio_path.is_file():
-                raise RuntimeError("FFmpeg completed without producing normalized audio")
-            add_artifact(job, "normalized_audio", audio_path, event_sink)
+            _normalize_audio(job, source, audio_path, event_sink)
             set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
 
             current_stage = StageName.TRANSCRIBE
@@ -694,36 +718,13 @@ def _process_acquired_media(
         add_artifact(job, "source_cues", cues_path, event_sink)
 
         current_stage = StageName.SUBTITLE_QA
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.RUNNING,
-            event_sink,
-            extras={"detail": "source"},
-        )
-        report = check_subtitles(
-            cues,
-            media_duration_ms=media_info.duration_ms,
-            video_width=media_info.width,
-            video_height=media_info.height,
-        )
-        qa_path = artifacts_directory / "qa.json"
-        write_json(qa_path, asdict(report))
-        add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        if not complete_qa_stage(job, report, event_sink):
+        if not _run_source_subtitle_qa(
+            job, cues, artifacts_directory, media_info=media_info, event_sink=event_sink
+        ):
             return job
 
         current_stage = StageName.RENDER
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.RUNNING,
-            event_sink,
-            extras={"detail": "source"},
-        )
-        subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-        add_artifact(job, "source_srt", subtitle_path, event_sink)
-        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        _render_source_srt(job, cues, artifacts_directory, event_sink)
     except Exception as error:
         if job.stages[current_stage].status is not StageStatus.FAILED:
             set_stage(
@@ -871,31 +872,13 @@ def _finish_subtitle_job(
 
     current_stage = StageName.SUBTITLE_QA
     try:
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.RUNNING,
-            event_sink,
-            extras={"detail": "source"},
-        )
-        report = check_subtitles(cues)
-        qa_path = artifacts_directory / "qa.json"
-        write_json(qa_path, asdict(report))
-        add_artifact(job, "subtitle_qa", qa_path, event_sink)
-        if not complete_qa_stage(job, report, event_sink):
+        if not _run_source_subtitle_qa(
+            job, cues, artifacts_directory, media_info=None, event_sink=event_sink
+        ):
             return job
 
         current_stage = StageName.RENDER
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.RUNNING,
-            event_sink,
-            extras={"detail": "source"},
-        )
-        subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-        add_artifact(job, "source_srt", subtitle_path, event_sink)
-        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        _render_source_srt(job, cues, artifacts_directory, event_sink)
         for stage in (StageName.BURN, StageName.MEDIA_QA):
             set_stage(job, stage, StageStatus.SKIPPED, event_sink)
     except Exception as error:
@@ -1507,35 +1490,12 @@ def _finish_resumed_source(
             _record_candidate_qa(job, evaluation, event_sink)
         _recover_source_selection(job, cues, event_sink)
 
-    set_stage(
-        job,
-        StageName.SUBTITLE_QA,
-        StageStatus.RUNNING,
-        event_sink,
-        extras={"detail": "source"},
-    )
-    report = check_subtitles(
-        cues,
-        media_duration_ms=media_info.duration_ms,
-        video_width=media_info.width,
-        video_height=media_info.height,
-    )
-    qa_path = artifacts_directory / "qa.json"
-    write_json(qa_path, asdict(report))
-    add_artifact(job, "subtitle_qa", qa_path, event_sink)
-    if not complete_qa_stage(job, report, event_sink):
+    if not _run_source_subtitle_qa(
+        job, cues, artifacts_directory, media_info=media_info, event_sink=event_sink
+    ):
         return job
 
-    set_stage(
-        job,
-        StageName.RENDER,
-        StageStatus.RUNNING,
-        event_sink,
-        extras={"detail": "source"},
-    )
-    subtitle_path = save_subtitles(cues, artifacts_directory / "source.srt")
-    add_artifact(job, "source_srt", subtitle_path, event_sink)
-    set_stage(job, StageName.RENDER, StageStatus.SUCCEEDED, event_sink)
+    _render_source_srt(job, cues, artifacts_directory, event_sink)
     if event_sink:
         event_sink(
             create_event(EventType.JOB_RESUMED, **job_event_fields(job.id, get_job_file(job)))

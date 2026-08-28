@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.errors import ExitCode, UserInputError
 from xvt.job_store import create_job, get_job_file, load_job, normalize_output_root, save_job
 from xvt.models import Job, StageName, StageStatus
 
@@ -129,6 +130,23 @@ class JobStoreTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "^Unsupported job schema version"):
                 load_job(path)
+
+    def test_missing_job_file_is_a_user_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "does-not-exist.json"
+
+            with self.assertRaisesRegex(UserInputError, "job file does not exist") as caught:
+                load_job(missing)
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
+            self.assertEqual(caught.exception.category, "invalid_input")
+
+    def test_job_file_pointing_at_a_directory_is_a_user_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(UserInputError, "job file does not exist") as caught:
+                load_job(directory)
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
 
 
 if __name__ == "__main__":

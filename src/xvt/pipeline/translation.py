@@ -19,7 +19,7 @@ from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
 from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
-from xvt.errors import UserInputError
+from xvt.errors import UserInputError, XvtError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Cue, Job, StageName, StageStatus
@@ -30,6 +30,8 @@ from xvt.pipeline.common import (
     error_category,
     invalidate_preview_artifacts,
     load_cues,
+    load_user_response_json,
+    parse_cue_text_items,
     set_stage,
     write_json,
 )
@@ -178,7 +180,18 @@ def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
-    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    """读取**用户提交的**响应文件并解析出译文映射。
+
+    读不出或解析不了时抛 ``UserInputError``（经 ``load_user_response_json``）。已登记
+    artifact 的读取不要走这里，改用 ``translations_from_response``。
+    """
+    return translations_from_response(
+        load_user_response_json(response_file, what="translation response"), expected_ids
+    )
+
+
+def translations_from_response(response: Any, expected_ids: set[int]) -> dict[int, str]:
+    """从已解析的响应载荷里取出 ``{cue_id: 译文}``；结构或覆盖范围不符时抛 ``ValueError``。"""
     items = response.get("items") if isinstance(response, dict) else None
     if not isinstance(items, list):
         raise ValueError("translation response must contain an items array")
@@ -271,7 +284,9 @@ def _atomic_draft_matches_translation_progress(
             normalize_generated=True,
         )
         return draft_path if load_cues(draft_path) == expected else None
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+    # XvtError：本函数经 load_translation_response 间接调用 load_user_response_json，
+    # 已登记 artifact 读不出时抛的是 UserInputError；漏掉它会让只读谓词抛异常而不是判否。
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, XvtError):
         return None
 
 
@@ -359,7 +374,9 @@ def translation_progress_rebuildable(job: Job, config: WorkflowConfig) -> bool:
         expected_ids = {item.id for batch in batches for item in batch.items}
         # 每个批次的全部 cue 都必须已有译文，否则该批次仍会被重新调用。
         load_translation_response(progress_path, expected_ids)
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+    # XvtError：本函数经 load_translation_response 间接调用 load_user_response_json，
+    # 已登记 artifact 读不出时抛的是 UserInputError；漏掉它会让只读谓词抛异常而不是判否。
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, XvtError):
         return False
     return True
 
@@ -491,7 +508,7 @@ def _load_agent_polished_response(
     response_file: str | Path, manifest: dict[str, Any]
 ) -> dict[int, str]:
     _batch_ids, cue_ids = _manifest_batch_ids_and_cue_ids(manifest)
-    response = json.loads(Path(response_file).read_text(encoding="utf-8"))
+    response = load_user_response_json(response_file, what="polish response")
     if not isinstance(response, dict) or response.get("fingerprint") != manifest.get("fingerprint"):
         raise ValueError("translation response fingerprint does not match the current manifest")
     items = response.get("items")
@@ -526,22 +543,9 @@ def _agent_polish_progress(
             or data.get("completed_batches") != batch_ids
         ):
             return None
-        items = data.get("items")
-        if not isinstance(items, list):
+        translations = parse_cue_text_items(data.get("items"))
+        if translations is None:
             return None
-        translations: dict[int, str] = {}
-        for item in items:
-            cue_id = item.get("id") if isinstance(item, dict) else None
-            text = item.get("text") if isinstance(item, dict) else None
-            if (
-                not isinstance(cue_id, int)
-                or isinstance(cue_id, bool)
-                or cue_id in translations
-                or not isinstance(text, str)
-                or not text.strip()
-            ):
-                return None
-            translations[cue_id] = text.strip()
         if set(translations) != cue_ids:
             return None
         return batch_ids, translations
@@ -886,6 +890,12 @@ def prepare_agent_translation(
         job.config["target_language"] = target_language
         job.config["source_language"] = source_language
         job.config["translation_policy"] = resolved_policy.to_dict()
+        # 整轮翻译准备取代任何未回填的局部重译：cue_retranslation_batches 在 artifact
+        # 依赖图上只派生自 source_cues，源 cue 没变时它不会被任何失效规则带走，于是
+        # 「放弃重译后重新翻译」的 Job 上四条件仍可全真，cue_retranslation_waiting 会把
+        # 合法的初译等待盖成重译等待，status 与 apply 一起指向作废的 manifest。
+        # 这里显式移出登记，让新的 translation_batches 成为唯一在途的翻译请求。
+        job.artifacts = [item for item in job.artifacts if item.kind != "cue_retranslation_batches"]
         if workflow is None:
             # workflow Job 的 quality 由 workflow 配置派生，不写入顶层 config。
             job.config["translation_quality"] = quality

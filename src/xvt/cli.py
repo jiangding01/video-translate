@@ -45,6 +45,7 @@ from xvt.pipeline import (
     apply_translation_review_fixes,
     burn_translated_job,
     complete_acknowledged_semantic_review,
+    cue_retranslation_waiting,
     inspect_input,
     interrupt_running_stage,
     prepare_agent_translation,
@@ -186,6 +187,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--target-font")
     run_parser.add_argument("--source-font")
     run_parser.add_argument("--events-jsonl", action="store_true")
+    run_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     batch_parser = subparsers.add_parser(
         "batch", help="Process supported files in a directory as independent jobs"
@@ -229,12 +237,26 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--target-font")
     batch_parser.add_argument("--source-font")
     batch_parser.add_argument("--events-jsonl", action="store_true")
+    batch_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     batch_continue_parser = subparsers.add_parser(
         "batch-continue", help="Continue incomplete jobs from a persisted batch"
     )
     batch_continue_parser.add_argument("batch_file")
     batch_continue_parser.add_argument("--events-jsonl", action="store_true")
+    batch_continue_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     status_parser = subparsers.add_parser(
         "status",
@@ -293,6 +315,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge the current semantic translation review report and proceed",
     )
     continue_parser.add_argument("--events-jsonl", action="store_true")
+    continue_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+        ),
+    )
 
     unified_apply_parser = subparsers.add_parser(
         "apply",
@@ -307,6 +336,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply the response and continue the same end-to-end workflow",
     )
     unified_apply_parser.add_argument("--events-jsonl", action="store_true")
+    unified_apply_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "With --continue, exit with code 10 when the continuation stops at "
+            "awaiting_input (default: 0; not a failure). No effect without --continue"
+        ),
+    )
 
     prepare_parser = subparsers.add_parser(
         "prepare-translation",
@@ -988,7 +1025,9 @@ def _recovery_plan_for_sink(sink: EventSink) -> RecoveryPlan | None:
         return None
     try:
         return build_recovery_plan(sink.job_file)
-    except (OSError, RuntimeError, ValueError):
+    except (XvtError, OSError, RuntimeError, ValueError):
+        # 含 XvtError：job.json 缺失时 load_job 抛 UserInputError，
+        # 而这里是失败路径上的尽力而为导航，绝不能再抛出遮蔽原始错误。
         return None
 
 
@@ -1008,7 +1047,7 @@ def _human_review_waiting(job: Job) -> bool:
 def _print_recovery_navigation(job_file: str | Path) -> None:
     try:
         plan = build_recovery_plan(job_file)
-    except (OSError, RuntimeError, ValueError):
+    except (XvtError, OSError, RuntimeError, ValueError):
         print(f"next: xvt status {shlex.quote(str(job_file))}")
         return
     print(f"recovery: {plan.reason}")
@@ -1022,12 +1061,103 @@ def _print_recovery_navigation(job_file: str | Path) -> None:
         print(f"alternative: {command}")
 
 
+# 普通模式下逐条展开的上限：条目多时刷屏没有意义，剩余的指向 --events-jsonl。
+_BATCH_ITEM_NAVIGATION_LIMIT = 10
+
+
+def _terminal_safe(value: object) -> str:
+    """把要打进终端的字符串里的控制字符转义掉，保留中文等正常 Unicode。
+
+    条目导航的 `input` / `job_file` / 命令里都嵌着扫描到的文件名，而文件名可以合法地
+    包含 `\\r` 与 ESC：裸 `\\r` 能把已经打印的行整行覆盖掉，ESC 序列能改颜色和光标位置，
+    两者合起来足以伪造出一条看起来出自 XVT 的 `next:` 命令。`shlex.quote` 挡不住这个
+    ——单引号内的控制字符照样被终端解释。
+
+    判定用 `str.isprintable()`：ASCII 空格返回 True，中日韩文字与常见符号也是 True，
+    只有 Unicode 分类 Other / Separator（控制字符、零宽字符、行分隔符等）会被转义成
+    `\\r`、`\\x1b` 这样的可见形式。制表符同样转义——文件名里的制表符只会打乱对齐。
+    """
+
+    return "".join(
+        character if character.isprintable() else character.encode("unicode_escape").decode("ascii")
+        for character in str(value)
+    )
+
+
+def _batch_item_navigation_lines(batch_file: str | Path) -> list[str]:
+    """从已持久化的 batch.json 读出需要用户动手的条目导航。
+
+    数据全部来自条目里已经算好的 `recovery_plan`，不重算恢复状态、不新增哈希。
+    没有这一段时，普通模式只会打印 `next: xvt batch-continue`，而那条命令再跑一次
+    仍然停在同一处——relink 之类真正的出口只存在于 JSONL 事件里，普通模式看不见。
+    """
+
+    try:
+        data = json.loads(Path(batch_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+
+    def _needs_attention(item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        return item.get("status") != "completed" or bool(item.get("verification"))
+
+    flagged = [item for item in items if _needs_attention(item)]
+    lines: list[str] = []
+    for item in flagged[:_BATCH_ITEM_NAVIGATION_LIMIT]:
+        verification = item.get("verification")
+        status = item.get("status")
+        label = f"{status} (degraded)" if status == "completed" and verification else status
+        # 这一段里的每一个值都可能源自扫描到的文件名，一律经 _terminal_safe。
+        lines.append(f"- {_terminal_safe(label)}: {_terminal_safe(item.get('input'))}")
+        job_file = item.get("job_file")
+        if isinstance(job_file, str):
+            lines.append(f"  job: {_terminal_safe(job_file)}")
+        error = item.get("error")
+        if isinstance(error, str) and error:
+            lines.append(f"  error: {_terminal_safe(error)}")
+        plan = item.get("recovery_plan")
+        if isinstance(plan, dict):
+            reason = plan.get("reason")
+            if isinstance(reason, str) and reason:
+                lines.append(f"  恢复建议：{_terminal_safe(reason)}")
+            for command in plan.get("prerequisite_commands") or []:
+                lines.append(f"  before: {_terminal_safe(command)}")
+            primary = plan.get("primary_command")
+            if isinstance(primary, str) and primary:
+                lines.append(f"  next: {_terminal_safe(primary)}")
+            for command in plan.get("alternative_commands") or []:
+                lines.append(f"  或：{_terminal_safe(command)}")
+    remaining = len(flagged) - _BATCH_ITEM_NAVIGATION_LIMIT
+    if remaining > 0:
+        lines.append(f"... 另有 {remaining} 个条目需要处理，用 --events-jsonl 查看全量")
+    return lines
+
+
+def _waiting_exit_code(arguments: argparse.Namespace, status: str | None) -> ExitCode:
+    """`awaiting_input` 的退出码：默认 0，显式 `--fail-on-waiting` 时 10。
+
+    旗标唯一改变的是进程退出码：不发 `cli_failed`，不改 Job / batch 状态，
+    不改事件流，不改 stdout 文本。`awaiting_input` 是 Agent 协议的正常成功路径
+    （每一次 Agent 模式的 `run` 都会停在这里），所以默认必须保持 0。
+    """
+
+    if status == "awaiting_input" and getattr(arguments, "fail_on_waiting", False):
+        return ExitCode.AWAITING_INPUT
+    return ExitCode.OK
+
+
 def _print_batch_result(result: BatchResult) -> None:
     print(result.batch_file)
     print(
         f"batch: {result.completed} completed, "
         f"{result.awaiting_input} awaiting input, {result.failed} failed"
     )
+    for line in _batch_item_navigation_lines(result.batch_file):
+        print(line)
     if result.status != "completed":
         print(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
 
@@ -1045,7 +1175,7 @@ def _print_workflow_result(result: object) -> None:
             job = load_job(job_file)
             if resolve_target_language(job):
                 print(f"翻译质量: {resolve_translation_quality(job)}")
-        except (OSError, ValueError):
+        except (XvtError, OSError, ValueError):
             pass
     videos: list[Path] = []
     subtitles: list[Path] = []
@@ -1077,7 +1207,7 @@ def _print_workflow_result(result: object) -> None:
     if status == "awaiting_input":
         try:
             plan = build_recovery_plan(job_file) if job_file is not None else None
-        except (OSError, RuntimeError, ValueError):
+        except (XvtError, OSError, RuntimeError, ValueError):
             plan = None
         if plan is not None:
             print(f"恢复建议：{plan.reason}")
@@ -1163,7 +1293,7 @@ def _cmd_run(arguments: argparse.Namespace) -> int:
         )
     elif not arguments.events_jsonl:
         _print_workflow_result(result)
-    return 0
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_batch(arguments: argparse.Namespace) -> int:
@@ -1201,7 +1331,11 @@ def _cmd_batch(arguments: argparse.Namespace) -> int:
             _complete(arguments, batch_file=str(result.batch_file), status=result.status)
     else:
         _print_batch_result(result)
-    return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
+    # 6 优先于 10：有条目真的失败了是坏消息，压过「按设计停下等你」的中性消息。
+    # _result_status 的分支顺序（failed/pending -> partial_failure）保证两者互斥。
+    if result.status == "partial_failure":
+        return ExitCode.PARTIAL_FAILURE
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_batch_continue(arguments: argparse.Namespace) -> int:
@@ -1212,7 +1346,11 @@ def _cmd_batch_continue(arguments: argparse.Namespace) -> int:
             _complete(arguments, batch_file=str(result.batch_file), status=result.status)
     else:
         _print_batch_result(result)
-    return ExitCode.PARTIAL_FAILURE if result.status == "partial_failure" else ExitCode.OK
+    # 6 优先于 10：有条目真的失败了是坏消息，压过「按设计停下等你」的中性消息。
+    # _result_status 的分支顺序（failed/pending -> partial_failure）保证两者互斥。
+    if result.status == "partial_failure":
+        return ExitCode.PARTIAL_FAILURE
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_status(arguments: argparse.Namespace) -> int:
@@ -1351,7 +1489,7 @@ def _cmd_continue(arguments: argparse.Namespace) -> int:
         )
     elif not arguments.events_jsonl:
         _print_workflow_result(result)
-    return 0
+    return _waiting_exit_code(arguments, result.status)
 
 
 def _cmd_prepare_translation(arguments: argparse.Namespace) -> int:
@@ -1488,7 +1626,7 @@ def _cmd_translate(arguments: argparse.Namespace) -> int:
             )
     try:
         job = load_job(arguments.job_file)
-    except OSError:
+    except (XvtError, OSError):
         waiting = False
     else:
         waiting = _human_review_waiting(job)
@@ -1681,7 +1819,7 @@ def _cmd_resegment_translation(arguments: argparse.Namespace) -> int:
             if target_language:
                 print(
                     f'重新翻译: xvt translate "{arguments.job_file}" '
-                    f"--target-language {target_language}"
+                    f"--target-language {shlex.quote(target_language)}"
                 )
     return 0
 
@@ -1716,7 +1854,7 @@ def _cmd_retranslate_cues(arguments: argparse.Namespace) -> int:
             print(
                 "xvt apply-cue-retranslation "
                 f'"{arguments.job_file}" RESPONSE {cues} '
-                f"--target-language {arguments.target_language}"
+                f"--target-language {shlex.quote(arguments.target_language)}"
             )
         else:
             job = load_job(arguments.job_file)
@@ -1822,15 +1960,21 @@ def _assert_disjoint_task_tables() -> None:
 
 _assert_disjoint_task_tables()
 
-# 步骤回退表。Agent 回填响应按协议不带 task 字段，绝大多数情况靠这里的下一步识别；
-# 但原子重译（retranslate-cues）不在 plan_advance_steps 的推进步骤里，需要单独识别，
-# 否则协议一致的重译响应会落到「job is not awaiting Agent input」的死环。
+# 步骤回退表。Agent 回填响应按协议不带 task 字段，绝大多数情况靠这里的下一步识别。
 _STEP_ROUTES: dict[str, str] = {
     "await_agent_translation": "apply-translation",
     "await_agent_polish": "apply-polish-translation",
     "await_agent_semantic_review": "apply-semantic-review",
     "await_translation_review": "apply-translation-review-fixes",
 }
+
+# 刻意不进 _STEP_ROUTES 的等待步骤，以及不进的理由。原子重译现在是
+# plan_advance_steps 的一个正式等待步骤（见 workflow.AWAIT_STEPS），但目标子命令
+# apply-cue-retranslation 必须显式收 --cue 与 --target-language，而 xvt apply 的命令行
+# 里没有这两个参数、也不能从响应里安全地推出来（AGENTS.md 已定调）。
+# 这张表存在的意义是让「新增等待步骤」必须表态：要么进路由表，要么在这里写明理由，
+# 否则守卫测试会红。
+_UNROUTABLE_AWAIT_STEPS: frozenset[str] = frozenset({"await_cue_retranslation"})
 
 # 人工修订 SRT 的固定命名形状。命名规则的唯一来源在 xvt.pipeline.revision（模板写入点与
 # 回填校验点共用），这里只按同样的前缀与 fingerprint 长度派生形状正则，不再独立硬编码。
@@ -1840,19 +1984,6 @@ _SOURCE_REVIEW_SRT_NAME = re.compile(
 _TRANSLATION_REVIEW_SRT_NAME = re.compile(
     rf"^{re.escape(TRANSLATION_REVIEW_STEM_PREFIX)}[0-9a-f]{{{REVISION_FINGERPRINT_LENGTH}}}$"
 )
-
-
-def _awaiting_cue_retranslation(job: Job) -> bool:
-    """Job 是否停在原子重译的等待态（有未回填的 manifest，且 TRANSLATE 在等输入）。
-
-    两个条件缺一不可：manifest 必须仍有效（checksum 门由 valid_artifact_path 把守），
-    stage 必须真的在等输入——否则会把「重译已回填、Job 已推进」的旧 manifest 误判成等待。
-    """
-
-    stage = job.stages.get(StageName.TRANSLATE)
-    if stage is None or stage.status is not StageStatus.AWAITING_INPUT:
-        return False
-    return valid_artifact_path(job, "cue_retranslation_batches") is not None
 
 
 def _cmd_apply(arguments: argparse.Namespace) -> int:
@@ -1890,11 +2021,12 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
                 raise ValueError(f"unknown task in response file: {task}")
         else:
             job = load_job(arguments.job_file)
-            if _awaiting_cue_retranslation(job):
-                # 原子重译的等待态既不产生推进步骤，协议一致的重译响应又不带 task，两条
-                # 识别路径同时落空：此前这里报「no persisted workflow goal」或「job is not
-                # awaiting Agent input」，与 TRANSLATE stage 明明在 awaiting_input 的事实
-                # 直接冲突，用户无路可走。
+            if cue_retranslation_waiting(job):
+                # 协议一致的重译响应不带 task，而 apply-cue-retranslation 不可自动路由，
+                # 两条识别路径同时落空：此前这里报「no persisted workflow goal」或「job is
+                # not awaiting Agent input」，与 TRANSLATE stage 明明在 awaiting_input 的
+                # 事实直接冲突，用户无路可走。谓词与 planner / status 共用同一份严格实现，
+                # 因此过期的残留 manifest 不会再把合法的润色回填顶掉。
                 raise UserInputError(
                     "this job is awaiting a cue retranslation response, and per the Agent "
                     "protocol that response carries no task field: "
@@ -1909,6 +2041,16 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
             steps = plan_advance_steps(job, workflow)
             route = _STEP_ROUTES.get(steps[0]) if steps else None
             if route is None:
+                if valid_artifact_path(job, "cue_retranslation_batches") is not None:
+                    # 宽松兜底：manifest 还在、checksum 也有效，但已经对不上当前译文
+                    # （多半是回填后的残留，或升级后需要重建）。严格谓词在上面已经判假，
+                    # 这里只能给出「重新生成 manifest」这条真正可执行的路径。
+                    raise UserInputError(
+                        "a cue retranslation manifest exists but no longer matches the current "
+                        "translation (it was most likely already applied, or needs regenerating "
+                        "after an upgrade); rerun xvt retranslate-cues to regenerate it, or "
+                        f"{_RETRANSLATE_CUES_MANUAL_COMMAND}"
+                    )
                 raise ValueError(
                     "response file has no task field, and the job is not awaiting Agent input; "
                     "run xvt status to see the current next step"
@@ -1939,6 +2081,9 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         return _COMMAND_DISPATCH[route](routed)
     routed._defer_cli_complete = True
     _COMMAND_DISPATCH[route](routed)
+    # continuation 复制 apply 的 Namespace，因此 --fail-on-waiting 原样透传给
+    # _cmd_continue 的 _waiting_exit_code：`apply --continue` 是 Agent 循环的主推进
+    # 命令，没有这个旗标就没法在无人值守流水线里区分「跑完了」和「停在下一个等待」。
     continuation = argparse.Namespace(**vars(arguments))
     continuation.command = "apply"
     continuation.cookies_from_browser = None

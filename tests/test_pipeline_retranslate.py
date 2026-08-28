@@ -8,12 +8,17 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.job_store import create_job, save_job
-from xvt.models import Artifact, Cue
+from xvt.errors import ExitCode, UserInputError
+from xvt.job_store import create_job, load_job, save_job
+from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline import (
     apply_cue_retranslation,
+    cue_retranslation_request,
+    cue_retranslation_waiting,
+    prepare_agent_translation,
     retranslate_cues,
 )
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.translation_provider import ProviderResponseError, TranslationProviderError
 
 
@@ -94,6 +99,48 @@ class CueRetranslationTest(unittest.TestCase):
         self.assertEqual(persisted["stages"]["subtitle_qa"]["status"], "succeeded")
         self.assertNotIn("bilingual_ass", {item["kind"] for item in persisted["artifacts"]})
         self.assertNotIn("preview_video", {item["kind"] for item in persisted["artifacts"]})
+
+    def test_missing_response_file_is_a_user_input_error(self) -> None:
+        """等待态正确、只是 response 路径打错：属于用户输入错误（2），不是依赖故障（3）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "First", source_language="en"))]),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "First", "旧译文", target_language="zh-CN"))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 1000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path)),
+                    Artifact("translated_cues", str(translated_path)),
+                    Artifact("media_info", str(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            retranslate_cues(job_file, cue_ids=(1,), target_language="zh-CN", provider="agent")
+
+            with self.assertRaisesRegex(
+                UserInputError, "cannot read cue retranslation response"
+            ) as caught:
+                apply_cue_retranslation(
+                    job_file,
+                    root / "gone" / "response.json",
+                    cue_ids=(1,),
+                    target_language="zh-CN",
+                )
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
 
     def test_cue_retranslation_rejects_a_different_target_language(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -344,6 +391,66 @@ class CueRetranslationTest(unittest.TestCase):
         self.assertTrue(all(event.data["batch_total"] == 1 for event in batch_events))
 
 
+class CueRetranslationInternalResponseReadTest(unittest.TestCase):
+    """API 模式读的是自己刚写下并登记的产物，不能借用户输入 helper 的错误归类。"""
+
+    def test_api_mode_does_not_route_its_own_response_through_the_user_input_helper(
+        self,
+    ) -> None:
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.test/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_path = artifacts / "source-cues.json"
+            source_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello", source_language="en"))]),
+                encoding="utf-8",
+            )
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps([asdict(Cue(1, 0, 1000, "Hello", "旧译文", target_language="zh-CN"))]),
+                encoding="utf-8",
+            )
+            media_path = artifacts / "media.json"
+            media_path.write_text(json.dumps({"duration_ms": 1000}), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(source_path)),
+                    Artifact("translated_cues", str(translated_path)),
+                    Artifact("media_info", str(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+
+            def forbidden(*_args, **_kwargs):
+                raise AssertionError("internal artifact must not go through the user-input helper")
+
+            with (
+                patch.dict(os.environ, provider_env, clear=False),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    side_effect=lambda *_a, **_k: {1: "新译文"},
+                ),
+                patch("xvt.pipeline.retranslate.load_user_response_json", forbidden),
+            ):
+                retranslate_cues(
+                    job_file,
+                    cue_ids=(1,),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                )
+
+            repaired = json.loads(translated_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(repaired[0]["target_text"], "新译文")
+
+
 class CueRetranslationPolicyResolutionTest(unittest.TestCase):
     """守卫：重译 manifest 的策略解析与译文 QA 的术语校验必须走同一口径。
 
@@ -423,6 +530,199 @@ class CueRetranslationPolicyResolutionTest(unittest.TestCase):
 
         self.assertEqual(manifest["policy"], policy)
         self.assertEqual(manifest["batches"][0]["policy"], policy)
+
+
+class CueRetranslationWaitingPredicateTest(unittest.TestCase):
+    """恢复计划与 planner 共用的两个只读谓词。"""
+
+    def _waiting_job_file(self, root: Path, *, cue_ids: tuple[int, ...] = (2,)) -> Path:
+        job = create_job("/tmp/input.mp4", root)
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir()
+        source_path = artifacts / "source-cues.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    asdict(Cue(cue_id, (cue_id - 1) * 1000, cue_id * 1000, f"S{cue_id}"))
+                    for cue_id in (1, 2, 3)
+                ]
+            ),
+            encoding="utf-8",
+        )
+        translated_path = artifacts / "translated-cues.json"
+        translated_path.write_text(
+            json.dumps(
+                [
+                    asdict(
+                        Cue(
+                            cue_id,
+                            (cue_id - 1) * 1000,
+                            cue_id * 1000,
+                            f"S{cue_id}",
+                            f"译{cue_id}",
+                            target_language="zh-CN",
+                        )
+                    )
+                    for cue_id in (1, 2, 3)
+                ]
+            ),
+            encoding="utf-8",
+        )
+        media_path = artifacts / "media.json"
+        media_path.write_text(json.dumps({"duration_ms": 3000}), encoding="utf-8")
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path)),
+                Artifact("media_info", str(media_path), file_checksum(media_path)),
+            ]
+        )
+        job_file = save_job(job)
+        retranslate_cues(job_file, cue_ids=cue_ids, target_language="zh-CN", provider="agent")
+        return job_file
+
+    def test_request_returns_only_the_targeted_cue_ids(self) -> None:
+        """上下文 cue 在 context_before / context_after，不能混进回填命令的 --cue。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            manifest_path = next(
+                Path(artifact.path)
+                for artifact in job.artifacts
+                if artifact.kind == "cue_retranslation_batches"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            # 前提：manifest 里确实带着上下文 cue，否则这条断言测不到东西。
+            self.assertEqual([item["id"] for item in manifest["batches"][0]["context_before"]], [1])
+            self.assertEqual([item["id"] for item in manifest["batches"][0]["context_after"]], [3])
+            self.assertEqual(cue_retranslation_request(job), ((2,), "zh-CN"))
+
+    def test_waiting_predicate_requires_the_manifest_to_match_current_cues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            self.assertTrue(cue_retranslation_waiting(job))
+
+            translated = next(
+                artifact for artifact in job.artifacts if artifact.kind == "translated_cues"
+            )
+            path = Path(translated.path)
+            cues = json.loads(path.read_text(encoding="utf-8"))
+            cues[0]["target_text"] = "等待期间被改过"
+            path.write_text(json.dumps(cues), encoding="utf-8")
+            # 译文重新登记为有效产物：失配的只有 manifest 记录的译文 checksum。
+            translated.checksum = file_checksum(path)
+            save_job(job)
+            job = load_job(job_file)
+
+            self.assertIsNotNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertIsNotNone(valid_artifact_path(job, "translated_cues"))
+            self.assertFalse(cue_retranslation_waiting(job))
+
+    def test_waiting_predicate_requires_valid_translated_cues(self) -> None:
+        """译文 cue 被失效移出登记（润色/语义等待的常态）时谓词必须为假。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            job.artifacts = [
+                artifact for artifact in job.artifacts if artifact.kind != "translated_cues"
+            ]
+            save_job(job)
+            job = load_job(job_file)
+
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
+            self.assertIsNotNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertFalse(cue_retranslation_waiting(job))
+            self.assertIsNotNone(cue_retranslation_request(job))
+
+    def test_request_returns_none_for_an_unparsable_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            manifest = next(
+                artifact
+                for artifact in job.artifacts
+                if artifact.kind == "cue_retranslation_batches"
+            )
+            path = Path(manifest.path)
+            path.write_text("not json", encoding="utf-8")
+            manifest.checksum = file_checksum(path)
+            save_job(job)
+            job = load_job(job_file)
+
+            self.assertIsNone(cue_retranslation_request(job))
+            self.assertFalse(cue_retranslation_waiting(job))
+
+    def test_request_preserves_the_manifest_batch_order(self) -> None:
+        """`--cue 3 --cue 1` 的 manifest 就是 3、1 顺序；排序会让回填的全等比对必然失败。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, cue_ids=(3, 1))
+            job = load_job(job_file)
+            request = cue_retranslation_request(job)
+
+            assert request is not None
+            self.assertEqual(request, ((3, 1), "zh-CN"))
+
+            manifest_path = valid_artifact_path(job, "cue_retranslation_batches")
+            assert manifest_path is not None
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            response_path = root / "response.json"
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": cue_id, "text": f"新{cue_id}"} for cue_id in request[0]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # 恢复计划给出的 --cue 顺序必须能被原样复制执行。
+            apply_cue_retranslation(
+                job_file,
+                response_path,
+                cue_ids=request[0],
+                target_language=request[1],
+            )
+
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
+            )
+
+    def test_a_fresh_translation_round_supersedes_a_stale_retranslation_manifest(self) -> None:
+        """放弃重译后重新跑整轮翻译：残留 manifest 不得再遮蔽合法的初译等待。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            self.assertTrue(cue_retranslation_waiting(job))
+
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            job = load_job(job_file)
+
+            self.assertIsNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertNotIn(
+                "cue_retranslation_batches",
+                {artifact.kind for artifact in job.artifacts},
+            )
+            self.assertIsNotNone(valid_artifact_path(job, "translation_batches"))
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
+            self.assertFalse(cue_retranslation_waiting(job))
 
 
 if __name__ == "__main__":

@@ -11,11 +11,10 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Thread
 from typing import TextIO
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from xvt.cancellation import cancel_event as _global_cancel_event
 from xvt.cancellation import cancellation_requested
-from xvt.events import EventSink, EventType, create_event, error_event_fields
+from xvt.events import EventSink, EventType, create_event, error_event_fields, redact_url
 
 # 静默超时的建议值：仅供能保证持续输出的调用方（如带 -progress pipe:1 的烧录）
 # 显式传入。默认不启用——yt-dlp 提取阶段、慢网络输入等场景存在合法的长时间
@@ -35,19 +34,6 @@ _SENSITIVE_OPTIONS = {
     "--video-password",
 }
 _SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key"}
-_SENSITIVE_QUERY_KEYS = {
-    "access_token",
-    "api_key",
-    "auth",
-    "authorization",
-    "key",
-    "signature",
-    "sig",
-    "token",
-    "x-amz-credential",
-    "x-amz-security-token",
-    "x-amz-signature",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,25 +172,6 @@ def _run_process(
     )
 
 
-def _redact_url(value: str) -> str:
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return value
-
-    netloc = (
-        f"{_REDACTED}@{parsed.netloc.rsplit('@', 1)[1]}"
-        if parsed.username is not None
-        else parsed.netloc
-    )
-    query = urlencode(
-        [
-            (key, _REDACTED if key.lower() in _SENSITIVE_QUERY_KEYS else query_value)
-            for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
-        ]
-    )
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
-
-
 def _redact_header(value: str) -> str:
     name, separator, _ = value.partition(":")
     if separator and name.strip().lower() in _SENSITIVE_HEADERS:
@@ -241,7 +208,7 @@ def _redact_command(command: tuple[str, ...]) -> list[str]:
                 redacted.append(argument)
                 redact_header = True
             continue
-        redacted.append(_redact_url(argument))
+        redacted.append(redact_url(argument))
     return redacted
 
 

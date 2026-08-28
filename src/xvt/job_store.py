@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from xvt.errors import UserInputError
 from xvt.locking import hold_job_lock
 from xvt.models import Job
 
@@ -69,6 +70,10 @@ def save_job(job: Job) -> Path:
 
 def load_job(job_file: str | Path) -> Job:
     path = Path(job_file).expanduser()
+    if not path.is_file():
+        # job_file 在每一个命令里都是用户直接输入的位置参数，缺失（或指向目录）
+        # 属于用户输入错误；顶层的 OSError → 退出码 3 是留给内部 I/O 故障的。
+        raise UserInputError(f"job file does not exist: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("job file must contain a JSON object")

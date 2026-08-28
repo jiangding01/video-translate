@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import asdict, fields
@@ -15,7 +14,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xvt.artifacts import ArtifactKind, downstream_of
+
+# 分块 SHA-256 的唯一实现在 xvt.checksums。这里只做包内别名，
+# 保持 pipeline 各模块既有的 `checksum(path)` 调用名不变（34 处调用点零改动）。
+from xvt.checksums import file_checksum as checksum
 from xvt.download import inspect_remote
+from xvt.errors import UserInputError, XvtError
 from xvt.events import (
     EventSink,
     EventType,
@@ -134,7 +138,11 @@ def interrupt_running_stage(
             event_sink,
             error="interrupted by user",
         )
-    except (KeyError, OSError, RuntimeError, ValueError):
+    # XvtError 必须在元组里：本函数是 cli 的 Ctrl-C 处理块的**第一条语句**，job.json
+    # 缺失或不可解析时 load_job 抛的是 UserInputError（XvtError 子类），逃逸出去会顶掉
+    # 整个中断收尾——不发 cli_failed、不打印恢复引导，退出码变成 1 而不是 130/143。
+    # 中断收尾是尽力而为的记账，任何一种读不出 Job 的方式都只该让它安静地返回 False。
+    except (KeyError, OSError, RuntimeError, ValueError, XvtError):
         return False
     return True
 
@@ -143,14 +151,6 @@ def write_json(path: Path, data: Any) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
-
-
-def checksum(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def add_artifact(job: Job, kind: str, path: Path, event_sink: EventSink | None) -> None:
@@ -210,6 +210,28 @@ _CUE_FIELDS = {field.name for field in fields(Cue)}
 _WORD_FIELDS = {field.name for field in fields(Word)}
 
 
+def load_user_response_json(response_file: str | Path, *, what: str) -> Any:
+    """读取用户提交的 response 文件。
+
+    `response_file` 永远是用户直接输入的 CLI 位置参数，读不出或解析不了都是用户输入
+    错误，不能逃逸成 OSError / JSONDecodeError 被顶层归到 dependency_or_process
+    （退出码 3）。**已登记 artifact 的读取不要走这个函数**：那些路径来自 Job 自己，
+    缺失是 Job 状态问题而不是用户敲错了命令行。
+
+    还要注意间接路径：``translation.load_translation_response`` 内部就调用本函数，
+    因此它同样只适用于用户提交的响应文件。读已登记 artifact 时改用
+    ``translation.translations_from_response``（接受已解析的载荷），并把
+    ``UserInputError``（``XvtError`` 子类）算进调用点的 except 元组——只读谓词漏掉它
+    就会让本该判否的分支抛出异常。
+    """
+
+    path = Path(response_file).expanduser()
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise UserInputError(f"cannot read {what}: {error}") from error
+
+
 def load_cues(path: Path) -> list[Cue]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
@@ -234,3 +256,28 @@ def load_cues(path: Path) -> list[Cue]:
     except (AttributeError, TypeError) as error:
         raise ValueError(f"invalid cue artifact: {error}") from error
     return cues
+
+
+def parse_cue_text_items(items: Any) -> dict[int, str] | None:
+    """把 ``[{"id": int, "text": str}, ...]`` 解析成 ``{cue_id: 去空白文本}``。
+
+    结构非法（不是数组、item 不是对象、id 不是 int 或是 bool、id 重复、
+    text 不是非空字符串）时返回 ``None``，由调用方决定是抛异常、判否还是
+    丢弃 checkpoint —— 这里刻意不产生任何用户可见文案。
+    """
+    if not isinstance(items, list):
+        return None
+    translations: dict[int, str] = {}
+    for item in items:
+        cue_id = item.get("id") if isinstance(item, dict) else None
+        text = item.get("text") if isinstance(item, dict) else None
+        if (
+            not isinstance(cue_id, int)
+            or isinstance(cue_id, bool)
+            or cue_id in translations
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            return None
+        translations[cue_id] = text.strip()
+    return translations

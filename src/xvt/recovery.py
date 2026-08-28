@@ -1,18 +1,71 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from xvt.candidate_qa import translation_candidate_qa_issues
+from xvt.checksums import file_checksum as _hash_file
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
-from xvt.workflow_config import WorkflowConfig, get_workflow_config, resolve_target_language
+from xvt.workflow_config import (
+    WorkflowConfig,
+    get_workflow_config,
+    resolve_target_language,
+    resolve_translation_quality,
+)
+
+_checksum_cache: ContextVar[dict[tuple[Any, ...], str] | None] = ContextVar(
+    "xvt_readonly_checksum_cache", default=None
+)
+
+
+@contextmanager
+def readonly_checksum_scope() -> Iterator[None]:
+    """只读判定期间的进程内 checksum 记忆化作用域。
+
+    只能包住不写入任何产物的代码。作用域内同一
+    ``(path, st_dev, st_ino, st_size, st_mtime_ns)`` 只哈希一次；
+    不跨命令、不跨进程、不落盘。嵌套时内层建新字典，退出即复位。
+
+    文件元数据在这里只用于给"同一次判定内的同一个文件"定身份，
+    绝不用于替代内容校验：stat 只能证伪（元数据不符 ⇒ 内容必然已变），
+    永远不能证实（元数据相符不蕴含内容未变）。
+    """
+
+    token = _checksum_cache.set({})
+    try:
+        yield
+    finally:
+        _checksum_cache.reset(token)
+
+
+def file_checksum(path: Path) -> str:
+    """文件内容 SHA-256；在 ``readonly_checksum_scope`` 内做记忆化。
+
+    无作用域时逐字等价于 ``xvt.checksums.file_checksum``。
+    """
+
+    cache = _checksum_cache.get()
+    if cache is None:
+        return _hash_file(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        # 让原始 OSError 在真正读取时按现有路径抛出，不在这里吞掉。
+        return _hash_file(path)
+    key = (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    value = cache.get(key)
+    if value is None:
+        value = _hash_file(path)
+        cache[key] = value
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,14 +101,6 @@ class SubtitleQaFailureGuidance:
     is_needs_review: bool
 
 
-def file_checksum(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def verify_artifact(artifact: Artifact) -> dict[str, Any]:
     path = Path(artifact.path)
     result: dict[str, Any] = {
@@ -85,6 +130,113 @@ def valid_artifact_path(job: Job, kind: str) -> Path | None:
 def _job_command(command: str, job_file: Path, *arguments: str) -> str:
     parts = ["xvt", command, shlex.quote(str(job_file)), *arguments]
     return " ".join(parts)
+
+
+def atomic_translated_qa_rebuild_command(
+    job: Job,
+    job_file: str | Path | None = None,
+) -> str | None:
+    """原子 Job 上零 API 成本重建译文 QA 与渲染产物的命令；不可行时返回 None。
+
+    `import-translation` 与端到端 `continue` 的 render 步骤走同一个 ``finalize_translation``
+    收尾，只消费 Job 内已经 checksum 有效的 ``translated.srt``，不调用任何翻译提供方。
+    承诺仅限于「零 API 成本重建 QA 与渲染产物」——它按当前源 cue 重新映射译文，不承诺
+    ``translated_cues`` 逐字不变。代价是这份字幕会被登记为 ``input_translation_subtitles`` /
+    ``translation_mapping``，Job 从此带上「导入译文」的痕迹，reason 与文档都要写明。
+
+    三处共用：原子恢复分支的新判定、``qa_blocked`` 上 ``workflow`` 为 None 的死路，
+    以及 ``pipeline.burnin`` 的原子 QA 门文案。
+
+    **polished Job 上不可行**：``import-translation`` 同样经 ``finalize_translation``，而
+    那里在 ``resolve_translation_quality(job) == "polished"`` 且 ``polished_result`` 为假时
+    走 draft 分支——只写出一份新的润色草稿，QA 不重建、渲染不执行，润色候选与语义校对结论
+    连同最终译文一并失效，整条润色腿要重跑（真实模型成本）。承诺「零 API 成本重建 QA 与
+    渲染产物」在这种 Job 上是假的，因此这里返回 None，让调用方落回各自既有的引导。
+    """
+
+    if resolve_translation_quality(job) == "polished":
+        return None
+    target_language = resolve_target_language(job)
+    if not target_language:
+        return None
+    translated_srt = valid_artifact_path(job, "translated_srt")
+    if translated_srt is None:
+        return None
+    resolved = (
+        Path(job_file).expanduser().resolve()
+        if job_file is not None
+        else get_job_file(job).resolve()
+    )
+    return _job_command(
+        "import-translation",
+        resolved,
+        shlex.quote(str(translated_srt)),
+        "--target-language",
+        shlex.quote(target_language),
+    )
+
+
+_CUE_RETRANSLATION_WAITING_REASON = (
+    "任务正在等待局部重译（retranslate-cues）结果回填；未回填前不要按已完成处理。"
+    "要放弃这次重译，重新运行一轮完整翻译（xvt translate JOB --target-language LANG）"
+    "即可取代它：准备新批次时会把这份重译 manifest 移出登记。continue 本身会停在这次"
+    "等待上，不会替你放弃。"
+)
+
+
+def _cue_retranslation_apply_command(job: Job, job_file: Path) -> str:
+    """拼出可直接复制的 ``apply-cue-retranslation`` 命令。
+
+    ``xvt apply`` 拿不到 ``--cue`` 与 ``--target-language``，所以这里从 manifest 读出
+    具体 cue id 与目标语言；manifest 结构不可解析时退回形状占位，绝不猜测 cue id。
+    惰性 import 与本文件其余 pipeline 引用同一模式，避免
+    ``recovery ↔ pipeline.retranslate`` 循环导入。
+    """
+
+    from xvt.pipeline.retranslate import cue_retranslation_request
+
+    request = cue_retranslation_request(job)
+    if request is None:
+        return _job_command(
+            "apply-cue-retranslation",
+            job_file,
+            "RESPONSE",
+            "--cue",
+            "ID",
+            "[--cue ID ...]",
+            "--target-language",
+            "LANG",
+        )
+    cue_ids, target_language = request
+    arguments: list[str] = ["RESPONSE"]
+    for cue_id in cue_ids:
+        arguments.extend(("--cue", str(cue_id)))
+    arguments.extend(("--target-language", shlex.quote(target_language)))
+    return _job_command("apply-cue-retranslation", job_file, *arguments)
+
+
+def _cue_retranslation_waiting_plan(
+    job: Job,
+    job_file: Path,
+    valid_artifacts: dict[str, Path],
+    plan: Callable[..., RecoveryPlan],
+    *,
+    advance_steps: tuple[str, ...] = (),
+) -> RecoveryPlan:
+    """局部重译等待的统一恢复计划；原子分支与端到端分支共用同一份文案与命令。
+
+    ``apply-cue-retranslation`` 需要 ``xvt apply`` 拿不到的 ``--cue`` / ``--target-language``，
+    ``continue`` 也推不动这一步，因此不设首选命令，只给拼好的前置命令。
+    """
+
+    return plan(
+        "awaiting_input",
+        _CUE_RETRANSLATION_WAITING_REASON,
+        primary_command=None,
+        prerequisite_commands=(_cue_retranslation_apply_command(job, job_file),),
+        report_paths=(str(valid_artifacts["cue_retranslation_batches"]),),
+        advance_steps=advance_steps,
+    )
 
 
 def _semantic_review_options(
@@ -239,6 +391,86 @@ def _source_selection_is_asr(job: Job, valid_artifacts: dict[str, Path]) -> bool
     )
 
 
+def _glossary_violation_cue_ids(report: dict[str, Any]) -> tuple[int, ...] | None:
+    """全部 error 级问题都是 ``glossary_violation`` 时返回涉及的 cue id；否则 None。
+
+    只要混进任何一条别的 error（时间轴、缺译文、显示宽度……），局部重译就不是出口，
+    必须退回通用的「查看报告并修复字幕」引导。cue id 缺失或不是真整数时同样放弃——
+    命令必须能原样复制执行，猜出来的 id 会写坏译文。
+    """
+
+    issues = report.get("issues")
+    if not isinstance(issues, list):
+        return None
+    cue_ids: list[int] = []
+    for issue in issues:
+        if not isinstance(issue, dict) or issue.get("severity") != "error":
+            continue
+        if issue.get("code") != "glossary_violation":
+            return None
+        cue_id = issue.get("cue_id")
+        # bool 是 int 的子类；与项目其余解析器同口径显式排除。
+        if isinstance(cue_id, bool) or not isinstance(cue_id, int) or cue_id < 1:
+            return None
+        cue_ids.append(cue_id)
+    if not cue_ids:
+        return None
+    return tuple(sorted(dict.fromkeys(cue_ids)))
+
+
+def _glossary_violation_guidance(
+    job: Job,
+    job_file: Path,
+    reports: dict[str, dict[str, Any] | None],
+    blocking: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """译文 QA 只因术语违规而失败时，给出 ``retranslate-cues`` 出口 ``(reason, command)``。
+
+    没有这条出口时该状态是死路：术语校验的 `glossary_violation` 是 error 级，acknowledge
+    通道只覆盖 review 级，恢复计划因此给 ``primary_command=None``。出口本身早已存在
+    （`retranslate-cues` 复用 Job 保存的术语策略），只是没人告诉用户。
+
+    源字幕 QA 也有 error 时不给：重译译文改不了源文问题。
+    """
+
+    translated_report = reports.get("translated_subtitle_qa")
+    if translated_report is None or blocking is not translated_report:
+        return None
+    source_report = reports.get("subtitle_qa")
+    if source_report is not None and _qa_report_has_errors(source_report):
+        return None
+    cue_ids = _glossary_violation_cue_ids(translated_report)
+    target_language = resolve_target_language(job)
+    if cue_ids is None or not target_language:
+        return None
+
+    arguments: list[str] = []
+    for cue_id in cue_ids:
+        arguments.extend(("--cue", str(cue_id)))
+    arguments.extend(("--target-language", shlex.quote(target_language)))
+    command = _job_command("retranslate-cues", job_file, *arguments)
+
+    if resolve_translation_quality(job) == "polished":
+        # polished Job 上回填走 finalize_translation 且没有 polished_result=True：结果被
+        # 写成新的翻译草稿，润色候选、语义校对结论与最终译文一并失效，整条润色腿要重跑
+        # （真实模型成本）。因此这里绝不能承诺「其余译文保持不变」。
+        reason = (
+            "译文 QA 未通过，但阻断的 error 级问题全部是术语表冲突（glossary_violation）。"
+            "可以只重译这些 cue：retranslate-cues 复用 Job 保存的术语策略，时间轴保持不变。"
+            "注意这是 polished 质量的 Job——回填结果会成为新的翻译草稿，润色候选、语义校对"
+            "结论与最终译文一并失效，需要重新走一遍润色与语义校对（会真实调用模型）。"
+            "若认为译文没问题，另一条路是调整术语表后重跑翻译。"
+        )
+    else:
+        reason = (
+            "译文 QA 未通过，但阻断的 error 级问题全部是术语表冲突（glossary_violation）。"
+            "可以只重译这些 cue：retranslate-cues 复用 Job 保存的术语策略，只改写指定 cue，"
+            "其余译文与全部时间轴保持不变，回填后重跑完整译文 QA。"
+            "若认为译文没问题，另一条路是调整术语表后重跑翻译。"
+        )
+    return reason, command
+
+
 def subtitle_qa_failure_guidance(
     job: Job,
     job_file: str | Path | None = None,
@@ -263,13 +495,15 @@ def subtitle_qa_failure_guidance(
     )
     report_paths: list[str] = []
     blocking: dict[str, Any] | None = None
+    reports: dict[str, dict[str, Any] | None] = {}
     for kind in ("translated_subtitle_qa", "subtitle_qa"):
         path = valid_artifact_path(job, kind)
         if path is None:
             continue
         report_paths.append(str(path))
+        reports[kind] = _load_qa_report(path)
         if blocking is None:
-            blocking = _load_qa_report(path)
+            blocking = reports[kind]
 
     if blocking is not None and not _qa_report_has_errors(blocking):
         if blocking.get("status") == "needs_review":
@@ -289,6 +523,16 @@ def subtitle_qa_failure_guidance(
                 primary_command=command,
                 is_needs_review=True,
             )
+
+    glossary_guidance = _glossary_violation_guidance(job, resolved, reports, blocking)
+    if glossary_guidance is not None:
+        return SubtitleQaFailureGuidance(
+            reason=glossary_guidance[0],
+            message=f"{glossary_guidance[0]} 下一步：{glossary_guidance[1]}",
+            report_paths=tuple(report_paths),
+            primary_command=glossary_guidance[1],
+            is_needs_review=False,
+        )
 
     reason = "字幕 QA 未通过，需要检查报告并修复字幕后再继续。"
     return SubtitleQaFailureGuidance(
@@ -312,7 +556,61 @@ def _translated_qa_needs_rebuild(job: Job) -> bool:
     )
 
 
+def _atomic_translated_qa_recovery(
+    job: Job,
+    job_file: Path,
+    target_language: str | None,
+    plan: Callable[..., RecoveryPlan],
+) -> RecoveryPlan:
+    """原子 Job 上「译文 QA 报告失效」的统一分类与引导。
+
+    烧录与预览的 fail-closed 门以该报告为硬前置，报 ``complete`` 会让用户在
+    「门说去修、status 说已完成」之间打转。
+    """
+
+    rebuild = atomic_translated_qa_rebuild_command(job, job_file)
+    if rebuild is not None:
+        assert target_language is not None
+        return plan(
+            "retryable",
+            "译文 QA 报告已失效，烧录与预览会被安全门拒绝；可以从 Job 内仍然 checksum 有效的"
+            "译文字幕零 API 成本重建 QA 与渲染产物（该命令会把这份字幕登记为导入译文）。",
+            primary_command=rebuild,
+            alternative_commands=(
+                _job_command(
+                    "translate", job_file, "--target-language", shlex.quote(target_language)
+                ),
+            ),
+        )
+    return plan(
+        "manual_fix",
+        "译文 QA 报告已失效且 Job 内没有可复用的译文字幕，只能重跑翻译重新生成报告"
+        "（会重新调用翻译提供方）。",
+        primary_command=(
+            _job_command("translate", job_file, "--target-language", shlex.quote(target_language))
+            if target_language
+            else None
+        ),
+    )
+
+
 def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
+    """生成恢复计划。按契约只读，因此整段判定可以共享一份 checksum 记忆化。
+
+    ``plan_advance_steps`` / ``burned_output_relink_recovery_available`` /
+    ``_semantic_review_options`` / ``translation_candidate_qa_issues`` 都不写产物，
+    因此这里做记忆化是安全的：同一个文件在一次调用里不再被哈希两到四次，也就不会
+    在两次哈希之间被改写而给出自相矛盾的判定。
+
+    记忆化只覆盖经本模块 ``file_checksum`` 的调用点。``candidate_qa`` 直接用
+    ``checksums.file_checksum``，不进这份缓存，因此它看到的是自己那一刻的文件内容。
+    """
+
+    with readonly_checksum_scope():
+        return _build_recovery_plan(job_or_file)
+
+
+def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
     job = job_or_file if isinstance(job_or_file, Job) else load_job(job_or_file)
     job_file = get_job_file(job).resolve()
     valid_artifacts = {
@@ -401,6 +699,27 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             "没有 checksum 有效的源字幕或转写 checkpoint，当前 Job 不能自动续跑。",
         )
 
+    from xvt.pipeline.retranslate import cue_retranslation_waiting
+
+    # 必须排在 qa_blocked 之前。术语死锁（阻断的 error 全是 glossary_violation）的出口
+    # 就是 retranslate-cues，用户按引导跑完 Agent 模式的重译后 SUBTITLE_QA 仍停在
+    # FAILED——译文 QA 要等回填后才重跑。排在后面时 qa_blocked 分支会把这段等待重报成
+    # manual_fix 并再次给出同一条 retranslate-cues（用户已经跑过了），端到端 Job 上
+    # advance_steps 还会与 plan_advance_steps 的 ('await_cue_retranslation',) 自相矛盾。
+    # 重译等待正是这次 QA 阻断的处置进行时，先报等待才是真状态。
+    if cue_retranslation_waiting(job):
+        if workflow is not None:
+            # plan_advance_steps 的函数体第一件事就是同一个谓词，因此这里必然落到
+            # await_cue_retranslation 分支，advance_steps 与 continue 保持一致。
+            return _recovery_for_workflow(
+                job,
+                job_file=job_file,
+                workflow=workflow,
+                valid_artifacts=valid_artifacts,
+                plan=plan,
+            )
+        return _cue_retranslation_waiting_plan(job, job_file, valid_artifacts, plan)
+
     qa_blocked = job.stages[StageName.SUBTITLE_QA].status in {
         StageStatus.FAILED,
         StageStatus.AWAITING_INPUT,
@@ -413,12 +732,14 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             _load_qa_report(translated_report_path) if translated_report_path else None
         )
         if _translated_qa_needs_rebuild(job):
+            if workflow is None:
+                # 原子 Job 上 continue 不适用，此前这里给 primary_command=None，是一条
+                # 没有出口的死路；改为与原子分支共用同一条零 API 成本重建引导。
+                return _atomic_translated_qa_recovery(job, job_file, target_language, plan)
             return plan(
                 "retryable",
                 "译文字幕 QA 报告缺失或 checksum 已失效，可以从现有译文重新执行 QA。",
-                primary_command=(
-                    _job_command("continue", job_file) if workflow is not None else None
-                ),
+                primary_command=_job_command("continue", job_file),
             )
         if source_report is None and "source_srt" not in valid_artifacts:
             command = "continue" if workflow is not None else "resume"
@@ -518,7 +839,7 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         and "translation_polished_cues" in valid_artifacts
         and not semantic_review_approved(job)
     ):
-        target = target_language or "LANGUAGE"
+        target = shlex.quote(target_language) if target_language else "LANGUAGE"
         return plan(
             "retryable",
             "润色候选有效，可以重新执行原子翻译命令继续语义校对。",
@@ -531,6 +852,9 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                 "polished",
             ),
         )
+
+    # 局部重译等待（原子分支此前把它当成初译等待，给出的 apply-translation 命令对重译
+    # 响应是错的）已在 qa_blocked 之前统一判定，这里不必再判一次。
 
     agent_waiting = agent_translation_polish_waiting(job)
     agent_progress = agent_translation_polish_progress_ready(job)
@@ -545,7 +869,22 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         or agent_waiting
         or agent_progress
     ):
-        target = target_language or "LANGUAGE"
+        target = shlex.quote(target_language) if target_language else "LANGUAGE"
+        if valid_artifact_path(job, "translation_batches") is None:
+            # 等待态残留：批次 manifest 已经不在（例如按旧文案手工删掉重译 manifest 后
+            # TRANSLATE 仍停在 awaiting_input）。此时建议 apply-translation 等于让用户
+            # 回填一份根本不存在的请求的响应，必然被 fingerprint 校验拒绝。
+            return plan(
+                "retryable",
+                "翻译阶段停在等待态，但 Job 内已经没有 checksum 有效的翻译批次 manifest，"
+                "没有任何响应能回填这次等待；重新运行翻译会重建批次并给出新的回填请求。",
+                primary_command=_job_command(
+                    "translate",
+                    job_file,
+                    "--target-language",
+                    target,
+                ),
+            )
         apply_command = _job_command(
             "apply-translation",
             job_file,
@@ -568,9 +907,20 @@ def build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                 "translate",
                 job_file,
                 "--target-language",
-                target_language,
+                shlex.quote(target_language),
             ),
         )
+
+    if (
+        target_language
+        and "translated_cues" in valid_artifacts
+        and any(item.kind == "translated_subtitle_qa" for item in job.artifacts)
+        and "translated_subtitle_qa" not in valid_artifacts
+    ):
+        # 译文 cue 仍有效，缺的只是可确定性重算的译文 QA 报告；但烧录/预览门以它为硬前置，
+        # 报 complete 会让用户在「门说去修、status 说已完成」之间打转。SUBTITLE_QA stage
+        # 仍是 succeeded 时走不到上面的 qa_blocked 分支，所以这条判定必须留在收尾之前。
+        return _atomic_translated_qa_recovery(job, job_file, target_language, plan)
 
     return plan(
         "complete",
@@ -608,8 +958,17 @@ def _recovery_for_workflow(
             advance_steps=(),
         )
 
+    if steps[0] == "await_cue_retranslation":
+        return _cue_retranslation_waiting_plan(
+            job,
+            job_file,
+            valid_artifacts,
+            plan,
+            advance_steps=steps,
+        )
+
     if steps[0] == "await_agent_translation":
-        target = workflow.target_language or "LANGUAGE"
+        target = shlex.quote(workflow.target_language) if workflow.target_language else "LANGUAGE"
         return plan(
             "awaiting_input",
             "任务正在等待翻译结果回填。",

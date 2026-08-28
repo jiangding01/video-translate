@@ -6,7 +6,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.errors import UserInputError
+from xvt.errors import ExitCode, UserInputError
 from xvt.events import EventType
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus
@@ -1279,6 +1279,21 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                     )["issues"]
                 )
             )
+
+    def test_missing_semantic_response_file_is_a_user_input_error(self) -> None:
+        """等待态正确、只是 response 路径打错：属于用户输入错误（2），不是依赖故障（3）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root, provider="agent")
+            prepare_agent_semantic_review(job_file)
+
+            with self.assertRaisesRegex(
+                UserInputError, "cannot read semantic review response"
+            ) as caught:
+                apply_agent_semantic_review(job_file, root / "gone" / "semantic-response.json")
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
 
     def test_agent_combined_review_without_issues(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

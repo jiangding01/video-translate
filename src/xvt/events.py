@@ -109,7 +109,7 @@ _SENSITIVE_HEADER_PATTERN = re.compile(
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+")
 # 任意 scheme 的 URL userinfo：@ 之前的一切（user:pass、:pass、仅 token）都视为
-# 凭据整体脱敏；_redact_url 只处理 http/https，这里兜底其余协议。
+# 凭据整体脱敏；redact_url 只处理 http/https，这里兜底其余协议。
 _USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+@")
 # 事件 data 中的敏感字典 key：值不做解析、整体替换。覆盖嵌套 Header 字典
 # （{"Cookie": ...}）与常见凭据字段名。
@@ -156,7 +156,7 @@ class Event:
 EventSink = Callable[[Event], None]
 
 
-def _redact_url(value: str) -> str:
+def redact_url(value: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return value
@@ -182,7 +182,7 @@ def _redact_free_text(value: str) -> str:
 
 def _redact_event_value(value: Any) -> Any:
     if isinstance(value, str):
-        return _redact_free_text(_URL_PATTERN.sub(lambda match: _redact_url(match.group()), value))
+        return _redact_free_text(_URL_PATTERN.sub(lambda match: redact_url(match.group()), value))
     if isinstance(value, list):
         return [_redact_event_value(item) for item in value]
     if isinstance(value, tuple):

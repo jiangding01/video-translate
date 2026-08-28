@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from xvt.errors import JobLockedError
+from xvt.errors import JobLockedError, UserInputError, XvtError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
@@ -131,6 +131,9 @@ def _write_batch(batch_file: Path, batch: dict[str, Any]) -> None:
 
 def _load_batch(batch_file: str | Path) -> tuple[Path, dict[str, Any]]:
     path = Path(batch_file).expanduser().resolve()
+    if not path.is_file():
+        # batch_file 与 job_file 同理：永远是用户直接输入的位置参数。
+        raise UserInputError(f"batch file does not exist: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("batch file must contain a JSON object")
@@ -215,13 +218,30 @@ def _record_artifacts(item: dict[str, Any]) -> None:
     item["artifacts"] = [artifact.path for artifact in job.artifacts if artifact.kind in reusable]
 
 
-def _all_artifacts_valid(item: dict[str, Any]) -> bool:
+# `plan_advance_steps` 不查这些 kind，但它们仍可能是用户交付物或有真实修复路径，
+# 因此「category == complete 时失效的一定是中间产物」这条性质对它们不成立：
+# `source_srt` 在纯转写批次（`--target-language` 非必填）里**就是**交付物，
+# 而 `continue_workflow` 对失效的 `source_srt` 有 `resume_job` 重建路径。
+# 这类 kind 失效时不能标 completed，要落到 continue 让它真的被修复，
+# 否则「已完成但成品不在」会变成另一种形态的死循环。
+_GOAL_ARTIFACT_KINDS_OUTSIDE_PLAN = frozenset({"source_srt"})
+
+
+def _invalid_artifact_kinds(item: dict[str, Any]) -> set[str]:
+    """返回该条目里缺失或 checksum 失效的 artifact kind。
+
+    只消费恢复计划已经算好的 `reusable_artifacts`，不新增任何哈希。
+    """
+
     job_file = item.get("job_file")
     plan = item.get("recovery_plan")
     if not isinstance(job_file, str) or not isinstance(plan, dict):
-        return False
+        # category 能取到 "complete" 就意味着这两者都成立，此处只是防御。
+        return set()
     reusable = set(plan.get("reusable_artifacts", []))
-    return all(artifact.kind in reusable for artifact in load_job(job_file).artifacts)
+    return {
+        artifact.kind for artifact in load_job(job_file).artifacts if artifact.kind not in reusable
+    }
 
 
 def _item_event_sink(
@@ -286,6 +306,8 @@ def _process_item(
 ) -> None:
     item["status"] = "running"
     item["error"] = None
+    # 每次处理都重置：上一轮的 degraded 标注不能粘在新的终态上。
+    item["verification"] = None
     _write_batch(batch_file, batch)
     if event_sink:
         event_sink(
@@ -308,36 +330,43 @@ def _process_item(
             category = _record_recovery(item)
             _record_artifacts(item)
             if category == "complete":
-                if not _all_artifacts_valid(item):
-                    item["recovery_plan"]["category"] = "manual_fix"
-                    item["recovery_plan"]["reason"] = (
-                        "已完成 Job 存在缺失或 checksum 无效的登记产物，请先运行 verify。"
+                # category == "complete" 只可能由 plan_advance_steps 为空得出，而那要求
+                # 全部用户目标产物 checksum 有效（batch 条目必为端到端 Job）。因此这里
+                # 失效的通常只是中间 checkpoint（normalized_audio / word_transcript 等），
+                # 把已达成目标的条目改写成 failed 既不真实，也没有任何前进路径——
+                # 用户清磁盘删掉的恰恰是这类对成品毫无价值的大文件。例外见
+                # _GOAL_ARTIFACT_KINDS_OUTSIDE_PLAN：那些 kind 落到下面的 continue 修复。
+                invalid_kinds = _invalid_artifact_kinds(item)
+                if not invalid_kinds & _GOAL_ARTIFACT_KINDS_OUTSIDE_PLAN:
+                    item["status"] = "completed"
+                    item["verification"] = (
+                        {"status": "degraded", "invalid_artifacts": sorted(invalid_kinds)}
+                        if invalid_kinds
+                        else None
                     )
-                    _mark_unfinished_item(
-                        batch_file,
-                        batch,
-                        item,
-                        status="failed",
-                        index=index,
-                        total=len(batch["items"]),
-                        event_sink=event_sink,
-                    )
-                    return
-                item["status"] = "completed"
-                _write_batch(batch_file, batch)
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.BATCH_ITEM_COMPLETED,
-                            batch_file=str(batch_file),
-                            input=item["input"],
-                            job_file=item["job_file"],
-                            index=index,
-                            total=len(batch["items"]),
-                            reused=True,
+                    if invalid_kinds:
+                        plan = item["recovery_plan"]
+                        plan["reason"] = (
+                            f"{plan.get('reason', '')}"
+                            "用户目标产物全部有效；以下中间产物已失效，不影响成品："
+                            f"{'、'.join(sorted(invalid_kinds))}；"
+                            "需要逐项审计时运行 xvt verify JOB。"
                         )
-                    )
-                return
+                    _write_batch(batch_file, batch)
+                    if event_sink:
+                        event_sink(
+                            create_event(
+                                EventType.BATCH_ITEM_COMPLETED,
+                                batch_file=str(batch_file),
+                                input=item["input"],
+                                job_file=item["job_file"],
+                                index=index,
+                                total=len(batch["items"]),
+                                reused=True,
+                                verification=item["verification"],
+                            )
+                        )
+                    return
             if category in {"awaiting_input", "manual_fix", "unrecoverable"}:
                 status = "awaiting_input" if category == "awaiting_input" else "failed"
                 _mark_unfinished_item(
@@ -390,6 +419,13 @@ def _process_item(
                     index=index,
                     total=len(batch["items"]),
                     recovery_plan=item.get("recovery_plan"),
+                    # 完成事件恒带 verification（刚跑完的条目为 null），
+                    # 消费端不必按「字段在不在」分叉。
+                    **(
+                        {"verification": item.get("verification")}
+                        if event_type is EventType.BATCH_ITEM_COMPLETED
+                        else {}
+                    ),
                 )
             )
     except (KeyboardInterrupt, CommandCancelled):
@@ -424,7 +460,7 @@ def _process_item(
             try:
                 _record_recovery(item)
                 _record_artifacts(item)
-            except (OSError, RuntimeError, ValueError):
+            except (XvtError, OSError, RuntimeError, ValueError):
                 item["recovery_plan"] = None
                 item["artifacts"] = []
         _write_batch(batch_file, batch)

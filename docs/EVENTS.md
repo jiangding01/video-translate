@@ -386,6 +386,7 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 | `index` | int | 当前项序号 |
 | `total` | int | 批处理项总数 |
 | `reused` | bool? | 是否复用已完成的 Job（仅复用路径设置） |
+| `verification` | object? | 已完成条目的产物校验标注：`null` 表示全部登记产物 checksum 有效；否则为 `{"status": "degraded", "invalid_artifacts": [kind, ...]}`，表示用户目标产物全部有效、仅列出的中间 checkpoint 已失效。degraded **不是失败**，条目仍是 `completed`，批处理退出码不受影响 |
 
 ### `batch_item_waiting`
 | 字段 | 类型 | 含义 |
@@ -466,6 +467,8 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 ## CLI 终态
 
 CLI 层最终结果（`cli.py`），写入 stdout。
+
+`run` / `continue` / `apply --continue` / `batch` / `batch-continue` 的 `--fail-on-waiting` **只改变进程退出码**（等待态返回 10）：不产生 `cli_failed`，不改 Job / batch 状态，事件流与不加旗标时逐条相同。消费端不要把退出码 10 与任何失败事件关联；按「没有 `cli_completed`」或 `batch_finished.status` 判断等待态的既有做法继续有效。
 
 ### `cli_completed`
 | 字段 | 类型 | 含义 |

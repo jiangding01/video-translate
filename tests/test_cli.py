@@ -17,9 +17,11 @@ from xvt.cli import (
     _STEP_ROUTES,
     _TASK_ROUTES,
     _TRANSLATION_REVIEW_SRT_NAME,
+    _UNROUTABLE_AWAIT_STEPS,
+    _print_batch_result,
     main,
 )
-from xvt.errors import DependencyError, InternalError, UserInputError
+from xvt.errors import DependencyError, ExitCode, InternalError, UserInputError
 from xvt.events import EventType, create_event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -27,9 +29,12 @@ from xvt.pipeline import (
     RebuildSourceResult,
     ResegmentationResult,
     TranslationRunResult,
+    apply_agent_translation,
+    apply_cue_retranslation,
     prepare_agent_translation,
     retranslate_cues,
     run_subtitle_transcription,
+    run_translation_polish,
 )
 from xvt.pipeline.revision import (
     SOURCE_REVIEW_TASK,
@@ -38,7 +43,7 @@ from xvt.pipeline.revision import (
     translation_review_stem,
 )
 from xvt.process import CommandCancelled
-from xvt.recovery import file_checksum
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.workflow import AWAIT_STEPS, WorkflowResult, _record_burn_fingerprint
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
@@ -855,6 +860,81 @@ class CliTest(unittest.TestCase):
         self.assertIn("--target-language", message)
         self.assertNotIn("not awaiting Agent input", message)
 
+    def test_apply_routes_polish_response_despite_a_stale_retranslation_manifest(self) -> None:
+        """回归修复：重译回填后再进入润色等待，残留 manifest 不得顶掉合法的润色回填。
+
+        ``cue_retranslation_batches`` 只派生自 ``source_cues``，译文被改写时不会失效，
+        因此回填后它仍然 checksum 有效。此前 `xvt apply` 只看「stage 在等输入 + manifest
+        有效」，会拒绝一条合法的润色响应并指向 apply-cue-retranslation，而同一时刻
+        `status` 说「等待润色回填，用 xvt apply」——两者互相矛盾。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN", provider="agent", batch_size=1),
+            )
+            save_job(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                await_input=False,
+            )
+            apply_agent_translation(
+                job_file,
+                self._write_response(directory, {"items": [{"id": 1, "text": "译文一"}]}),
+                target_language="zh-CN",
+            )
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+            fingerprint = json.loads(manifest_path.read_text(encoding="utf-8"))["fingerprint"]
+            cue_response = root / "cue-response.json"
+            cue_response.write_text(
+                json.dumps({"fingerprint": fingerprint, "items": [{"id": 1, "text": "重译一"}]}),
+                encoding="utf-8",
+            )
+            apply_cue_retranslation(job_file, cue_response, cue_ids=(1,), target_language="zh-CN")
+            polish_manifest = run_translation_polish(job_file).paths[0]
+            polish_fingerprint = json.loads(polish_manifest.read_text(encoding="utf-8"))[
+                "fingerprint"
+            ]
+            polish_response = root / "polish-response.json"
+            polish_response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": polish_fingerprint,
+                        "items": [{"id": 1, "text": "润色一"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # 前提：残留 manifest 仍然 checksum 有效，否则这条用例测不到 E5。
+            self.assertIsNotNone(
+                valid_artifact_path(load_job(job_file), "cue_retranslation_batches")
+            )
+
+            with redirect_stdout(StringIO()):
+                return_code = main(["apply", str(job_file), str(polish_response)])
+
+            self.assertEqual(return_code, 0)
+            self.assertIn(
+                "translation_polished_cues",
+                {artifact.kind for artifact in load_job(job_file).artifacts},
+            )
+
     def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
         """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
         paths = (Path("/tmp/revision.json"),)
@@ -1050,8 +1130,15 @@ class CliTest(unittest.TestCase):
             self.assertIn("translated_cues", {artifact.kind for artifact in applied.artifacts})
 
     def test_step_routes_keys_match_workflow_await_steps(self) -> None:
-        """路由表的 key 必须与真实实现同源，避免改名后静默失配。"""
-        self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS))
+        """路由表的 key 必须与真实实现同源，避免改名后静默失配。
+
+        不可自动路由的等待步骤必须显式登记在 ``_UNROUTABLE_AWAIT_STEPS`` 里
+        （apply-cue-retranslation 需要 xvt apply 拿不到的 --cue / --target-language），
+        新增等待步骤时必须在两张表之一里表态，否则这条断言会红。
+        """
+        self.assertEqual(set(_STEP_ROUTES), set(AWAIT_STEPS) - _UNROUTABLE_AWAIT_STEPS)
+        self.assertLessEqual(_UNROUTABLE_AWAIT_STEPS, AWAIT_STEPS)
+        self.assertFalse(_UNROUTABLE_AWAIT_STEPS & set(_STEP_ROUTES))
         self.assertIn(SOURCE_REVIEW_TASK, _TASK_ROUTES)
         self.assertIn(TRANSLATION_REVIEW_TASK, _TASK_ROUTES)
 
@@ -2017,6 +2104,51 @@ class CliTest(unittest.TestCase):
         self.assertEqual(options.segmentation_preset, "compact")
         self.assertTrue(options.burn)
 
+    def test_run_rejects_glossary_with_imported_translation_subtitles(self) -> None:
+        """术语表 + 导入译文在 run 入口即被拒绝，退出码 2 且不落任何 Job。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好。\n",
+                encoding="utf-8",
+            )
+            glossary = root / "glossary.json"
+            glossary.write_text(
+                json.dumps({"terms": [{"source": "Hello", "target": "你好"}]}),
+                encoding="utf-8",
+            )
+            output = root / "output"
+            error_output = StringIO()
+            with redirect_stderr(error_output), redirect_stdout(StringIO()):
+                return_code = main(
+                    [
+                        "run",
+                        str(source),
+                        "--output",
+                        str(output),
+                        "--target-language",
+                        "zh-CN",
+                        "--translation-subtitles",
+                        str(translated),
+                        "--glossary",
+                        str(glossary),
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            self.assertIn(
+                "--glossary cannot be combined with --translation-subtitles",
+                error_output.getvalue(),
+            )
+            self.assertEqual(list((output / "jobs").glob("*/job.json")), [])
+
     def test_align_subtitles_requires_subtitle_file(self) -> None:
         error_output = StringIO()
         with redirect_stderr(error_output):
@@ -2619,6 +2751,375 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 4)
         self.assertEqual(event["type"], "cli_failed")
         self.assertEqual(event["data"]["error"]["category"], "workflow")
+
+
+class FailOnWaitingTest(unittest.TestCase):
+    """`--fail-on-waiting` 只改退出码：默认 0 一字不改，6 优先于 10。"""
+
+    def _run(self, argv: list[str], *, workflow_status: str = "awaiting_input") -> int:
+        result = WorkflowResult(workflow_status, Path("/tmp/job.json"), (), "needs agent")
+        with (
+            patch("xvt.cli.run_workflow", return_value=result),
+            patch("xvt.cli.continue_workflow", return_value=result),
+            patch("xvt.cli.build_recovery_plan", side_effect=OSError("no job")),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            return main(argv)
+
+    def _run_batch(self, argv: list[str], status: str) -> int:
+        result = BatchResult(status, Path("/tmp/batch.json"), 2, 1, 1, 0)
+        with (
+            patch("xvt.cli.run_batch", return_value=result),
+            patch("xvt.cli.continue_batch", return_value=result),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            return main(argv)
+
+    def test_run_awaiting_input_defaults_to_success(self) -> None:
+        self.assertEqual(self._run(["run", "/tmp/in.mp4", "--output", "/tmp/out"]), 0)
+
+    def test_run_awaiting_input_with_flag_returns_awaiting_code(self) -> None:
+        return_code = self._run(["run", "/tmp/in.mp4", "--output", "/tmp/out", "--fail-on-waiting"])
+        self.assertEqual(return_code, ExitCode.AWAITING_INPUT)
+        self.assertEqual(return_code, 10)
+
+    def test_run_completed_with_flag_still_returns_success(self) -> None:
+        return_code = self._run(
+            ["run", "/tmp/in.mp4", "--output", "/tmp/out", "--fail-on-waiting"],
+            workflow_status="completed",
+        )
+        self.assertEqual(return_code, 0)
+
+    def test_continue_awaiting_input_both_ways(self) -> None:
+        self.assertEqual(self._run(["continue", "/tmp/job.json"]), 0)
+        self.assertEqual(
+            self._run(["continue", "/tmp/job.json", "--fail-on-waiting"]),
+            ExitCode.AWAITING_INPUT,
+        )
+
+    def test_batch_awaiting_input_both_ways(self) -> None:
+        argv = ["batch", "/tmp/inputs", "--output", "/tmp/out"]
+        self.assertEqual(self._run_batch(argv, "awaiting_input"), 0)
+        self.assertEqual(
+            self._run_batch([*argv, "--fail-on-waiting"], "awaiting_input"),
+            ExitCode.AWAITING_INPUT,
+        )
+
+    def test_batch_continue_awaiting_input_both_ways(self) -> None:
+        argv = ["batch-continue", "/tmp/batch.json"]
+        self.assertEqual(self._run_batch(argv, "awaiting_input"), 0)
+        self.assertEqual(
+            self._run_batch([*argv, "--fail-on-waiting"], "awaiting_input"),
+            ExitCode.AWAITING_INPUT,
+        )
+
+    def _run_apply(self, argv: list[str], *, workflow_status: str) -> int:
+        result = WorkflowResult(workflow_status, Path("/tmp/job.json"), (), "needs agent")
+        with (
+            patch.dict(
+                "xvt.cli._COMMAND_DISPATCH",
+                {"apply-translation-review-fixes": lambda _arguments: 0},
+            ),
+            patch("xvt.cli.continue_workflow", return_value=result),
+            patch("xvt.cli.build_recovery_plan", side_effect=OSError("no job")),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            return main(argv)
+
+    def test_apply_continue_awaiting_input_both_ways(self) -> None:
+        """`apply --continue` 是 Agent 循环的主推进命令，必须能表达 --fail-on-waiting。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/in.mp4", root, {"workflow": {"target_language": "zh-CN"}})
+            job_file = save_job(job)
+            response = root / "translation-review-fixes.json"
+            response.write_text(
+                json.dumps({"task": "translation_review_fixes", "changes": []}), encoding="utf-8"
+            )
+            argv = ["apply", str(job_file), str(response), "--continue"]
+
+            self.assertEqual(self._run_apply(argv, workflow_status="awaiting_input"), 0)
+            self.assertEqual(
+                self._run_apply([*argv, "--fail-on-waiting"], workflow_status="awaiting_input"),
+                ExitCode.AWAITING_INPUT,
+            )
+            self.assertEqual(
+                self._run_apply([*argv, "--fail-on-waiting"], workflow_status="completed"),
+                0,
+            )
+
+    def test_apply_without_continue_ignores_the_flag(self) -> None:
+        """不加 --continue 时只是一次纯回填，不会停在等待态，旗标不该改变退出码。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/in.mp4", root, {"workflow": {"target_language": "zh-CN"}})
+            job_file = save_job(job)
+            response = root / "translation-review-fixes.json"
+            response.write_text(
+                json.dumps({"task": "translation_review_fixes", "changes": []}), encoding="utf-8"
+            )
+
+            self.assertEqual(
+                self._run_apply(
+                    ["apply", str(job_file), str(response), "--fail-on-waiting"],
+                    workflow_status="awaiting_input",
+                ),
+                0,
+            )
+
+    def test_partial_failure_outranks_awaiting_input(self) -> None:
+        """混合态（有失败、也有等待）无论加不加旗标都必须是 6：失败压过等待。"""
+
+        for argv in (
+            ["batch", "/tmp/inputs", "--output", "/tmp/out"],
+            ["batch-continue", "/tmp/batch.json"],
+        ):
+            with self.subTest(command=argv[0]):
+                self.assertEqual(self._run_batch(argv, "partial_failure"), ExitCode.PARTIAL_FAILURE)
+                self.assertEqual(
+                    self._run_batch([*argv, "--fail-on-waiting"], "partial_failure"),
+                    ExitCode.PARTIAL_FAILURE,
+                )
+
+    def test_flag_does_not_change_the_event_stream(self) -> None:
+        """契约守卫：10 不对应任何失败事件，事件序列必须与不加旗标时逐条相等。"""
+
+        def emit(argv: list[str]) -> list[dict]:
+            result = WorkflowResult("awaiting_input", Path("/tmp/job.json"), (), "needs agent")
+
+            def run_waiting(_options, *, event_sink):
+                event_sink(
+                    create_event(EventType.WORKFLOW_STARTED, job_id="j", job_file="/tmp/job.json")
+                )
+                event_sink(
+                    create_event(EventType.WORKFLOW_WAITING, job_id="j", job_file="/tmp/job.json")
+                )
+                return result
+
+            output = StringIO()
+            with (
+                patch("xvt.cli.run_workflow", side_effect=run_waiting),
+                redirect_stdout(output),
+                redirect_stderr(StringIO()),
+            ):
+                main(argv)
+            return [json.loads(line) for line in output.getvalue().splitlines()]
+
+        base = ["run", "/tmp/in.mp4", "--output", "/tmp/out", "--events-jsonl"]
+        without = emit(base)
+        with_flag = emit([*base, "--fail-on-waiting"])
+
+        def stripped(events: list[dict]) -> list[tuple]:
+            return [(event["type"], json.dumps(event["data"], sort_keys=True)) for event in events]
+
+        self.assertEqual(stripped(without), stripped(with_flag))
+        self.assertNotIn("cli_failed", {event["type"] for event in with_flag})
+        self.assertNotIn("cli_completed", {event["type"] for event in with_flag})
+
+
+class BatchResultPrintingTest(unittest.TestCase):
+    """普通模式必须看得见条目级的恢复出口，而不是只有一句 batch-continue。"""
+
+    def _batch_file(self, root: Path, items: list[dict]) -> Path:
+        batch_file = root / "batch.json"
+        batch_file.write_text(json.dumps({"items": items}), encoding="utf-8")
+        return batch_file
+
+    def _render(self, batch_file: Path, **counts: int) -> str:
+        result = BatchResult(
+            status=counts.pop("status", "awaiting_input"),  # type: ignore[arg-type]
+            batch_file=batch_file,
+            total=counts.get("total", 1),
+            completed=counts.get("completed", 0),
+            awaiting_input=counts.get("awaiting_input", 1),
+            failed=counts.get("failed", 0),
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_batch_result(result)
+        return output.getvalue()
+
+    def test_print_batch_result_shows_per_item_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {
+                        "input": "/inputs/A.mp4",
+                        "status": "awaiting_input",
+                        "job_file": "/jobs/a/job.json",
+                        "error": None,
+                        "recovery_plan": {
+                            "category": "awaiting_input",
+                            "reason": "烧录成品可能可重新关联；执行命令时会再次校验源媒体内容。",
+                            "primary_command": "xvt relink-burned-output /jobs/a/job.json VIDEO",
+                            "alternative_commands": ["xvt continue /jobs/a/job.json"],
+                            "prerequisite_commands": [],
+                        },
+                    },
+                    {"input": "/inputs/B.mp4", "status": "completed", "job_file": "/jobs/b/j.json"},
+                ],
+            )
+
+            rendered = self._render(batch_file, total=2, completed=1)
+
+        self.assertIn("- awaiting_input: /inputs/A.mp4", rendered)
+        self.assertIn("job: /jobs/a/job.json", rendered)
+        self.assertIn("next: xvt relink-burned-output /jobs/a/job.json VIDEO", rendered)
+        self.assertIn("或：xvt continue /jobs/a/job.json", rendered)
+        # 已完成且无标注的条目不刷屏。
+        self.assertNotIn("/inputs/B.mp4", rendered)
+        self.assertIn("next: xvt batch-continue", rendered)
+
+    def test_print_batch_result_flags_degraded_completed_items(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {
+                        "input": "/inputs/A.mp4",
+                        "status": "completed",
+                        "job_file": "/jobs/a/job.json",
+                        "verification": {
+                            "status": "degraded",
+                            "invalid_artifacts": ["normalized_audio"],
+                        },
+                        "recovery_plan": {
+                            "category": "complete",
+                            "reason": "当前目标已完成。以下中间产物已失效：normalized_audio。",
+                            "primary_command": None,
+                            "alternative_commands": [],
+                            "prerequisite_commands": [],
+                        },
+                    }
+                ],
+            )
+
+            rendered = self._render(
+                batch_file, status="completed", total=1, completed=1, awaiting_input=0
+            )
+
+        self.assertIn("- completed (degraded): /inputs/A.mp4", rendered)
+        self.assertIn("normalized_audio", rendered)
+        self.assertNotIn("next: xvt batch-continue", rendered)
+
+    def test_print_batch_result_caps_expanded_items(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {"input": f"/inputs/{index}.mp4", "status": "failed", "job_file": None}
+                    for index in range(12)
+                ],
+            )
+
+            rendered = self._render(batch_file, total=12, completed=0, awaiting_input=0, failed=12)
+
+        self.assertIn("/inputs/9.mp4", rendered)
+        self.assertNotIn("/inputs/10.mp4", rendered)
+        self.assertIn("另有 2 个条目需要处理", rendered)
+
+    def test_print_batch_result_escapes_control_characters_from_scanned_names(self) -> None:
+        """扫描到的文件名可以合法带 \\r / ESC，裸打进终端能伪造出一条 next: 行。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file = self._batch_file(
+                root,
+                [
+                    {
+                        "input": "/inputs/A.mp4\r\x1b[32mnext: rm -rf ~\x1b[0m",
+                        "status": "failed",
+                        "job_file": "/jobs/\ra/job.json",
+                        "error": "boom\r伪造",
+                        "recovery_plan": {
+                            "category": "manual_fix",
+                            "reason": "坏了\r伪造",
+                            "primary_command": "xvt status '/jobs/\ra/job.json'",
+                            "alternative_commands": [],
+                            "prerequisite_commands": [],
+                        },
+                    }
+                ],
+            )
+
+            rendered = self._render(batch_file, total=1, completed=0, awaiting_input=0, failed=1)
+
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("\\r", rendered)
+        self.assertIn("\\x1b", rendered)
+        # 中文等正常 Unicode 不受影响。
+        self.assertIn("伪造", rendered)
+        self.assertIn("/inputs/A.mp4", rendered)
+
+
+class MissingJobFileTest(unittest.TestCase):
+    """job.json / batch.json 路径打错是用户输入错误（2），不是依赖故障（3）。"""
+
+    def _cases(self, missing: str, root: Path) -> list[list[str]]:
+        return [
+            ["status", missing],
+            ["verify", missing],
+            ["continue", missing],
+            ["resume", missing],
+            ["translate", missing, "--target-language", "zh-CN"],
+            ["burn", missing],
+            ["preview", missing],
+            ["import-translation", missing, str(root / "zh.srt"), "--target-language", "zh-CN"],
+            ["relink-burned-output", missing, str(root / "moved.mp4")],
+            ["polish-translation", missing],
+        ]
+
+    def test_missing_job_file_returns_user_error_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = str(root / "gone" / "job.json")
+            for argv in self._cases(missing, root):
+                with self.subTest(command=argv[0]):
+                    output, errors = StringIO(), StringIO()
+                    # 守卫点：错误路径上的恢复导航自己会 load_job，防御 except 必须接住
+                    # UserInputError，否则 main 会抛出 traceback 而不是返回退出码。
+                    with redirect_stdout(output), redirect_stderr(errors):
+                        return_code = main(argv)
+                    self.assertEqual(return_code, 2)
+                    combined = output.getvalue() + errors.getvalue()
+                    self.assertNotIn("Traceback", combined)
+                    self.assertIn("job file does not exist", combined)
+
+    def test_missing_job_file_reports_invalid_input_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = str(root / "gone" / "job.json")
+            # status / verify 是只读展示命令，不接 --events-jsonl。
+            jsonl_cases = [
+                argv for argv in self._cases(missing, root) if argv[0] not in {"status", "verify"}
+            ]
+            for argv in jsonl_cases:
+                with self.subTest(command=argv[0]):
+                    output, errors = StringIO(), StringIO()
+                    with redirect_stdout(output), redirect_stderr(errors):
+                        return_code = main([*argv, "--events-jsonl"])
+                    self.assertEqual(return_code, 2)
+                    streams = output.getvalue().splitlines() + errors.getvalue().splitlines()
+                    events = [json.loads(line) for line in streams if line.startswith("{")]
+                    failure = next(event for event in events if event["type"] == "cli_failed")
+                    self.assertEqual(failure["data"]["error"]["category"], "invalid_input")
+
+    def test_job_file_pointing_at_a_directory_returns_user_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                return_code = main(["status", directory])
+
+        self.assertEqual(return_code, 2)
 
 
 if __name__ == "__main__":

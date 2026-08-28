@@ -12,6 +12,13 @@ from typing import Any
 from xvt.models import Cue
 from xvt.render import font_for_language, save_bilingual_ass
 
+# doctor 的 ffmpeg 能力探测都是纯查询，秒级返回；给足余量后仍不返回按环境异常处理，
+# 归为该检查项 fail，不让 `xvt doctor` 无限期挂住。
+_FFMPEG_CAPABILITY_TIMEOUT_SECONDS = 30.0
+# 字体检查会真的用 libass 渲染一帧：首次运行可能触发 fontconfig 缓存重建，
+# 明显慢于纯查询，所以给更宽的上限。
+_FFMPEG_RENDER_TIMEOUT_SECONDS = 60.0
+
 
 def _check_binary(name: str) -> dict[str, str]:
     path = shutil.which(name)
@@ -24,12 +31,22 @@ def _ffmpeg_capability(arguments: list[str], token: str, name: str) -> dict[str,
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return {"name": name, "status": "fail", "message": "ffmpeg is not installed"}
-    completed = subprocess.run(
-        [ffmpeg, "-hide_banner", *arguments],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-hide_banner", *arguments],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=_FFMPEG_CAPABILITY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "name": name,
+            "status": "fail",
+            "message": (
+                f"ffmpeg capability probe timed out after {_FFMPEG_CAPABILITY_TIMEOUT_SECONDS:g}s"
+            ),
+        }
     output = f"{completed.stdout}\n{completed.stderr}"
     if completed.returncode == 0 and token in output:
         return {"name": name, "status": "pass", "message": token}
@@ -73,28 +90,38 @@ def _check_ass_font() -> dict[str, str]:
             video_width=640,
             video_height=360,
         )
-        completed = subprocess.run(
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "info",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=s=640x360:d=0.1",
-                "-vf",
-                f"ass=filename={subtitle_path}",
-                "-frames:v",
-                "1",
-                "-f",
-                "null",
-                "-",
-            ],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
+        try:
+            completed = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "info",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=s=640x360:d=0.1",
+                    "-vf",
+                    f"ass=filename={subtitle_path}",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=_FFMPEG_RENDER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "name": "subtitle_font",
+                "status": "fail",
+                "message": (
+                    f"libass render check timed out after {_FFMPEG_RENDER_TIMEOUT_SECONDS:g}s"
+                ),
+            }
     detail = f"{completed.stdout}\n{completed.stderr}".casefold()
     font_errors = ("error opening font", "failed to find any fallback", "could not open")
     if completed.returncode == 0 and not any(error in detail for error in font_errors):

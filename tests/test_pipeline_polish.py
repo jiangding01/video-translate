@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.errors import ExitCode, UserInputError
 from xvt.job_store import get_job_file, load_job, save_job
 from xvt.models import Cue, StageName, StageStatus
 from xvt.pipeline import (
@@ -195,6 +196,19 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                     ("await_agent_polish",),
                 )
                 apply_agent_translation_polish(job_file, response)
+
+    def test_missing_polish_response_file_is_a_user_input_error(self) -> None:
+        """等待态正确、只是 response 路径打错：属于用户输入错误（2），不是依赖故障（3）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            run_translation_polish(job_file)
+
+            with self.assertRaisesRegex(UserInputError, "cannot read polish response") as caught:
+                apply_agent_translation_polish(job_file, root / "gone" / "polish-response.json")
+
+            self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
 
     def test_agent_polish_rejects_old_prompt_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -35,6 +35,7 @@ from xvt.pipeline import (
     complete_acknowledged_semantic_review,
     complete_agent_polished_outputs,
     complete_translated_outputs,
+    cue_retranslation_waiting,
     ensure_semantic_review_inputs,
     finalize_acknowledged_subtitle_review,
     is_subtitle_input,
@@ -60,13 +61,15 @@ from xvt.workflow_config import (
     require_workflow_config,
 )
 
-# plan_advance_steps 可能返回的全部 Agent 等待步骤名。CLI 的回填路由表以此为准。
+# plan_advance_steps 可能返回的全部 Agent 等待步骤名。CLI 的回填路由表以此为准
+# （不可自动路由的等待步骤在 cli._UNROUTABLE_AWAIT_STEPS 里显式登记并说明理由）。
 AWAIT_STEPS: frozenset[str] = frozenset(
     {
         "await_agent_translation",
         "await_agent_polish",
         "await_agent_semantic_review",
         "await_translation_review",
+        "await_cue_retranslation",
     }
 )
 
@@ -519,9 +522,12 @@ def _current_artifacts(
     waiting: bool = False,
     polishing: bool = False,
     semantic_reviewing: bool = False,
+    retranslating: bool = False,
 ) -> tuple[Path, ...]:
     if waiting:
-        if semantic_reviewing:
+        if retranslating:
+            kinds = ("cue_retranslation_batches",)
+        elif semantic_reviewing:
             kinds = ("translation_semantic_qa", "translation_semantic_qa_final")
         elif polishing:
             kinds = ("translation_polish_batches",)
@@ -622,6 +628,8 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
     """根据当前 Job 与持久化目标，列出仍需执行的推进步骤。
 
     返回值为有序步骤名：
+    - ``await_cue_retranslation``：局部重译已进入 Agent 等待（可能叠加在一个端到端目标
+      已经满足的 Job 上），调用方应停止并提示回填，不得按已完成处理
     - ``await_agent_translation``：已进入 Agent 等待，调用方应停止并提示回填
     - ``await_agent_polish``：润色已进入 Agent 等待，调用方应停止并提示回填
     - ``import_translation`` / ``translate``：补齐译文 cue
@@ -632,6 +640,13 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
 
     空元组表示翻译/烧录目标已满足（转写腿由 continue 在进入本函数前处理）。
     """
+
+    # 必须是函数体的第一件事：原子重译等待叠加在一个「端到端目标可能已经满足」的 Job 上，
+    # 不早退就会因 _translation_satisfied 为真而返回空计划，让 status 与 continue 一起
+    # 报完成——而用户手里正握着一份未回填的 manifest。谓词是严格的（见
+    # cue_retranslation_waiting），残留的过期 manifest 不会盖掉润色/语义等待。
+    if cue_retranslation_waiting(job):
+        return ("await_cue_retranslation",)
 
     goals = workflow_goals(config)
     steps: list[str] = []
@@ -971,6 +986,17 @@ def _advance_workflow(
 
     # 与 planner 共用等待判定：Agent 等待是终态快照，不得继续烧录。
     advance_steps = plan_advance_steps(job, config)
+    # 必须排在下面那条被 goals.needs_translation 守卫的等待分支之前：局部重译可以发生在
+    # workflow.target_language 为 None 的 Job 上（run 时没给目标语言，后来用原子
+    # translate 补翻），那种 Job 走不进 needs_translation 分支，会一路落到「已完成」。
+    if advance_steps and advance_steps[0] == "await_cue_retranslation":
+        return _emit_waiting(
+            job=job,
+            path=path,
+            message="cue retranslation requires Agent input",
+            artifacts=_current_artifacts(job, waiting=True, retranslating=True),
+            event_sink=event_sink,
+        )
     if goals.needs_translation and advance_steps and advance_steps[0] in AWAIT_STEPS:
         polishing = advance_steps[0] == "await_agent_polish"
         semantic_reviewing = advance_steps[0] in {
@@ -1067,9 +1093,12 @@ def run_workflow(
     event_sink: EventSink | None = None,
 ) -> WorkflowResult:
     options.validate()
+    # validate 已保证 glossary 与 translation_subtitles 互斥，这里只按有无目标语言决定是否
+    # 落策略快照。导入译文时 terms 必为空（glossary 传不进来），但 style 仍要落盘：后续
+    # retranslate-cues / polish-translation 读的是同一份快照，用户在 run 时选的风格不应凭空消失。
     policy = (
         load_translation_policy(options.glossary, style=options.translation_style)
-        if options.target_language and not options.translation_subtitles
+        if options.target_language
         else None
     )
     steps = planned_run_steps(options)

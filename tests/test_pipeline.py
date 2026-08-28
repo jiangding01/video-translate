@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from xvt.job_store import create_job, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
+from xvt.pipeline import interrupt_running_stage
 from xvt.qa import check_subtitles, display_width, display_width_limit
 from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.segment import SegmentationConfig, segment_transcript
@@ -349,6 +350,32 @@ class PipelineTest(unittest.TestCase):
                 load_job(job_file).stages[StageName.SUBTITLE_QA].status,
                 StageStatus.AWAITING_INPUT,
             )
+
+
+class InterruptRunningStageTest(unittest.TestCase):
+    """Ctrl-C 收尾的第一条语句：任何一种读不出 Job 的方式都只该安静地返回 False。"""
+
+    def test_missing_job_file_does_not_escape_the_interrupt_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "gone" / "job.json"
+
+            # load_job 对缺失路径抛 UserInputError（XvtError 子类）。它逃逸出去会顶掉
+            # 整个中断收尾：不发 cli_failed、不打恢复引导，退出码从 130/143 变成 1。
+            self.assertFalse(interrupt_running_stage(missing, "translate"))
+
+    def test_unreadable_job_file_also_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            broken = Path(directory) / "job.json"
+            broken.write_text("not json", encoding="utf-8")
+
+            self.assertFalse(interrupt_running_stage(broken, "translate"))
+
+    def test_unknown_stage_name_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = save_job(create_job("/tmp/input.mp4", root))
+
+            self.assertFalse(interrupt_running_stage(job_file, "not-a-stage"))
 
 
 if __name__ == "__main__":
