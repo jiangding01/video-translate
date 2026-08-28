@@ -2815,6 +2815,63 @@ class FailOnWaitingTest(unittest.TestCase):
             ExitCode.AWAITING_INPUT,
         )
 
+    def _run_apply(self, argv: list[str], *, workflow_status: str) -> int:
+        result = WorkflowResult(workflow_status, Path("/tmp/job.json"), (), "needs agent")
+        with (
+            patch.dict(
+                "xvt.cli._COMMAND_DISPATCH",
+                {"apply-translation-review-fixes": lambda _arguments: 0},
+            ),
+            patch("xvt.cli.continue_workflow", return_value=result),
+            patch("xvt.cli.build_recovery_plan", side_effect=OSError("no job")),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            return main(argv)
+
+    def test_apply_continue_awaiting_input_both_ways(self) -> None:
+        """`apply --continue` 是 Agent 循环的主推进命令，必须能表达 --fail-on-waiting。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/in.mp4", root, {"workflow": {"target_language": "zh-CN"}})
+            job_file = save_job(job)
+            response = root / "translation-review-fixes.json"
+            response.write_text(
+                json.dumps({"task": "translation_review_fixes", "changes": []}), encoding="utf-8"
+            )
+            argv = ["apply", str(job_file), str(response), "--continue"]
+
+            self.assertEqual(self._run_apply(argv, workflow_status="awaiting_input"), 0)
+            self.assertEqual(
+                self._run_apply([*argv, "--fail-on-waiting"], workflow_status="awaiting_input"),
+                ExitCode.AWAITING_INPUT,
+            )
+            self.assertEqual(
+                self._run_apply([*argv, "--fail-on-waiting"], workflow_status="completed"),
+                0,
+            )
+
+    def test_apply_without_continue_ignores_the_flag(self) -> None:
+        """不加 --continue 时只是一次纯回填，不会停在等待态，旗标不该改变退出码。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/in.mp4", root, {"workflow": {"target_language": "zh-CN"}})
+            job_file = save_job(job)
+            response = root / "translation-review-fixes.json"
+            response.write_text(
+                json.dumps({"task": "translation_review_fixes", "changes": []}), encoding="utf-8"
+            )
+
+            self.assertEqual(
+                self._run_apply(
+                    ["apply", str(job_file), str(response), "--fail-on-waiting"],
+                    workflow_status="awaiting_input",
+                ),
+                0,
+            )
+
     def test_partial_failure_outranks_awaiting_input(self) -> None:
         """混合态（有失败、也有等待）无论加不加旗标都必须是 6：失败压过等待。"""
 

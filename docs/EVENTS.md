@@ -468,7 +468,7 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 
 CLI 层最终结果（`cli.py`），写入 stdout。
 
-`run` / `continue` / `batch` / `batch-continue` 的 `--fail-on-waiting` **只改变进程退出码**（等待态返回 10）：不产生 `cli_failed`，不改 Job / batch 状态，事件流与不加旗标时逐条相同。消费端不要把退出码 10 与任何失败事件关联；按「没有 `cli_completed`」或 `batch_finished.status` 判断等待态的既有做法继续有效。
+`run` / `continue` / `apply --continue` / `batch` / `batch-continue` 的 `--fail-on-waiting` **只改变进程退出码**（等待态返回 10）：不产生 `cli_failed`，不改 Job / batch 状态，事件流与不加旗标时逐条相同。消费端不要把退出码 10 与任何失败事件关联；按「没有 `cli_completed`」或 `batch_finished.status` 判断等待态的既有做法继续有效。
 
 ### `cli_completed`
 | 字段 | 类型 | 含义 |

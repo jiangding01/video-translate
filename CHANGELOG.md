@@ -6,6 +6,8 @@
 
 ### Added
 
+- `xvt apply --continue` 也支持 `--fail-on-waiting`（透传给它内部的续跑）。它是 Agent 循环的主推进命令——回填一次响应、继续跑到下一个等待态——此前 apply parser 上没有这个旗标，无人值守流水线就没法区分「整条链路跑完了」和「停在下一个 Agent 等待」，只能改用 `apply` 加一次独立 `continue --fail-on-waiting` 绕。语义与其余四个命令一致：只改退出码，不发 `cli_failed`，Job 状态与事件流不变。不加 `--continue` 时旗标没有作用（纯回填不会停在等待态）。
+
 - `run` / `continue` / `batch` / `batch-continue` 新增 `--fail-on-waiting`，配套新增退出码 10（`ExitCode.AWAITING_INPUT`）。**默认行为一字不改**：停在 `awaiting_input` 仍返回 0。这不是疏漏而是承诺——`awaiting_input` 是 Agent 协议的正常成功路径，每一次 Agent 模式的 `xvt run` 都会停在这里，`polished` 质量的 `continue` 还会连续多次停在 `await_agent_polish` / `await_agent_semantic_review` / `await_translation_review`；默认返回非零会让 Skill、Claude Code 和任何 `set -e` 的 shell 在流程第一步就判定失败并中止。缺口只在无人值守流水线：`--provider auto` 在 API 配置不完整时会静默降级到 Agent 模式并返回 0，期望「跑完出成品」的调用方会认为成功却拿不到视频（显式 `--provider openai-compatible` 已经硬失败，不在危险面内）。加旗标后等待态返回 10，失败仍返回各自的失败码——批处理有失败条目时是 6，**6 优先于 10**（失败压过等待，由 `_result_status` 的分支顺序结构性保证，并有守卫测试锁住）。10 不代表出错：不发 `cli_failed`，Job 状态、batch 状态、事件流与 stdout 文本都与不加旗标时逐条相同，旗标唯一改变的是进程退出码（契约由事件序列等价测试锁住）。`--events-jsonl` 与它正交，JSONL 消费端可继续按「没有 `cli_completed`」或 `batch_finished.status` 判断。旗标刻意只加在这 4 个导航级命令上：`prepare-translation` / `retranslate-cues` / `prepare-source-review` 的「等待」就是它们的交付物本身，`translate` / `polish-translation` / `apply-*` 是调用方逐步驱动的原子步骤——铺到全部命令只会扩大 CLI 表面积而不增加表达力。Skill 明确不使用该旗标。
 
 - 人工校对恢复链新增 `xvt apply JOB RESPONSE --continue`，译文修订可在同一进程回填并继续；JSONL 模式保持逐行纯 JSON。修订模板的 JSON/SRT 都严格要求完整 cue ID 集合，接受后记录实际 `changed_ids`，只复查受影响的完整语义组并把相邻组作为只读上下文，不重新翻译、润色或再次自动修复。源文修订会失效译文及下游，因此明确拒绝 `--continue` 并要求先查看 `status`。

@@ -336,6 +336,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply the response and continue the same end-to-end workflow",
     )
     unified_apply_parser.add_argument("--events-jsonl", action="store_true")
+    unified_apply_parser.add_argument(
+        "--fail-on-waiting",
+        action="store_true",
+        help=(
+            "With --continue, exit with code 10 when the continuation stops at "
+            "awaiting_input (default: 0; not a failure). No effect without --continue"
+        ),
+    )
 
     prepare_parser = subparsers.add_parser(
         "prepare-translation",
@@ -2073,6 +2081,9 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         return _COMMAND_DISPATCH[route](routed)
     routed._defer_cli_complete = True
     _COMMAND_DISPATCH[route](routed)
+    # continuation 复制 apply 的 Namespace，因此 --fail-on-waiting 原样透传给
+    # _cmd_continue 的 _waiting_exit_code：`apply --continue` 是 Agent 循环的主推进
+    # 命令，没有这个旗标就没法在无人值守流水线里区分「跑完了」和「停在下一个等待」。
     continuation = argparse.Namespace(**vars(arguments))
     continuation.command = "apply"
     continuation.cookies_from_browser = None

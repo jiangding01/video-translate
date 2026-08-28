@@ -174,11 +174,12 @@ xvt continue JOB_FILE [--cookies-from-browser BROWSER] [--proxy URL]
 <summary><code>xvt apply</code>：自动路由 Agent 或人工修订响应</summary>
 
 ```text
-xvt apply JOB_FILE RESPONSE_FILE [--continue] [--events-jsonl]
+xvt apply JOB_FILE RESPONSE_FILE [--continue] [--events-jsonl] [--fail-on-waiting]
 ```
 
 - 位置参数：`job_file`、`response_file`。
 - 可选参数：`--continue` 在回填成功后继续同一端到端工作流；`--events-jsonl` 输出纯 JSONL 事件。源文修订会失效译文及下游产物，因此不接受 `--continue`。
+- 停在等待态时的退出码：默认 0。加 `--fail-on-waiting` 后，`--continue` 的续跑停在 `awaiting_input` 时返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job 状态与事件流完全不变。不加 `--continue` 时该旗标没有作用——单纯的回填不会停在等待态。
 - 仅用于有持久化工作流目标且能从响应或等待状态确定路由的 Job；无法安全判断时会报错而不会猜测。
 
 </details>
@@ -946,13 +947,13 @@ CLI 使用集中定义的退出码表达终态语义（见 `src/xvt/errors.py`�
 | 5 | `verify` 校验未通过，artifact checksum 不一致 |
 | 6 | 批处理整体完成但存在失败条目 |
 | 7 | 目标 Job 或 batch 正被另一个 XVT 进程独占执行 |
-| 10 | 命令按设计停在 `awaiting_input`（仅 `run` / `continue` / `batch` / `batch-continue` 显式加 `--fail-on-waiting` 时返回；不代表出错） |
+| 10 | 命令按设计停在 `awaiting_input`（仅 `run` / `continue` / `apply --continue` / `batch` / `batch-continue` 显式加 `--fail-on-waiting` 时返回；不代表出错） |
 | 130 | 被用户中断（SIGINT / Ctrl-C） |
 | 143 | 被 SIGTERM 终止，中断状态已持久化 |
 
-默认行为不变：`run` / `continue` / `batch` / `batch-continue` 停在 `awaiting_input` 时仍返回 0，现有脚本与 Agent 流程无需改动——每一次 Agent 模式的 `xvt run` 都会停在 `awaiting_input`，把它默认判成失败会在流程第一步就中断设计好的协作路径。需要脚本区分「完成」与「等待回填」时加 `--fail-on-waiting`：等待态返回退出码 10（`AWAITING_INPUT`），失败仍返回各自的失败码（批处理有失败条目时是 6，**优先于 10**）。10 不代表出错：不发 `cli_failed`，Job 状态、batch 状态、事件流与 stdout 文本都与不加旗标时完全一致，旗标唯一改变的是进程退出码。`--events-jsonl` 与 `--fail-on-waiting` 正交，可同时使用；JSONL 消费端也可以继续按「没有 `cli_completed`」或 `batch_finished.status` 判断，无需改用退出码。
+默认行为不变：`run` / `continue` / `apply --continue` / `batch` / `batch-continue` 停在 `awaiting_input` 时仍返回 0，现有脚本与 Agent 流程无需改动——每一次 Agent 模式的 `xvt run` 都会停在 `awaiting_input`，把它默认判成失败会在流程第一步就中断设计好的协作路径。需要脚本区分「完成」与「等待回填」时加 `--fail-on-waiting`：等待态返回退出码 10（`AWAITING_INPUT`），失败仍返回各自的失败码（批处理有失败条目时是 6，**优先于 10**）。10 不代表出错：不发 `cli_failed`，Job 状态、batch 状态、事件流与 stdout 文本都与不加旗标时完全一致，旗标唯一改变的是进程退出码。`--events-jsonl` 与 `--fail-on-waiting` 正交，可同时使用；JSONL 消费端也可以继续按「没有 `cli_completed`」或 `batch_finished.status` 判断，无需改用退出码。
 
-旗标刻意只加在这 4 个导航级命令上：`prepare-translation` / `retranslate-cues` / `prepare-source-review` 的「等待」就是它们的交付物本身（生成批次文件让 Agent 去填），返回非零毫无意义；`translate` / `polish-translation` / `apply-*` 是原子步骤，调用方本来就在逐步驱动。这是取舍，不是遗漏。
+旗标刻意只加在这 5 个导航级命令上：`prepare-translation` / `retranslate-cues` / `prepare-source-review` 的「等待」就是它们的交付物本身（生成批次文件让 Agent 去填），返回非零毫无意义；`translate` / `polish-translation` / 各条显式 `apply-*` 是原子步骤，调用方本来就在逐步驱动。`xvt apply --continue` 在列，是因为它就是 Agent 循环的主推进命令：回填一次、继续跑到下一个等待态，无人值守流水线正需要区分「跑完了」和「停在下一个等待」。不加 `--continue` 时它退化成一次纯回填，旗标没有作用。这是取舍，不是遗漏。
 
 ## 开发
 
