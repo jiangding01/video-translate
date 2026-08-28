@@ -229,3 +229,28 @@ def load_cues(path: Path) -> list[Cue]:
     except (AttributeError, TypeError) as error:
         raise ValueError(f"invalid cue artifact: {error}") from error
     return cues
+
+
+def parse_cue_text_items(items: Any) -> dict[int, str] | None:
+    """把 ``[{"id": int, "text": str}, ...]`` 解析成 ``{cue_id: 去空白文本}``。
+
+    结构非法（不是数组、item 不是对象、id 不是 int 或是 bool、id 重复、
+    text 不是非空字符串）时返回 ``None``，由调用方决定是抛异常、判否还是
+    丢弃 checkpoint —— 这里刻意不产生任何用户可见文案。
+    """
+    if not isinstance(items, list):
+        return None
+    translations: dict[int, str] = {}
+    for item in items:
+        cue_id = item.get("id") if isinstance(item, dict) else None
+        text = item.get("text") if isinstance(item, dict) else None
+        if (
+            not isinstance(cue_id, int)
+            or isinstance(cue_id, bool)
+            or cue_id in translations
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            return None
+        translations[cue_id] = text.strip()
+    return translations

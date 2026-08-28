@@ -30,6 +30,7 @@ from xvt.pipeline.common import (
     error_category,
     invalidate_preview_artifacts,
     load_cues,
+    parse_cue_text_items,
     set_stage,
     write_json,
 )
@@ -526,22 +527,9 @@ def _agent_polish_progress(
             or data.get("completed_batches") != batch_ids
         ):
             return None
-        items = data.get("items")
-        if not isinstance(items, list):
+        translations = parse_cue_text_items(data.get("items"))
+        if translations is None:
             return None
-        translations: dict[int, str] = {}
-        for item in items:
-            cue_id = item.get("id") if isinstance(item, dict) else None
-            text = item.get("text") if isinstance(item, dict) else None
-            if (
-                not isinstance(cue_id, int)
-                or isinstance(cue_id, bool)
-                or cue_id in translations
-                or not isinstance(text, str)
-                or not text.strip()
-            ):
-                return None
-            translations[cue_id] = text.strip()
         if set(translations) != cue_ids:
             return None
         return batch_ids, translations

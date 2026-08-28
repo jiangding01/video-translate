@@ -16,6 +16,7 @@ from xvt.pipeline.common import (
     checksum,
     error_category,
     load_cues,
+    parse_cue_text_items,
     set_stage,
     write_json,
 )
@@ -246,28 +247,16 @@ def _load_progress(
         data = json.loads(path.read_text(encoding="utf-8"))
         completed_data = data["completed_batches"]
         items_data = data["items"]
-        if not isinstance(completed_data, list) or not isinstance(items_data, list):
+        if not isinstance(completed_data, list):
             raise ValueError
         if any(not isinstance(value, int) or isinstance(value, bool) for value in completed_data):
             raise ValueError
         completed = set(completed_data)
         if len(completed) != len(completed_data):
             raise ValueError
-        translations: dict[int, str] = {}
-        for item in items_data:
-            if not isinstance(item, dict):
-                raise ValueError
-            cue_id = item.get("id")
-            text = item.get("text")
-            if (
-                not isinstance(cue_id, int)
-                or isinstance(cue_id, bool)
-                or cue_id in translations
-                or not isinstance(text, str)
-                or not text.strip()
-            ):
-                raise ValueError
-            translations[cue_id] = text.strip()
+        translations = parse_cue_text_items(items_data)
+        if translations is None:
+            raise ValueError
         batch_ids = {batch.id for batch in batches}
         expected_item_ids = {
             item.id for batch in batches if batch.id in completed for item in batch.items
@@ -332,24 +321,11 @@ def translation_polish_satisfied(
             or any(not isinstance(value, int) or isinstance(value, bool) for value in completed)
             or completed != [batch.id for batch in batches]
             or batches_data.get("batches") != expected_batches
-            or not isinstance(items, list)
         ):
             return False
-        translations: dict[int, str] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                return False
-            cue_id = item.get("id")
-            text = item.get("text")
-            if (
-                not isinstance(cue_id, int)
-                or isinstance(cue_id, bool)
-                or cue_id in translations
-                or not isinstance(text, str)
-                or not text.strip()
-            ):
-                return False
-            translations[cue_id] = text.strip()
+        translations = parse_cue_text_items(items)
+        if translations is None:
+            return False
         expected = apply_polish_translations(
             load_cues(draft_path),
             translations,
