@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shlex
 from collections.abc import Callable
@@ -10,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xvt.candidate_qa import translation_candidate_qa_issues
+from xvt.checksums import file_checksum
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.workflow_config import WorkflowConfig, get_workflow_config, resolve_target_language
@@ -46,14 +46,6 @@ class SubtitleQaFailureGuidance:
     report_paths: tuple[str, ...]
     primary_command: str | None
     is_needs_review: bool
-
-
-def file_checksum(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def verify_artifact(artifact: Artifact) -> dict[str, Any]:

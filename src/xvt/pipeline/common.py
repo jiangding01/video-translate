@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import asdict, fields
@@ -15,6 +14,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xvt.artifacts import ArtifactKind, downstream_of
+
+# 分块 SHA-256 的唯一实现在 xvt.checksums。这里只做包内别名，
+# 保持 pipeline 各模块既有的 `checksum(path)` 调用名不变（34 处调用点零改动）。
+from xvt.checksums import file_checksum as checksum
 from xvt.download import inspect_remote
 from xvt.events import (
     EventSink,
@@ -143,14 +146,6 @@ def write_json(path: Path, data: Any) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
-
-
-def checksum(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def add_artifact(job: Job, kind: str, path: Path, event_sink: EventSink | None) -> None:

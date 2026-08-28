@@ -705,3 +705,18 @@ class RecoveryTest(unittest.TestCase):
 
         self.assertEqual(plan.category, "retryable")
         self.assertIn("continue", plan.primary_command or "")
+
+    def test_checksum_has_a_single_implementation(self) -> None:
+        """防止未来又抄一份分块 SHA-256：所有口径都必须落到 xvt.checksums。"""
+
+        from xvt import candidate_qa, checksums
+        from xvt.pipeline import common
+
+        self.assertIs(common.checksum, checksums.file_checksum)
+        self.assertIs(candidate_qa.file_checksum, checksums.file_checksum)
+        # recovery.file_checksum 是只读作用域记忆化包装，不是同一个对象，
+        # 但无作用域时必须与纯哈希逐字一致。
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.bin"
+            path.write_bytes(b"xvt" * 4096)
+            self.assertEqual(file_checksum(path), checksums.file_checksum(path))
