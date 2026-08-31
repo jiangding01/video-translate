@@ -839,6 +839,12 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(len(calls), 4)
 
     def test_checksum_cache_is_keyed_on_stat(self) -> None:
+        """size 变化会换掉 cache key，因此改写后能拿到新哈希。
+
+        注意这条只覆盖「stat 变了」的一半：等长且 mtime_ns 被恢复的另一半见
+        ``test_checksum_cache_reuses_the_hash_when_stat_is_restored``。
+        """
+
         from xvt import recovery
 
         with tempfile.TemporaryDirectory() as directory:
@@ -851,6 +857,43 @@ class RecoveryTest(unittest.TestCase):
                 after = recovery.file_checksum(path)
 
         self.assertNotEqual(before, after)
+
+    def test_checksum_cache_reuses_the_hash_when_stat_is_restored(self) -> None:
+        """有意的边界，不是缺陷：作用域内等长覆盖 + 还原 mtime_ns 会复用旧哈希。
+
+        缓存 key 是 ``(path, st_dev, st_ino, st_size, st_mtime_ns)``，命中即复用，
+        所以「同一次只读判定内把文件改成等长内容并把 mtime_ns 改回原值」这个毫秒级
+        窗口里读到的是旧哈希。这与 git 的 racy-timestamp 取舍同类。``build_recovery_plan``
+        本身只读，但判定结果会经 ``batch._record_recovery`` 进入 ``batch.json`` 的条目
+        终态，因此误判并非完全不落地；被接受的理由是：命中它要求外部写入者在 xvt 持有
+        job 锁期间正好插进一次调用内首次哈希之后的亚毫秒缝隙，同样的坏状态在无缓存时
+        也能由「计划返回后、落盘前」这个更宽的 TOCTOU 窗口达成（缓存不是根因），而
+        ``xvt verify JOB`` 在作用域外重新哈希必然识破。
+
+        这条测试把该行为锁进回归网：如果哪天有人往 key 里加内容摘要，「一次调用只
+        哈希一次」的记忆化前提就没了（同一个文件会被哈希两次），必须连同
+        ``readonly_checksum_scope`` 的 docstring 一起重新论证，而不是顺手改绿。
+        """
+
+        from xvt import recovery
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.bin"
+            path.write_bytes(b"first")
+            original = path.stat()
+            with recovery.readonly_checksum_scope():
+                before = recovery.file_checksum(path)
+                # 等长覆盖：st_size 不变。
+                path.write_bytes(b"secnd")
+                os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+                self.assertEqual(path.stat().st_size, original.st_size)
+                self.assertEqual(path.stat().st_mtime_ns, original.st_mtime_ns)
+                cached = recovery.file_checksum(path)
+            # 离开作用域后不再记忆化，能读到真实内容的哈希。
+            fresh = recovery.file_checksum(path)
+
+        self.assertEqual(cached, before)
+        self.assertNotEqual(fresh, before)
 
     def test_build_recovery_plan_does_not_touch_artifacts(self) -> None:
         """记忆化的前提是判定链只读：任何一处偷偷写产物都会在这里炸掉。"""
@@ -986,6 +1029,67 @@ class CueRetranslationRecoveryTest(unittest.TestCase):
             self.assertIn("xvt apply-cue-retranslation", plan.prerequisite_commands[0])
             self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
 
+    def _failed_retranslation(self, job_file: Path) -> None:
+        """跑一次 API 模式重译并让它失败：TRANSLATE 落到 failed，manifest 原样保留。
+
+        必须走 API 模式。用户模式的 ``apply-cue-retranslation`` 校验失败已经不再改写 Job
+        状态（坏输入下 TRANSLATE 保持 awaiting_input），拿它铺 failed 只会得到等待态，
+        这两条用例就测不到 failed 分支了。failed + 有效 manifest 现在只来自 API 模式重译
+        失败（响应是内部产物）或旧版本留下的历史 Job。
+        """
+
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "test-model",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        with (
+            patch.dict(os.environ, provider_env, clear=False),
+            # 提供方交回请求范围外的 cue id：覆盖范围校验失败，stage 已在 running。
+            patch(
+                "xvt.pipeline.translation.translate_batch",
+                side_effect=lambda *_a, **_k: {9: "越界译文"},
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                retranslate_cues(
+                    job_file,
+                    cue_ids=(2,),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                )
+        self.assertIs(load_job(job_file).stages[StageName.TRANSLATE].status, StageStatus.FAILED)
+
+    def test_a_failed_retranslation_still_reports_the_pending_retranslation(self) -> None:
+        """API 模式重译失败不作废这次等待：status 必须继续提示回填，而不是再劝一次重译。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(
+                root,
+                workflow={"target_language": "zh-CN"},
+                glossary_qa_blocked=True,
+            )
+            self._failed_retranslation(job_file)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ("await_cue_retranslation",))
+            self.assertIn("xvt apply-cue-retranslation", plan.prerequisite_commands[0])
+            self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
+
+    def test_atomic_failed_retranslation_still_reports_the_pending_retranslation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root, workflow=None)
+            self._failed_retranslation(job_file)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertIn("xvt apply-cue-retranslation", plan.prerequisite_commands[0])
+
     def test_atomic_glossary_qa_block_also_reports_the_pending_retranslation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1061,6 +1165,107 @@ class CueRetranslationRecoveryTest(unittest.TestCase):
             command = plan.prerequisite_commands[0]
             self.assertIn("--cue ID [--cue ID ...]", command)
             self.assertIn("--target-language LANG", command)
+
+
+class QaBlockedAgentWaitRecoveryTest(unittest.TestCase):
+    """SUBTITLE_QA 停在 failed 时，端到端 Job 的在途 Agent 等待必须压过 qa_blocked 分支。
+
+    ``SUBTITLE_QA`` 不会因为随后开了一次新的等待而复位：术语死锁后改走整轮重翻时，
+    ``prepare_agent_translation`` 只置 ``TRANSLATE=awaiting_input``。按 qa_blocked 处理会把
+    出口指向已经被移出登记的 retranslate-cues manifest，而统一 ``xvt apply`` 拿不到
+    ``await_agent_translation`` 路由，用户两头无路。
+    """
+
+    def _job_file(self, root: Path, *, batches: bool) -> Path:
+        job = create_job("/tmp/input.mp4", root, {"workflow": {"target_language": "zh-CN"}})
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+        source_path = artifacts / "source-cues.json"
+        source_path.write_text(
+            json.dumps([{"id": 1, "start_ms": 0, "end_ms": 1000, "source_text": "S1"}]),
+            encoding="utf-8",
+        )
+        # 旧译文与旧 QA 报告刻意保留：等待期间它们对用户仍有价值。渲染产物没有，
+        # 因为译文 QA 失败时 finalize_translation 走不到渲染。
+        translated_path = artifacts / "translated-cues.json"
+        translated_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": 1,
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                        "source_text": "S1",
+                        "target_text": "译1",
+                        "target_language": "zh-CN",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        source_qa = artifacts / "qa-source.json"
+        source_qa.write_text(json.dumps({"status": "pass", "issues": []}), encoding="utf-8")
+        translated_qa = artifacts / "qa-translated.json"
+        translated_qa.write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "issues": [
+                        {
+                            "code": "glossary_violation",
+                            "severity": "error",
+                            "cue_id": 1,
+                            "message": "glossary term 'widget' requires '小组件'",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        job.artifacts.extend(
+            [
+                Artifact("source_cues", str(source_path), file_checksum(source_path)),
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path)),
+                Artifact("subtitle_qa", str(source_qa), file_checksum(source_qa)),
+                Artifact(
+                    "translated_subtitle_qa",
+                    str(translated_qa),
+                    file_checksum(translated_qa),
+                ),
+            ]
+        )
+        if batches:
+            manifest = artifacts / "translation-batches.json"
+            manifest.write_text(json.dumps({"batches": []}), encoding="utf-8")
+            job.artifacts.append(
+                Artifact("translation_batches", str(manifest), file_checksum(manifest))
+            )
+        job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+        job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+        return save_job(job)
+
+    def test_pending_full_round_wins_over_the_stale_qa_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job_file(Path(directory), batches=True)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ("await_agent_translation",))
+            self.assertIn("xvt apply ", plan.prerequisite_commands[0])
+            self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
+            self.assertNotIn("retranslate-cues", plan.primary_command or "")
+
+    def test_without_a_pending_request_the_qa_guidance_still_wins(self) -> None:
+        """护栏：等待态残留（批次 manifest 已经不在）不得被当成在途等待放行。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job_file(Path(directory), batches=False)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertIn("xvt retranslate-cues", plan.primary_command or "")
 
 
 class AtomicTranslatedQaRebuildTest(unittest.TestCase):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -434,17 +435,20 @@ def _process_item(
         batch["next_action"] = f"xvt batch-continue {shlex.quote(str(batch_file))}"
         _write_batch(batch_file, batch)
         if event_sink:
-            event_sink(
-                create_event(
-                    EventType.BATCH_ITEM_INTERRUPTED,
-                    batch_file=str(batch_file),
-                    input=item["input"],
-                    job_file=item.get("job_file"),
-                    index=index,
-                    total=len(batch["items"]),
-                    next_action=batch["next_action"],
+            # 中断状态已经落盘；终态事件只是尽力而为，输出管道关闭等普通 sink
+            # 故障不得顶掉原始 KeyboardInterrupt / CommandCancelled。
+            with suppress(Exception):
+                event_sink(
+                    create_event(
+                        EventType.BATCH_ITEM_INTERRUPTED,
+                        batch_file=str(batch_file),
+                        input=item["input"],
+                        job_file=item.get("job_file"),
+                        index=index,
+                        total=len(batch["items"]),
+                        next_action=batch["next_action"],
+                    )
                 )
-            )
         raise
     except Exception as error:
         category = _error_category(error)
@@ -485,28 +489,65 @@ def _process_batch(
     *,
     event_sink: EventSink | None,
 ) -> BatchResult:
-    if event_sink:
-        event_sink(
-            create_event(
-                EventType.BATCH_STARTED,
-                batch_file=str(batch_file),
-                total=len(batch["items"]),
+    try:
+        if event_sink:
+            event_sink(
+                create_event(
+                    EventType.BATCH_STARTED,
+                    batch_file=str(batch_file),
+                    total=len(batch["items"]),
+                )
             )
-        )
-    for index, item in enumerate(batch["items"], start=1):
-        if not isinstance(item, dict):
-            raise ValueError("batch item must be a JSON object")
-        with lock_scope():
-            _process_item(batch_file, batch, item, index=index, event_sink=event_sink)
+        for index, item in enumerate(batch["items"], start=1):
+            if not isinstance(item, dict):
+                raise ValueError("batch item must be a JSON object")
+            with lock_scope():
+                _process_item(batch_file, batch, item, index=index, event_sink=event_sink)
 
-    result = _result(batch_file, batch)
-    batch["status"] = result.status
-    batch["next_action"] = (
-        f"xvt batch-continue {shlex.quote(str(batch_file))}"
-        if result.status != "completed"
-        else None
-    )
-    _write_batch(batch_file, batch)
+        result = _result(batch_file, batch)
+        batch["status"] = result.status
+        batch["next_action"] = (
+            f"xvt batch-continue {shlex.quote(str(batch_file))}"
+            if result.status != "completed"
+            else None
+        )
+        _write_batch(batch_file, batch)
+    except (KeyboardInterrupt, CommandCancelled):
+        # 兜底而非 finally：_process_item 内部的 try 已经把它自己那次中断落了盘
+        # （用 except 才不会跟这里的收尾打架）。这里补四个 _process_item 管不到
+        # 的窗口——批次已落盘但 batch_started 正在发射、两个 item 之间、item 置
+        # running 落盘后但进 try 之前、以及末个 item 完成后汇总落盘前——统一把仍标
+        # running 的条目降级为 interrupted，
+        # 避免 batch.json 停在 status=running 且没有 next_action。与
+        # _process_item 已有的持久化天然幂等：它写过的条目这里原样重写。
+        degraded: list[tuple[int, dict[str, Any]]] = []
+        for item_index, batch_item in enumerate(batch["items"], start=1):
+            if isinstance(batch_item, dict) and batch_item.get("status") == "running":
+                batch_item["status"] = "interrupted"
+                degraded.append((item_index, batch_item))
+        batch["status"] = "interrupted"
+        batch["next_action"] = f"xvt batch-continue {shlex.quote(str(batch_file))}"
+        _write_batch(batch_file, batch)
+        # 落盘之后再补发条目级终态事件：这些条目已发过 BATCH_ITEM_STARTED，缺终态
+        # 会让消费端把它们永远当成在跑。内层 except 处理过的条目此刻已是
+        # interrupted，不会进 degraded，因此与内层天然互斥、不会重复发送。
+        if event_sink:
+            for item_index, batch_item in degraded:
+                # 兜底跑在 KeyboardInterrupt 传播路径上：坏 sink 抛出的异常会顶掉
+                # 中断本身（130 退出码），事件补发失败绝不能压过中断。
+                with suppress(Exception):
+                    event_sink(
+                        create_event(
+                            EventType.BATCH_ITEM_INTERRUPTED,
+                            batch_file=str(batch_file),
+                            input=batch_item["input"],
+                            job_file=batch_item.get("job_file"),
+                            index=item_index,
+                            total=len(batch["items"]),
+                            next_action=batch["next_action"],
+                        )
+                    )
+        raise
     if event_sink:
         event_sink(
             create_event(

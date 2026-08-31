@@ -699,6 +699,70 @@ class CueRetranslationWaitingPredicateTest(unittest.TestCase):
                 StageStatus.SUCCEEDED,
             )
 
+    def test_bad_user_retranslation_response_keeps_the_waiting_state(self) -> None:
+        """显式 apply-cue-retranslation 喂坏响应不得改写 Job 状态：等待态保住，修好后可回填。
+
+        此前坏响应会把 TRANSLATE 打成 failed，cue_retranslation_waiting 判否，
+        恢复计划与统一 xvt apply 一起丢失重译等待。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            job = load_job(job_file)
+            manifest_path = valid_artifact_path(job, "cue_retranslation_batches")
+            assert manifest_path is not None
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            bad_json = root / "bad.json"
+            bad_json.write_text("{not json", encoding="utf-8")
+            stale = root / "stale.json"
+            stale.write_text(
+                json.dumps({"fingerprint": "nope", "items": [{"id": 2, "text": "新2"}]}),
+                encoding="utf-8",
+            )
+
+            for response_path, expected in (
+                (bad_json, UserInputError),
+                (stale, ValueError),
+            ):
+                with self.subTest(response=response_path.name):
+                    with self.assertRaises(expected):
+                        apply_cue_retranslation(
+                            job_file,
+                            response_path,
+                            cue_ids=(2,),
+                            target_language="zh-CN",
+                        )
+                    job = load_job(job_file)
+                    self.assertIs(
+                        job.stages[StageName.TRANSLATE].status,
+                        StageStatus.AWAITING_INPUT,
+                    )
+                    self.assertTrue(cue_retranslation_waiting(job))
+
+            fixed = root / "fixed.json"
+            fixed.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 2, "text": "修好后的译文"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_cue_retranslation(
+                job_file,
+                fixed,
+                cue_ids=(2,),
+                target_language="zh-CN",
+            )
+
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
+            )
+
     def test_a_fresh_translation_round_supersedes_a_stale_retranslation_manifest(self) -> None:
         """放弃重译后重新跑整轮翻译：残留 manifest 不得再遮蔽合法的初译等待。"""
 
@@ -723,6 +787,117 @@ class CueRetranslationWaitingPredicateTest(unittest.TestCase):
             self.assertIsNotNone(valid_artifact_path(job, "translation_batches"))
             self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
             self.assertFalse(cue_retranslation_waiting(job))
+
+    _PROVIDER_ENV = {
+        "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+        "XVT_TRANSLATION_MODEL": "test-model",
+        "XVT_TRANSLATION_API_KEY": "secret",
+    }
+
+    def _failed_api_retranslation(self, job_file: Path) -> None:
+        """API 模式重译（``xvt retranslate-cues`` 直连提供方）失败：manifest 保留，落到 failed。
+
+        FAILED 必须由这条路径制造。用户模式（显式 ``apply-cue-retranslation``）的校验
+        失败已经不再改写 Job 状态，用它来铺 failed 只会得到 awaiting_input，谓词的
+        FAILED 分支就成了永远走不到的死码。谓词接受 FAILED 现在只服务两类场景：
+        API 模式失败（这里），以及旧版本留下的、已被打成 failed 的历史 Job。
+        """
+
+        with (
+            patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+            patch(
+                "xvt.pipeline.translation.translate_batch",
+                side_effect=ProviderResponseError("invalid response"),
+            ),
+        ):
+            with self.assertRaises(ProviderResponseError):
+                retranslate_cues(
+                    job_file,
+                    cue_ids=(2,),
+                    target_language="zh-CN",
+                    provider="openai-compatible",
+                    max_retries=0,
+                )
+
+    def test_api_retranslation_validation_failure_still_lands_on_failed(self) -> None:
+        """API 模式下回填校验失败仍收口成 failed：响应是内部产物，不是用户输入。
+
+        与 ``test_bad_user_retranslation_response_keeps_the_waiting_state`` 成对：同一段
+        校验代码，用户模式不改写状态，API 模式按内部故障收口。manifest 仍然有效，
+        谓词继续把这次重译认作可回填的等待。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+
+            with (
+                patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+                # 提供方交回请求范围外的 cue id：覆盖范围校验在 _apply_cue_retranslation
+                # 里失败，此时 stage 已由 retranslate_cues 置 running。
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    side_effect=lambda *_a, **_k: {9: "越界译文"},
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    retranslate_cues(
+                        job_file,
+                        cue_ids=(2,),
+                        target_language="zh-CN",
+                        provider="openai-compatible",
+                    )
+
+            job = load_job(job_file)
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.FAILED)
+            self.assertIsNotNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertTrue(cue_retranslation_waiting(job))
+
+    def test_waiting_survives_a_failed_api_retranslation(self) -> None:
+        """API 模式重译失败不作废这次等待：manifest 仍然有效，改对参数再回填一次就能推进。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            self._failed_api_retranslation(job_file)
+
+            job = load_job(job_file)
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.FAILED)
+            self.assertIsNotNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertTrue(cue_retranslation_waiting(job))
+            self.assertEqual(cue_retranslation_request(job), ((2,), "zh-CN"))
+
+    def test_a_newer_full_round_request_wins_over_a_failed_retranslation(self) -> None:
+        """failed + 两份 manifest 同时在场时按登记先后定夺：整轮翻译取代局部重译。
+
+        ``prepare_agent_translation`` 自己会把重译 manifest 移出登记，所以这里直接按
+        ``add_artifact`` 的语义（去重后追加）补一条 ``translation_batches``，测的是谓词
+        在两份 manifest 都还挂着时的防御。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_file(root)
+            self._failed_api_retranslation(job_file)
+
+            job = load_job(job_file)
+            manifest_path = valid_artifact_path(job, "cue_retranslation_batches")
+            assert manifest_path is not None
+            batches_path = manifest_path.parent / "translation-batches.json"
+            batches_path.write_text(json.dumps({"batches": []}), encoding="utf-8")
+            job.artifacts.append(
+                Artifact("translation_batches", str(batches_path), file_checksum(batches_path))
+            )
+            save_job(job)
+
+            job = load_job(job_file)
+            self.assertFalse(cue_retranslation_waiting(job))
+
+            # 反向次序（整轮批次是上一轮的旧产物）不构成取代，重译等待仍然成立。
+            batches = job.artifacts.pop()
+            job.artifacts.insert(0, batches)
+            save_job(job)
+            self.assertTrue(cue_retranslation_waiting(load_job(job_file)))
 
 
 if __name__ == "__main__":

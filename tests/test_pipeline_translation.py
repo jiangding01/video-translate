@@ -11,7 +11,7 @@ from unittest.mock import patch
 from xvt.errors import ExitCode, UserInputError
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
-from xvt.models import Artifact, Cue, Transcript, Word
+from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
     apply_agent_translation,
     apply_subtitle_translation,
@@ -22,7 +22,7 @@ from xvt.pipeline import (
 )
 from xvt.pipeline.translation import _backoff_delay, load_translation_response
 from xvt.process import CommandResult
-from xvt.recovery import file_checksum
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.translation_provider import ProviderResponseError, TranslationProviderError
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
@@ -228,6 +228,95 @@ class TranslationPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(UserInputError, "cannot read translation response"):
                 load_translation_response(response_path, {1})
 
+    def test_non_utf8_translation_response_is_a_user_input_error(self) -> None:
+        """非 UTF-8 响应必须和坏 JSON 同一分类。
+
+        UnicodeDecodeError 是 ValueError 子类但不是 JSONDecodeError 子类：漏掉它就会
+        逃逸出 UserInputError，让 stage_failed 记 workflow 而顶层记 invalid_input。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            response_path = root / "response.json"
+            payload = json.dumps({"translations": [{"id": 1, "text": "café"}]}, ensure_ascii=False)
+            response_path.write_bytes(payload.encode("latin-1"))
+
+            with self.assertRaises(UserInputError) as caught:
+                load_translation_response(response_path, {1})
+
+        self.assertIn("cannot read translation response", str(caught.exception))
+        self.assertEqual(caught.exception.category, "invalid_input")
+        self.assertEqual(caught.exception.exit_code, ExitCode.USER_ERROR)
+
+    def test_bad_apply_translation_input_keeps_the_agent_waiting_state(self) -> None:
+        """显式 apply-translation 喂坏响应不得改写 Job 状态：等待态保住，修好后可回填。
+
+        此前坏响应会把 TRANSLATE 打成 failed：plan_advance_steps 不再返回等待步骤，
+        统一 xvt apply 误报「not awaiting Agent input」，恢复计划从等待回填降级成重跑。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.AWAITING_INPUT,
+            )
+
+            bad_json = root / "bad.json"
+            bad_json.write_text("{not json", encoding="utf-8")
+            non_utf8 = root / "gbk.json"
+            non_utf8.write_bytes('{"items": [{"id": 1, "text": "你好"}]}'.encode("gbk"))
+            wrong_coverage = root / "wrong.json"
+            wrong_coverage.write_text(json.dumps({"items": []}), encoding="utf-8")
+
+            for response_path, expected in (
+                (bad_json, UserInputError),
+                # 非 UTF-8 在 read_text 抛 UnicodeDecodeError，由 load_user_response_json
+                # 一并归成 UserInputError（invalid_input / 退出码 2），与坏 JSON 同一分类。
+                (non_utf8, UserInputError),
+                (wrong_coverage, ValueError),
+            ):
+                with self.subTest(response=response_path.name):
+                    with self.assertRaises(expected):
+                        apply_agent_translation(
+                            job_file,
+                            response_path,
+                            target_language="zh-CN",
+                        )
+                    self.assertIs(
+                        load_job(job_file).stages[StageName.TRANSLATE].status,
+                        StageStatus.AWAITING_INPUT,
+                    )
+
+            fixed = root / "fixed.json"
+            fixed.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好"}]}),
+                encoding="utf-8",
+            )
+            translated, *_outputs = apply_agent_translation(
+                job_file,
+                fixed,
+                target_language="zh-CN",
+            )
+
+            self.assertTrue(translated.exists())
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
+            )
+
     def test_agent_translation_blocks_glossary_violations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -335,6 +424,65 @@ class TranslationPipelineTest(unittest.TestCase):
                     translation_path,
                     target_language="zh-CN",
                 )
+
+    def test_bad_import_translation_input_keeps_the_agent_waiting_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+
+            non_utf8 = root / "non-utf8.srt"
+            non_utf8.write_bytes("1\n00:00:00,000 --> 00:00:01,000\n你好\n".encode("gbk"))
+            wrong_coverage = root / "wrong-coverage.srt"
+            wrong_coverage.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好\n\n"
+                "2\n00:00:01,000 --> 00:00:02,000\n世界\n",
+                encoding="utf-8",
+            )
+
+            for subtitle_path, expected in (
+                (non_utf8, UserInputError),
+                (wrong_coverage, ValueError),
+            ):
+                with self.subTest(subtitle=subtitle_path.name):
+                    with self.assertRaises(expected):
+                        apply_subtitle_translation(
+                            job_file,
+                            subtitle_path,
+                            target_language="zh-CN",
+                        )
+                    persisted = load_job(job_file)
+                    self.assertIs(
+                        persisted.stages[StageName.TRANSLATE].status,
+                        StageStatus.AWAITING_INPUT,
+                    )
+                    self.assertIsNotNone(valid_artifact_path(persisted, "translation_batches"))
+
+            valid = root / "valid.srt"
+            valid.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
+                encoding="utf-8",
+            )
+            translated, _bilingual = apply_subtitle_translation(
+                job_file,
+                valid,
+                target_language="zh-CN",
+            )
+            self.assertTrue(translated.exists())
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
+            )
 
     def test_malformed_provider_response_enters_correction_retry(self) -> None:
         # 回归测试：结构性无效的 provider 响应（ProviderResponseError）必须进入

@@ -369,6 +369,8 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 | `batch_file` | string | `batch.json` 路径 |
 | `total` | int | 批处理项总数 |
 
+该事件在 `batch.json` 首次持久化后发送，并位于批处理中断兜底内。若发送期间收到 SIGINT 或 SIGTERM，批次会持久化为 `interrupted` 并写入 `next_action`；此时尚无条目开始，因此不会发送 `batch_item_interrupted`。
+
 ### `batch_item_started`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -386,7 +388,7 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 | `index` | int | 当前项序号 |
 | `total` | int | 批处理项总数 |
 | `reused` | bool? | 是否复用已完成的 Job（仅复用路径设置） |
-| `verification` | object? | 已完成条目的产物校验标注：`null` 表示全部登记产物 checksum 有效；否则为 `{"status": "degraded", "invalid_artifacts": [kind, ...]}`，表示用户目标产物全部有效、仅列出的中间 checkpoint 已失效。degraded **不是失败**，条目仍是 `completed`，批处理退出码不受影响 |
+| `verification` | object? | 已完成条目的产物校验标注：`null` 表示全部登记产物 checksum 有效；否则为 `{"status": "degraded", "invalid_artifacts": [kind, ...]}`，表示用户交付物全部有效、仅列出的中间 checkpoint 已失效。degraded **不是失败**，条目仍是 `completed`，批处理退出码不受影响。语义边界：`bilingual_ass` 已经是「译文目标是否满足」的判定条件之一（对渲染过 ASS 的 Job），它失效时条目的恢复分类不再是 `complete`，因此**不会**出现在 `invalid_artifacts` 里，也不会以 `batch_item_completed` 收尾——该条目落到 `continue` 由 `render` 重建 |
 
 ### `batch_item_waiting`
 | 字段 | 类型 | 含义 |

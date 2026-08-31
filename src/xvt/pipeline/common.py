@@ -228,7 +228,10 @@ def load_user_response_json(response_file: str | Path, *, what: str) -> Any:
     path = Path(response_file).expanduser()
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        # UnicodeDecodeError 是 ValueError 子类但不是 JSONDecodeError 子类：漏掉它，非 UTF-8
+        # 响应就会绕过 UserInputError，stage_failed 记 workflow 而顶层按 isinstance(ValueError)
+        # 记 invalid_input，同一次失败出现两个分类。
         raise UserInputError(f"cannot read {what}: {error}") from error
 
 

@@ -1227,31 +1227,24 @@ def apply_agent_translation(
                 extras={"phase": "polish"},
             )
             raise
-    current_stage = StageName.TRANSLATE
-    set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-    try:
-        source_path = valid_artifact_path(job, "source_cues")
-        if source_path is None:
-            raise ValueError("translation requires checksum-valid source_cues")
-        _require_manifest_source_cues(manifest, source_path)
-        cues = load_cues(source_path)
-        translations = load_translation_response(response_file, {cue.id for cue in cues})
-        translated = apply_translations(
-            cues,
-            translations,
-            target_language=target_language,
-            normalize_generated=True,
-        )
-    except Exception as error:
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=error_category(error),
-        )
-        raise
+    # 回填校验必须全部完成后才允许触碰 stage：response 是用户敲进命令行的输入，坏文件
+    # （读不出、结构不符、覆盖不全）不改写 Job 状态，TRANSLATE 保持 awaiting_input——
+    # 一旦提前置 running 再回写 failed，plan_advance_steps 就不再返回等待步骤，统一
+    # xvt apply 会误报「not awaiting Agent input」，恢复计划也从等待回填降级成重跑翻译。
+    # 校验通过后由 finalize_translation 接管 stage 记账（其内部失败自会置 failed）。
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        raise ValueError("translation requires checksum-valid source_cues")
+    _require_manifest_source_cues(manifest, source_path)
+    cues = load_cues(source_path)
+    translations = load_translation_response(response_file, {cue.id for cue in cues})
+    translated = apply_translations(
+        cues,
+        translations,
+        target_language=target_language,
+        normalize_generated=True,
+    )
+    set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     return finalize_translation(
         job, translated, event_sink, invalidate=invalidate_preview_artifacts
     )
@@ -1276,23 +1269,26 @@ def apply_subtitle_translation(
         raise ValueError(message)
     if workflow is None and job.config.get("target_language") not in {None, target_language}:
         raise ValueError("target language must match the persisted atomic job goal")
+    # 与 apply_agent_translation 同一约定：字幕文件是用户输入，读取、解析与映射都是
+    # 只读校验，放在 set_stage 之前——坏文件不改写 Job 状态（若 TRANSLATE 正停在
+    # Agent 等待上，等待态不得被顶成 failed）。
+    source_cues = load_cues(artifact_path(job, "source_cues"))
+    subtitle_path = Path(subtitle_file).expanduser()
+    translated_cues = load_subtitles(
+        subtitle_path,
+        role="translated",
+        target_language=target_language,
+    )
+    translations, mapping_report = map_subtitle_translations(source_cues, translated_cues)
+    translated = apply_translations(
+        source_cues,
+        translations,
+        target_language=target_language,
+        normalize_generated=False,
+    )
     current_stage = StageName.TRANSLATE
     set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
-        source_cues = load_cues(artifact_path(job, "source_cues"))
-        subtitle_path = Path(subtitle_file).expanduser()
-        translated_cues = load_subtitles(
-            subtitle_path,
-            role="translated",
-            target_language=target_language,
-        )
-        translations, mapping_report = map_subtitle_translations(source_cues, translated_cues)
-        translated = apply_translations(
-            source_cues,
-            translations,
-            target_language=target_language,
-            normalize_generated=False,
-        )
         artifacts_directory = get_job_directory(job) / "artifacts"
         imported_path = artifacts_directory / f"input-translation{subtitle_path.suffix.lower()}"
         if subtitle_path.resolve() != imported_path.resolve():
