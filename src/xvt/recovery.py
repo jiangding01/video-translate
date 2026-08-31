@@ -34,9 +34,22 @@ def readonly_checksum_scope() -> Iterator[None]:
     ``(path, st_dev, st_ino, st_size, st_mtime_ns)`` 只哈希一次；
     不跨命令、不跨进程、不落盘。嵌套时内层建新字典，退出即复位。
 
-    文件元数据在这里只用于给"同一次判定内的同一个文件"定身份，
-    绝不用于替代内容校验：stat 只能证伪（元数据不符 ⇒ 内容必然已变），
-    永远不能证实（元数据相符不蕴含内容未变）。
+    文件元数据在这里只用于给"同一次判定内的同一个文件"定身份：作用域内首次遇到
+    某个 ``(path, st_dev, st_ino, st_size, st_mtime_ns)`` 才真正读文件算哈希，
+    之后复用该结果。这是有意的记忆化，不是内容校验的替代品。
+
+    因此有一条已知且被接受的边界：如果在同一个只读作用域执行期间（毫秒级）把文件
+    改成等长内容、并把 ``st_mtime_ns`` 恢复成原值，缓存会复用旧哈希。这与 git 的
+    racy-timestamp 取舍同类。``build_recovery_plan`` 本身严格只读，但判定结果会被
+    调用方消费：``batch._record_recovery`` 会把它写进 ``item["recovery_plan"]``，
+    批处理据此把条目落成 ``completed``，所以这个窗口里的误判确实可能进入
+    ``batch.json`` 这一持久状态。接受它的理由是：(i) 利用该窗口需要外部写入者在
+    xvt 持有 job 锁期间，恰好命中一次 ``build_recovery_plan`` 调用内、该文件首次
+    哈希之后的亚毫秒缝隙；(ii) 同样的坏状态在没有缓存时也能达成——「计划返回后、
+    条目落盘前」是一个更宽的 TOCTOU 窗口，缓存不是根因；(iii) 逃生口是
+    ``xvt verify JOB``，它在本作用域之外重新哈希，必然识破。要绕开记忆化，不进入
+    本作用域即可（``file_checksum`` 无作用域时逐字等价于
+    ``xvt.checksums.file_checksum``）。
     """
 
     token = _checksum_cache.set({})
@@ -724,6 +737,25 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         StageStatus.FAILED,
         StageStatus.AWAITING_INPUT,
     }
+    if qa_blocked and workflow is not None:
+        # 与上面「重译等待优先」同构的第二条让路。SUBTITLE_QA 停在 FAILED 只说明「上一次
+        # 译文 QA 没过」，它不会因为随后开了一次新的 Agent 等待而自动复位：
+        # prepare_agent_translation 移走重译 manifest、写入新的 translation_batches 并置
+        # TRANSLATE=awaiting_input，却不碰 SUBTITLE_QA。此时按 qa_blocked 处理，出口会指向
+        # 已经被移出登记的 retranslate-cues manifest，而统一 xvt apply 拿不到
+        # await_agent_translation 路由，用户同样无路可走。planner 首步是正式等待步骤时，
+        # 等待才是真状态；分类与 continue 也由此保持一致。
+        from xvt.workflow import AWAIT_STEPS, plan_advance_steps
+
+        workflow_steps = plan_advance_steps(job, workflow)
+        if workflow_steps and workflow_steps[0] in AWAIT_STEPS:
+            return _recovery_for_workflow(
+                job,
+                job_file=job_file,
+                workflow=workflow,
+                valid_artifacts=valid_artifacts,
+                plan=plan,
+            )
     if qa_blocked:
         source_report_path = valid_artifacts.get("subtitle_qa")
         translated_report_path = valid_artifacts.get("translated_subtitle_qa")

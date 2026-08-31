@@ -4,12 +4,12 @@ import importlib.util
 import os
 import platform
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from xvt.models import Cue
+from xvt.process import CommandError, run_command
 from xvt.render import font_for_language, save_bilingual_ass
 
 # doctor 的 ffmpeg 能力探测都是纯查询，秒级返回；给足余量后仍不返回按环境异常处理，
@@ -31,15 +31,18 @@ def _ffmpeg_capability(arguments: list[str], token: str, name: str) -> dict[str,
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return {"name": name, "status": "fail", "message": "ffmpeg is not installed"}
+    # 走 run_command 而非裸 subprocess.run：以进程组方式启动并在所有退出路径
+    # （含超时）清理孙进程，同时顺带响应全局取消事件。doctor 本来就自行判定
+    # 通过/失败（原先 check=False），所以这里用 CommandError 捞回 result 即可，
+    # 不需要 run_command 抛出的异常语义。
     try:
-        completed = subprocess.run(
+        result = run_command(
             [ffmpeg, "-hide_banner", *arguments],
-            capture_output=True,
-            check=False,
-            text=True,
             timeout=_FFMPEG_CAPABILITY_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
+    except CommandError as command_error:
+        result = command_error.result
+    if result.returncode == 124:
         return {
             "name": name,
             "status": "fail",
@@ -47,8 +50,8 @@ def _ffmpeg_capability(arguments: list[str], token: str, name: str) -> dict[str,
                 f"ffmpeg capability probe timed out after {_FFMPEG_CAPABILITY_TIMEOUT_SECONDS:g}s"
             ),
         }
-    output = f"{completed.stdout}\n{completed.stderr}"
-    if completed.returncode == 0 and token in output:
+    output = f"{result.stdout}\n{result.stderr}"
+    if result.returncode == 0 and token in output:
         return {"name": name, "status": "pass", "message": token}
     return {"name": name, "status": "fail", "message": f"ffmpeg lacks {token}"}
 
@@ -90,8 +93,9 @@ def _check_ass_font() -> dict[str, str]:
             video_width=640,
             video_height=360,
         )
+        # 同上：改走 run_command 以进程组方式清理超时/取消，避免孙进程遗留。
         try:
-            completed = subprocess.run(
+            result = run_command(
                 [
                     ffmpeg,
                     "-hide_banner",
@@ -109,22 +113,19 @@ def _check_ass_font() -> dict[str, str]:
                     "null",
                     "-",
                 ],
-                capture_output=True,
-                check=False,
-                text=True,
                 timeout=_FFMPEG_RENDER_TIMEOUT_SECONDS,
             )
-        except subprocess.TimeoutExpired:
-            return {
-                "name": "subtitle_font",
-                "status": "fail",
-                "message": (
-                    f"libass render check timed out after {_FFMPEG_RENDER_TIMEOUT_SECONDS:g}s"
-                ),
-            }
-    detail = f"{completed.stdout}\n{completed.stderr}".casefold()
+        except CommandError as command_error:
+            result = command_error.result
+    if result.returncode == 124:
+        return {
+            "name": "subtitle_font",
+            "status": "fail",
+            "message": (f"libass render check timed out after {_FFMPEG_RENDER_TIMEOUT_SECONDS:g}s"),
+        }
+    detail = f"{result.stdout}\n{result.stderr}".casefold()
     font_errors = ("error opening font", "failed to find any fallback", "could not open")
-    if completed.returncode == 0 and not any(error in detail for error in font_errors):
+    if result.returncode == 0 and not any(error in detail for error in font_errors):
         return {"name": "subtitle_font", "status": "pass", "message": font}
     return {
         "name": "subtitle_font",

@@ -564,6 +564,20 @@ def workflow_goals(config: WorkflowConfig) -> WorkflowGoals:
     )
 
 
+def _bilingual_ass_satisfied(job: Job) -> bool:
+    """双语 ASS 交付物有效性：只对「曾经渲染过 ASS」的 Job 生效。
+
+    渲染侧只在媒体有正整数宽高时写 ASS（见 ``pipeline/translation``
+    的 ``_render_translated_outputs``），纯音频/字幕输入的 Job 从来不登记
+    ``bilingual_ass``；对它们要求 ASS 会让 continue 永远收敛不了。因此这里以
+    「Job 上是否登记过该 kind」为条件：登记过就必须 checksum 有效。
+    """
+
+    if not any(artifact.kind == "bilingual_ass" for artifact in job.artifacts):
+        return True
+    return valid_artifact_path(job, "bilingual_ass") is not None
+
+
 def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bool:
     """译文目标完成：cue、用户可见的译文字幕文件与译文 QA 报告均 checksum 有效。
 
@@ -571,6 +585,13 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
     单独失效时必须被视为「译文目标未完成」，让 continue 能从现有译文 cue 零成本
     重建（重算 QA + 重渲染，不调用翻译 API）。否则「门让你跑 continue、continue
     说已完成」会闭环打死。
+
+    ``bilingual_ass`` 同样是 README / ARCHITECTURE 列出的交付物，也是
+    ``_current_artifacts`` 对外汇报的产物之一，所以它失效时也必须算「未完成」，
+    否则删掉 bilingual.ass 后 continue/status/batch-continue 三路都会报完成、
+    且没有任何命令能单独重建它。planner 据此给出 ``render``，走的是零 API 成本
+    的重渲染路径。文档列产物时未按 burn 分叉，这里也不加 burn 守卫：burn=True
+    的 Job 至多多渲染一次 ASS，代价为零且能把交付物补回来。
     """
 
     standard = (
@@ -578,6 +599,7 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
         and valid_artifact_path(job, "translated_srt") is not None
         and valid_artifact_path(job, "bilingual_srt") is not None
         and valid_artifact_path(job, "translated_subtitle_qa") is not None
+        and _bilingual_ass_satisfied(job)
     )
     if not standard or config is None or config.translation_quality == "standard":
         return standard
@@ -702,6 +724,17 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
             ):
                 return ("await_agent_polish",)
             steps.append("polish")
+        elif (
+            job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+            and valid_artifact_path(job, "translation_batches") is not None
+        ):
+            # 必须排在下面的 translated_cues→render 之前：prepare_agent_translation 写出
+            # 新的整轮请求时只把 TRANSLATE 置成 awaiting_input，不会失效旧译文（等待期间
+            # 旧译文对用户仍有价值）。按 render 先判就会把「等 Agent 回填整轮译文」误报成
+            # 「只差渲染」，统一 xvt apply 也因为拿不到 await_agent_translation 路由而拒收。
+            # 批次 manifest 有效是必要条件（与 recovery 的等待态残留防御同口径）：manifest
+            # 已经不在时没有任何响应能回填这次等待，那种 Job 仍按下面的既有分支处理。
+            return ("await_agent_translation",)
         elif valid_artifact_path(job, "translated_cues") is not None:
             steps.append("render")
         elif job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
@@ -972,24 +1005,42 @@ def _advance_workflow(
         config = require_workflow_config(job)
     goals = workflow_goals(config)
 
-    guidance = subtitle_qa_failure_guidance(job, path)
-    if guidance is not None:
-        if guidance.is_needs_review:
-            return _emit_waiting(
-                job=job,
-                path=path,
-                message=guidance.message,
-                artifacts=tuple(Path(item) for item in guidance.report_paths),
-                event_sink=event_sink,
-            )
-        raise RuntimeError(guidance.message)
-
     # 与 planner 共用等待判定：Agent 等待是终态快照，不得继续烧录。
     advance_steps = plan_advance_steps(job, config)
+    first_step = advance_steps[0] if advance_steps else None
+    # 只认「下面两条分支真的会接住」的等待。await_cue_retranslation 之外的等待步骤都产自
+    # plan_advance_steps 里被 needs_translation 守卫的那段，这里同口径复述一次守卫，免得
+    # 将来放宽 planner 时出现「吞掉了 QA 引导又没人返回等待」的静默落空。
+    waiting_step = (
+        first_step
+        if first_step in AWAIT_STEPS
+        and (goals.needs_translation or first_step == "await_cue_retranslation")
+        else None
+    )
+
+    # 字幕 QA 引导必须给在途 Agent 等待让路，且判定顺序要与 build_recovery_plan 一致
+    # （那边同样是「等待优先于 qa_blocked」）。SUBTITLE_QA 停在 FAILED 时旁边完全可能挂着
+    # 一次仍然有效的等待：术语死锁的出口就是重译，回填前 QA 不会重跑；用户改走整轮重翻时
+    # prepare_agent_translation 也只置 TRANSLATE=awaiting_input，不复位 SUBTITLE_QA。
+    # 先判引导会让 status 报「去回填」而 continue 抛错要求重跑，batch-continue 据此把条目
+    # 误记成 failed 而不是停在 awaiting_input。
+    if waiting_step is None:
+        guidance = subtitle_qa_failure_guidance(job, path)
+        if guidance is not None:
+            if guidance.is_needs_review:
+                return _emit_waiting(
+                    job=job,
+                    path=path,
+                    message=guidance.message,
+                    artifacts=tuple(Path(item) for item in guidance.report_paths),
+                    event_sink=event_sink,
+                )
+            raise RuntimeError(guidance.message)
+
     # 必须排在下面那条被 goals.needs_translation 守卫的等待分支之前：局部重译可以发生在
     # workflow.target_language 为 None 的 Job 上（run 时没给目标语言，后来用原子
     # translate 补翻），那种 Job 走不进 needs_translation 分支，会一路落到「已完成」。
-    if advance_steps and advance_steps[0] == "await_cue_retranslation":
+    if waiting_step == "await_cue_retranslation":
         return _emit_waiting(
             job=job,
             path=path,
@@ -997,7 +1048,7 @@ def _advance_workflow(
             artifacts=_current_artifacts(job, waiting=True, retranslating=True),
             event_sink=event_sink,
         )
-    if goals.needs_translation and advance_steps and advance_steps[0] in AWAIT_STEPS:
+    if goals.needs_translation and waiting_step is not None:
         polishing = advance_steps[0] == "await_agent_polish"
         semantic_reviewing = advance_steps[0] in {
             "await_agent_semantic_review",

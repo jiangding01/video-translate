@@ -8,7 +8,8 @@ from unittest.mock import patch
 from xvt.errors import UserInputError
 from xvt.events import EventType
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job
-from xvt.models import Artifact, StageName, StageStatus
+from xvt.media import MediaInfo
+from xvt.models import Artifact, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
     TranslationRunResult,
     apply_agent_semantic_review,
@@ -19,11 +20,13 @@ from xvt.pipeline import (
     prepare_agent_semantic_review,
     prepare_agent_translation,
     retranslate_cues,
+    run_local_transcription,
     run_subtitle_transcription,
     run_translation_polish,
     source_review_input_path,
     translation_review_input_path,
 )
+from xvt.process import CommandResult
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
 from xvt.translate import GlossaryTerm, SemanticIssue, TranslationPolicy
 from xvt.workflow import (
@@ -2164,6 +2167,259 @@ class CueRetranslationWaitingTest(unittest.TestCase):
             # 计划回到既有结果：译文目标的四件产物仍全部有效，因此仍是空计划。
             # 「TRANSLATE stage 停在 awaiting_input」是既有表象问题，本批次不动（放弃
             # 一次重译目前仍靠手工删除 manifest）。
+            self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
+
+
+class QaBlockedAgentWaitTest(unittest.TestCase):
+    """SUBTITLE_QA 停在 failed 时，仍然挂着的 Agent 等待必须压过那段旧的 QA 引导。
+
+    ``SUBTITLE_QA`` 不会因为随后开了一次新的等待而自动复位，因此「QA 阻断」与「在途
+    Agent 等待」完全可以同时为真；此时 status / continue / 统一 apply 三侧必须一致地
+    报等待，否则 batch-continue 会把条目误记成 failed 而不是停在 awaiting_input。
+    """
+
+    def _glossary_blocked_job(self, root: Path) -> Path:
+        """真实形态的术语死锁 Job：译文 QA 只因术语违规而 failed，因此没有渲染产物。"""
+
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nSource 1.\n\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        job_file = get_job_file(job)
+        set_workflow_config(
+            job,
+            WorkflowConfig(
+                target_language="zh-CN",
+                requested_outputs=("translated_subtitles", "bilingual_subtitles"),
+                provider="agent",
+                batch_size=1,
+                translation_policy=TranslationPolicy(terms=(GlossaryTerm("Source", "小组件"),)),
+            ),
+        )
+        save_job(job)
+        prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+            await_input=False,
+        )
+        response = root / "translation-response.json"
+        response.write_text(
+            json.dumps({"items": [{"id": 1, "text": "译文一"}]}),
+            encoding="utf-8",
+        )
+        # 译文 QA 失败由 complete_qa_stage 抛出；stage 与报告在抛之前已经落盘。
+        with self.assertRaises(RuntimeError):
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+        job = load_job(job_file)
+        self.assertIs(job.stages[StageName.SUBTITLE_QA].status, StageStatus.FAILED)
+        self.assertIsNone(valid_artifact_path(job, "translated_srt"))
+        return job_file
+
+    def test_qa_failure_guidance_still_blocks_a_job_without_a_pending_wait(self) -> None:
+        """护栏：没有在途等待时，QA 引导必须照旧拦住 continue。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._glossary_blocked_job(Path(directory))
+            with self.assertRaises(RuntimeError) as raised:
+                continue_workflow(job_file)
+
+        self.assertIn("术语表冲突", str(raised.exception))
+
+    def test_a_new_full_round_is_not_shadowed_by_the_stale_qa_failure(self) -> None:
+        """整轮重翻取代术语死锁：planner / status / continue 必须都走统一 apply 出口。"""
+
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._glossary_blocked_job(root)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                await_input=True,
+            )
+
+            job = load_job(job_file)
+            # 旧译文与旧 QA 报告刻意保留：等待期间它们对用户仍有价值。
+            self.assertIsNotNone(valid_artifact_path(job, "translated_cues"))
+            self.assertIs(job.stages[StageName.SUBTITLE_QA].status, StageStatus.FAILED)
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("await_agent_translation",),
+            )
+
+            plan = build_recovery_plan(job_file)
+            result = continue_workflow(job_file, event_sink=events.append)
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertEqual(plan.advance_steps, ("await_agent_translation",))
+        self.assertIn("xvt apply ", plan.prerequisite_commands[0])
+        self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
+        self.assertNotIn("retranslate-cues", plan.primary_command or "")
+        self.assertEqual(result.status, "awaiting_input")
+        types = [event.type for event in events]
+        self.assertEqual(types.count(EventType.WORKFLOW_WAITING.value), 1)
+        self.assertNotIn(EventType.WORKFLOW_COMPLETED.value, types)
+
+    def test_continue_reports_the_pending_cue_retranslation_instead_of_raising(self) -> None:
+        """术语死锁的出口跑完之后，continue 必须与 status 一样报等待，而不是要求重跑。"""
+
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._glossary_blocked_job(root)
+            manifest_path = retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            ).paths[0]
+
+            plan = build_recovery_plan(job_file)
+            result = continue_workflow(job_file, event_sink=events.append)
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertEqual(plan.advance_steps, ("await_cue_retranslation",))
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertIn(manifest_path, result.artifacts)
+        types = [event.type for event in events]
+        self.assertEqual(types.count(EventType.WORKFLOW_WAITING.value), 1)
+        self.assertNotIn(EventType.WORKFLOW_COMPLETED.value, types)
+
+
+class BilingualAssDeliverableTest(unittest.TestCase):
+    """bilingual.ass 是 README / ARCHITECTURE 列出的交付物，失效必须重新渲染。
+
+    旧行为：``_translation_satisfied`` 只查 cue / SRT / QA 四项，删掉 bilingual.ass
+    之后 plan_advance_steps 返回 ()，continue / status / batch-continue 三路都报
+    completed，而 CLI 没有任何命令能单独重建 ASS——交付物就此永久缺失。
+    """
+
+    def _translated_video_job(self, root: Path) -> Path:
+        """有分辨率的真实媒体 Job：译文渲染会写出 bilingual.ass。"""
+
+        media = root / "input.mp4"
+        media.write_bytes(b"video")
+
+        def run_ffmpeg(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"audio")
+            return CommandResult(tuple(args), 0, "", "")
+
+        media_info = MediaInfo(
+            path=str(media),
+            duration_ms=5000,
+            size_bytes=5,
+            format_name="mp4",
+            width=1920,
+            height=1080,
+            frame_rate=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            has_video=True,
+            has_audio=True,
+        )
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(Word("Hello.", 1000, 1800, 0.9),),
+        )
+        with (
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+        ):
+            job = run_local_transcription(media, root)
+        job_file = get_job_file(job)
+        set_workflow_config(job, WorkflowConfig(target_language="zh-CN", provider="agent"))
+        save_job(job)
+        prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+        )
+        response = root / "translation-response.json"
+        response.write_text(
+            json.dumps({"items": [{"id": 1, "text": "你好。"}]}),
+            encoding="utf-8",
+        )
+        apply_agent_translation(job_file, response, target_language="zh-CN")
+        return job_file
+
+    def test_deleted_bilingual_ass_replans_render_and_continue_rebuilds_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_video_job(root)
+            job = load_job(job_file)
+            ass_path = valid_artifact_path(job, "bilingual_ass")
+            self.assertIsNotNone(ass_path)
+            assert ass_path is not None
+            self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
+
+            ass_path.unlink()
+            job = load_job(job_file)
+            self.assertIn("render", plan_advance_steps(job, require_workflow_config(job)))
+            self.assertEqual(build_recovery_plan(job_file).category, "retryable")
+
+            result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            rebuilt = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(rebuilt, "bilingual_ass"))
+            self.assertTrue(ass_path.exists())
+            self.assertIn(ass_path, result.artifacts)
+            self.assertEqual(plan_advance_steps(rebuilt, require_workflow_config(rebuilt)), ())
+
+    def test_tampered_bilingual_ass_also_replans_render(self) -> None:
+        """checksum 失效（被改写）与被删除同等对待，不能只认「文件不在」。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_video_job(root)
+            ass_path = valid_artifact_path(load_job(job_file), "bilingual_ass")
+            assert ass_path is not None
+            ass_path.write_text("[Script Info]\n; tampered\n", encoding="utf-8")
+
+            job = load_job(job_file)
+            self.assertIn("render", plan_advance_steps(job, require_workflow_config(job)))
+            continue_workflow(job_file)
+
+            rebuilt = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(rebuilt, "bilingual_ass"))
+            self.assertNotIn("tampered", ass_path.read_text(encoding="utf-8"))
+
+    def test_job_that_never_rendered_ass_is_still_complete(self) -> None:
+        """纯字幕输入没有分辨率，从不登记 bilingual_ass；对它要求 ASS 会永远收敛不了。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            set_workflow_config(job, WorkflowConfig(target_language="zh-CN", provider="agent"))
+            save_job(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            response = root / "translation-response.json"
+            response.write_text(
+                json.dumps({"items": [{"id": 1, "text": "你好。"}]}),
+                encoding="utf-8",
+            )
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+
+            job = load_job(job_file)
+            self.assertFalse(
+                any(artifact.kind == "bilingual_ass" for artifact in job.artifacts),
+            )
             self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
 
 

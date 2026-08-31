@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-08-19
+更新时间：2026-08-30
 
 ## 当前快照
 
@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 734 个测试、134 个子测试，全部通过 |
+| 自动化测试 | 774 个测试、143 个子测试，全部通过 |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -63,10 +63,11 @@
 - 429、部分 4xx、5xx、网络异常、远端断连、响应读取连接重置、分块响应中途断开（`IncompleteRead` / `BadStatusLine` / `LineTooLong`）和 TLS 连接中途终止（`SSLEOFError` / `SSLZeroReturnError` / `SSLSyscallError`）具有明确的传输重试分类；证书与握手类 `SSLError` 在请求和响应两个阶段都立即失败（请求阶段经 `URLError` 包装，按 `reason` 判定）。传输故障默认最多重试 4 次，优先使用最长 30 秒的有效 `Retry-After`（RFC 9110 的 delta-seconds 与 HTTP-date 两种形态，其余值退回本地退避），否则按 equal jitter 指数退避；结构性无效响应另有固定 2 次纠错重试，两个预算互不消耗，且传输重试保留上一轮的纠正提示。
 - 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID；`id` 必须是真正的整数，JSON 布尔值（`true` / `false`）与全部其他解析器一致被拒绝，不再当作 cue 1。
 - 标准 Agent manifest 记录 `source_cues_checksum`，回填时拒绝源 cue 已变化的陈旧响应；已登记的 manifest 若 checksum 失效、缺失或内容损坏同样拒绝回填并引导重新 `prepare-translation`。从未登记 manifest 的极旧 Job 与没有该字段的旧 manifest 仍按原样接受，只读查询路径不受影响。
+- 回填的输入校验是纯只读的，失败不改写 Job 状态：`apply-translation`（含统一 `xvt apply`）与 `import-translation` 把「读不出 / 非 UTF-8 / 结构不符 / 覆盖不全 / manifest 失配 / 源 cue 无效」这些检查全部放在触碰 stage 之前，坏输入下 `TRANSLATE` 原地保持 `awaiting_input`。否则等待态被顶成 `failed`，`plan_advance_steps` 不再返回 `await_agent_translation`，统一 `xvt apply` 会误报「not awaiting Agent input」，恢复计划也从「等待回填」降级成「重跑翻译」——用户只是敲错一个文件，却要重付一次翻译成本。校验通过后才置 `running`，随后真正的改写（`import-translation` 的字幕拷贝与 artifact 登记、`finalize_translation` 的落盘与 QA）失败仍按原约定收口成 `failed`。`translate_and_polish`（一次翻译加润色）分支不在此列，仍按原有的 stage 记账。
 - 翻译在不改动 cue 的前提下建立确定性语义组：句末标点或 650ms 间隔结束组，组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限按软标点、连接词前和最大停顿择边；单个超长 cue 单独成组。provider 批次只按完整组装箱，批次外前后各一个完整相邻组仅作只读上下文。
 - `TranslationBatch.semantic_groups` 记录当前批次的组 ID；响应仍只覆盖当前 `items` 的原 cue ID，不得输出上下文 ID。局部重译使用 singleton groups；`max_target_characters` 是显示建议，最终显示风险仍由确定性 QA 判定。
 - `resegment-translation` 仅对超过硬显示阈值且具有 ASR 词级时间戳的 cue 按语义优先边界重切；它重建 source cue 和 source SRT，废弃旧翻译及其下游产物，禁止复用或字符拆分旧译文。
-- `retranslate-cues` 只翻译指定 cue ID，保留其他译文和时间轴；每个目标 cue 带相邻源 cue 作为上下文，回填后完整重跑译文 QA 并使旧渲染/烧录产物失效。Agent 模式的等待是 `plan_advance_steps` 的正式步骤 `await_cue_retranslation`：`status` 归 `awaiting_input` 并拼出带具体 cue ID 与目标语言的 `apply-cue-retranslation` 命令，`continue` 不宣告完成，`batch-continue` 停在该条目。谓词严格绑定当前 source/translated cue checksum，回填后的残留 manifest 不会盖掉后续的润色或语义等待。恢复计划拼出的 `--cue` 顺序与 manifest 内的批次顺序一致（不排序）：`apply-cue-retranslation` 对 manifest 做全等比对，乱序 `--cue` 的 Job 上排序会让复制的命令必然失败。放弃一次重译不必手工删文件：`prepare_agent_translation` 写出新的整轮 `translation_batches` 时会把 `cue_retranslation_batches` 移出登记，否则残留 manifest 会遮蔽合法的初译等待。`polished` Job 上回填结果会成为新草稿并重启润色与语义校对（真实模型成本），`standard` Job 只改选中的 cue。
+- `retranslate-cues` 只翻译指定 cue ID，保留其他译文和时间轴；每个目标 cue 带相邻源 cue 作为上下文，回填后完整重跑译文 QA 并使旧渲染/烧录产物失效。Agent 模式的等待是 `plan_advance_steps` 的正式步骤 `await_cue_retranslation`：`status` 归 `awaiting_input` 并拼出带具体 cue ID 与目标语言的 `apply-cue-retranslation` 命令，`continue` 不宣告完成，`batch-continue` 停在该条目。谓词严格绑定当前 source/translated cue checksum，回填后的残留 manifest 不会盖掉后续的润色或语义等待。回填失败不再丢掉这次等待，两种模式的 stage 收口不同：用户显式跑的 `apply-cue-retranslation`，其校验（响应 fingerprint 对不上、`--cue` / `--target-language` 写错、manifest 与当前 XVT 版本失配等）全是只读动作，失败不改写 Job 状态，`TRANSLATE` 原地保持 `awaiting_input`；API 模式（`retranslate-cues` 直连提供方）下响应是 XVT 自己刚落盘并登记的内部产物、stage 已由调用方置 `running`，同一段校验失败属于内部故障，仍按原约定收口成 `failed`。两种情形下盘上的 manifest 都原样保留且仍然有效，那次等待并没有作废，因此 `cue_retranslation_waiting` 的 stage 条件同时接受 `awaiting_input` 与 `failed`；`failed` 这一支现在只覆盖 API 模式重译失败与旧版本留下的历史 Job（旧版本把用户输入错误也打成 `failed`）。`status` / `continue` 继续提示回填，不会在 `SUBTITLE_QA` 成功时改口报完成、也不会在 `SUBTITLE_QA` 失败时重复给出用户已经跑过的 `retranslate-cues`。`failed` 情形额外要求「没有更新的在途整轮翻译请求」：用户改走整轮重翻时 `prepare_agent_translation` 写出的新 `translation_batches` 在 `job.artifacts` 里排在重译 manifest 之后，此时整轮等待优先，回填出口不会指向已被取代的那一份。恢复计划拼出的 `--cue` 顺序与 manifest 内的批次顺序一致（不排序）：`apply-cue-retranslation` 对 manifest 做全等比对，乱序 `--cue` 的 Job 上排序会让复制的命令必然失败。放弃一次重译不必手工删文件：`prepare_agent_translation` 写出新的整轮 `translation_batches` 时会把 `cue_retranslation_batches` 移出登记，否则残留 manifest 会遮蔽合法的初译等待。`polished` Job 上回填结果会成为新草稿并重启润色与语义校对（真实模型成本），`standard` Job 只改选中的 cue。
 
 ### 字幕和显示质量
 
@@ -80,8 +81,9 @@
 - 字幕 QA error 记为 `failed`；纯 `needs_review` 记为 `awaiting_input`。两者都会停止工作流且不允许继续烧录，原子命令也不会误发 `cli_completed`。
 - 高级原子 `xvt burn` / `xvt preview` 与端到端链路共用同一道 fail-closed 译文 QA 门（`pipeline.review.review_gate_satisfied`），不能绕过 QA：要求 checksum 有效的译文 cue 与 QA 报告，`pass` / `warning` 放行，`needs_review` 只在报告内全部 review 问题都被当前有效确认覆盖时放行，error、缺失、checksum 失效或结构异常一律拒绝。确认通道只有 `continue --acknowledge-subtitle-review`，因此原子 Job 的报错文案指向重跑 `xvt translate`，不指向不可用的 `continue`。
 - 语义复核确认后，若译文候选和渲染产物已有效或被补齐，`translate` stage 会收口为 `succeeded` 并清除旧 QA 错误；字幕 QA 的独立 `needs_review` 仍需单独确认。
-- 「译文已满足」的判定包含译文 QA 报告：需要 checksum 有效的 `translated_cues`、`translated_srt`、`bilingual_srt` 与 `translated_subtitle_qa` 四者齐备（`workflow._translation_satisfied` 与 polished 链路的 finalize 短路共用同一口径）。漏掉 QA 报告会让报告单独失效的 Job 被判成「已完成」而空转，`continue` 永不重建。原子 Job 上这条缺口的零成本出口（`recovery.atomic_translated_qa_rebuild_command`，`status` 与 `pipeline.burnin` 的 QA 门共用）只对 `standard` 成立：`import-translation` 与其余回填路径共用 `finalize_translation`，在 `polished` Job 上走 draft 分支，QA 不重建、渲染不执行、整条润色腿失效，因此该函数对 `polished` 返回 `None`，两处调用方各自落回既有引导。
+- 「译文已满足」的判定包含译文 QA 报告与双语 ASS：需要 checksum 有效的 `translated_cues`、`translated_srt`、`bilingual_srt`、`translated_subtitle_qa`，外加**已登记过**的 `bilingual_ass`（`workflow._translation_satisfied` 与 polished 链路的 finalize 短路共用同一口径）。漏掉 QA 报告会让报告单独失效的 Job 被判成「已完成」而空转，`continue` 永不重建。`bilingual_ass` 同理：它是 README / 架构说明列出的交付物，也是 `workflow_completed` 汇报的产物之一，删掉或改坏 `bilingual.ass` 后旧口径会让 `continue` / `status` / `batch-continue` 三路都报完成，而 CLI 没有任何命令能单独重建它；补上之后 `plan_advance_steps` 给出 `render`，走零 API 成本的重渲染。该条件只对已登记过 `bilingual_ass` 的 Job 生效——纯音频、纯字幕等没有分辨率的 Job 从来不渲染 ASS，对它们要求 ASS 会让 `continue` 永远收敛不了。烧录 Job 不额外分叉：至多多渲染一次 ASS，代价为零。原子 Job 上这条缺口的零成本出口（`recovery.atomic_translated_qa_rebuild_command`，`status` 与 `pipeline.burnin` 的 QA 门共用）只对 `standard` 成立：`import-translation` 与其余回填路径共用 `finalize_translation`，在 `polished` Job 上走 draft 分支，QA 不重建、渲染不执行、整条润色腿失效，因此该函数对 `polished` 返回 `None`，两处调用方各自落回既有引导。
 - 恢复计划的判定顺序有一条硬约束：局部重译等待必须排在 `qa_blocked` 之前。术语死锁的出口就是 `retranslate-cues`，跑完后译文 QA 还没重跑、`SUBTITLE_QA` 仍是 `failed`，排在后面会把等待重报成 `manual_fix` 并重复给出同一条命令，端到端 Job 上还与 `plan_advance_steps` 的 `await_cue_retranslation` 自相矛盾。原子与端到端两条分支共用 `_cue_retranslation_waiting_plan`。
+- 同构的第二条让路：端到端 Job 上 `qa_blocked` 也要给**任何**在途 Agent 等待让路。`SUBTITLE_QA=failed` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的等待而自动复位——用户改走整轮重翻时 `prepare_agent_translation` 会移走重译 manifest、写入新的 `translation_batches` 并把 `TRANSLATE` 置为 `awaiting_input`，却不碰 `SUBTITLE_QA`。此时 `plan_advance_steps` 首步是正式等待步骤，等待才是真状态：`recovery._build_recovery_plan` 与 `workflow._advance_workflow` 用同一口径把 QA 引导排在等待之后，于是 `status` 报等待、`continue` 返回 `awaiting_input` 而不是抛错要求重跑、`batch-continue` 停在该条目并给出统一 `xvt apply` 或 `apply-cue-retranslation` 回填引导，三侧不再各说各话。
 - 恢复计划里出现的 `--target-language` 一律 `shlex.quote`：该值只被 Job 保存、没有内容校验，而恢复计划是「复制即执行」面。
 - 字幕 QA `needs_review` 被确认后，`continue` 会清除 `translate` stage 上的过期阻断错误（要求 QA 门已放行、确认仍对当前源 cue 有效、译文 cue 与两份 SRT 均有效）；旧 Job 下次 `continue` 自动收口。
 
@@ -105,9 +107,10 @@
 - `job_started` 在 Job 首次持久化后立即携带 `job_file`，早期素材获取失败也能定位任务文件。
 - 已有 Job 的原子命令会从 CLI 参数预先记录任务路径，早期失败不会误报为任务尚未创建。
 - `run` / `continue` / `apply --continue` / `batch` / `batch-continue` 停在 `awaiting_input` 时默认返回退出码 0；显式 `--fail-on-waiting` 时返回 10（`AWAITING_INPUT`），批处理有失败条目时仍是 6（6 优先于 10）。`apply` 的旗标经 continuation Namespace 透传给 `_cmd_continue`，不加 `--continue` 时无作用。该旗标只改退出码，不发 `cli_failed`、不改 Job/batch 状态与事件流。Skill 不使用它。
-- Ctrl-C 返回退出码 130、SIGTERM 返回 143，两者都清理外部进程组并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`；改写既有 Job 的命令与 `batch-continue` 以 flock 独占执行，冲突退出码 7；独立预览中断不会生成正式工作流恢复计划，而是提示重新运行 preview。`interrupt_running_stage` 是中断处理块的第一条语句，因此它的 except 元组必须包含 `XvtError`（`job.json` 在运行期间被删除或改坏时 `load_job` 抛 `UserInputError`）：漏掉会让整个收尾落空，退出码退化成 1。
-- 批处理普通模式的条目导航打印前一律经 `cli._terminal_safe` 转义控制字符：`input` 直接来自目录扫描，文件名里的 `\r` / ESC 能覆盖已打印的行、伪造 `next:` 命令，`shlex.quote` 不设防（单引号内的控制字符照样被终端解释）。
-- `load_user_response_json` 只服务用户提交的响应文件，`translation.load_translation_response` 是它的间接路径；读已登记 artifact 用 `translation.translations_from_response`（接受已解析载荷）。以该 helper 为底的只读谓词，except 元组里必须有 `XvtError`。
+- Ctrl-C 返回退出码 130、SIGTERM 返回 143，两者都清理外部进程组并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`；改写既有 Job 的命令与 `batch-continue` 以 flock 独占执行，冲突退出码 7；独立预览中断不会生成正式工作流恢复计划，而是提示重新运行 preview。`interrupt_running_stage` 是中断处理块的第一条语句，因此它的 except 元组必须包含 `XvtError`（`job.json` 在运行期间被删除或改坏时 `load_job` 抛 `UserInputError`）：漏掉会让整个收尾落空，退出码退化成 1。批处理另有四个 `_process_item` 自身管不到的中断窗口：批次已落盘但 `batch_started` 正在发射、两个条目之间、条目置 `running` 落盘后但还没进入内层 `try`、以及最后一个条目完成后汇总落盘前。这些窗口由 `_process_batch` 的兜底 `except`（不是 `finally`，避免与内层收尾打架）统一收口：仍标 `running` 的条目降级为 `interrupted`，`batch.status` 写成 `interrupted` 并留下 `next_action`，`batch.json` 不会停在 `status=running` 且无下一步。该处理与 `_process_item` 已有的持久化天然幂等。中断状态落盘后的 JSONL/人读终态报告是 best-effort：终端或管道关闭等普通输出异常不得覆盖原取消异常，退出码仍保持 130/143。
+- 人读终端输出统一经 `cli._terminal_safe` 转义控制字符，漏斗收在 `_HumanEventSink._line` / `_progress` 与 `_print_safe` 三处：叙述行里嵌的文件名（目录扫描而来）、远端标题（yt-dlp 元数据）和错误消息都可以合法地带 `\r` / ESC，足以覆盖已打印的行、清屏并伪造出一条看起来出自 XVT 的 `next:` 命令，`shlex.quote` 不设防（单引号内的控制字符照样被终端解释）。转义幂等，因此批处理条目导航里逐字段的既有调用可以照旧保留。**例外**：stdout 上的纯产物路径清单（供 xargs / 管道消费的 `print(path)`）是契约行，不转义。
+- `load_user_response_json` 只服务用户提交的响应文件，`translation.load_translation_response` 是它的间接路径；读已登记 artifact 用 `translation.translations_from_response`（接受已解析载荷）。以该 helper 为底的只读谓词，except 元组里必须有 `XvtError`。非 UTF-8 的响应文件与非 UTF-8 的输入字幕同口径归 `invalid_input`（退出码 2）：`UnicodeDecodeError` 是 `ValueError` 子类但不是 `JSONDecodeError` 子类，`load_user_response_json` 与 `xvt apply` 的 except 元组都必须显式带上 `UnicodeError`，否则同一次失败会出现两个分类（`stage_failed` 记 `workflow`、顶层按 `isinstance(ValueError)` 记 `invalid_input`），`xvt apply` 那条路径还会逃逸成裸 codec 报错；`apply` 的报错额外给出 `iconv` 转码建议。
+- `doctor` 的 ffmpeg 能力探测与 libass 渲染探测走 `process.run_command` 而不是裸 `subprocess.run`：以进程组方式启动并在所有退出路径（含超时）清理孙进程，同时响应全局取消事件。doctor 自行判定通过/失败，因此用 `CommandError` 捞回 `result`，超时按 `returncode == 124` 识别。
 - artifact 使用 SHA-256 checksum，`verify` 会重新计算。
 - `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。远程 Job 的 `resume` 优先复用 checksum 有效的已下载媒体，没有可复用媒体时委派远程恢复路径重新获取，可能触发一次媒体下载。
 - 远程端到端 Job 在检查或下载阶段失败后，可以通过 `continue` 在同一个 Job 中重试；checksum 有效的远程元数据、字幕和媒体会被复用。
@@ -121,7 +124,7 @@
 - JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。
 - `workflow_completed` 和 `cli_completed` 会列出 checksum 有效的用户产物；仅生成源字幕的任务也会返回 `source.srt`。
 - `batch` 会固定目录输入清单并串行创建独立 Job；单项失败不会阻断后续文件，`batch.json` 原子记录汇总状态和恢复计划。
-- `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。已完成条目上只有中间 checkpoint（`normalized_audio`、`word_transcript`、批次 manifest 等）失效时保持 `completed`，只在 `item["verification"]` 与 `batch_item_completed` 事件里标注 `degraded` 并列出失效 kind（旧行为是 `failed` + 退出码 6，且引导只报告不修复，构成死循环）；目标产物失效不走这条放行——缺烧录成品停在 relink 的 `awaiting_input`，缺 `source.srt` 落到 `continue` 由 `resume` 重建。普通模式会在汇总行后逐条打印待处理条目及其恢复命令（取自已持久化的 `recovery_plan`，最多 10 条）。
+- `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。已完成条目上只有中间 checkpoint（`normalized_audio`、`word_transcript`、批次 manifest 等）失效时保持 `completed`，只在 `item["verification"]` 与 `batch_item_completed` 事件里标注 `degraded` 并列出失效 kind（旧行为是 `failed` + 退出码 6，且引导只报告不修复，构成死循环）；目标产物失效不走这条放行——缺烧录成品停在 relink 的 `awaiting_input`，缺 `source.srt` 落到 `continue` 由 `resume` 重建，缺 `bilingual.ass` 由 `_translation_satisfied` 判成未完成后落到 `continue` 重渲染（不再被标成 `degraded` 并宣称「不影响成品」）。普通模式会在汇总行后逐条打印待处理条目及其恢复命令（取自已持久化的 `recovery_plan`，最多 10 条）。
 - `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
 - 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
 
@@ -309,7 +312,7 @@ media-qa.json
 - 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；默认是否切换为 `natural + polished` 仍需真实 E2E 验收。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
-- `apply-cue-retranslation` 的**任何**失败都会把 `TRANSLATE` 置为 `failed`，于是 `cue_retranslation_waiting` 的第一条件为假，`status` 从「等待重译回填」改口成 `complete`，而未回填的 manifest 还留在 `artifacts/cue-retranslation-batches.json`。恢复计划给出的命令本身已经能原样复制执行（`--cue` 顺序与 manifest 一致），因此正常路径踩不到这条；但手工改错参数、或升级 XVT 后 manifest 失配时会遇到。处置：以盘上的 manifest 为准，重新运行一轮完整翻译取代它，或重跑 `retranslate-cues` 重建 manifest。改掉它需要动 stage 语义（区分「回填失败」与「等待被放弃」），本轮不做。
+- 回填失败后的等待保持已修复（见「翻译」一节：用户模式的 `apply-cue-retranslation` / `apply-translation` / `import-translation` 校验失败不改写 stage，`cue_retranslation_waiting` 另外接受 `failed` 以兜住 API 模式重译失败与历史 Job）。仍存在的限制：stage 语义不区分「重译失败」与「等待被放弃」，放弃一次已请求的重译没有专门命令，靠重跑 `retranslate-cues` 重建 manifest，或直接开一轮整轮翻译取代它（`prepare_agent_translation` 会移走重译 manifest，且在途整轮请求优先）。用户模式的回填错误也不在 Job 上留痕（只有命令行报错，stage 不记 `error`），排查要看命令输出而不是 `job.json`。等待期间 `TRANSLATE` stage 停在 `awaiting_input` / `failed` 是表象，不影响判定。
 - 目录批处理当前串行执行，不支持后台队列、目录监控或每项不同参数；请求烧录时目录只能包含视频，音频和纯字幕输入必须拆成不烧录的独立批次。
 - 不支持远程执行或多租户 Web 服务。
 - 没有可视化校对界面和桌面 App。

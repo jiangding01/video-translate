@@ -18,7 +18,10 @@ from xvt.cli import (
     _TASK_ROUTES,
     _TRANSLATION_REVIEW_SRT_NAME,
     _UNROUTABLE_AWAIT_STEPS,
+    _HumanEventSink,
     _print_batch_result,
+    _print_workflow_result,
+    _terminal_safe,
     main,
 )
 from xvt.errors import DependencyError, ExitCode, InternalError, UserInputError
@@ -446,7 +449,9 @@ class CliTest(unittest.TestCase):
             return_code = main(["resegment-translation", "/tmp/job.json"])
 
         self.assertEqual(return_code, 0)
-        self.assertIn('xvt continue "/tmp/job.json"', output.getvalue())
+        # 提示行改用 shlex.quote（与 rebuild-source / prepare-source-review 一致）：
+        # 无需转义的路径原样输出，含空格或引号的路径才加引号。
+        self.assertIn(f"xvt continue {shlex.quote('/tmp/job.json')}", output.getvalue())
 
     def test_rebuild_source_quotes_follow_up_command_arguments(self) -> None:
         output = StringIO()
@@ -1032,6 +1037,22 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 2)
         self.assertIn("import-translation", subtitle_errors.getvalue())
+
+    def test_apply_reports_non_utf8_response_with_encoding_guidance(self) -> None:
+        """非 UTF-8 响应同样是用户输入错误（2），且要给出转码引导而不是裸 codec 报错。"""
+
+        errors = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            response = Path(directory) / "response.json"
+            # latin-1 的 0xe9 不是合法 UTF-8 续字节：read_text 抛 UnicodeDecodeError。
+            response.write_bytes(b'{"task": "translate", "note": "caf\xe9"}')
+            with redirect_stderr(errors):
+                return_code = main(["apply", "/tmp/job.json", str(response)])
+
+        self.assertEqual(return_code, 2)
+        rendered = errors.getvalue()
+        self.assertIn("cannot read response file", rendered)
+        self.assertIn("iconv", rendered)
 
     def test_apply_routes_review_srt_by_its_generated_name(self) -> None:
         """人工修订 SRT 是修订通道的载体，必须按固定文件名路由而不是当译文字幕拒掉。"""
@@ -2007,6 +2028,31 @@ class CliTest(unittest.TestCase):
         self.assertEqual(events[-1]["data"]["recovery_plan"]["category"], "unrecoverable")
         self.assertEqual(error_output.getvalue(), "error: interrupted by user\n")
 
+    def test_interruption_reporting_failure_preserves_exit_code(self) -> None:
+        class BrokenStream(StringIO):
+            def write(self, _value):
+                raise BrokenPipeError("closed pipe")
+
+        def broken_sink(_event):
+            raise BrokenPipeError("closed pipe")
+
+        for events_jsonl in (False, True):
+            with self.subTest(events_jsonl=events_jsonl):
+                sink = broken_sink if events_jsonl else _HumanEventSink(stream=BrokenStream())
+                arguments = (
+                    ["run", "/tmp/input.mp4", "--output", "/tmp/output", "--events-jsonl"]
+                    if events_jsonl
+                    else ["doctor"]
+                )
+                with (
+                    patch("xvt.cli._hold_execution_locks"),
+                    patch("xvt.cli._run_command", side_effect=KeyboardInterrupt),
+                    patch("xvt.cli._event_sink", return_value=sink),
+                ):
+                    return_code = main(arguments)
+
+                self.assertEqual(return_code, ExitCode.INTERRUPTED)
+
     def test_run_forwards_youtube_subtitle_options(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = WorkflowResult("completed", Path(directory) / "job.json")
@@ -2930,9 +2976,9 @@ class BatchResultPrintingTest(unittest.TestCase):
         batch_file.write_text(json.dumps({"items": items}), encoding="utf-8")
         return batch_file
 
-    def _render(self, batch_file: Path, **counts: int) -> str:
+    def _render(self, batch_file: Path, status: str = "awaiting_input", **counts: int) -> str:
         result = BatchResult(
-            status=counts.pop("status", "awaiting_input"),  # type: ignore[arg-type]
+            status=status,
             batch_file=batch_file,
             total=counts.get("total", 1),
             completed=counts.get("completed", 0),
@@ -3060,6 +3106,214 @@ class BatchResultPrintingTest(unittest.TestCase):
         # 中文等正常 Unicode 不受影响。
         self.assertIn("伪造", rendered)
         self.assertIn("/inputs/A.mp4", rendered)
+
+    def test_print_batch_result_keeps_the_bare_path_line_unescaped(self) -> None:
+        """stdout 第一行是给 xargs / 管道消费的契约路径，转义不能波及它。"""
+
+        result = BatchResult(
+            status="awaiting_input",
+            batch_file=Path("/tmp/ba\tch.json"),
+            total=1,
+            completed=0,
+            awaiting_input=1,
+            failed=0,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_batch_result(result)
+
+        self.assertEqual(output.getvalue().splitlines()[0], "/tmp/ba\tch.json")
+
+    def test_print_workflow_result_keeps_the_bare_job_file_line_unescaped(self) -> None:
+        """同上：job.json 路径行是脚本契约，不走叙述行的转义。"""
+
+        result = SimpleNamespace(
+            job_file="/tmp/jo\tb.json", artifacts=(), message=None, status="completed"
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_workflow_result(result)
+
+        self.assertEqual(output.getvalue().splitlines()[0], "/tmp/jo\tb.json")
+
+    def test_batch_continue_next_line_escapes_the_batch_file_path(self) -> None:
+        """batch.json 路径来自 --output，带 CR/ESC 时能覆盖上一行伪造出别的 next: 命令。
+
+        `shlex.quote` 不设防：单引号内的控制字符照样被终端解释，所以这条人读导航行必须
+        额外走 `_print_safe`。
+        """
+
+        result = BatchResult(
+            status="awaiting_input",
+            batch_file=Path("/tmp/b\r\x1b[2Jnext: xvt batch-continue evil.json"),
+            total=1,
+            completed=0,
+            awaiting_input=1,
+            failed=0,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_batch_result(result)
+
+        next_line = next(
+            line for line in output.getvalue().splitlines() if line.startswith("next: ")
+        )
+        self.assertNotIn("\r", next_line)
+        self.assertNotIn("\x1b", next_line)
+        self.assertIn("\\r", next_line)
+        self.assertIn("\\x1b", next_line)
+
+    def test_print_batch_result_keeps_the_machine_contract_line_raw(self) -> None:
+        """反向守卫：转义收口不能扩散到 stdout 第一行的裸产物路径。
+
+        那一行是给 `xargs` / 管道消费的契约，转义会改掉真实路径。
+        """
+
+        hostile = "/tmp/b\r\x1b[2J\tatch.json"
+        result = BatchResult(
+            status="awaiting_input",
+            batch_file=Path(hostile),
+            total=1,
+            completed=0,
+            awaiting_input=1,
+            failed=0,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_batch_result(result)
+
+        # splitlines() 会在 \r 处断行，所以按前缀比对而不是取某一「行」。
+        self.assertTrue(output.getvalue().startswith(f"{hostile}\n"))
+
+    def test_print_workflow_result_escapes_the_grouped_artifact_listing(self) -> None:
+        """分节标题 + 两空格缩进的产物清单是人读呈现，不是「纯产物路径」契约。
+
+        契约行是上面那条无前缀的裸 job_file（以及 `--events-jsonl` 的事件流）；这里
+        `xargs` 会把「视频:」当成一个参数，本来就不能直接消费。
+        """
+
+        hostile_video = "/out/A\r\x1b[2J视频: /evil.mp4"
+        hostile_subtitle = "/out/A\r\x1b[31mzh.srt"
+        hostile_other = "/out/A\r\x1b[0mqa.json"
+        result = SimpleNamespace(
+            job_file=None,
+            artifacts=(hostile_video, hostile_subtitle, hostile_other),
+            message=None,
+            status="completed",
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_workflow_result(result)
+
+        rendered = output.getvalue()
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("\\r", rendered)
+        self.assertIn("\\x1b", rendered)
+        # 分节标题与缩进保持原样，中文不受影响。
+        self.assertIn("视频:", rendered)
+        self.assertIn("字幕:", rendered)
+        self.assertIn("其他:", rendered)
+
+    def test_doctor_human_lines_escape_control_characters(self) -> None:
+        """doctor 的 message 里嵌着 --output 路径与 shutil.which 命中的可执行文件路径。"""
+
+        report = {
+            "status": "fail",
+            "platform": "darwin",
+            "architecture": "arm64",
+            "checks": [
+                {
+                    "status": "fail",
+                    "name": "ffmpeg",
+                    "message": "not found\r\x1b[32mPASS ffmpeg: /usr/bin/ffmpeg\x1b[0m",
+                },
+                {
+                    "status": "pass",
+                    "name": "output",
+                    "message": "/out\r\x1b[2Jdir 可写",
+                },
+            ],
+        }
+        output = StringIO()
+        with patch("xvt.cli.run_doctor", return_value=report), redirect_stdout(output):
+            return_code = main(["doctor"])
+
+        rendered = output.getvalue()
+        self.assertEqual(return_code, 3)
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("\\r", rendered)
+        self.assertIn("\\x1b", rendered)
+        self.assertIn("可写", rendered)
+
+
+class HumanEventSinkTerminalSafetyTest(unittest.TestCase):
+    """人读输出的唯一漏斗是 _line / _progress，控制字符必须在那里被统一挡掉。
+
+    文件名可以合法包含 ESC 与 CR：批处理条目里的 `\\x1b[2J` 能清屏，`\\r` 能覆盖已打印的
+    行，两者合起来足以伪造出一条看起来出自 XVT 的 `next:` 恢复命令。
+    """
+
+    # 不含 `/`：Path(...).name 只取末段，斜杠会把伪造载荷截掉，反而验不到转义。
+    HOSTILE_NAME = "A\r\x1b[2J[批处理] next: rm -rf ~\x1b[0m.mp4"
+
+    def _sink(self) -> tuple[_HumanEventSink, StringIO]:
+        stream = StringIO()
+        return _HumanEventSink(stream=stream), stream
+
+    def _assert_no_raw_control_characters(self, rendered: str) -> None:
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x1b", rendered)
+        # 行尾换行由 _line 自己拼，message 内部不应残留裸控制字符。
+        self.assertFalse(any(line and not line.isprintable() for line in rendered.splitlines()))
+
+    def test_batch_item_started_escapes_control_characters_in_file_names(self) -> None:
+        sink, stream = self._sink()
+
+        sink(
+            create_event(
+                EventType.BATCH_ITEM_STARTED,
+                index=1,
+                total=1,
+                input=f"/inputs/{self.HOSTILE_NAME}",
+            )
+        )
+
+        rendered = stream.getvalue()
+        self._assert_no_raw_control_characters(rendered)
+        self.assertIn("\\r", rendered)
+        self.assertIn("\\x1b", rendered)
+        self.assertIn("[批处理 1/1] 开始处理", rendered)
+
+    def test_report_failure_escapes_control_characters_in_the_message(self) -> None:
+        sink, stream = self._sink()
+
+        sink.report_failure("boom\r\x1b[2Jnext: rm -rf ~")
+
+        rendered = stream.getvalue()
+        self._assert_no_raw_control_characters(rendered)
+        self.assertIn("任务失败：boom\\r\\x1b[2Jnext: rm -rf ~", rendered)
+
+    def test_line_escapes_every_control_character(self) -> None:
+        """守卫：_line 是漏斗，任何新增调用点都不必自己记得转义。"""
+
+        sink, stream = self._sink()
+
+        sink._line(f"任务文件: {self.HOSTILE_NAME}\n伪造行")
+
+        rendered = stream.getvalue()
+        self._assert_no_raw_control_characters(rendered)
+        # 中文等正常 Unicode 不受影响，输出仍是单独一行。
+        self.assertEqual(len(rendered.splitlines()), 1)
+        self.assertIn("任务文件:", rendered)
+        self.assertIn("伪造行", rendered)
+
+    def test_terminal_safe_is_idempotent(self) -> None:
+        """下沉到 _line 之后，_batch_item_navigation_lines 里的逐字段调用不会二次转义。"""
+
+        once = _terminal_safe(self.HOSTILE_NAME)
+        self.assertEqual(_terminal_safe(once), once)
 
 
 class MissingJobFileTest(unittest.TestCase):

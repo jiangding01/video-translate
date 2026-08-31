@@ -7,13 +7,23 @@ from unittest.mock import patch
 
 from xvt.batch import BATCH_SCHEMA_VERSION, continue_batch, discover_batch_inputs, run_batch
 from xvt.errors import ExitCode, JobLockedError, UserInputError
-from xvt.job_store import create_job, save_job
+from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.locking import job_lock, lock_scope
-from xvt.models import Artifact, StageName, StageStatus
-from xvt.pipeline import apply_subtitle_translation, retranslate_cues
-from xvt.process import CommandCancelled
-from xvt.recovery import build_recovery_plan, file_checksum
+from xvt.media import MediaInfo
+from xvt.models import Artifact, StageName, StageStatus, Transcript, Word
+from xvt.pipeline import (
+    apply_agent_translation,
+    apply_subtitle_translation,
+    prepare_agent_translation,
+    retranslate_cues,
+    run_local_transcription,
+    run_subtitle_transcription,
+)
+from xvt.process import CommandCancelled, CommandResult
+from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
+from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow import WorkflowOptions, WorkflowResult, _record_burn_fingerprint
+from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 def _write_subtitle(path: Path, text: str = "Hello world.") -> None:
@@ -580,6 +590,189 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(report["items"][0]["status"], "interrupted")
         self.assertEqual(report["status"], "interrupted")
 
+    def test_interruption_while_emitting_batch_started_is_persisted(self) -> None:
+        # 缺陷9窗口①：batch.json 已写成 running，但 batch_started 还在发射。
+        # 该事件必须位于 _process_batch 的外层 try 内，否则中断会留下一个没有
+        # next_action 的 running 批次。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+            events = []
+
+            def raise_on_batch_started(event):
+                events.append(event)
+                if event.type == "batch_started":
+                    raise KeyboardInterrupt
+
+            with self.assertRaises(KeyboardInterrupt):
+                run_batch(
+                    inputs,
+                    WorkflowOptions(input="", output=output),
+                    event_sink=raise_on_batch_started,
+                )
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["status"], "interrupted")
+        self.assertEqual(report["items"][0]["status"], "pending")
+        self.assertIn("xvt batch-continue", report["next_action"])
+        self.assertEqual([event.type for event in events], ["batch_started"])
+
+    def test_interruption_between_items_is_persisted(self) -> None:
+        # 缺陷9窗口②：SIGINT 落在两个 item 之间——第一个 item 已跑完、第二个还没
+        # 进 lock_scope。_process_item 内部没有机会落盘，得靠 _process_batch 主循环
+        # 外层的兜底 except 补上。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "a.srt")
+            _write_subtitle(inputs / "b.srt")
+
+            call_count = {"n": 0}
+
+            def fake_lock_scope():
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    raise KeyboardInterrupt
+                return lock_scope()
+
+            with patch("xvt.batch.lock_scope", side_effect=fake_lock_scope):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_batch(inputs, WorkflowOptions(input="", output=output))
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        statuses = [item["status"] for item in report["items"]]
+        self.assertNotIn("running", statuses)
+        self.assertEqual(report["status"], "interrupted")
+        self.assertIn("xvt batch-continue", report["next_action"])
+
+    def test_interruption_after_running_write_but_before_try_is_persisted(self) -> None:
+        # 缺陷9窗口③：item 已被置为 running 并落盘（batch.py 里 _write_batch 那次），
+        # 但 _process_item 的 try 块还没开始——此时中断会绕过 _process_item 自己的
+        # except，必须靠外层兜底把这个仍标 running 的条目降级为 interrupted。
+        # BATCH_ITEM_STARTED 事件恰好在“running 落盘之后、try 之前”触发，借它注入。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+
+            events = []
+
+            def raise_on_item_started(event):
+                events.append(event)
+                if event.type == "batch_item_started":
+                    raise KeyboardInterrupt
+
+            with self.assertRaises(KeyboardInterrupt):
+                run_batch(
+                    inputs,
+                    WorkflowOptions(input="", output=output),
+                    event_sink=raise_on_item_started,
+                )
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["items"][0]["status"], "interrupted")
+        self.assertEqual(report["status"], "interrupted")
+        self.assertIn("xvt batch-continue", report["next_action"])
+        # 条目已发过 batch_item_started，就必须有条目级终态事件——否则消费端
+        # 会把它永远当成在跑（运行级 cli_failed 只给批次终态）。
+        interrupted = [event for event in events if event.type == "batch_item_interrupted"]
+        self.assertEqual(len(interrupted), 1)
+        self.assertEqual(interrupted[0].data["index"], 1)
+        self.assertEqual(interrupted[0].data["input"], report["items"][0]["input"])
+        self.assertEqual(interrupted[0].data["total"], 1)
+        self.assertIn("xvt batch-continue", interrupted[0].data["next_action"])
+        self.assertEqual(
+            [event.type for event in events],
+            ["batch_started", "batch_item_started", "batch_item_interrupted"],
+        )
+
+    def test_failing_sink_does_not_swallow_interruption(self) -> None:
+        # 兜底补发跑在 KeyboardInterrupt 的传播路径上：sink 自己抛异常时，
+        # 中断必须原样传播（否则 130 退出码被顶掉），batch.json 也必须已落盘。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+
+            def hostile_sink(event):
+                if event.type == "batch_item_started":
+                    raise KeyboardInterrupt
+                if event.type == "batch_item_interrupted":
+                    raise RuntimeError("sink exploded")
+
+            with self.assertRaises(KeyboardInterrupt):
+                run_batch(
+                    inputs,
+                    WorkflowOptions(input="", output=output),
+                    event_sink=hostile_sink,
+                )
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["items"][0]["status"], "interrupted")
+        self.assertEqual(report["status"], "interrupted")
+        self.assertIn("xvt batch-continue", report["next_action"])
+
+    def test_item_interruption_sink_failure_preserves_original_interruption(self) -> None:
+        # workflow 内部中断走 _process_item 自己的 except；条目终态事件只是尽力而为，
+        # stdout/JSONL 管道关闭不能用 BrokenPipeError 顶掉原始 KeyboardInterrupt。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+
+            def broken_interruption_sink(event):
+                if event.type == "batch_item_interrupted":
+                    raise BrokenPipeError("closed pipe")
+
+            with patch("xvt.batch.run_workflow", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_batch(
+                        inputs,
+                        WorkflowOptions(input="", output=output),
+                        event_sink=broken_interruption_sink,
+                    )
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["items"][0]["status"], "interrupted")
+        self.assertEqual(report["status"], "interrupted")
+        self.assertIn("xvt batch-continue", report["next_action"])
+
+    def test_interruption_before_final_summary_write_is_persisted(self) -> None:
+        # 缺陷9窗口④：所有 item 都已处理完，但汇总落盘（_result 之后的 _write_batch）
+        # 还没执行——中断必须让 batch.json 落到 interrupted 而不是停在 running。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            output = root / "output"
+            _write_subtitle(inputs / "source.srt")
+
+            with patch("xvt.batch._result", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_batch(inputs, WorkflowOptions(input="", output=output))
+
+            batch_file = next((output / "batches").glob("*/batch.json"))
+            report = json.loads(batch_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["items"][0]["status"], "completed")
+        self.assertEqual(report["status"], "interrupted")
+        self.assertIn("xvt batch-continue", report["next_action"])
+
     def test_failure_message_is_redacted_in_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -826,3 +1019,209 @@ class BatchCueRetranslationTest(unittest.TestCase):
             updated["items"][0]["recovery_plan"]["prerequisite_commands"][0],
         )
         continue_workflow.assert_not_called()
+
+
+def _write_batch_file(output: Path, media: Path, job_file: Path) -> Path:
+    """按批处理文件格式登记单条已有 Job 的条目。"""
+
+    batch_file = output / "batches" / "test" / "batch.json"
+    batch_file.parent.mkdir(parents=True, exist_ok=True)
+    batch_file.write_text(
+        json.dumps(
+            {
+                "schema_version": BATCH_SCHEMA_VERSION,
+                "id": "test",
+                "output_root": str(output.resolve()),
+                "workflow": {},
+                "items": [
+                    {
+                        "input": str(media.resolve()),
+                        "status": "pending",
+                        "job_file": str(job_file.resolve()),
+                        "artifacts": [],
+                        "error": None,
+                        "recovery_plan": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return batch_file
+
+
+class BatchBilingualAssDeliverableTest(unittest.TestCase):
+    """bilingual_ass 是交付物，不是中间产物：失效时不能被 degraded 放行。
+
+    旧行为把它归到「不影响成品的中间产物」里，条目标 completed + degraded，用户
+    再跑多少次 batch-continue 都拿不回 ASS。修好之后条目会落到 continue，走零 API
+    成本的重渲染。
+    """
+
+    def _translated_video_batch(self, root: Path) -> tuple[Path, Path]:
+        output = root / "output"
+        media = root / "input.mp4"
+        media.write_bytes(b"video")
+
+        def run_ffmpeg(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"audio")
+            return CommandResult(tuple(args), 0, "", "")
+
+        media_info = MediaInfo(
+            path=str(media),
+            duration_ms=5000,
+            size_bytes=5,
+            format_name="mp4",
+            width=1920,
+            height=1080,
+            frame_rate=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            has_video=True,
+            has_audio=True,
+        )
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(Word("Hello.", 1000, 1800, 0.9),),
+        )
+        with (
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+        ):
+            job = run_local_transcription(media, output)
+        job_file = get_job_file(job)
+        set_workflow_config(job, WorkflowConfig(target_language="zh-CN", provider="agent"))
+        save_job(job)
+        prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+        )
+        response = root / "translation-response.json"
+        response.write_text(
+            json.dumps({"items": [{"id": 1, "text": "你好。"}]}),
+            encoding="utf-8",
+        )
+        apply_agent_translation(job_file, response, target_language="zh-CN")
+        return _write_batch_file(output, media, job_file), job_file
+
+    def test_invalid_bilingual_ass_is_rebuilt_instead_of_marked_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, job_file = self._translated_video_batch(root)
+            ass_path = valid_artifact_path(load_job(job_file), "bilingual_ass")
+            self.assertIsNotNone(ass_path)
+            assert ass_path is not None
+            ass_path.unlink()
+
+            # 真实 continue_workflow：桩会绕过重渲染，让「最终 ASS 有效」变成假绿。
+            result = continue_batch(batch_file)
+            item = json.loads(batch_file.read_text(encoding="utf-8"))["items"][0]
+            rebuilt = load_job(job_file)
+            # 临时目录退出后文件就没了，落盘校验必须在作用域内取值。
+            rebuilt_ass = valid_artifact_path(rebuilt, "bilingual_ass")
+            ass_restored = ass_path.exists()
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(item["status"], "completed")
+        # 关键守卫：不得以 degraded「不影响成品」的名义放行。
+        self.assertIsNone(item.get("verification"))
+        self.assertTrue(ass_restored)
+        self.assertIsNotNone(rebuilt_ass)
+
+    def test_intact_item_is_still_reused_without_continue(self) -> None:
+        """护栏：ASS 有效时条目照旧复用，不该因为新增校验多跑一次 continue。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, _job_file = self._translated_video_batch(root)
+
+            with patch("xvt.batch.continue_workflow") as continue_workflow:
+                result = continue_batch(batch_file)
+            item = json.loads(batch_file.read_text(encoding="utf-8"))["items"][0]
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(item["status"], "completed")
+        self.assertIsNone(item.get("verification"))
+        continue_workflow.assert_not_called()
+
+
+class BatchQaBlockedCueRetranslationTest(unittest.TestCase):
+    """SUBTITLE_QA 停在 failed、旁边挂着有效局部重译 manifest 的条目必须停在 awaiting_input。
+
+    契约见 HANDOFF：continue 不宣告完成，batch-continue 停在该条目并给出回填引导。
+    这两个状态完全可以同时为真——术语死锁的出口就是 retranslate-cues，回填前译文
+    QA 不会重跑，所以 SUBTITLE_QA 不会自动复位。旧行为把它按 qa_blocked 处理，条目
+    被记成 failed，用户手里那份 manifest 反而没人认。
+    """
+
+    def _qa_blocked_waiting_batch(self, root: Path) -> tuple[Path, Path]:
+        output = root / "output"
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nSource 1.\n\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, output, language="en")
+        job_file = get_job_file(job)
+        set_workflow_config(
+            job,
+            WorkflowConfig(
+                target_language="zh-CN",
+                requested_outputs=("translated_subtitles", "bilingual_subtitles"),
+                provider="agent",
+                batch_size=1,
+                translation_policy=TranslationPolicy(terms=(GlossaryTerm("Source", "小组件"),)),
+            ),
+        )
+        save_job(job)
+        prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+            await_input=False,
+        )
+        response = root / "translation-response.json"
+        response.write_text(
+            json.dumps({"items": [{"id": 1, "text": "译文一"}]}),
+            encoding="utf-8",
+        )
+        # 术语违规让译文 QA 落在 failed；stage 与报告在抛出前已经落盘。
+        with self.assertRaises(RuntimeError):
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+        blocked = load_job(job_file)
+        self.assertIs(blocked.stages[StageName.SUBTITLE_QA].status, StageStatus.FAILED)
+        # 术语死锁的出口：请求局部重译，等 Agent 回填。
+        retranslate_cues(job_file, cue_ids=(1,), target_language="zh-CN", provider="agent")
+        return _write_batch_file(output, source, job_file), job_file
+
+    def test_qa_blocked_item_with_pending_cue_retranslation_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_file, job_file = self._qa_blocked_waiting_batch(root)
+
+            with patch("xvt.batch.continue_workflow") as continue_workflow:
+                result = continue_batch(batch_file)
+            item = json.loads(batch_file.read_text(encoding="utf-8"))["items"][0]
+            still_failed = load_job(job_file).stages[StageName.SUBTITLE_QA].status
+
+        # 前提复述：QA 阻断与在途等待同时为真，等待才是真状态。
+        self.assertIs(still_failed, StageStatus.FAILED)
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertEqual(item["status"], "awaiting_input")
+        self.assertEqual(item["recovery_plan"]["category"], "awaiting_input")
+        self.assertEqual(item["recovery_plan"]["advance_steps"], ["await_cue_retranslation"])
+        guidance = " ".join(
+            [
+                *item["recovery_plan"]["prerequisite_commands"],
+                item["recovery_plan"]["primary_command"] or "",
+            ]
+        )
+        self.assertIn("apply-cue-retranslation", guidance)
+        continue_workflow.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

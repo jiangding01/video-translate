@@ -66,12 +66,39 @@ def _load_cue_retranslation_manifest(job: Job) -> dict | None:
     return manifest if isinstance(manifest, dict) else None
 
 
+def _newer_full_translation_request(job: Job) -> bool:
+    """是否存在比重译 manifest 更晚登记、且 checksum 仍有效的整轮翻译批次。
+
+    ``add_artifact`` 先按 kind 去重再追加，因此 ``job.artifacts`` 的相对次序就是两份
+    manifest 各自最后一次登记的先后：整轮批次排在后面即「整轮请求更新」。
+    """
+
+    if valid_artifact_path(job, "translation_batches") is None:
+        return False
+    kinds = [item.kind for item in job.artifacts]
+    try:
+        return kinds.index("translation_batches") > kinds.index("cue_retranslation_batches")
+    except ValueError:
+        return False
+
+
 def cue_retranslation_waiting(job: Job) -> bool:
     """Job 是否真的停在一次仍然挂得住的原子重译等待上。
 
-    严格四条件（缺一不可）：``TRANSLATE`` stage 在等输入；重译 manifest checksum 有效；
-    当前 ``translated_cues`` checksum 有效；manifest 记录的 source / translated cue
+    严格四条件（缺一不可）：``TRANSLATE`` stage 停在等输入或失败；重译 manifest checksum
+    有效；当前 ``translated_cues`` checksum 有效；manifest 记录的 source / translated cue
     checksum 与当前逐一相等。
+
+    第一条接受 ``FAILED``：用户显式回填的校验失败已不再改写 stage（见
+    ``_apply_cue_retranslation`` 的只读校验约定），但 ``TRANSLATE`` 仍有真实路径落在
+    failed 而盘上的 manifest 原样保留且仍然有效——API 模式 ``retranslate-cues`` 先写
+    manifest、随后调用提供方中途失败，API 模式回填自身响应校验失败，以及旧版本 xvt
+    留下的历史 Job。这些情形下那次等待并没有作废，重跑或改用回填就能推进。只认
+    ``AWAITING_INPUT`` 会让 status/continue 在这些失败后不再提示回填：``SUBTITLE_QA``
+    succeeded 时误报完成，failed 时给出一条用户已经跑过的 retranslate-cues。
+    ``FAILED`` 情形额外要求「没有更新的在途整轮翻译请求」（见
+    ``_newer_full_translation_request``）：整轮翻译取代局部重译，两者同时挂着时必须让整轮
+    等待优先，否则回填出口会指向作废的那一份。
 
     后两条不能省。``cue_retranslation_batches`` 在 artifact 依赖图上只派生自
     ``source_cues``，译文被改写时它不会被失效，因此「重译已回填、manifest 只是残留」
@@ -91,10 +118,12 @@ def cue_retranslation_waiting(job: Job) -> bool:
     """
 
     stage = job.stages.get(StageName.TRANSLATE)
-    if stage is None or stage.status is not StageStatus.AWAITING_INPUT:
+    if stage is None or stage.status not in {StageStatus.AWAITING_INPUT, StageStatus.FAILED}:
         return False
     manifest = _load_cue_retranslation_manifest(job)
     if manifest is None:
+        return False
+    if stage.status is StageStatus.FAILED and _newer_full_translation_request(job):
         return False
     source_path = valid_artifact_path(job, "source_cues")
     translated_path = valid_artifact_path(job, "translated_cues")
@@ -230,18 +259,21 @@ def _apply_cue_retranslation(
     event_sink: EventSink | None,
     from_job_artifact: bool,
 ) -> tuple[Path, ...]:
-    """回填实现。``from_job_artifact`` 区分响应文件的来源，只影响读失败的归类。
+    """回填实现。``from_job_artifact`` 区分响应文件的来源，影响两件事。
 
-    API 模式下这份文件是本模块自己刚 ``write_json`` 落盘并登记为
+    一是读失败的归类：API 模式下这份文件是本模块自己刚 ``write_json`` 落盘并登记为
     ``cue_retranslation_response`` 的产物，不是用户敲的命令行参数：走
     ``load_user_response_json`` 会把内部 I/O 故障重贴成 ``UserInputError``（退出码 2），
     还让用户去检查一个他从没输入过的路径。直读让 ``OSError`` / ``JSONDecodeError``
     按内部故障归到退出码 3。
+
+    二是校验失败的 stage 收口：用户模式下校验全是只读动作，失败不改写 Job 状态，
+    ``TRANSLATE`` 保持 awaiting_input（否则等待态被顶成 failed，恢复计划从等待回填
+    降级成重跑）；API 模式下 stage 已在 running，校验失败按内部故障收口成 failed。
     """
 
     job = load_job(job_file)
     current_stage = StageName.TRANSLATE
-    set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     try:
         manifest, translated_cues, _batches = _cue_retranslation_manifest(
             job, cue_ids, target_language
@@ -284,15 +316,21 @@ def _apply_cue_retranslation(
             for cue in translated_cues
         ]
     except Exception as error:
-        set_stage(
-            job,
-            current_stage,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=error_category(error),
-        )
+        # 上面全部是只读校验。用户模式（显式 apply-cue-retranslation）下坏响应不改写
+        # Job 状态：TRANSLATE 保持 awaiting_input，等待态与恢复计划不因用户输入错误
+        # 降级。API 模式下响应是本模块刚落盘的内部产物，stage 已由调用方置 running，
+        # 校验失败属于内部故障，按原约定收口成 failed。
+        if from_job_artifact:
+            set_stage(
+                job,
+                current_stage,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=error_category(error),
+            )
         raise
+    set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
     return finalize_translation(job, repaired, event_sink, invalidate=invalidate_rendered_artifacts)
 
 

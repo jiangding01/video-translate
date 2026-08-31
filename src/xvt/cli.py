@@ -5,6 +5,7 @@ import shlex
 import signal
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 from time import monotonic
 from typing import TextIO
@@ -695,6 +696,38 @@ def _format_batch_position(data: dict[str, object]) -> str:
     return f"{batch}"
 
 
+def _terminal_safe(value: object) -> str:
+    """把要打进终端的字符串里的控制字符转义掉，保留中文等正常 Unicode。
+
+    叙述行里嵌着的文件名、远端标题、错误消息都可以合法地包含 `\\r` 与 ESC：裸 `\\r` 能把
+    已经打印的行整行覆盖掉，ESC 序列能改颜色和光标位置，两者合起来足以清屏并伪造出一条
+    看起来出自 XVT 的 `next:` 命令。`shlex.quote` 挡不住这个——单引号内的控制字符照样被
+    终端解释。
+
+    判定用 `str.isprintable()`：ASCII 空格返回 True，中日韩文字与常见符号也是 True，
+    只有 Unicode 分类 Other / Separator（控制字符、零宽字符、行分隔符等）会被转义成
+    `\\r`、`\\x1b` 这样的可见形式。制表符同样转义——文件名里的制表符只会打乱对齐。
+
+    幂等：转义后的结果只含可打印 ASCII，再过一遍不会二次转义，因此下沉到 `_line` 之后，
+    `_batch_item_navigation_lines` 里逐字段的调用（那条路径走裸 `print`）可以照旧保留。
+    """
+
+    return "".join(
+        character if character.isprintable() else character.encode("unicode_escape").decode("ascii")
+        for character in str(value)
+    )
+
+
+def _print_safe(message: str, *, file: TextIO | None = None) -> None:
+    """打印带前缀的叙述行，控制字符统一转义。
+
+    **stdout 上的纯产物路径清单不能走这里**：那些 `print(path)` 是给 xargs / 管道消费的
+    契约，转义会改掉真实路径。只有带前缀的人读行（`next:`、`报告:`、`error:` 等）用它。
+    """
+
+    print(_terminal_safe(message), file=file)
+
+
 class _HumanEventSink(_TrackedEventSink):
     def __init__(self, job_file: str | None = None, stream: TextIO | None = None) -> None:
         super().__init__(job_file)
@@ -712,9 +745,12 @@ class _HumanEventSink(_TrackedEventSink):
             self.stream.write("\r\033[2K")
         self._progress_active = False
 
+    # _line / _progress 是人读输出的唯一漏斗，控制字符在这里统一转义：调用点里的文件名、
+    # 远端标题、错误消息都可能带 ESC/CR。转义只作用于 message，_clear_progress 与下面拼的
+    # "\r"、"\033[K" 是 xvt 自己的擦除序列，必须在转义之后再拼上去。
     def _line(self, message: str) -> None:
         self._clear_progress()
-        self.stream.write(f"{message}\n")
+        self.stream.write(f"{_terminal_safe(message)}\n")
         self.stream.flush()
 
     def _progress(self, key: str, message: str, *, force: bool = False) -> None:
@@ -723,7 +759,7 @@ class _HumanEventSink(_TrackedEventSink):
             return
         self._last_progress_at[key] = now
         if self.is_tty:
-            self.stream.write(f"\r{message}\033[K")
+            self.stream.write(f"\r{_terminal_safe(message)}\033[K")
             self.stream.flush()
             self._progress_active = True
         else:
@@ -1048,40 +1084,21 @@ def _print_recovery_navigation(job_file: str | Path) -> None:
     try:
         plan = build_recovery_plan(job_file)
     except (XvtError, OSError, RuntimeError, ValueError):
-        print(f"next: xvt status {shlex.quote(str(job_file))}")
+        _print_safe(f"next: xvt status {shlex.quote(str(job_file))}")
         return
-    print(f"recovery: {plan.reason}")
+    _print_safe(f"recovery: {plan.reason}")
     for path in plan.report_paths:
-        print(f"report: {path}")
+        _print_safe(f"report: {path}")
     for path in plan.input_paths:
-        print(f"input: {path}")
+        _print_safe(f"input: {path}")
     if plan.primary_command:
-        print(f"next: {plan.primary_command}")
+        _print_safe(f"next: {plan.primary_command}")
     for command in plan.alternative_commands:
-        print(f"alternative: {command}")
+        _print_safe(f"alternative: {command}")
 
 
 # 普通模式下逐条展开的上限：条目多时刷屏没有意义，剩余的指向 --events-jsonl。
 _BATCH_ITEM_NAVIGATION_LIMIT = 10
-
-
-def _terminal_safe(value: object) -> str:
-    """把要打进终端的字符串里的控制字符转义掉，保留中文等正常 Unicode。
-
-    条目导航的 `input` / `job_file` / 命令里都嵌着扫描到的文件名，而文件名可以合法地
-    包含 `\\r` 与 ESC：裸 `\\r` 能把已经打印的行整行覆盖掉，ESC 序列能改颜色和光标位置，
-    两者合起来足以伪造出一条看起来出自 XVT 的 `next:` 命令。`shlex.quote` 挡不住这个
-    ——单引号内的控制字符照样被终端解释。
-
-    判定用 `str.isprintable()`：ASCII 空格返回 True，中日韩文字与常见符号也是 True，
-    只有 Unicode 分类 Other / Separator（控制字符、零宽字符、行分隔符等）会被转义成
-    `\\r`、`\\x1b` 这样的可见形式。制表符同样转义——文件名里的制表符只会打乱对齐。
-    """
-
-    return "".join(
-        character if character.isprintable() else character.encode("unicode_escape").decode("ascii")
-        for character in str(value)
-    )
 
 
 def _batch_item_navigation_lines(batch_file: str | Path) -> list[str]:
@@ -1159,7 +1176,8 @@ def _print_batch_result(result: BatchResult) -> None:
     for line in _batch_item_navigation_lines(result.batch_file):
         print(line)
     if result.status != "completed":
-        print(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
+        # batch_file 来自 --output/CLI 参数，可带 CR/ESC；这条 next: 是人读导航行，必须转义。
+        _print_safe(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
 
 
 def _print_workflow_result(result: object) -> None:
@@ -1174,7 +1192,7 @@ def _print_workflow_result(result: object) -> None:
         try:
             job = load_job(job_file)
             if resolve_target_language(job):
-                print(f"翻译质量: {resolve_translation_quality(job)}")
+                _print_safe(f"翻译质量: {resolve_translation_quality(job)}")
         except (XvtError, OSError, ValueError):
             pass
     videos: list[Path] = []
@@ -1192,37 +1210,41 @@ def _print_workflow_result(result: object) -> None:
             subtitles.append(path)
         else:
             others.append(path)
+    # 这三段是带分节标题与两空格缩进的人读清单，不是「纯产物路径清单」那种机器契约
+    # （README.md:213 的契约限定为无前缀、整行只有路径的 stdout 行；xargs 直接消费这里
+    # 会把「视频:」当成一个参数）。机器消费者用 --events-jsonl 的 workflow_completed
+    # 或上面第 1 行的裸 job_file。因此按人读行处理，统一转义控制字符。
     if videos:
-        print("视频:")
+        _print_safe("视频:")
         for path in videos:
-            print(f"  {path}")
+            _print_safe(f"  {path}")
     if subtitles:
-        print("字幕:")
+        _print_safe("字幕:")
         for path in subtitles:
-            print(f"  {path}")
+            _print_safe(f"  {path}")
     if others:
-        print("其他:")
+        _print_safe("其他:")
         for path in others:
-            print(f"  {path}")
+            _print_safe(f"  {path}")
     if status == "awaiting_input":
         try:
             plan = build_recovery_plan(job_file) if job_file is not None else None
         except (XvtError, OSError, RuntimeError, ValueError):
             plan = None
         if plan is not None:
-            print(f"恢复建议：{plan.reason}")
+            _print_safe(f"恢复建议：{plan.reason}")
             for path in plan.report_paths:
-                print(f"报告: {path}")
+                _print_safe(f"报告: {path}")
             for path in plan.input_paths:
-                print(f"待编辑: {path}")
+                _print_safe(f"待编辑: {path}")
             for command in plan.prerequisite_commands:
-                print(f"  {command}")
+                _print_safe(f"  {command}")
             if plan.primary_command:
-                print(f"  {plan.primary_command}")
+                _print_safe(f"  {plan.primary_command}")
             for command in plan.alternative_commands:
-                print(f"  或：{command}")
+                _print_safe(f"  或：{command}")
         elif message:
-            print(f"translation is awaiting input: {message}")
+            _print_safe(f"translation is awaiting input: {message}")
 
 
 def _cmd_inspect(arguments: argparse.Namespace) -> int:
@@ -1230,7 +1252,8 @@ def _cmd_inspect(arguments: argparse.Namespace) -> int:
     if arguments.json:
         _print_json(result)
     else:
-        print(f"{result['kind']}: {result.get('title') or result.get('path')}")
+        # title 可能来自 yt-dlp 的远端元数据，控制字符由远端可控。
+        _print_safe(f"{result['kind']}: {result.get('title') or result.get('path')}")
     return 0
 
 
@@ -1240,7 +1263,8 @@ def _cmd_doctor(arguments: argparse.Namespace) -> int:
         _print_json(report)
     else:
         for check in report["checks"]:
-            print(f"{check['status'].upper():4} {check['name']}: {check['message']}")
+            # message 里嵌着 --output 路径与 shutil.which 命中的可执行文件路径，外部可控。
+            _print_safe(f"{check['status'].upper():4} {check['name']}: {check['message']}")
         print(f"overall: {report['status']}")
     return ExitCode.OK if report["status"] == "pass" else ExitCode.DEPENDENCY_ERROR
 
@@ -1368,22 +1392,22 @@ def _cmd_status(arguments: argparse.Namespace) -> int:
             for name, record in job.stages.items()
         )
         print(f"{job.id}: {stages}")
-        print(f"recovery: {plan.category} - {plan.reason}")
+        _print_safe(f"recovery: {plan.category} - {plan.reason}")
         if plan.advance_steps:
-            print(f"steps: {', '.join(plan.advance_steps)}")
+            _print_safe(f"steps: {', '.join(plan.advance_steps)}")
         for path in plan.report_paths:
-            print(f"report: {path}")
+            _print_safe(f"report: {path}")
         for path in plan.input_paths:
-            print(f"input: {path}")
+            _print_safe(f"input: {path}")
         for command in plan.prerequisite_commands:
-            print(f"before: {command}")
+            _print_safe(f"before: {command}")
         if plan.primary_command:
-            print(f"next: {plan.primary_command}")
+            _print_safe(f"next: {plan.primary_command}")
         elif plan.category in {"manual_fix", "awaiting_input"}:
             # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
-            print(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
+            _print_safe(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
         for command in plan.alternative_commands:
-            print(f"alternative: {command}")
+            _print_safe(f"alternative: {command}")
     return 0
 
 
@@ -1393,7 +1417,8 @@ def _cmd_verify(arguments: argparse.Namespace) -> int:
         _print_json(report)
     else:
         for artifact in report["artifacts"]:
-            print(f"{artifact['status'].upper():4} {artifact['kind']}: {artifact['message']}")
+            # message 会带上产物路径与校验失败原因，路径由 --output/CLI 参数决定。
+            _print_safe(f"{artifact['status'].upper():4} {artifact['kind']}: {artifact['message']}")
         print(f"overall: {report['status']}")
     return ExitCode.OK if report["status"] == "pass" else ExitCode.VERIFY_FAILED
 
@@ -1412,7 +1437,7 @@ def _cmd_relink_burned_output(arguments: argparse.Namespace) -> int:
             artifacts=[str(path)],
         )
     else:
-        print(f"已重新关联烧录成品: {path}")
+        _print_safe(f"已重新关联烧录成品: {path}")
     return 0
 
 
@@ -1448,17 +1473,17 @@ def _cmd_rebuild_source(arguments: argparse.Namespace) -> int:
     if arguments.events_jsonl:
         _complete(arguments, artifacts=[str(path) for path in artifacts])
     else:
-        print(f"已使用 ASR 重建源字幕: {result.source_cues_path}")
-        print(f"源字幕文件: {result.source_srt_path}")
-        print(f"质量报告: {result.qa_path}")
+        _print_safe(f"已使用 ASR 重建源字幕: {result.source_cues_path}")
+        _print_safe(f"源字幕文件: {result.source_srt_path}")
+        _print_safe(f"质量报告: {result.qa_path}")
         job = load_job(arguments.job_file)
         quoted_job_file = shlex.quote(str(Path(arguments.job_file).expanduser().resolve()))
         if get_workflow_config(job) is not None:
-            print(f"继续任务: xvt continue {quoted_job_file}")
+            _print_safe(f"继续任务: xvt continue {quoted_job_file}")
         else:
             target_language = resolve_target_language(job)
             if target_language:
-                print(
+                _print_safe(
                     f"继续翻译: xvt translate {quoted_job_file} "
                     f"--target-language {shlex.quote(target_language)}"
                 )
@@ -1470,11 +1495,11 @@ def _cmd_continue(arguments: argparse.Namespace) -> int:
     if arguments.acknowledge_subtitle_review:
         report_path = acknowledge_subtitle_review(arguments.job_file, event_sink=event_sink)
         if not arguments.events_jsonl:
-            print(f"已确认字幕 QA 复核报告: {report_path}", file=sys.stderr)
+            _print_safe(f"已确认字幕 QA 复核报告: {report_path}", file=sys.stderr)
     if arguments.acknowledge_translation_review:
         report_path = acknowledge_translation_review(arguments.job_file, event_sink=event_sink)
         if not arguments.events_jsonl:
-            print(f"已确认译文语义复核报告: {report_path}", file=sys.stderr)
+            _print_safe(f"已确认译文语义复核报告: {report_path}", file=sys.stderr)
     result = continue_workflow(
         arguments.job_file,
         cookies_from_browser=arguments.cookies_from_browser,
@@ -1639,7 +1664,9 @@ def _cmd_translate(arguments: argparse.Namespace) -> int:
             )
     else:
         if result.fallback_reason:
-            print(f"translation provider unavailable ({result.fallback_reason}); using Agent mode")
+            _print_safe(
+                f"translation provider unavailable ({result.fallback_reason}); using Agent mode"
+            )
         print(f"mode: {result.mode}")
         for path in result.paths:
             print(path)
@@ -1669,7 +1696,9 @@ def _cmd_polish_translation(arguments: argparse.Namespace) -> int:
         )
     else:
         if result.fallback_reason:
-            print(f"translation provider unavailable ({result.fallback_reason}); using Agent mode")
+            _print_safe(
+                f"translation provider unavailable ({result.fallback_reason}); using Agent mode"
+            )
         print(f"mode: {result.mode}")
         for path in result.paths:
             print(path)
@@ -1746,7 +1775,7 @@ def _cmd_prepare_source_review(arguments: argparse.Namespace) -> int:
     else:
         for item in paths:
             print(item)
-        print(
+        _print_safe(
             "next: xvt apply-source-review-fixes "
             f"{shlex.quote(str(arguments.job_file))} {shlex.quote(str(path))}"
         )
@@ -1809,16 +1838,17 @@ def _cmd_resegment_translation(arguments: argparse.Namespace) -> int:
     elif not result.changed:
         print("没有译文 cue 超过硬显示阈值，任务未改动。")
     else:
-        print(f"已重切源字幕: {result.source_cues_path}")
-        print(f"审计报告: {result.report_path}")
+        _print_safe(f"已重切源字幕: {result.source_cues_path}")
+        _print_safe(f"审计报告: {result.report_path}")
         job = load_job(arguments.job_file)
+        quoted_job_file = shlex.quote(str(arguments.job_file))
         if get_workflow_config(job) is not None:
-            print(f'继续重翻译: xvt continue "{arguments.job_file}"')
+            _print_safe(f"继续重翻译: xvt continue {quoted_job_file}")
         else:
             target_language = resolve_target_language(job)
             if target_language:
-                print(
-                    f'重新翻译: xvt translate "{arguments.job_file}" '
+                _print_safe(
+                    f"重新翻译: xvt translate {quoted_job_file} "
                     f"--target-language {shlex.quote(target_language)}"
                 )
     return 0
@@ -1851,16 +1881,16 @@ def _cmd_retranslate_cues(arguments: argparse.Namespace) -> int:
         if result.mode == "agent":
             cues = " ".join(f"--cue {cue_id}" for cue_id in arguments.cue_ids)
             print("完成 Agent 翻译后执行：")
-            print(
+            _print_safe(
                 "xvt apply-cue-retranslation "
-                f'"{arguments.job_file}" RESPONSE {cues} '
+                f"{shlex.quote(str(arguments.job_file))} RESPONSE {cues} "
                 f"--target-language {shlex.quote(arguments.target_language)}"
             )
         else:
             job = load_job(arguments.job_file)
             workflow = get_workflow_config(job)
             if workflow is not None and workflow.burn:
-                print(f'继续烧录: xvt continue "{arguments.job_file}"')
+                _print_safe(f"继续烧录: xvt continue {shlex.quote(str(arguments.job_file))}")
     return 0
 
 
@@ -1884,7 +1914,7 @@ def _cmd_apply_cue_retranslation(arguments: argparse.Namespace) -> int:
         if waiting:
             _print_recovery_navigation(arguments.job_file)
         elif (workflow := get_workflow_config(job)) is not None and workflow.burn:
-            print(f'继续烧录: xvt continue "{arguments.job_file}"')
+            _print_safe(f"继续烧录: xvt continue {shlex.quote(str(arguments.job_file))}")
     return 0
 
 
@@ -2002,9 +2032,17 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         # OSError/JSONDecodeError 被顶层归到 dependency_or_process。
         try:
             response_data = json.loads(response_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            # UnicodeDecodeError 是 ValueError 子类但不是 JSONDecodeError 子类：漏掉它，
+            # 非 UTF-8 响应会逃逸成裸 codec 报错，分类也和 stage_failed 对不上。
+            hint = (
+                "convert it to UTF-8 first (for example "
+                "iconv -f gb18030 -t utf-8 old.json > new.json); "
+                if isinstance(error, UnicodeError)
+                else ""
+            )
             raise UserInputError(
-                f"cannot read response file: {error}; "
+                f"cannot read response file: {error}; {hint}"
                 "xvt apply only accepts a JSON response file — "
                 "for subtitle files (SRT etc.) use xvt import-translation"
             ) from error
@@ -2233,14 +2271,17 @@ def _execute(parsed: argparse.Namespace) -> int:
             ),
             **({"recovery_plan": recovery_plan.to_dict()} if recovery_plan else {}),
         )
-        if getattr(parsed, "events_jsonl", False):
-            sink(interruption_event)
-            print("error: interrupted by user", file=sys.stderr)
-        elif isinstance(sink, _HumanEventSink):
-            if parsed.command == "preview":
-                sink.report_preview_interruption()
-            else:
-                sink.report_interruption(recovery_plan)
+        # Job / batch 中断状态已经尽力落盘；终端或 JSONL 管道关闭不能用新的 I/O
+        # 异常覆盖原取消语义。只抑制普通 Exception，不吞二次 Ctrl-C 等控制流。
+        with suppress(Exception):
+            if getattr(parsed, "events_jsonl", False):
+                sink(interruption_event)
+                print("error: interrupted by user", file=sys.stderr)
+            elif isinstance(sink, _HumanEventSink):
+                if parsed.command == "preview":
+                    sink.report_preview_interruption()
+                else:
+                    sink.report_interruption(recovery_plan)
         return ExitCode.TERMINATED if received_signal() == signal.SIGTERM else ExitCode.INTERRUPTED
     except (XvtError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, XvtError):
@@ -2269,12 +2310,12 @@ def _execute(parsed: argparse.Namespace) -> int:
         safe_message = str(failure_event.data["error"]["message"])
         if getattr(parsed, "events_jsonl", False):
             _event_sink(parsed)(failure_event)
-            print(f"error: {safe_message}", file=sys.stderr)
+            _print_safe(f"error: {safe_message}", file=sys.stderr)
         else:
             if isinstance(sink, _HumanEventSink):
                 sink.report_failure(safe_message, recovery_plan)
             else:
-                print(f"error: {safe_message}", file=sys.stderr)
+                _print_safe(f"error: {safe_message}", file=sys.stderr)
         return return_code
 
 
