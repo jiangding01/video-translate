@@ -748,6 +748,20 @@ uv run --no-sync xvt apply "/path/to/job.json" "/path/to/translation-review-<fp1
 uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-review
 ```
 
+`review/translation-review-<fp12>.json` 的字段如下。**回填只读取 `items[].id` 与 `items[].text`**，其余字段都是帮你判断「哪条必改、要缩到多少、原文是什么」的只读标注，改了不会生效，也不影响 fingerprint 校验；顶层的 `task` / `revision_fingerprint` / `scope` 必须原样保留：
+
+| 字段 | 说明 |
+| --- | --- |
+| `task` / `scope` / `revision_fingerprint` / `report` / `qa_report` | 模板身份与来源报告路径；`revision_fingerprint` 绑定当前候选与报告，内容变化后旧模板失效 |
+| `issues` / `qa_issues` | 本次触发修订的语义问题与候选译文 QA 阻断项全集（只读） |
+| `items[].id` | cue ID，回填时必须完整保留模板的 ID 集合，且顺序为 ID 升序 |
+| `items[].source_text` | 该 cue 的源文（只读标注） |
+| `items[].must_fix` | 该 cue 是否被候选译文 QA 阻断；`true` 表示必须改到 QA 通过才能继续（只读标注） |
+| `items[].qa` | 该 cue 的阻断项列表，每项含 `code`、`message`；行宽超限时额外给出 `display_width` 与 `limit`，即「当前显示宽度 / 允许上限」（只读标注） |
+| `items[].text` | 当前译文，**唯一会被回填读取的可编辑字段** |
+
+同名的 `.srt` 通道只含 `#<cue id>` 注释行与译文正文，不带任何标注——那些注释行是解析锚点，不能改动。需要看标注时对照 JSON 模板即可，两条通道等价。
+
 确认绑定当前候选、完整语义处理 artifact 链和报告 checksum；内容变化后自动失效。初次报告包含可修复问题时不能提前确认，修复完成后仍会保留未改动源文对应的 `source_suspect`。确定性 QA 失败仍会阻断渲染与烧录。Q5a 的显式补跑仍只支持带工作流配置的端到端 Job；原子 `translate --translation-quality polished` 通过重跑同一命令恢复 API draft、润色和语义校对 checkpoint。
 
 `translation-draft-cues.json` 是恢复润色的必要检查点。它缺失或 checksum 失效时，`status` 会要求人工恢复原始译文草稿，不会把已润色的最终译文再次复制为 draft。

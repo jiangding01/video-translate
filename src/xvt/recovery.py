@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shlex
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -11,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from xvt.candidate_qa import translation_candidate_qa_issues
+from xvt.candidate_qa import overflow_limits, translation_candidate_qa_issues
 from xvt.checksums import file_checksum as _hash_file
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -267,9 +266,6 @@ _QA_BLOCKER_TAIL = "这类问题不能通过语义确认绕过，也不会触发
 _QA_BLOCKER_FALLBACK_REASON = (
     "候选译文的确定性 QA 仍有可修复问题；请修改译文模板后继续。" + _QA_BLOCKER_TAIL
 )
-# 宽度与上限只出现在 qa 的 message 里（见 ``qa._overflow_risk``）；
-# 提取不到就退回只列 cue id，绝不猜数字。
-_QA_LINE_WIDTH_PATTERN = re.compile(r"line width (\d+) exceeds (\d+)")
 
 
 def _candidate_qa_blocker_reason(issues: tuple[dict[str, Any], ...]) -> str:
@@ -281,9 +277,10 @@ def _candidate_qa_blocker_reason(issues: tuple[dict[str, Any], ...]) -> str:
         cue_id = issue.get("cue_id")
         item = str(cue_id)
         if code == _QA_BLOCKER_OVERFLOW_CODE:
-            match = _QA_LINE_WIDTH_PATTERN.search(str(issue.get("message", "")))
-            if match is not None:
-                item = f"{cue_id}（{match.group(1)}/{match.group(2)}）"
+            # 宽度与上限只出现在 message 里；提取不到就退回只列 cue id，绝不猜数字。
+            limits = overflow_limits(str(issue.get("message", "")))
+            if limits is not None:
+                item = f"{cue_id}（{limits[0]}/{limits[1]}）"
         entries = grouped.setdefault(code, [])
         if item not in entries:
             entries.append(item)
