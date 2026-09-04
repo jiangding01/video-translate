@@ -633,10 +633,15 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 ),
             )
             self.assertIn("apply-source-review-fixes", recovery.primary_command or "")
-            self.assertIn(
-                "apply-translation-review-fixes",
-                " ".join(recovery.alternative_commands),
+            # 这里的 job 已经去掉了 workflow 目标：原子 Job 用不了 `apply --continue`，
+            # 推荐命令必须退回两步式的 apply-translation-review-fixes。
+            translation_alternative = next(
+                command
+                for command in recovery.alternative_commands
+                if "apply-translation-review-fixes" in command
             )
+            self.assertNotIn("--continue", translation_alternative)
+            self.assertIn(str(template), translation_alternative)
             self.assertIn(
                 "acknowledge-translation-review",
                 " ".join(recovery.alternative_commands),

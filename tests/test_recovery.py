@@ -10,6 +10,7 @@ from xvt.job_store import create_job, load_job, save_job
 from xvt.models import Artifact, StageName, StageStatus
 from xvt.pipeline import retranslate_cues
 from xvt.recovery import (
+    _candidate_qa_blocker_reason,
     _semantic_review_options,
     atomic_translated_qa_rebuild_command,
     build_recovery_plan,
@@ -1165,6 +1166,127 @@ class CueRetranslationRecoveryTest(unittest.TestCase):
             command = plan.prerequisite_commands[0]
             self.assertIn("--cue ID [--cue ID ...]", command)
             self.assertIn("--target-language LANG", command)
+
+
+class CandidateQaBlockerReasonTest(unittest.TestCase):
+    """候选译文 QA 的等待原因必须点名 cue，并在 message 异常时安全降级。"""
+
+    @staticmethod
+    def _issue(code: str, cue_id: int, message: str) -> dict[str, object]:
+        return {"code": code, "severity": "review", "cue_id": cue_id, "message": message}
+
+    def test_overflow_issues_name_the_cues_with_width_and_limit(self) -> None:
+        reason = _candidate_qa_blocker_reason(
+            (
+                self._issue(
+                    "bilingual_overflow_risk", 22, "target line width 41 exceeds 36 display units"
+                ),
+                self._issue(
+                    "bilingual_overflow_risk", 33, "target line width 37 exceeds 36 display units"
+                ),
+            )
+        )
+
+        self.assertEqual(
+            reason,
+            "候选译文有 2 条 cue 行宽超限：22（41/36）、33（37/36）；请缩短这些译文后继续。"
+            "这类问题不能通过语义确认绕过，也不会触发重新翻译或润色。",
+        )
+
+    def test_non_overflow_blockers_are_grouped_by_code(self) -> None:
+        reason = _candidate_qa_blocker_reason(
+            (
+                self._issue(
+                    "bilingual_overflow_risk", 22, "target line width 41 exceeds 36 display units"
+                ),
+                self._issue("missing_translation", 5, "missing translation"),
+                self._issue("missing_translation", 9, "missing translation"),
+                self._issue("glossary_violation", 12, "glossary term not used"),
+            )
+        )
+
+        self.assertIn("候选译文有 1 条 cue 行宽超限：22（41/36）；请缩短这些译文后继续。", reason)
+        self.assertIn("另有 2 条 cue 缺少译文：5、9。", reason)
+        self.assertIn("另有 1 条 cue 违反术语表：12。", reason)
+
+    def test_blockers_without_overflow_lead_with_the_template_edit_action(self) -> None:
+        reason = _candidate_qa_blocker_reason(
+            (self._issue("missing_translation", 5, "missing translation"),)
+        )
+
+        self.assertTrue(
+            reason.startswith("候选译文有 1 条 cue 缺少译文：5；请修改译文模板后继续。")
+        )
+
+    def test_unparsable_width_message_degrades_to_the_cue_id_only(self) -> None:
+        reason = _candidate_qa_blocker_reason(
+            (self._issue("bilingual_overflow_risk", 7, "target line is too wide"),)
+        )
+
+        self.assertIn("候选译文有 1 条 cue 行宽超限：7；请缩短这些译文后继续。", reason)
+        self.assertNotIn("（", reason.split("；")[0])
+
+    def test_empty_issue_set_keeps_the_generic_reason(self) -> None:
+        reason = _candidate_qa_blocker_reason(())
+
+        self.assertEqual(
+            reason,
+            "候选译文的确定性 QA 仍有可修复问题；请修改译文模板后继续。"
+            "这类问题不能通过语义确认绕过，也不会触发重新翻译或润色。",
+        )
+
+
+class SemanticReviewContinueCommandTest(unittest.TestCase):
+    """`xvt apply ... --continue` 只能推荐给持久化了 workflow 目标的 Job。"""
+
+    def _primary_command(self, *, workflow: bool) -> str:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/source.srt", root, {"input_kind": "subtitle"})
+            job.config["translation_quality"] = "polished"
+            if workflow:
+                job.config["workflow"] = {"target_language": "zh-CN", "burn": False}
+            candidate = root / "translation-polished-cues.json"
+            candidate.write_text("[]", encoding="utf-8")
+            job.artifacts.append(
+                Artifact("translation_polished_cues", str(candidate), file_checksum(candidate))
+            )
+            review_input = root / "translation-review.json"
+            review_input.write_text("{}", encoding="utf-8")
+            issues = (
+                {
+                    "code": "missing_translation",
+                    "severity": "review",
+                    "cue_id": 5,
+                    "message": "missing translation",
+                },
+            )
+            with (
+                patch(
+                    "xvt.pipeline.revision.translation_review_input_path",
+                    return_value=review_input,
+                ),
+                patch("xvt.pipeline.revision.source_suspect_cue_ids", return_value=()),
+                patch("xvt.recovery.translation_candidate_qa_issues", return_value=issues),
+            ):
+                _reason, primary, _alternatives, _inputs = _semantic_review_options(
+                    job,
+                    root / "job.json",
+                    acknowledgment_command="xvt acknowledge-translation-review JOB",
+                )
+        return primary
+
+    def test_atomic_job_keeps_the_two_step_apply_translation_review_fixes(self) -> None:
+        primary = self._primary_command(workflow=False)
+
+        self.assertIn("apply-translation-review-fixes", primary)
+        self.assertNotIn("--continue", primary)
+
+    def test_workflow_job_recommends_apply_with_continue(self) -> None:
+        primary = self._primary_command(workflow=True)
+
+        self.assertIn("--continue", primary)
+        self.assertNotIn("apply-translation-review-fixes", primary)
 
 
 class QaBlockedAgentWaitRecoveryTest(unittest.TestCase):

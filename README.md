@@ -741,10 +741,9 @@ uv run --no-sync xvt continue "/path/to/job.json"
 润色响应必须回传当前 `translation-polish-batches.json` 的 `fingerprint`、精确覆盖全部请求 ID，并且只能替换译文文本；旧响应不能用于新的 draft。`continue` 随后进入语义校对。如果语义报告仍有问题，`status` 会优先给出可编辑模板与回填命令：
 
 ```bash
-uv run --no-sync xvt apply-translation-review-fixes "/path/to/job.json" "/path/to/review.json"
+uv run --no-sync xvt apply "/path/to/job.json" "/path/to/review.json" --continue
 # 或用字幕工具编辑 review/ 下同名的 .srt 后回填（两条通道等价）：
-uv run --no-sync xvt apply-translation-review-fixes "/path/to/job.json" "/path/to/translation-review-<fp12>.srt"
-uv run --no-sync xvt continue "/path/to/job.json"
+uv run --no-sync xvt apply "/path/to/job.json" "/path/to/translation-review-<fp12>.srt" --continue
 # 或在确认当前问题可接受时：
 uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-review
 ```

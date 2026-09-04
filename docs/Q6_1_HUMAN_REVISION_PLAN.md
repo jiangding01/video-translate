@@ -63,7 +63,7 @@ polished 候选还必须具备 checksum 有效且绑定当前候选 checksum 的
 
 应用修订会失效旧语义报告/修复/确认、旧字幕 QA 确认以及译文渲染和烧录下游。每轮接受结果写入 fingerprint 区分的独立文件，并在一次 Job 原子保存中同时切换修订记录和候选登记；保存失败时上一轮 checksum 有效的证据链保持可恢复。复查报告与修订候选 checksum 有效时可恢复；API 与 Agent 都只做 review-only。Job schema 和 `StageName` 不升级，继续用 `translate` stage 的 `semantic_review` phase。
 
-`RecoveryPlan` 新增可选 `input_paths` 和 `alternative_commands`。等待人工语义处理时，首选命令是 `apply-translation-review-fixes`，直接确认保留为备选。旧等待 Job 没有模板时，`continue` 会补生成模板；`status` 始终只读。
+`RecoveryPlan` 新增可选 `input_paths` 和 `alternative_commands`。等待人工语义处理时的首选命令按 Job 是否持久化了端到端 workflow 目标区分：有 workflow 配置的端到端 Job 首选 `xvt apply JOB REVIEW.json --continue`；无 workflow 配置的原子 Job 首选 `apply-translation-review-fixes`；不需要回填模板时首选 `continue`。直接确认保留为备选。旧等待 Job 没有模板时，`continue` 会补生成模板；`status` 始终只读。
 
 ## 事件
 

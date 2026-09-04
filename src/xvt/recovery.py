@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -252,6 +253,66 @@ def _cue_retranslation_waiting_plan(
     )
 
 
+_QA_BLOCKER_OVERFLOW_CODE = "bilingual_overflow_risk"
+_QA_BLOCKER_LABELS = {
+    "missing_translation": "缺少译文",
+    "glossary_violation": "违反术语表",
+}
+_QA_BLOCKER_CODE_ORDER = (
+    _QA_BLOCKER_OVERFLOW_CODE,
+    "missing_translation",
+    "glossary_violation",
+)
+_QA_BLOCKER_TAIL = "这类问题不能通过语义确认绕过，也不会触发重新翻译或润色。"
+_QA_BLOCKER_FALLBACK_REASON = (
+    "候选译文的确定性 QA 仍有可修复问题；请修改译文模板后继续。" + _QA_BLOCKER_TAIL
+)
+# 宽度与上限只出现在 qa 的 message 里（见 ``qa._overflow_risk``）；
+# 提取不到就退回只列 cue id，绝不猜数字。
+_QA_LINE_WIDTH_PATTERN = re.compile(r"line width (\d+) exceeds (\d+)")
+
+
+def _candidate_qa_blocker_reason(issues: tuple[dict[str, Any], ...]) -> str:
+    """把候选译文 QA 的阻断项渲染成点名 cue 的等待原因；严格只读，不碰文件。"""
+
+    grouped: dict[str, list[str]] = {}
+    for issue in issues:
+        code = str(issue.get("code"))
+        cue_id = issue.get("cue_id")
+        item = str(cue_id)
+        if code == _QA_BLOCKER_OVERFLOW_CODE:
+            match = _QA_LINE_WIDTH_PATTERN.search(str(issue.get("message", "")))
+            if match is not None:
+                item = f"{cue_id}（{match.group(1)}/{match.group(2)}）"
+        entries = grouped.setdefault(code, [])
+        if item not in entries:
+            entries.append(item)
+
+    codes = [code for code in _QA_BLOCKER_CODE_ORDER if code in grouped]
+    codes.extend(sorted(code for code in grouped if code not in _QA_BLOCKER_CODE_ORDER))
+    clauses = []
+    for code in codes:
+        entries = grouped[code]
+        if code == _QA_BLOCKER_OVERFLOW_CODE:
+            label = "行宽超限"
+        elif code in _QA_BLOCKER_LABELS:
+            label = _QA_BLOCKER_LABELS[code]
+        else:
+            label = f"未通过 {code} 检查"
+        clauses.append((code, f"{len(entries)} 条 cue {label}：{'、'.join(entries)}"))
+    if not clauses:
+        return _QA_BLOCKER_FALLBACK_REASON
+
+    head_code, head_clause = clauses[0]
+    action = (
+        "请缩短这些译文后继续" if head_code == _QA_BLOCKER_OVERFLOW_CODE else "请修改译文模板后继续"
+    )
+    parts = [f"候选译文有 {head_clause}；{action}。"]
+    parts.extend(f"另有 {clause}。" for _, clause in clauses[1:])
+    parts.append(_QA_BLOCKER_TAIL)
+    return "".join(parts)
+
+
 def _semantic_review_options(
     job: Job,
     job_file: Path,
@@ -266,15 +327,26 @@ def _semantic_review_options(
     )
 
     translation_input = translation_review_input_path(job)
-    translation_command = (
-        _job_command(
+    # `xvt apply ... --continue` 只在 Job 持久化了端到端 workflow 目标时可用
+    # （见 cli.py 的 `--continue requires a persisted end-to-end workflow goal`）。
+    # 判定放在函数内部而不是让调用方传旗标：与 CLI 校验读同一个事实来源，
+    # 新增调用点也不会因为漏传参数而推荐一条必然失败的命令。
+    allow_continue = get_workflow_config(job) is not None
+    if translation_input is None:
+        translation_command = _job_command("continue", job_file)
+    elif allow_continue:
+        translation_command = _job_command(
+            "apply",
+            job_file,
+            shlex.quote(str(translation_input)),
+            "--continue",
+        )
+    else:
+        translation_command = _job_command(
             "apply-translation-review-fixes",
             job_file,
             shlex.quote(str(translation_input)),
         )
-        if translation_input is not None
-        else _job_command("continue", job_file)
-    )
     source_ids = source_suspect_cue_ids(job)
     source_supported = source_review_supported(job)
     source_input = (
@@ -320,8 +392,7 @@ def _semantic_review_options(
                 ),
             )
         return (
-            "候选译文的确定性 QA 仍有可修复问题；请修改译文模板后继续。"
-            "这类问题不能通过语义确认绕过，也不会触发重新翻译或润色。",
+            _candidate_qa_blocker_reason(qa_issues),
             translation_command,
             alternatives,
             input_paths,
