@@ -13,14 +13,17 @@ from unittest.mock import patch
 from xvt import cancellation
 from xvt.batch import BatchResult
 from xvt.cli import (
+    _EN_RECOVERY_LABELS,
     _SOURCE_REVIEW_SRT_NAME,
     _STEP_ROUTES,
     _TASK_ROUTES,
     _TRANSLATION_REVIEW_SRT_NAME,
     _UNROUTABLE_AWAIT_STEPS,
+    _ZH_RECOVERY_LABELS,
     _HumanEventSink,
     _print_batch_result,
     _print_workflow_result,
+    _recovery_lines,
     _terminal_safe,
     main,
 )
@@ -1783,9 +1786,210 @@ class CliTest(unittest.TestCase):
         self.assertEqual(return_code, 0)
         text = output.getvalue()
         self.assertIn("恢复建议：等待 Agent 语义校对", text)
-        self.assertIn("报告: /tmp/report.json", text)
+        # 等待终态是 verbose=False：报告路径留给 status / 失败路径，这里不再平铺。
+        self.assertNotIn("报告: /tmp/report.json", text)
         self.assertIn("待编辑: /tmp/review.json", text)
         self.assertIn("xvt continue /tmp/job.json", text)
+
+    def _run_awaiting(
+        self,
+        plan: SimpleNamespace,
+        *,
+        waiting_reason: str | None = None,
+    ) -> str:
+        output = StringIO()
+        error_output = StringIO()
+        result = WorkflowResult("awaiting_input", Path("/tmp/job.json"), (), "needs agent")
+
+        def run_waiting(_options, *, event_sink):
+            if waiting_reason is not None:
+                event_sink(create_event(EventType.WORKFLOW_WAITING, reason=waiting_reason))
+            return result
+
+        with (
+            patch("xvt.cli.run_workflow", side_effect=run_waiting),
+            patch("xvt.cli.build_recovery_plan", return_value=plan),
+            redirect_stdout(output),
+            redirect_stderr(error_output),
+        ):
+            return_code = main(["run", "/tmp/input.mp4", "--output", "/tmp/output"])
+
+        self.assertEqual(return_code, 0)
+        self._stderr_of_last_run = error_output.getvalue()
+        return output.getvalue()
+
+    @staticmethod
+    def _awaiting_plan(**overrides: object) -> SimpleNamespace:
+        fields: dict[str, object] = {
+            "reason": "等待 Agent 语义校对",
+            "report_paths": (),
+            "input_paths": (),
+            "prerequisite_commands": (),
+            "primary_command": "xvt continue /tmp/job.json",
+            "alternative_commands": (),
+        }
+        fields.update(overrides)
+        return SimpleNamespace(**fields)
+
+    def test_awaiting_result_skips_reason_already_printed_by_waiting_event(self) -> None:
+        text = self._run_awaiting(self._awaiting_plan(), waiting_reason="等待 Agent 语义校对")
+
+        self.assertIn("[等待] 翻译需要输入：等待 Agent 语义校对", self._stderr_of_last_run)
+        self.assertNotIn("恢复建议：", text)
+        self.assertIn("xvt continue /tmp/job.json", text)
+
+    def test_awaiting_result_prints_reason_when_it_differs_from_waiting_event(self) -> None:
+        text = self._run_awaiting(self._awaiting_plan(), waiting_reason="另一个原因")
+
+        self.assertIn("恢复建议：等待 Agent 语义校对", text)
+
+    def test_awaiting_result_prints_reason_without_any_waiting_event(self) -> None:
+        text = self._run_awaiting(self._awaiting_plan())
+
+        self.assertIn("恢复建议：等待 Agent 语义校对", text)
+
+    def test_awaiting_input_paths_fold_same_stem_srt_into_the_json_line(self) -> None:
+        text = self._run_awaiting(
+            self._awaiting_plan(
+                input_paths=("/tmp/review.json", "/tmp/review.srt"),
+            )
+        )
+
+        self.assertIn("待编辑: /tmp/review.json（同名 .srt 亦可）", text)
+        self.assertNotIn("待编辑: /tmp/review.srt", text)
+
+    def test_awaiting_input_paths_omit_the_srt_note_when_no_srt_exists(self) -> None:
+        text = self._run_awaiting(self._awaiting_plan(input_paths=("/tmp/review.json",)))
+
+        self.assertIn("待编辑: /tmp/review.json\n", text)
+        self.assertNotIn("同名 .srt 亦可", text)
+
+    def test_recovery_lines_render_both_dialects_and_honour_verbose(self) -> None:
+        plan = SimpleNamespace(
+            reason="r",
+            report_paths=("/tmp/report.json",),
+            input_paths=("/tmp/review.json", "/tmp/review.srt"),
+            prerequisite_commands=("xvt apply J R",),
+            primary_command="xvt continue J",
+            alternative_commands=("xvt apply-semantic-review J R",),
+        )
+        cases = (
+            (
+                _ZH_RECOVERY_LABELS,
+                False,
+                [
+                    "待编辑: /tmp/review.json（同名 .srt 亦可）",
+                    "  xvt apply J R",
+                    "  xvt continue J",
+                    "  或：xvt apply-semantic-review J R",
+                ],
+            ),
+            (
+                _ZH_RECOVERY_LABELS,
+                True,
+                [
+                    "报告: /tmp/report.json",
+                    "待编辑: /tmp/review.json（同名 .srt 亦可）",
+                    "  xvt apply J R",
+                    "  xvt continue J",
+                    "  或：xvt apply-semantic-review J R",
+                ],
+            ),
+            (
+                _EN_RECOVERY_LABELS,
+                False,
+                [
+                    "input: /tmp/review.json (same-name .srt also accepted)",
+                    "before: xvt apply J R",
+                    "next: xvt continue J",
+                    "alternative: xvt apply-semantic-review J R",
+                ],
+            ),
+            (
+                _EN_RECOVERY_LABELS,
+                True,
+                [
+                    "report: /tmp/report.json",
+                    "input: /tmp/review.json (same-name .srt also accepted)",
+                    "before: xvt apply J R",
+                    "next: xvt continue J",
+                    "alternative: xvt apply-semantic-review J R",
+                ],
+            ),
+        )
+        for labels, verbose, expected in cases:
+            with self.subTest(dialect=labels["input"], verbose=verbose):
+                self.assertEqual(_recovery_lines(plan, labels=labels, verbose=verbose), expected)
+
+    def test_apply_star_with_continue_points_at_the_unified_entry(self) -> None:
+        error_output = StringIO()
+        with redirect_stderr(error_output), self.assertRaises(SystemExit) as raised:
+            main(["apply-translation-review-fixes", "/tmp/job.json", "/tmp/r.json", "--continue"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "--continue is only supported by the unified entry: "
+            "xvt apply JOB_FILE RESPONSE_FILE --continue",
+            error_output.getvalue(),
+        )
+
+    def test_apply_source_review_fixes_with_continue_explains_the_invalidation(self) -> None:
+        error_output = StringIO()
+        with redirect_stderr(error_output), self.assertRaises(SystemExit) as raised:
+            main(["apply-source-review-fixes", "/tmp/job.json", "/tmp/r.json", "--continue"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "apply-source-review-fixes does not support --continue", error_output.getvalue()
+        )
+        self.assertIn("run xvt continue after the fixes", error_output.getvalue())
+
+    def test_failure_path_keeps_report_paths(self) -> None:
+        error_output = StringIO()
+        sink = _HumanEventSink("/tmp/job.json", stream=error_output)
+        plan = self._awaiting_plan(report_paths=("/tmp/report.json",))
+
+        sink.report_failure("boom", plan)
+
+        rendered = error_output.getvalue()
+        self.assertIn("报告: /tmp/report.json", rendered)
+        self.assertIn('xvt status "/tmp/job.json"', rendered)
+
+    def test_status_keeps_report_paths(self) -> None:
+        output = StringIO()
+        plan = SimpleNamespace(
+            category="awaiting_input",
+            reason="等待回填",
+            advance_steps=("translate",),
+            report_paths=("/tmp/report.json",),
+            input_paths=("/tmp/review.json",),
+            prerequisite_commands=(),
+            primary_command="xvt continue /tmp/job.json",
+            alternative_commands=(),
+            to_dict=dict,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/input.mp4", directory)
+            job_file = save_job(job)
+            with (
+                patch("xvt.cli.build_recovery_plan", return_value=plan),
+                redirect_stdout(output),
+            ):
+                return_code = main(["status", str(job_file)])
+
+        self.assertEqual(return_code, 0)
+        rendered = output.getvalue()
+        self.assertIn("report: /tmp/report.json", rendered)
+        self.assertIn("input: /tmp/review.json", rendered)
+        self.assertIn("next: xvt continue /tmp/job.json", rendered)
+
+    def test_unrelated_unknown_arguments_keep_the_native_argparse_error(self) -> None:
+        error_output = StringIO()
+        with redirect_stderr(error_output), self.assertRaises(SystemExit) as raised:
+            main(["status", "/tmp/job.json", "--bogus"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("unrecognized arguments: --bogus", error_output.getvalue())
 
     def test_status_displays_needs_review_instead_of_failed(self) -> None:
         output = StringIO()
