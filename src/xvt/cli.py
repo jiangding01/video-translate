@@ -762,18 +762,20 @@ def _recovery_lines(
     由各调用点自己打印：等待终态要去重，`status` 还要额外拼 `category`。
 
     `input_paths` 里 json 与同名 srt 是同一个修订通道的两副载体，全平铺只会让用户以为
-    有两份要改。这里只列 json 那一行，同名 srt 存在时在行尾补一句说明。
+    有两份要改。成对出现时只列 json 那一行、行尾补一句说明；没有同名 json 的孤立 srt
+    是它自己的修订入口，照常单独列出，否则会被整行吞掉、用户看不到要改哪个文件。
     """
 
     lines: list[str] = []
     if verbose:
         lines.extend(f"{labels['report']}{path}" for path in plan.report_paths)
-    srt_paths = {path for path in plan.input_paths if Path(path).suffix.lower() == ".srt"}
+    listed = set(plan.input_paths)
     for path in plan.input_paths:
-        if path in srt_paths:
+        suffix = Path(path).suffix.lower()
+        if suffix == ".srt" and str(Path(path).with_suffix(".json")) in listed:
             continue
         line = f"{labels['input']}{path}"
-        if str(Path(path).with_suffix(".srt")) in srt_paths:
+        if suffix == ".json" and str(Path(path).with_suffix(".srt")) in listed:
             line += labels["srt_note"]
         lines.append(line)
     lines.extend(f"{labels['prerequisite']}{command}" for command in plan.prerequisite_commands)
@@ -1228,11 +1230,36 @@ def _print_batch_result(result: BatchResult) -> None:
         _print_safe(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
 
 
+def _is_tty(stream: object) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty):
+        return False
+    try:
+        return bool(isatty())
+    except (OSError, ValueError):
+        return False
+
+
+def _deduplicable_waiting_reason(event_sink: object) -> str | None:
+    """`[等待]` 走 sink 的流（stderr），`恢复建议：` 走 stdout：只有两条都落在同一块
+    终端上时，重复才真的是重复。只重定向 stdout 的调用方（`xvt run > out.txt`）看不到
+    stderr 那一行，此时再省掉 `恢复建议：`，文件里就一句原因都不剩。
+    """
+
+    reason = getattr(event_sink, "last_waiting_reason", None)
+    if not isinstance(reason, str):
+        return None
+    if not (_is_tty(getattr(event_sink, "stream", None)) and _is_tty(sys.stdout)):
+        return None
+    return reason
+
+
 def _print_workflow_result(result: object, *, printed_waiting_reason: str | None = None) -> None:
     """stdout 交付物摘要：Job → 视频 → 字幕 → 其他，避免扁平路径列表难读。
 
-    `printed_waiting_reason` 是事件流里最近一条 `[等待]` 打过的原因原文；等待终态的
-    `恢复建议：` 与它逐字相同时跳过那一行，同一句话不在相邻两行里重复。
+    `printed_waiting_reason` 是事件流里最近一条 `[等待]` 打过、且确认与本函数写向同一块
+    终端的原因原文（见 `_deduplicable_waiting_reason`）；等待终态的 `恢复建议：` 与它
+    逐字相同时跳过那一行，同一句话不在相邻两行里重复。
     """
 
     job_file = getattr(result, "job_file", None)
@@ -1362,7 +1389,7 @@ def _cmd_run(arguments: argparse.Namespace) -> int:
         )
     elif not arguments.events_jsonl:
         _print_workflow_result(
-            result, printed_waiting_reason=getattr(event_sink, "last_waiting_reason", None)
+            result, printed_waiting_reason=_deduplicable_waiting_reason(event_sink)
         )
     return _waiting_exit_code(arguments, result.status)
 
@@ -1553,7 +1580,7 @@ def _cmd_continue(arguments: argparse.Namespace) -> int:
         )
     elif not arguments.events_jsonl:
         _print_workflow_result(
-            result, printed_waiting_reason=getattr(event_sink, "last_waiting_reason", None)
+            result, printed_waiting_reason=_deduplicable_waiting_reason(event_sink)
         )
     return _waiting_exit_code(arguments, result.status)
 
@@ -2006,6 +2033,14 @@ _TASK_ROUTES: dict[str, str] = {
 # 而 xvt apply 的命令行里没有这两个参数，也不能从响应里安全地推出来。
 # 事实口径：只有人类可读模式的 xvt retranslate-cues 会打印现成命令，--events-jsonl 模式不打
 # 印，所以指引只能承诺 manifest 里有拼命令所需的字段，不能承诺「上一条命令已经打印过」。
+# 源文修订后下游产物全部失效，没有可续跑的下一步：唯一的下一步是回头看 status。
+# `_cmd_apply`（apply --continue）与 `main`（apply-source-review-fixes --continue）
+# 共用这一句，两条误用路径不会给出互相矛盾的下一步。
+_SOURCE_REVIEW_CONTINUE_HINT = (
+    "--continue is not supported for source review fixes: source edits invalidate "
+    "translation and downstream artifacts; apply the source review first, then run status"
+)
+
 _RETRANSLATE_CUES_MANUAL_COMMAND = (
     "applying one needs the cue ids and the target language as explicit arguments; run "
     "xvt apply-cue-retranslation JOB RESPONSE --cue ID [--cue ID ...] --target-language LANG "
@@ -2145,10 +2180,7 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         routed.target_language = target_language
     continue_after_apply = bool(getattr(arguments, "continue_after_apply", False))
     if continue_after_apply and route == "apply-source-review-fixes":
-        raise UserInputError(
-            "--continue is not supported for source review fixes: source edits invalidate "
-            "translation and downstream artifacts; apply the source review first, then run status"
-        )
+        raise UserInputError(_SOURCE_REVIEW_CONTINUE_HINT)
     if continue_after_apply:
         continuation_job = job or load_job(arguments.job_file)
         if get_workflow_config(continuation_job) is None:
@@ -2273,12 +2305,20 @@ def _hold_execution_locks(parsed: argparse.Namespace) -> None:
 # `--continue` 只有统一入口 xvt apply 支持；直接挂到 apply-* 上时 argparse 原生只会说
 # 「unrecognized arguments」，用户看不出该往哪走。这里把这一种误用换成具体指引，
 # 其余未知参数保持 argparse 的原文与退出码 2。
+#
+# 指引只能给 `xvt apply` 真的能路由过去的子命令：显式列出而不是按 `apply-` 前缀匹配，
+# 否则 apply-cue-retranslation 这种 `_TASK_ROUTES` / `_STEP_ROUTES` 里根本没有、
+# `_cmd_apply` 会当场拒绝的命令，也会被指到一条走不通的路上。
+_APPLY_CONTINUE_ROUTABLE_COMMANDS = frozenset(
+    {
+        "apply-translation",
+        "apply-polish-translation",
+        "apply-semantic-review",
+        "apply-translation-review-fixes",
+    }
+)
 _APPLY_CONTINUE_HINT = (
     "--continue is only supported by the unified entry: xvt apply JOB_FILE RESPONSE_FILE --continue"
-)
-_SOURCE_REVIEW_CONTINUE_HINT = (
-    "apply-source-review-fixes does not support --continue: "
-    "source edits invalidate downstream artifacts; run xvt continue after the fixes"
 )
 
 
@@ -2288,10 +2328,11 @@ def _report_unrecognized_arguments(
     extras: Sequence[str],
 ) -> None:
     command = getattr(parsed, "command", None)
-    if isinstance(command, str) and command.startswith("apply-") and "--continue" in extras:
+    if isinstance(command, str) and "--continue" in extras:
         if command == "apply-source-review-fixes":
             parser.error(_SOURCE_REVIEW_CONTINUE_HINT)
-        parser.error(_APPLY_CONTINUE_HINT)
+        if command in _APPLY_CONTINUE_ROUTABLE_COMMANDS:
+            parser.error(_APPLY_CONTINUE_HINT)
     parser.error(f"unrecognized arguments: {' '.join(extras)}")
 
 

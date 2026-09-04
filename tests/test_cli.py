@@ -54,6 +54,13 @@ from xvt.workflow import AWAIT_STEPS, WorkflowResult, _record_burn_fingerprint
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
+class _TtyStringIO(StringIO):
+    """假装自己是终端的缓冲区：用来触发「同一块终端才去重」的那条分支。"""
+
+    def isatty(self) -> bool:
+        return True
+
+
 class CliTest(unittest.TestCase):
     def _missing_relinkable_burned_job(self, root: Path) -> Path:
         media = root / "video.mp4"
@@ -1796,9 +1803,12 @@ class CliTest(unittest.TestCase):
         plan: SimpleNamespace,
         *,
         waiting_reason: str | None = None,
+        tty: bool = False,
     ) -> str:
-        output = StringIO()
-        error_output = StringIO()
+        """`tty=True` 让 stdout / stderr 都假装是同一块终端，才会触发去重。"""
+
+        output = _TtyStringIO() if tty else StringIO()
+        error_output = _TtyStringIO() if tty else StringIO()
         result = WorkflowResult("awaiting_input", Path("/tmp/job.json"), (), "needs agent")
 
         def run_waiting(_options, *, event_sink):
@@ -1832,19 +1842,29 @@ class CliTest(unittest.TestCase):
         return SimpleNamespace(**fields)
 
     def test_awaiting_result_skips_reason_already_printed_by_waiting_event(self) -> None:
-        text = self._run_awaiting(self._awaiting_plan(), waiting_reason="等待 Agent 语义校对")
+        text = self._run_awaiting(
+            self._awaiting_plan(), waiting_reason="等待 Agent 语义校对", tty=True
+        )
 
         self.assertIn("[等待] 翻译需要输入：等待 Agent 语义校对", self._stderr_of_last_run)
         self.assertNotIn("恢复建议：", text)
         self.assertIn("xvt continue /tmp/job.json", text)
 
+    def test_awaiting_result_keeps_reason_when_stdout_is_redirected(self) -> None:
+        """只重定向 stdout 时 `[等待]` 留在终端上，文件里必须仍有一句原因。"""
+
+        text = self._run_awaiting(self._awaiting_plan(), waiting_reason="等待 Agent 语义校对")
+
+        self.assertIn("[等待] 翻译需要输入：等待 Agent 语义校对", self._stderr_of_last_run)
+        self.assertIn("恢复建议：等待 Agent 语义校对", text)
+
     def test_awaiting_result_prints_reason_when_it_differs_from_waiting_event(self) -> None:
-        text = self._run_awaiting(self._awaiting_plan(), waiting_reason="另一个原因")
+        text = self._run_awaiting(self._awaiting_plan(), waiting_reason="另一个原因", tty=True)
 
         self.assertIn("恢复建议：等待 Agent 语义校对", text)
 
     def test_awaiting_result_prints_reason_without_any_waiting_event(self) -> None:
-        text = self._run_awaiting(self._awaiting_plan())
+        text = self._run_awaiting(self._awaiting_plan(), tty=True)
 
         self.assertIn("恢复建议：等待 Agent 语义校对", text)
 
@@ -1863,6 +1883,20 @@ class CliTest(unittest.TestCase):
 
         self.assertIn("待编辑: /tmp/review.json\n", text)
         self.assertNotIn("同名 .srt 亦可", text)
+
+    def test_awaiting_input_paths_keep_an_srt_without_a_same_stem_json(self) -> None:
+        """孤立 srt 是它自己的修订入口，不能被 json/srt 折叠规则整行吞掉。"""
+
+        cases = (
+            (("/tmp/source.srt",), "待编辑: /tmp/source.srt"),
+            (("/tmp/review.json", "/tmp/other.srt"), "待编辑: /tmp/other.srt"),
+        )
+        for input_paths, expected in cases:
+            with self.subTest(input_paths=input_paths):
+                text = self._run_awaiting(self._awaiting_plan(input_paths=input_paths))
+
+                self.assertIn(f"{expected}\n", text)
+                self.assertNotIn("同名 .srt 亦可", text)
 
     def test_recovery_lines_render_both_dialects_and_honour_verbose(self) -> None:
         plan = SimpleNamespace(
@@ -1922,16 +1956,49 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(_recovery_lines(plan, labels=labels, verbose=verbose), expected)
 
     def test_apply_star_with_continue_points_at_the_unified_entry(self) -> None:
+        for command in (
+            "apply-translation",
+            "apply-polish-translation",
+            "apply-semantic-review",
+            "apply-translation-review-fixes",
+        ):
+            with self.subTest(command=command):
+                error_output = StringIO()
+                argv = [command, "/tmp/job.json", "/tmp/r.json", "--continue"]
+                if command == "apply-translation":
+                    argv += ["--target-language", "zh"]
+                with redirect_stderr(error_output), self.assertRaises(SystemExit) as raised:
+                    main(argv)
+
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(
+                    "--continue is only supported by the unified entry: "
+                    "xvt apply JOB_FILE RESPONSE_FILE --continue",
+                    error_output.getvalue(),
+                )
+
+    def test_apply_cue_retranslation_with_continue_keeps_the_native_message(self) -> None:
+        """xvt apply 路由不了局部重译，指引会把用户送上一条走不通的路，只能留原生文案。"""
+
         error_output = StringIO()
         with redirect_stderr(error_output), self.assertRaises(SystemExit) as raised:
-            main(["apply-translation-review-fixes", "/tmp/job.json", "/tmp/r.json", "--continue"])
+            main(
+                [
+                    "apply-cue-retranslation",
+                    "/tmp/job.json",
+                    "/tmp/r.json",
+                    "--cue",
+                    "1",
+                    "--target-language",
+                    "zh",
+                    "--continue",
+                ]
+            )
 
         self.assertEqual(raised.exception.code, 2)
-        self.assertIn(
-            "--continue is only supported by the unified entry: "
-            "xvt apply JOB_FILE RESPONSE_FILE --continue",
-            error_output.getvalue(),
-        )
+        rendered = error_output.getvalue()
+        self.assertIn("unrecognized arguments: --continue", rendered)
+        self.assertNotIn("only supported by the unified entry", rendered)
 
     def test_apply_source_review_fixes_with_continue_explains_the_invalidation(self) -> None:
         error_output = StringIO()
@@ -1939,10 +2006,11 @@ class CliTest(unittest.TestCase):
             main(["apply-source-review-fixes", "/tmp/job.json", "/tmp/r.json", "--continue"])
 
         self.assertEqual(raised.exception.code, 2)
+        # 与 _cmd_apply 的拒绝文案逐字相同：两条误用路径给出同一个下一步。
         self.assertIn(
-            "apply-source-review-fixes does not support --continue", error_output.getvalue()
+            "--continue is not supported for source review fixes", error_output.getvalue()
         )
-        self.assertIn("run xvt continue after the fixes", error_output.getvalue())
+        self.assertIn("apply the source review first, then run status", error_output.getvalue())
 
     def test_failure_path_keeps_report_paths(self) -> None:
         error_output = StringIO()

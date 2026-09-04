@@ -1746,15 +1746,15 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fingerprint"):
                 apply_agent_semantic_review(job_file, response)
 
-    def _overlong_candidate_job(self, root: Path) -> Path:
-        """把 cue 1 的译文撑到超宽，制造一条 ``bilingual_overflow_risk`` 阻断项。"""
+    def _overlong_candidate_job(self, root: Path, *, index: int = 0) -> Path:
+        """把第 ``index`` 条 cue 的译文撑到超宽，制造一条 ``bilingual_overflow_risk`` 阻断项。"""
 
         job_file = self._job(root)
         job = load_job(job_file)
         artifact = next(item for item in job.artifacts if item.kind == "translation_polished_cues")
         path = Path(artifact.path)
         cues = [Cue(**item) for item in json.loads(path.read_text(encoding="utf-8"))]
-        cues[0] = replace(cues[0], target_text="超长字幕" * 30)
+        cues[index] = replace(cues[index], target_text="超长字幕" * 30)
         path.write_text(
             json.dumps([asdict(cue) for cue in cues], ensure_ascii=False),
             encoding="utf-8",
@@ -1768,9 +1768,10 @@ class SemanticReviewPipelineTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            job_file = self._overlong_candidate_job(root)
-            repair_issue = SemanticIssue("omission", (2,), "review", "missing", ())
-            final_issue = SemanticIssue("terminology", (2,), "review", "term mismatch", ())
+            # 阻断项落在 id 较大的那条上：must_fix 若被重排到前面，下面的升序断言会失败。
+            job_file = self._overlong_candidate_job(root, index=1)
+            repair_issue = SemanticIssue("omission", (1,), "review", "missing", ())
+            final_issue = SemanticIssue("terminology", (1,), "review", "term mismatch", ())
             with (
                 patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
                 patch(
@@ -1779,7 +1780,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 ),
                 patch(
                     "xvt.pipeline.semantic.semantic_repair_batch",
-                    return_value={2: "世界。"},
+                    return_value={1: "你好。"},
                 ),
             ):
                 result = run_translation_semantic_review(job_file)
@@ -1795,8 +1796,9 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                     list(item.keys()),
                     ["id", "source_text", "must_fix", "qa", "text"],
                 )
-            blocked, semantic_only = items
-            self.assertEqual(blocked["source_text"], "Hello.")
+            semantic_only, blocked = items
+            self.assertEqual(blocked["id"], 2)
+            self.assertEqual(blocked["source_text"], "World.")
             self.assertTrue(blocked["must_fix"])
             self.assertEqual(
                 [entry["code"] for entry in blocked["qa"]], ["bilingual_overflow_risk"]
@@ -1807,16 +1809,17 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 f"line width {annotation['display_width']} exceeds {annotation['limit']}",
                 annotation["message"],
             )
-            self.assertEqual(semantic_only["source_text"], "World.")
+            self.assertEqual(semantic_only["id"], 1)
+            self.assertEqual(semantic_only["source_text"], "Hello.")
             self.assertFalse(semantic_only["must_fix"])
             self.assertEqual(semantic_only["qa"], [])
             # SRT 通道是解析锚点，不能带任何标注。
             srt = template.with_suffix(".srt").read_text(encoding="utf-8")
             self.assertNotIn("must_fix", srt)
-            self.assertNotIn("Hello.", srt)
+            self.assertNotIn("World.", srt)
 
             payload["items"] = [
-                {**item, "text": "简短译文。" if item["id"] == 1 else "世界！"} for item in items
+                {**item, "text": "简短译文。" if item["id"] == 2 else "你好！"} for item in items
             ]
             response = root / "review-response.json"
             response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -1826,7 +1829,7 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 for item in load_job(job_file).artifacts
                 if item.kind == "translation_reviewed_cues"
             )
-            self.assertEqual(_load_target_text(reviewed, 1), "简短译文。")
+            self.assertEqual(_load_target_text(reviewed, 2), "简短译文。")
 
     def test_translation_template_omits_width_fields_for_non_overflow_blockers(self) -> None:
         """术语违规这类阻断项的 message 里没有宽度，标注就只留 code/message，绝不猜数字。"""
