@@ -365,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_parser = subparsers.add_parser(
         "apply-translation",
-        help="Apply Agent translation JSON, then run continue (needed after awaiting_input)",
+        help="Apply Agent translation JSON, next step: xvt continue (needed after awaiting_input)",
     )
     apply_parser.add_argument("job_file")
     apply_parser.add_argument("response_file")
@@ -426,7 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_polish_parser = subparsers.add_parser(
         "apply-polish-translation",
-        help="Apply Agent polish JSON, then run continue",
+        help="Apply Agent polish JSON, next step: xvt continue",
     )
     apply_polish_parser.add_argument("job_file")
     apply_polish_parser.add_argument("response_file")
@@ -434,7 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_semantic_parser = subparsers.add_parser(
         "apply-semantic-review",
-        help="Apply Agent semantic review and one-repair JSON, then run continue",
+        help="Apply Agent semantic review and one-repair JSON, next step: xvt continue",
     )
     apply_semantic_parser.add_argument("job_file")
     apply_semantic_parser.add_argument("response_file")
@@ -442,7 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_review_fixes_parser = subparsers.add_parser(
         "apply-translation-review-fixes",
-        help="Apply human translation review edits, then run continue",
+        help="Apply human translation review edits, next step: xvt continue",
     )
     apply_review_fixes_parser.add_argument("job_file")
     apply_review_fixes_parser.add_argument("response_file")
@@ -728,6 +728,63 @@ def _print_safe(message: str, *, file: TextIO | None = None) -> None:
     print(_terminal_safe(message), file=file)
 
 
+# 恢复导航的两套方言前缀：中文（人读事件流、等待终态）与英文（原子命令 / status 导航）。
+# 键固定为 report / input / srt_note / prerequisite / primary / alternative，值是纯前缀，
+# 与路径、命令直接拼接——不能用 str.format，路径里的 `{}` 会被当成占位符。
+_ZH_RECOVERY_LABELS: dict[str, str] = {
+    "report": "报告: ",
+    "input": "待编辑: ",
+    "srt_note": "（同名 .srt 亦可）",
+    "prerequisite": "  ",
+    "primary": "  ",
+    "alternative": "  或：",
+}
+_EN_RECOVERY_LABELS: dict[str, str] = {
+    "report": "report: ",
+    "input": "input: ",
+    "srt_note": " (same-name .srt also accepted)",
+    "prerequisite": "before: ",
+    "primary": "next: ",
+    "alternative": "alternative: ",
+}
+
+
+def _recovery_lines(
+    plan: RecoveryPlan,
+    *,
+    labels: dict[str, str],
+    verbose: bool,
+) -> list[str]:
+    """把 `RecoveryPlan` 渲染成人读导航行，顺序固定、方言由 `labels` 决定。
+
+    顺序：`report_paths`（仅 `verbose`）→ `input_paths` → `prerequisite_commands`
+    → `primary_command` → `alternative_commands`。分类原因（`恢复建议：` / `recovery:`）
+    由各调用点自己打印：等待终态要去重，`status` 还要额外拼 `category`。
+
+    `input_paths` 里 json 与同名 srt 是同一个修订通道的两副载体，全平铺只会让用户以为
+    有两份要改。成对出现时只列 json 那一行、行尾补一句说明；没有同名 json 的孤立 srt
+    是它自己的修订入口，照常单独列出，否则会被整行吞掉、用户看不到要改哪个文件。
+    """
+
+    lines: list[str] = []
+    if verbose:
+        lines.extend(f"{labels['report']}{path}" for path in plan.report_paths)
+    listed = set(plan.input_paths)
+    for path in plan.input_paths:
+        suffix = Path(path).suffix.lower()
+        if suffix == ".srt" and str(Path(path).with_suffix(".json")) in listed:
+            continue
+        line = f"{labels['input']}{path}"
+        if suffix == ".json" and str(Path(path).with_suffix(".srt")) in listed:
+            line += labels["srt_note"]
+        lines.append(line)
+    lines.extend(f"{labels['prerequisite']}{command}" for command in plan.prerequisite_commands)
+    if plan.primary_command:
+        lines.append(f"{labels['primary']}{plan.primary_command}")
+    lines.extend(f"{labels['alternative']}{command}" for command in plan.alternative_commands)
+    return lines
+
+
 class _HumanEventSink(_TrackedEventSink):
     def __init__(self, job_file: str | None = None, stream: TextIO | None = None) -> None:
         super().__init__(job_file)
@@ -739,6 +796,9 @@ class _HumanEventSink(_TrackedEventSink):
         self._last_failed_stage: str | None = None
         self._workflow_started_at: float | None = None
         self._seen_translation = False
+        # 最近一次打印过的 `[等待]` 原因原文：等待终态的 `恢复建议：` 与它逐字相同时跳过，
+        # 免得同一句话在相邻两行里说两遍。
+        self.last_waiting_reason: str | None = None
 
     def _clear_progress(self) -> None:
         if self.is_tty and self._progress_active:
@@ -831,7 +891,9 @@ class _HumanEventSink(_TrackedEventSink):
             self._line(f"[重试] {action}（{'，'.join(parts)}）")
         elif event.type == EventType.WORKFLOW_WAITING:
             self._flush_pending_skips()
-            self._line(f"[等待] 翻译需要输入：{data.get('reason')}")
+            reason = data.get("reason")
+            self.last_waiting_reason = reason if isinstance(reason, str) else None
+            self._line(f"[等待] 翻译需要输入：{reason}")
         elif event.type == EventType.WORKFLOW_COMPLETED:
             self._flush_pending_skips()
             elapsed = None
@@ -981,16 +1043,10 @@ class _HumanEventSink(_TrackedEventSink):
     def _render_recovery(self, plan: RecoveryPlan | None) -> None:
         if plan:
             self._line(f"恢复建议：{plan.reason}")
-            for path in plan.report_paths:
-                self._line(f"报告: {path}")
-            for path in plan.input_paths:
-                self._line(f"待编辑: {path}")
-            for command in plan.prerequisite_commands:
-                self._line(f"  {command}")
-            if plan.primary_command:
-                self._line(f"  {plan.primary_command}")
-            for command in plan.alternative_commands:
-                self._line(f"  或：{command}")
+            for line in _recovery_lines(plan, labels=_ZH_RECOVERY_LABELS, verbose=True):
+                self._line(line)
+        # plan 为 None（job.json 读不出来）时也要给出口，所以这段不进 _recovery_lines。
+        # 引号形态沿用现有手拼：shlex.quote 对普通路径不加引号，与既有断言不一致。
         if self.job_file:
             self._line("查看详情：")
             self._line(f'  xvt status "{self.job_file}"')
@@ -1087,14 +1143,8 @@ def _print_recovery_navigation(job_file: str | Path) -> None:
         _print_safe(f"next: xvt status {shlex.quote(str(job_file))}")
         return
     _print_safe(f"recovery: {plan.reason}")
-    for path in plan.report_paths:
-        _print_safe(f"report: {path}")
-    for path in plan.input_paths:
-        _print_safe(f"input: {path}")
-    if plan.primary_command:
-        _print_safe(f"next: {plan.primary_command}")
-    for command in plan.alternative_commands:
-        _print_safe(f"alternative: {command}")
+    for line in _recovery_lines(plan, labels=_EN_RECOVERY_LABELS, verbose=False):
+        _print_safe(line)
 
 
 # 普通模式下逐条展开的上限：条目多时刷屏没有意义，剩余的指向 --events-jsonl。
@@ -1180,8 +1230,37 @@ def _print_batch_result(result: BatchResult) -> None:
         _print_safe(f"next: xvt batch-continue {shlex.quote(str(result.batch_file))}")
 
 
-def _print_workflow_result(result: object) -> None:
-    """stdout 交付物摘要：Job → 视频 → 字幕 → 其他，避免扁平路径列表难读。"""
+def _is_tty(stream: object) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty):
+        return False
+    try:
+        return bool(isatty())
+    except (OSError, ValueError):
+        return False
+
+
+def _deduplicable_waiting_reason(event_sink: object) -> str | None:
+    """`[等待]` 走 sink 的流（stderr），`恢复建议：` 走 stdout：只有两条都落在同一块
+    终端上时，重复才真的是重复。只重定向 stdout 的调用方（`xvt run > out.txt`）看不到
+    stderr 那一行，此时再省掉 `恢复建议：`，文件里就一句原因都不剩。
+    """
+
+    reason = getattr(event_sink, "last_waiting_reason", None)
+    if not isinstance(reason, str):
+        return None
+    if not (_is_tty(getattr(event_sink, "stream", None)) and _is_tty(sys.stdout)):
+        return None
+    return reason
+
+
+def _print_workflow_result(result: object, *, printed_waiting_reason: str | None = None) -> None:
+    """stdout 交付物摘要：Job → 视频 → 字幕 → 其他，避免扁平路径列表难读。
+
+    `printed_waiting_reason` 是事件流里最近一条 `[等待]` 打过、且确认与本函数写向同一块
+    终端的原因原文（见 `_deduplicable_waiting_reason`）；等待终态的 `恢复建议：` 与它
+    逐字相同时跳过那一行，同一句话不在相邻两行里重复。
+    """
 
     job_file = getattr(result, "job_file", None)
     artifacts = tuple(getattr(result, "artifacts", ()) or ())
@@ -1232,17 +1311,10 @@ def _print_workflow_result(result: object) -> None:
         except (XvtError, OSError, RuntimeError, ValueError):
             plan = None
         if plan is not None:
-            _print_safe(f"恢复建议：{plan.reason}")
-            for path in plan.report_paths:
-                _print_safe(f"报告: {path}")
-            for path in plan.input_paths:
-                _print_safe(f"待编辑: {path}")
-            for command in plan.prerequisite_commands:
-                _print_safe(f"  {command}")
-            if plan.primary_command:
-                _print_safe(f"  {plan.primary_command}")
-            for command in plan.alternative_commands:
-                _print_safe(f"  或：{command}")
+            if plan.reason != printed_waiting_reason:
+                _print_safe(f"恢复建议：{plan.reason}")
+            for line in _recovery_lines(plan, labels=_ZH_RECOVERY_LABELS, verbose=False):
+                _print_safe(line)
         elif message:
             _print_safe(f"translation is awaiting input: {message}")
 
@@ -1316,7 +1388,9 @@ def _cmd_run(arguments: argparse.Namespace) -> int:
             artifacts=[str(path) for path in result.artifacts],
         )
     elif not arguments.events_jsonl:
-        _print_workflow_result(result)
+        _print_workflow_result(
+            result, printed_waiting_reason=_deduplicable_waiting_reason(event_sink)
+        )
     return _waiting_exit_code(arguments, result.status)
 
 
@@ -1395,19 +1469,11 @@ def _cmd_status(arguments: argparse.Namespace) -> int:
         _print_safe(f"recovery: {plan.category} - {plan.reason}")
         if plan.advance_steps:
             _print_safe(f"steps: {', '.join(plan.advance_steps)}")
-        for path in plan.report_paths:
-            _print_safe(f"report: {path}")
-        for path in plan.input_paths:
-            _print_safe(f"input: {path}")
-        for command in plan.prerequisite_commands:
-            _print_safe(f"before: {command}")
-        if plan.primary_command:
-            _print_safe(f"next: {plan.primary_command}")
-        elif plan.category in {"manual_fix", "awaiting_input"}:
+        for line in _recovery_lines(plan, labels=_EN_RECOVERY_LABELS, verbose=True):
+            _print_safe(line)
+        if not plan.primary_command and plan.category in {"manual_fix", "awaiting_input"}:
             # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
             _print_safe(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
-        for command in plan.alternative_commands:
-            _print_safe(f"alternative: {command}")
     return 0
 
 
@@ -1513,7 +1579,9 @@ def _cmd_continue(arguments: argparse.Namespace) -> int:
             artifacts=[str(path) for path in result.artifacts],
         )
     elif not arguments.events_jsonl:
-        _print_workflow_result(result)
+        _print_workflow_result(
+            result, printed_waiting_reason=_deduplicable_waiting_reason(event_sink)
+        )
     return _waiting_exit_code(arguments, result.status)
 
 
@@ -1965,6 +2033,14 @@ _TASK_ROUTES: dict[str, str] = {
 # 而 xvt apply 的命令行里没有这两个参数，也不能从响应里安全地推出来。
 # 事实口径：只有人类可读模式的 xvt retranslate-cues 会打印现成命令，--events-jsonl 模式不打
 # 印，所以指引只能承诺 manifest 里有拼命令所需的字段，不能承诺「上一条命令已经打印过」。
+# 源文修订后下游产物全部失效，没有可续跑的下一步：唯一的下一步是回头看 status。
+# `_cmd_apply`（apply --continue）与 `main`（apply-source-review-fixes --continue）
+# 共用这一句，两条误用路径不会给出互相矛盾的下一步。
+_SOURCE_REVIEW_CONTINUE_HINT = (
+    "--continue is not supported for source review fixes: source edits invalidate "
+    "translation and downstream artifacts; apply the source review first, then run status"
+)
+
 _RETRANSLATE_CUES_MANUAL_COMMAND = (
     "applying one needs the cue ids and the target language as explicit arguments; run "
     "xvt apply-cue-retranslation JOB RESPONSE --cue ID [--cue ID ...] --target-language LANG "
@@ -2104,10 +2180,7 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         routed.target_language = target_language
     continue_after_apply = bool(getattr(arguments, "continue_after_apply", False))
     if continue_after_apply and route == "apply-source-review-fixes":
-        raise UserInputError(
-            "--continue is not supported for source review fixes: source edits invalidate "
-            "translation and downstream artifacts; apply the source review first, then run status"
-        )
+        raise UserInputError(_SOURCE_REVIEW_CONTINUE_HINT)
     if continue_after_apply:
         continuation_job = job or load_job(arguments.job_file)
         if get_workflow_config(continuation_job) is None:
@@ -2229,6 +2302,40 @@ def _hold_execution_locks(parsed: argparse.Namespace) -> None:
     # run_batch 写出 batch.json 前），同样挂在本命令的锁作用域上直至终态。
 
 
+# `--continue` 只有统一入口 xvt apply 支持；直接挂到 apply-* 上时 argparse 原生只会说
+# 「unrecognized arguments」，用户看不出该往哪走。这里把这一种误用换成具体指引，
+# 其余未知参数保持 argparse 的原文与退出码 2。
+#
+# 指引只能给 `xvt apply` 真的能路由过去的子命令：显式列出而不是按 `apply-` 前缀匹配，
+# 否则 apply-cue-retranslation 这种 `_TASK_ROUTES` / `_STEP_ROUTES` 里根本没有、
+# `_cmd_apply` 会当场拒绝的命令，也会被指到一条走不通的路上。
+_APPLY_CONTINUE_ROUTABLE_COMMANDS = frozenset(
+    {
+        "apply-translation",
+        "apply-polish-translation",
+        "apply-semantic-review",
+        "apply-translation-review-fixes",
+    }
+)
+_APPLY_CONTINUE_HINT = (
+    "--continue is only supported by the unified entry: xvt apply JOB_FILE RESPONSE_FILE --continue"
+)
+
+
+def _report_unrecognized_arguments(
+    parser: argparse.ArgumentParser,
+    parsed: argparse.Namespace,
+    extras: Sequence[str],
+) -> None:
+    command = getattr(parsed, "command", None)
+    if isinstance(command, str) and "--continue" in extras:
+        if command == "apply-source-review-fixes":
+            parser.error(_SOURCE_REVIEW_CONTINUE_HINT)
+        if command in _APPLY_CONTINUE_ROUTABLE_COMMANDS:
+            parser.error(_APPLY_CONTINUE_HINT)
+    parser.error(f"unrecognized arguments: {' '.join(extras)}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -2236,7 +2343,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    parsed = parser.parse_args(arguments)
+    parsed, extras = parser.parse_known_args(arguments)
+    if extras:
+        _report_unrecognized_arguments(parser, parsed, extras)
     with signal_scope(), lock_scope():
         return _execute(parsed)
 

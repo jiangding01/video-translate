@@ -42,6 +42,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/translate.py` | 翻译批次、响应校验和译文回填 |
 | `src/xvt/translation_provider.py` | OpenAI-compatible Chat Completions 调用 |
 | `src/xvt/qa.py` | 时间轴、文本完整性和显示宽度检查 |
+| `src/xvt/candidate_qa.py` | 候选译文 QA 判定，以及 QA message 中行宽/上限的**唯一**解析实现（`overflow_limits`，零依赖叶子，供 recovery / pipeline.revision 共用）；其它模块一律复用它，不得就地重造这条正则 |
 | `src/xvt/render.py` | 双语 ASS 样式和平台字体选择 |
 | `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
 | `src/xvt/paths.py` | 烧录/预览输出绝对路径与覆盖保护（源媒体、job 文件、已登记 artifact） |

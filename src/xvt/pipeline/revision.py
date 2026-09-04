@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
-from xvt.candidate_qa import translation_candidate_qa_issues
+from xvt.candidate_qa import overflow_limits, translation_candidate_qa_issues
 from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job, utc_now
@@ -639,6 +639,41 @@ def translation_review_input_path(job: Job) -> Path | None:
     return None
 
 
+def _translation_review_items(
+    cues: list[Cue],
+    affected: set[int],
+    qa_issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """给译文修订模板的每条 cue 附上只读标注，帮人看清「哪条必改、要缩到多少」。
+
+    ``source_text``/``must_fix``/``qa`` 只是标注，回填端一律忽略；可编辑的 ``text``
+    放在最后，紧挨着这些标注。顺序保持 cue id 升序，与同名 SRT 通道逐条对得上。
+    """
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for issue in qa_issues:
+        cue_id = issue.get("cue_id")
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool):
+            continue
+        message = str(issue.get("message", ""))
+        annotation: dict[str, Any] = {"code": str(issue.get("code", "")), "message": message}
+        limits = overflow_limits(message)
+        if limits is not None:
+            annotation["display_width"], annotation["limit"] = limits
+        grouped.setdefault(cue_id, []).append(annotation)
+    return [
+        {
+            "id": cue.id,
+            "source_text": cue.source_text,
+            "must_fix": cue.id in grouped,
+            "qa": grouped.get(cue.id, []),
+            "text": cue.target_text or "",
+        }
+        for cue in cues
+        if cue.id in affected
+    ]
+
+
 def ensure_translation_review_input(
     job_file: str | Path,
     *,
@@ -686,9 +721,7 @@ def ensure_translation_review_input(
             "issues": issues,
             "qa_report": str(valid_artifact_path(job, "translation_candidate_qa")),
             "qa_issues": qa_issues,
-            "items": [
-                {"id": cue.id, "text": cue.target_text or ""} for cue in cues if cue.id in affected
-            ],
+            "items": _translation_review_items(cues, affected, qa_issues),
         },
     )
     # SRT 与 JSON 同名同 fingerprint，供人工用任意字幕工具编辑；两条通道等价。

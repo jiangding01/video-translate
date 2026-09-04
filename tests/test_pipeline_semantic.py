@@ -31,7 +31,12 @@ from xvt.pipeline import (
 from xvt.pipeline.revision import translation_review_stem
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
 from xvt.subtitles import save_subtitles
-from xvt.translate import SemanticIssue, SemanticSuggestedItem
+from xvt.translate import (
+    GlossaryTerm,
+    SemanticIssue,
+    SemanticSuggestedItem,
+    TranslationPolicy,
+)
 from xvt.translation_provider import ProviderResponseError
 from xvt.workflow_config import WorkflowConfig, get_workflow_config, set_workflow_config
 
@@ -1740,6 +1745,160 @@ class SemanticReviewPipelineTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "fingerprint"):
                 apply_agent_semantic_review(job_file, response)
+
+    def _overlong_candidate_job(self, root: Path, *, index: int = 0) -> Path:
+        """把第 ``index`` 条 cue 的译文撑到超宽，制造一条 ``bilingual_overflow_risk`` 阻断项。"""
+
+        job_file = self._job(root)
+        job = load_job(job_file)
+        artifact = next(item for item in job.artifacts if item.kind == "translation_polished_cues")
+        path = Path(artifact.path)
+        cues = [Cue(**item) for item in json.loads(path.read_text(encoding="utf-8"))]
+        cues[index] = replace(cues[index], target_text="超长字幕" * 30)
+        path.write_text(
+            json.dumps([asdict(cue) for cue in cues], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifact.checksum = file_checksum(path)
+        save_job(job)
+        return job_file
+
+    def test_translation_template_annotates_must_fix_and_width_limits(self) -> None:
+        """模板要标出「哪条必改、要缩到多少、原文是什么」，且不打乱 cue id 顺序。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # 阻断项落在 id 较大的那条上：must_fix 若被重排到前面，下面的升序断言会失败。
+            job_file = self._overlong_candidate_job(root, index=1)
+            repair_issue = SemanticIssue("omission", (1,), "review", "missing", ())
+            final_issue = SemanticIssue("terminology", (1,), "review", "term mismatch", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    side_effect=[(repair_issue,), (final_issue,)],
+                ),
+                patch(
+                    "xvt.pipeline.semantic.semantic_repair_batch",
+                    return_value={1: "你好。"},
+                ),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "awaiting_review")
+            template = translation_review_input_path(load_job(job_file))
+            assert template is not None
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            items = payload["items"]
+            self.assertEqual([item["id"] for item in items], [1, 2])
+            for item in items:
+                self.assertEqual(
+                    list(item.keys()),
+                    ["id", "source_text", "must_fix", "qa", "text"],
+                )
+            semantic_only, blocked = items
+            self.assertEqual(blocked["id"], 2)
+            self.assertEqual(blocked["source_text"], "World.")
+            self.assertTrue(blocked["must_fix"])
+            self.assertEqual(
+                [entry["code"] for entry in blocked["qa"]], ["bilingual_overflow_risk"]
+            )
+            annotation = blocked["qa"][0]
+            self.assertGreater(annotation["display_width"], annotation["limit"])
+            self.assertIn(
+                f"line width {annotation['display_width']} exceeds {annotation['limit']}",
+                annotation["message"],
+            )
+            self.assertEqual(semantic_only["id"], 1)
+            self.assertEqual(semantic_only["source_text"], "Hello.")
+            self.assertFalse(semantic_only["must_fix"])
+            self.assertEqual(semantic_only["qa"], [])
+            # SRT 通道是解析锚点，不能带任何标注。
+            srt = template.with_suffix(".srt").read_text(encoding="utf-8")
+            self.assertNotIn("must_fix", srt)
+            self.assertNotIn("World.", srt)
+
+            payload["items"] = [
+                {**item, "text": "简短译文。" if item["id"] == 2 else "你好！"} for item in items
+            ]
+            response = root / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, response)
+            reviewed = next(
+                Path(item.path)
+                for item in load_job(job_file).artifacts
+                if item.kind == "translation_reviewed_cues"
+            )
+            self.assertEqual(_load_target_text(reviewed, 2), "简短译文。")
+
+    def test_translation_template_omits_width_fields_for_non_overflow_blockers(self) -> None:
+        """术语违规这类阻断项的 message 里没有宽度，标注就只留 code/message，绝不猜数字。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            job = load_job(job_file)
+            set_workflow_config(
+                job,
+                replace(
+                    get_workflow_config(job),
+                    translation_policy=TranslationPolicy(terms=(GlossaryTerm("Hello", "你好"),)),
+                ),
+            )
+            artifact = next(
+                item for item in job.artifacts if item.kind == "translation_polished_cues"
+            )
+            path = Path(artifact.path)
+            cues = [Cue(**item) for item in json.loads(path.read_text(encoding="utf-8"))]
+            cues[0] = replace(cues[0], target_text="哈啰。")
+            path.write_text(
+                json.dumps([asdict(cue) for cue in cues], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifact.checksum = file_checksum(path)
+            save_job(job)
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "awaiting_review")
+            template = translation_review_input_path(load_job(job_file))
+            assert template is not None
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            item = next(entry for entry in payload["items"] if entry["id"] == 1)
+            self.assertTrue(item["must_fix"])
+            self.assertEqual([entry["code"] for entry in item["qa"]], ["glossary_violation"])
+            self.assertEqual(list(item["qa"][0]), ["code", "message"])
+
+    def test_translation_template_backfill_accepts_legacy_id_text_items(self) -> None:
+        """回填端忽略未知字段，只认 id/text；旧格式模板必须照样能提交。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._overlong_candidate_job(root)
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+            ):
+                run_translation_semantic_review(job_file)
+
+            template = translation_review_input_path(load_job(job_file))
+            assert template is not None
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [
+                {"id": item["id"], "text": "简短译文。"} for item in payload["items"]
+            ]
+            response = root / "legacy-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            apply_translation_review_fixes(job_file, response)
+            reviewed = next(
+                Path(item.path)
+                for item in load_job(job_file).artifacts
+                if item.kind == "translation_reviewed_cues"
+            )
+            self.assertEqual(_load_target_text(reviewed, 1), "简短译文。")
 
 
 if __name__ == "__main__":

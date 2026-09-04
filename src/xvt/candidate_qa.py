@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,19 @@ from xvt.checksums import file_checksum
 from xvt.models import Job
 
 TRANSLATION_CANDIDATE_QA_VERSION = 1
+
+# 宽度与上限只出现在 qa 的 message 里（见 ``qa._overflow_risk``）；
+# 提取不到就返回 None，绝不猜数字。软上限形态（``exceeds preferred N``）不匹配。
+_LINE_WIDTH_PATTERN = re.compile(r"line width (\d+) exceeds (\d+)")
+
+
+def overflow_limits(message: str) -> tuple[int, int] | None:
+    """从 QA issue 的 message 中提取 ``(display_width, limit)``；不匹配返回 None。"""
+
+    match = _LINE_WIDTH_PATTERN.search(message)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def translation_candidate_qa_issues(
