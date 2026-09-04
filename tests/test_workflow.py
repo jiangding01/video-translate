@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from xvt.errors import UserInputError
@@ -34,6 +35,7 @@ from xvt.workflow import (
     _burn_satisfied,
     _record_burn_fingerprint,
     _stored_burn_fingerprint,
+    _translation_review_waiting_reason,
     burned_output_relink_recovery_available,
     continue_workflow,
     plan_advance_steps,
@@ -152,10 +154,11 @@ class WorkflowTest(unittest.TestCase):
                 ),
             )
             self.assertIn("apply-source-review-fixes", plan.primary_command or "")
-            self.assertIn(
-                "apply-translation-review-fixes",
-                " ".join(plan.alternative_commands),
+            translation_alternative = next(
+                command for command in plan.alternative_commands if "--continue" in command
             )
+            self.assertTrue(translation_alternative.startswith("xvt apply "))
+            self.assertIn(str(translation_input), translation_alternative)
             self.assertIn(
                 "--acknowledge-translation-review",
                 " ".join(plan.alternative_commands),
@@ -1264,6 +1267,79 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         resume_remote.assert_called_once()
         resume.assert_not_called()
+
+
+class TranslationReviewWaitingReasonTest(unittest.TestCase):
+    """等待原因必须与恢复计划同源，避免与真实阻断原因错位。"""
+
+    def test_waiting_event_reason_matches_the_recovery_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nCloud Code.\n",
+                encoding="utf-8",
+            )
+            issue = SemanticIssue("source_suspect", (1,), "review", "check source", ())
+            events = []
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.translation.translate_batch", return_value={1: "Cloud Code。"}),
+                patch("xvt.pipeline.polish.polish_batch", return_value={1: "Cloud Code。"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                result = run_workflow(
+                    WorkflowOptions(
+                        input=str(source),
+                        output=root / "output",
+                        target_language="zh-CN",
+                        translation_quality="polished",
+                        provider="openai-compatible",
+                        base_url="https://example.com/v1",
+                        model="model",
+                        api_key_env="TEST_TRANSLATION_API_KEY",
+                    ),
+                    event_sink=events.append,
+                )
+
+            self.assertEqual(result.status, "awaiting_input")
+            waiting = [event for event in events if event.type == "workflow_waiting"]
+            self.assertTrue(waiting)
+            plan = build_recovery_plan(load_job(result.job_file))
+            self.assertEqual(waiting[-1].data["reason"], plan.reason)
+            self.assertNotEqual(waiting[-1].data["reason"], "")
+
+    def test_unrelated_plan_category_falls_back_to_the_english_constant(self) -> None:
+        job = create_job("/tmp/source.srt", "/tmp", {"input_kind": "subtitle"})
+        plan = SimpleNamespace(category="retryable", reason="不相关的分类")
+        with patch("xvt.workflow.build_recovery_plan", return_value=plan):
+            self.assertEqual(
+                _translation_review_waiting_reason(job),
+                "semantic review requires user acknowledgment",
+            )
+
+    def test_recoverable_plan_failure_falls_back_to_the_english_constant(self) -> None:
+        job = create_job("/tmp/source.srt", "/tmp", {"input_kind": "subtitle"})
+        with patch("xvt.workflow.build_recovery_plan", side_effect=ValueError("broken job")):
+            self.assertEqual(
+                _translation_review_waiting_reason(job),
+                "semantic review requires user acknowledgment",
+            )
+
+    def test_programming_error_from_the_plan_is_not_swallowed(self) -> None:
+        job = create_job("/tmp/source.srt", "/tmp", {"input_kind": "subtitle"})
+        with patch("xvt.workflow.build_recovery_plan", side_effect=AttributeError("bug")):
+            with self.assertRaises(AttributeError):
+                _translation_review_waiting_reason(job)
+
+    def test_empty_plan_reason_falls_back_to_the_english_constant(self) -> None:
+        job = create_job("/tmp/source.srt", "/tmp", {"input_kind": "subtitle"})
+        plan = SimpleNamespace(category="awaiting_input", reason="")
+        with patch("xvt.workflow.build_recovery_plan", return_value=plan):
+            self.assertEqual(
+                _translation_review_waiting_reason(job),
+                "semantic review requires user acknowledgment",
+            )
 
 
 class BurnFingerprintArtifactTest(unittest.TestCase):

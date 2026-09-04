@@ -53,7 +53,7 @@
 | --- | --- | --- |
 | `job_id` | string | 关联 Job ID |
 | `job_file` | string | 关联 Job 文件路径 |
-| `reason` | string | 等待原因（如需要人工翻译输入） |
+| `reason` | string | 等待原因，自由文本，与恢复计划（`recovery_plan`）的 `reason` 一致；消费方不应解析 |
 | `artifacts` | string[] | 相关产物路径列表 |
 
 ### `workflow_completed`

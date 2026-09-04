@@ -18,7 +18,7 @@ from xvt.config import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TRANSLATION_STYLE,
 )
-from xvt.errors import UserInputError
+from xvt.errors import UserInputError, XvtError
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -51,7 +51,12 @@ from xvt.pipeline import (
     translation_polish_satisfied,
     translation_progress_rebuildable,
 )
-from xvt.recovery import file_checksum, subtitle_qa_failure_guidance, valid_artifact_path
+from xvt.recovery import (
+    build_recovery_plan,
+    file_checksum,
+    subtitle_qa_failure_guidance,
+    valid_artifact_path,
+)
 from xvt.segment import SEGMENTATION_PRESETS
 from xvt.translate import TranslationPolicy, load_translation_policy
 from xvt.workflow_config import (
@@ -760,6 +765,26 @@ def planned_run_steps(options: WorkflowOptions) -> list[str]:
     return steps
 
 
+_TRANSLATION_REVIEW_WAITING_REASON = "semantic review requires user acknowledgment"
+
+
+def _translation_review_waiting_reason(job: Job) -> str:
+    """人工语义校对等待的原因文案，直接取恢复计划的 reason，避免与真实阻断原因错位。
+
+    ``build_recovery_plan`` 严格只读，这里只读它的结论。分类不属于语义校对等待
+    （或 reason 为空）时退回英文常量，保证不会把无关分类的文案贴到等待事件上。
+    """
+
+    try:
+        plan = build_recovery_plan(job)
+    except (OSError, ValueError, KeyError, XvtError):
+        # 等待事件不能因恢复判定失败而中断；但编程错误要照常抛出。
+        return _TRANSLATION_REVIEW_WAITING_REASON
+    if plan.category != "awaiting_input":
+        return _TRANSLATION_REVIEW_WAITING_REASON
+    return plan.reason or _TRANSLATION_REVIEW_WAITING_REASON
+
+
 def _emit_waiting(
     *,
     job: Job,
@@ -877,10 +902,13 @@ def _ensure_translation(
             )
         if semantic_review_waiting(job):
             review_inputs = ensure_semantic_review_inputs(path, event_sink=event_sink)
+            # ensure_semantic_review_inputs 只落盘 review 文件，不 save_job；
+            # 重新载入是为了拿到与磁盘一致的 job 状态再派生等待原因。
+            job = load_job(path)
             return _emit_waiting(
                 job=job,
                 path=path,
-                message="semantic review requires user acknowledgment",
+                message=_translation_review_waiting_reason(job),
                 artifacts=(
                     *_current_artifacts(job, waiting=True, semantic_reviewing=True),
                     *review_inputs,
@@ -896,13 +924,14 @@ def _ensure_translation(
             event_sink=event_sink,
         )
         if semantic.status != "completed":
+            reviewed_job = load_job(path)
             return _emit_waiting(
-                job=load_job(path),
+                job=reviewed_job,
                 path=path,
                 message=(
                     "semantic review requires Agent input"
                     if semantic.status == "awaiting_agent"
-                    else "semantic review requires user acknowledgment"
+                    else _translation_review_waiting_reason(reviewed_job)
                 ),
                 artifacts=semantic.paths,
                 event_sink=event_sink,
@@ -1065,11 +1094,14 @@ def _advance_workflow(
                 *waiting_artifacts,
                 *ensure_semantic_review_inputs(path, event_sink=event_sink),
             )
+            # ensure_semantic_review_inputs 只落盘 review 文件，不 save_job；
+            # 重新载入是为了拿到与磁盘一致的 job 状态再派生等待原因。
+            job = load_job(path)
         return _emit_waiting(
             job=job,
             path=path,
             message=(
-                "semantic review requires user acknowledgment"
+                _translation_review_waiting_reason(job)
                 if advance_steps[0] == "await_translation_review"
                 else "semantic review requires Agent input"
                 if semantic_reviewing
