@@ -186,23 +186,29 @@ def check_subtitles(
             )
 
         if require_translation:
-            overflow = _overflow_risk(
-                cue.source_text,
-                cue.source_language,
-                "source",
-                video_width=video_width,
-                video_height=video_height,
-            )
-            overflow = overflow or _overflow_risk(
-                cue.target_text or "",
-                cue.target_language,
-                "target",
-                video_width=video_width,
-                video_height=video_height,
-            )
-            if overflow:
-                severity, message = overflow
-                issues.append(SubtitleIssue("bilingual_overflow_risk", severity, cue.id, message))
+            # 源文与译文各自独立判定：任一侧超宽都要单独产出一条 issue，
+            # 否则源文超宽会吞掉译文超宽，下游按 "target line width " 前缀筛选的阻断项会丢失。
+            for overflow in (
+                _overflow_risk(
+                    cue.source_text,
+                    cue.source_language,
+                    "source",
+                    video_width=video_width,
+                    video_height=video_height,
+                ),
+                _overflow_risk(
+                    cue.target_text or "",
+                    cue.target_language,
+                    "target",
+                    video_width=video_width,
+                    video_height=video_height,
+                ),
+            ):
+                if overflow:
+                    severity, message = overflow
+                    issues.append(
+                        SubtitleIssue("bilingual_overflow_risk", severity, cue.id, message)
+                    )
         else:
             overflow = _overflow_risk(
                 cue.source_text,

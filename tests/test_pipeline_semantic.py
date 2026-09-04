@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.candidate_qa import translation_candidate_qa_issues
 from xvt.errors import ExitCode, UserInputError
 from xvt.events import EventType
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
@@ -1213,6 +1214,66 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             )
             self.assertIsNone(translation_review_input_path(job))
 
+    def test_source_and_target_overflow_still_blocks_on_the_target_issue(self) -> None:
+        """同一 cue 源文与译文都超宽时，源文 warning 不能吞掉译文的 review 阻断项。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            job = load_job(job_file)
+            source_artifact = next(item for item in job.artifacts if item.kind == "source_cues")
+            source_path = Path(source_artifact.path)
+            source_cues = [
+                Cue(**item) for item in json.loads(source_path.read_text(encoding="utf-8"))
+            ]
+            source_cues[0] = replace(source_cues[0], source_text="source text " * 30)
+            source_path.write_text(
+                json.dumps([asdict(cue) for cue in source_cues], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            source_artifact.checksum = file_checksum(source_path)
+            artifact = next(
+                item for item in job.artifacts if item.kind == "translation_polished_cues"
+            )
+            path = Path(artifact.path)
+            cues = [Cue(**item) for item in json.loads(path.read_text(encoding="utf-8"))]
+            cues[0] = replace(cues[0], source_text="source text " * 30, target_text="超长字幕" * 30)
+            path.write_text(
+                json.dumps([asdict(cue) for cue in cues], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifact.checksum = file_checksum(path)
+            save_job(job)
+
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "awaiting_review")
+            job = load_job(job_file)
+            candidate_qa_path = valid_artifact_path(job, "translation_candidate_qa")
+            report = json.loads(candidate_qa_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "needs_review")
+            self.assertEqual(
+                sorted(
+                    issue["message"].split(" line width ")[0]
+                    for issue in report["issues"]
+                    if issue["code"] == "bilingual_overflow_risk"
+                ),
+                ["source", "target"],
+            )
+            candidate_path = next(
+                Path(item.path)
+                for item in job.artifacts
+                if item.kind == "translation_polished_cues"
+            )
+            blockers = translation_candidate_qa_issues(job, candidate_path)
+            self.assertEqual(
+                [issue["message"].split(" line width ")[0] for issue in blockers or ()],
+                ["target"],
+            )
+
     def test_candidate_qa_is_included_in_revision_and_rerun_after_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_file = self._job(Path(directory))
@@ -1278,6 +1339,73 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                         ).read_text(encoding="utf-8")
                     )["issues"]
                 )
+            )
+
+    def test_unchanged_revision_reports_pending_qa_blocked_cues(self) -> None:
+        """QA 阻断项还在、却提交了零改动：报错要点名仍需缩短的 cue 与原因。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            job = load_job(job_file)
+            artifact = next(
+                item for item in job.artifacts if item.kind == "translation_polished_cues"
+            )
+            path = Path(artifact.path)
+            cues = [Cue(**item) for item in json.loads(path.read_text(encoding="utf-8"))]
+            overlong = "超长字幕" * 30
+            cues[0] = replace(cues[0], target_text=overlong)
+            path.write_text(
+                json.dumps([asdict(cue) for cue in cues], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifact.checksum = file_checksum(path)
+            save_job(job)
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "awaiting_review")
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            payload["items"] = [{"id": 1, "text": overlong}]
+            response = Path(directory) / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            with self.assertRaises(UserInputError) as caught:
+                apply_translation_review_fixes(job_file, response)
+
+            message = str(caught.exception)
+            self.assertIn("does not change any cue text", message)
+            self.assertIn("QA-blocked", message)
+            self.assertIn("1 (target line width ", message)
+
+    def test_unchanged_revision_without_qa_blockers_keeps_the_plain_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            issue = SemanticIssue("source_suspect", (1,), "review", "awkward", ())
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+            ):
+                result = run_translation_semantic_review(job_file)
+
+            self.assertEqual(result.status, "awaiting_review")
+            template = translation_review_input_path(load_job(job_file))
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            self.assertEqual(payload["qa_issues"], [])
+            payload["items"] = [{"id": 1, "text": "你好。"}]
+            response = root / "review-response.json"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            with self.assertRaises(UserInputError) as caught:
+                apply_translation_review_fixes(job_file, response)
+
+            self.assertEqual(
+                str(caught.exception),
+                "translation review response does not change any cue text",
             )
 
     def test_missing_semantic_response_file_is_a_user_input_error(self) -> None:

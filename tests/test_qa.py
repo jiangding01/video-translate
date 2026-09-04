@@ -158,6 +158,29 @@ class SubtitleQaTest(unittest.TestCase):
 
         self.assertNotIn("bilingual_overflow_risk", {issue.code for issue in report.issues})
 
+    def test_source_and_target_overflow_are_reported_independently(self) -> None:
+        """源文超宽不能吞掉译文超宽，否则下游拿不到 target 阻断项。"""
+
+        cues = [
+            Cue(
+                1,
+                0,
+                4000,
+                "x" * 120,
+                target_text="长" * 60,
+                source_language="en",
+                target_language="zh-CN",
+            )
+        ]
+
+        report = check_subtitles(cues, require_translation=True)
+
+        overflow = [issue for issue in report.issues if issue.code == "bilingual_overflow_risk"]
+        self.assertEqual(len(overflow), 2)
+        self.assertTrue(overflow[0].message.startswith("source line width "))
+        self.assertTrue(overflow[1].message.startswith("target line width "))
+        self.assertEqual([issue.severity for issue in overflow], ["review", "review"])
+
     def test_horizontal_video_uses_warning_and_review_width_limits(self) -> None:
         cues = [
             Cue(1, 0, 4000, "x" * 65, source_language="en"),

@@ -521,6 +521,24 @@ def _candidate_qa_issue_set(job: Job, candidate_path: Path) -> list[dict[str, An
     )
 
 
+def _describe_unchanged_qa_cues(qa_issues: list[dict[str, Any]]) -> str:
+    """把仍待处理的 QA 阻断项按 cue 汇总成人类可读描述，供零改动报错提示。"""
+
+    grouped: dict[int, list[str]] = {}
+    for issue in qa_issues:
+        cue_id = issue.get("cue_id")
+        if not isinstance(cue_id, int) or isinstance(cue_id, bool):
+            continue
+        message = issue.get("message")
+        grouped.setdefault(cue_id, []).append(message if isinstance(message, str) else "")
+    if not grouped:
+        return ""
+    details = ", ".join(
+        f"{cue_id} ({'; '.join(messages)})" for cue_id, messages in sorted(grouped.items())
+    )
+    return f"{len(grouped)} QA-blocked cue(s) still fail candidate QA: {details}"
+
+
 def source_suspect_cue_ids(job: Job) -> tuple[int, ...]:
     target = _target_kinds(job)
     if target is None:
@@ -837,7 +855,11 @@ def apply_translation_review_fixes(
     current_text = {cue.id: cue.target_text or "" for cue in candidate}
     changed_ids = {cue_id for cue_id, text in changes.items() if current_text[cue_id] != text}
     if not changed_ids:
-        raise UserInputError("translation review response does not change any cue text")
+        message = "translation review response does not change any cue text"
+        blocked = _describe_unchanged_qa_cues(qa_issues)
+        if blocked:
+            message = f"{message}; {blocked}"
+        raise UserInputError(message)
     reviewed = [replace(cue, target_text=changes.get(cue.id, cue.target_text)) for cue in candidate]
 
     artifacts_dir = get_job_directory(job) / "artifacts"
