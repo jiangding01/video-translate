@@ -1,12 +1,12 @@
 # AGENTS.md
 
-本文件适用于项目根目录及全部子目录。进入项目后先阅读本文件，再阅读 [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[架构说明](docs/ARCHITECTURE.md) 和 [路线图](ROADMAP.md)。
+本文件适用于项目根目录及全部子目录。先阅读本文件，再按受影响面选读：进行中的工作与下一步看 [HANDOFF.md](HANDOFF.md)；工作流、恢复或回填改动看 [架构说明](docs/ARCHITECTURE.md) 与 [恢复与回填契约](docs/RECOVERY.md)；用户可见行为看 [README.md](README.md) 与 `xvt --help`；范围与优先级看 [路线图](ROADMAP.md)。
 
 ## 项目定位
 
 XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI。它支持本地视频、音频、YouTube URL、已有源字幕和已有译文字幕，并输出 SRT、ASS 或烧录后的视频。
 
-当前开发重点是 CLI。桌面端、Web 服务和批处理不在当前实现范围内，除非用户明确调整优先级。
+当前开发重点是 CLI，包含已有的目录批处理能力。桌面端和 Web 服务不在当前实现范围内，除非用户明确调整优先级。
 
 ## 不可破坏的约束
 
@@ -18,14 +18,15 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 6. 外部命令必须以参数数组执行，不拼接 shell 字符串。
 7. Job、batch manifest 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。烧录成品重新关联只能由 checksum 有效的 v2 proof 授权，proof 必须绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum；legacy fingerprint 不得绕过重烧。
 8. 每个 Job 当前只支持一个目标语言。不要在现有 schema 上隐式加入多目标语言。
+9. 产物有效性只认内容 checksum。size、mtime 等文件元数据只能用于**证伪**（与登记值不符即失效），不得用于**证实**有效；`cp -p`、`rsync -a` 和备份还原都会保留 mtime。
 
 ## 代码结构
 
 | 路径 | 职责 |
 | --- | --- |
 | `src/xvt/cli.py` | 参数定义、命令路由、普通输出和 JSONL 终态 |
-| `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复；批次首次落盘后的 `batch_started` 事件必须位于批处理中断兜底内，任何中断都要留下 `interrupted` 与 `next_action` |
-| `src/xvt/workflow.py` | 端到端目标编排（Goals → `plan_advance_steps` → 执行）、`continue`、Agent 等待和烧录派生指纹；译文满足度含 SRT、译文 QA 报告与**已登记过**的 `bilingual_ass`（渲染侧只对有正整数宽高的媒体写 ASS，从未登记过的 Job 不要求它），缺渲染、QA 报告或 ASS 时走 `complete_translated_outputs`；`plan_advance_steps` 在函数体最前判定局部重译等待（`await_cue_retranslation`），因为它会叠加在一个译文目标已满足的 Job 上，并在 `TRANSLATE` 等输入且 `translation_batches` checksum 有效时早退为 `await_agent_translation`（必须排在 `translated_cues` → `render` 之前：新整轮请求不会失效旧译文，按 render 先判会把等待误报成「只差渲染」） |
+| `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复；中断兜底与恢复分类见 [恢复与回填契约](docs/RECOVERY.md#批处理恢复分类与中断兜底) |
+| `src/xvt/workflow.py` | 端到端目标编排（Goals → `plan_advance_steps` → 执行）、`continue`、Agent 等待和烧录派生指纹；译文满足度含 SRT 与译文 QA 报告，缺渲染或 QA 报告时走 `complete_translated_outputs`；`plan_advance_steps` 在函数体最前判定局部重译等待（`await_cue_retranslation`），因为它会叠加在一个译文目标已满足的 Job 上；完整判定顺序见 [恢复与回填契约](docs/RECOVERY.md#端到端推进计划的判定顺序) |
 | `src/xvt/workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与读写边界 |
 | `src/xvt/checksums.py` | 文件内容 SHA-256 的唯一实现（零依赖叶子，供 recovery / candidate_qa / pipeline.common 共用） |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
@@ -57,20 +58,20 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 默认用户路径是 **`run` → `status` → `continue`**（批处理为 `batch` / `batch-continue`）。`status` 输出 `recovery_plan` 与 `advance_steps`，与 `continue` 共用 `plan_advance_steps` 判定，是中断后的导航入口。
 
 - `xvt run` 创建新 Job。没有 `--target-language` 时停在源字幕；提供目标语言后继续翻译；同时提供 `--burn` 时继续烧录。停在 `awaiting_input` 时退出码默认为 0（Agent 协议的正常步骤），只有显式 `--fail-on-waiting` 才返回 10；该旗标不发 `cli_failed`、不改事件流，只改退出码。
-- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。已登记烧录成品缺失、但具备重新关联资格的 Job 会停在 `awaiting_input`，绝不由批处理自动重烧；用户须先显式 `relink-burned-output`，或明确选择 `continue` 重烧。未回填的局部重译（`retranslate-cues`）同样是等待项，条目记为 `awaiting_input` 而不是已完成——等待项绝不由批处理自动推进。已完成条目的**非目标**产物（`normalized_audio`、`word_transcript`、批次 manifest 等中间 checkpoint）失效只做标注（`item["verification"].status == "degraded"` 与 `batch_item_completed.verification`），不改写终态；**目标**产物失效仍按各自路径处理：`burned_video` 走 relink / 重烧的 `awaiting_input`；`bilingual_ass` 已经在 `plan_advance_steps` 的译文满足度判定内（登记过就必须有效），失效时条目的恢复分类根本不是 `complete`，直接落到 `continue` 由 `render` 零 API 成本重建；`source_srt` 不在 `plan_advance_steps` 判定内但纯转写批次上就是交付物，条目落到 `continue` 由 `resume_job` 真正重建，不得当作「非目标产物」放行。普通模式下 `batch` / `batch-continue` 会逐条打印需要处理的条目及其恢复命令（数据取自已持久化的 `recovery_plan`，不重算）。两者同样支持 `--fail-on-waiting`：无失败条目、有等待条目时返回 10，有失败条目仍返回 6（**6 优先于 10**）。
-- `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum；符合资格时归类为 `awaiting_input`，优先给出 `relink-burned-output`，并列出显式 `continue` 重烧作为备选。产物有效性判定与 `continue` 使用同一套全量 checksum 校验，只是同一次判定内对同一文件只哈希一次（进程内、单次调用作用域内的记忆化，不跨命令、不落盘）。记忆化的身份键含 `st_mtime_ns`，因此有一条已知且被接受的边界：在同一个只读作用域执行期间（毫秒级）把文件改成等长内容并把 mtime 恢复原值，会复用旧哈希——与 git 的 racy-timestamp 取舍同类。`build_recovery_plan` 本身只读，但 batch 会把 plan 及其完成分类写入 `batch.json`，所以该窗口里的误判可能持久化；接受它的理由是命中需要外部写入者绕过 Job 锁、精确插入首次哈希后的极短窗口，而无缓存时「计划返回后、落盘前」仍有更宽的同类 TOCTOU，`xvt verify JOB` 则会在作用域外重新哈希并识破。除此之外，size/mtime 等文件元数据只能用于**证伪**（元数据与登记值不符即判失效），不得用于**证实**有效——`cp -p` / `rsync -a` / 备份还原都会保留 mtime。既有成例同此界线：`add_artifact` 写后立即哈希登记，`_burn_fingerprint` 的 size+mtime 只参与身份指纹，不承担有效性判定。
+- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。等待项绝不由批处理自动推进，已登记烧录成品缺失时绝不自动重烧，一律停在 `awaiting_input` 等用户显式 `relink-burned-output` 或 `continue`。`--fail-on-waiting` 下有等待条目返回 10，有失败条目仍返回 6（**6 优先于 10**）。恢复分类、`degraded` 标注与各目标产物的去向详见 [恢复与回填契约](docs/RECOVERY.md#批处理恢复分类与中断兜底)。
+- `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。产物有效性判定与 `continue` 使用**同一套全量 checksum 校验**，只是同一次判定内对同一文件只哈希一次。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum。记忆化边界与元数据证伪/证实的界线详见 [恢复与回填契约](docs/RECOVERY.md#产物有效性校验与-checksum-记忆化)。
 - `xvt continue JOB` 读取 `job.config.workflow`（类型化为 `WorkflowConfig`），补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。等待态退出码同 `run`（默认 0，`--fail-on-waiting` 时 10）。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
 - `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
 - `xvt prepare-source-review JOB --cue ID` / `apply-source-review-fixes JOB REVIEW` 显式修订源 cue 文本，保留 ID、时间轴、words 和 provenance，立即重跑源字幕 QA，并失效旧翻译及全部下游；导入译文工作流不支持。
 - `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
 - Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先回填再运行 `continue`。
-- `xvt apply JOB RESPONSE` 是统一回填入口，但路由规则依响应类型而不同：人工修订模板（`source-review-*.json` / `translation-review-*.json`，CLI 生成、用户编辑后原样提交）携带 `task` 字段，按该字段路由；人工修订 SRT（固定命名 `translation-review-<fp12>.srt`）按文件名识别为修订通道，不与 `import-translation` 的字幕输入混淆；Agent 翻译/润色/语义校对响应契约（见 `translation-protocol.md`）不含 `task` 字段，按 Job 当前等待步骤路由——仅支持有持久化 `config.workflow` 目标的端到端 Job。原子 Job（无 `config.workflow`，例如单独 `xvt translate` 创建的等待）不受统一入口支持，路由不出来时报错而不猜测，需改用对应的显式 `apply-*` 命令。译文相关响应可加 `--continue` 在回填后继续同一工作流（`--fail-on-waiting` 透传给这次续跑：停在下一个等待态时返回 10，不加 `--continue` 时无作用）；源文修订会失效译文及下游，必须先独立回填并查看 `status`，因此拒绝该组合。因此端到端 Job 上人工 translation review 的推荐命令是 `xvt apply JOB FILE --continue`（回填并续跑同一工作流），原子 Job（无 `config.workflow`）拿不到 `--continue`，推荐命令退回 `xvt apply-translation-review-fixes JOB FILE`，而人工 source review 的推荐命令仍是 `xvt apply-source-review-fixes JOB FILE` 加一次显式 `status`，保持两步。各 `apply-*` 命令保留为稳定入口，语义零改动。需要额外参数的 `apply-cue-retranslation` 与输入非 JSON 的 `import-translation` 不纳入统一路由：局部重译现在是 `plan_advance_steps` 的一个正式等待步骤（`await_cue_retranslation` ∈ `AWAIT_STEPS`），但仍刻意不进 `_STEP_ROUTES`——`apply-cue-retranslation` 必须显式收 `--cue` 与 `--target-language`，而 `xvt apply` 的命令行里没有这两个参数、也不能从响应里安全地推出来。理由显式登记在 `cli._UNROUTABLE_AWAIT_STEPS`，新增等待步骤必须在两张表之一里表态（守卫测试强制）。
+- `xvt apply JOB RESPONSE` 是统一回填入口：人工修订模板按 `task` 字段路由，人工修订 SRT 按固定文件名识别，Agent 响应按 Job 当前等待步骤路由。**路由不出来时报错而不猜测**，改用对应的显式 `apply-*` 命令（它们保留为稳定入口，语义零改动）。**新增等待步骤必须在 `cli._STEP_ROUTES` 与 `cli._UNROUTABLE_AWAIT_STEPS` 两张表之一里表态**，守卫测试强制。`--continue` 透传、源文修订拒绝该组合的理由与各场景推荐命令详见 [恢复与回填契约](docs/RECOVERY.md#xvt-apply-统一回填路由)。
 - `--translation-quality polished` 在润色候选后必须完成 Q6 语义校对；API 最多修复一次并复查，Agent 使用 `apply-semantic-review` 回填合并响应。仍有 review 问题时运行 `continue --acknowledge-translation-review`；确认不能绕过确定性字幕 QA。
 - `xvt polish-translation JOB` 为已有端到端 Job 显式补跑润色；API 模式逐批 checkpoint，Agent 模式必须先运行 `apply-polish-translation`，再由 `continue` 进入语义校对。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。
-- `xvt burn JOB` 是独立烧录入口（advanced）。本地纯音频 Job 必须通过 `--media` 提供视频。该原子命令可覆盖持久化 workflow 之外的媒体、字体和编码参数，因此不签发 workflow v2 proof；只有 `run` / `continue` 按持久化目标完成的烧录才登记 checksum 保护的 `version=2` `burn_fingerprint` proof，绑定 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum。旧/legacy fingerprint 可按既有轻量完成语义读取，但不能用于 relink。
-- `xvt relink-burned-output JOB EXISTING_VIDEO` 是已移动烧录成品的唯一重新关联入口（advanced）。仅接受 checksum 有效的 v2 proof，且重算的源媒体内容 checksum、原 `burned_video` checksum、当前 fingerprint、媒体 QA 和候选文件 SHA-256 必须全部匹配；重复 `burned_video` 一律 fail closed。legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重新关联资格，按 `retryable` 恢复并由 `continue` 重烧；旧 Job 必须先 `continue` 重烧一次生成 v2 proof，不得宣称可直接 relink。普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；内容 checksum 只在烧录落证和 relink 校验时计算。
+- `xvt burn JOB` 是独立烧录入口（advanced）。本地纯音频 Job 必须通过 `--media` 提供视频。该原子命令可覆盖持久化 workflow 之外的媒体、字体和编码参数，因此不签发 workflow v2 proof；只有 `run` / `continue` 按持久化目标完成的烧录才登记 checksum 保护的 `version=2` proof，详见 [恢复与回填契约](docs/RECOVERY.md#烧录-proof-与成品重新关联资格)。
+- `xvt relink-burned-output JOB EXISTING_VIDEO` 是已移动烧录成品的唯一重新关联入口（advanced）。**只认 checksum 有效的 v2 proof**，全部校验项匹配才放行，重复 `burned_video` 一律 fail closed；不具备资格的 Job 按 `retryable` 由 `continue` 重烧。完整匹配条件详见 [恢复与回填契约](docs/RECOVERY.md#烧录-proof-与成品重新关联资格)。
 
 不要把 `resume` 和 `continue` 合并。前者恢复转写状态，后者完成用户最初请求的端到端目标。
 
@@ -83,7 +84,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 5. 使用 `apply_patch` 修改文本文件。不要覆盖用户已有的无关改动。
 6. 保持实现简单。不要为尚未确认的 GUI、队列、多租户、数据库或插件体系预留抽象层。
 7. 行为变化必须补测试。涉及 FFmpeg、字体、yt-dlp、翻译提供方、恢复逻辑或安全边界时，至少覆盖一个失败或边界场景。
-8. CLI 参数、默认行为、artifact、事件或安全边界变化后，同步检查 README、架构、Changelog、Roadmap、Skill 和 HANDOFF。
+8. CLI 参数、默认行为、artifact、事件或安全边界变化后，同步检查 README、架构、恢复契约、Changelog、Roadmap、Skill 和 HANDOFF。
 9. **提交前硬门槛（不可跳过）**：
    1. 对照 diff 做一遍代码 review（正确性、边界、与既有语义一致性、安全边界、文档是否漏改）。
    2. 有问题先修再测；未修干净不得 `git commit`。

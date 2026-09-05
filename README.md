@@ -978,7 +978,7 @@ uv run --no-sync ruff format --check src tests
 uv run --no-sync pytest -q
 ```
 
-更多设计说明见 [架构说明](docs/ARCHITECTURE.md)，已完成和待完成工作见 [路线图](ROADMAP.md)，协作约定见 [贡献指南](CONTRIBUTING.md)。
+更多设计说明见 [架构说明](docs/ARCHITECTURE.md)，恢复与回填语义见 [恢复与回填契约](docs/RECOVERY.md)，已完成和待完成工作见 [路线图](ROADMAP.md)，协作约定见 [贡献指南](CONTRIBUTING.md)。
 
 ## License
 

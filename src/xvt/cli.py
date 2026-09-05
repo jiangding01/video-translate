@@ -2077,7 +2077,7 @@ _STEP_ROUTES: dict[str, str] = {
 # 刻意不进 _STEP_ROUTES 的等待步骤，以及不进的理由。原子重译现在是
 # plan_advance_steps 的一个正式等待步骤（见 workflow.AWAIT_STEPS），但目标子命令
 # apply-cue-retranslation 必须显式收 --cue 与 --target-language，而 xvt apply 的命令行
-# 里没有这两个参数、也不能从响应里安全地推出来（AGENTS.md 已定调）。
+# 里没有这两个参数、也不能从响应里安全地推出来（理由见 docs/RECOVERY.md）。
 # 这张表存在的意义是让「新增等待步骤」必须表态：要么进路由表，要么在这里写明理由，
 # 否则守卫测试会红。
 _UNROUTABLE_AWAIT_STEPS: frozenset[str] = frozenset({"await_cue_retranslation"})
