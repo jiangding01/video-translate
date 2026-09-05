@@ -384,7 +384,7 @@ CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消
 
 ## 接手步骤
 
-1. 阅读 [AGENTS.md](AGENTS.md)、[README.md](README.md)、[架构说明](docs/ARCHITECTURE.md)、[路线图](ROADMAP.md) 和 [贡献指南](CONTRIBUTING.md)。
+1. 阅读 [AGENTS.md](AGENTS.md)、[README.md](README.md)、[架构说明](docs/ARCHITECTURE.md)、[恢复与回填契约](docs/RECOVERY.md)、[路线图](ROADMAP.md) 和 [贡献指南](CONTRIBUTING.md)。
 2. 运行 `uv run --no-sync xvt --help`，确认命令面与本文一致。
 3. 运行 Ruff 和全量测试，确认基线没有漂移。
 4. 运行 `git status --short --branch -uall`，确认当前分支和 `origin/main` 的同步状态。

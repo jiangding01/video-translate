@@ -34,6 +34,7 @@ uv run --no-sync pytest -q
 
 - `README.md`
 - `docs/ARCHITECTURE.md`
+- `docs/RECOVERY.md`，恢复分类、回填路由或批处理恢复语义变化时更新
 - `CHANGELOG.md`
 - `ROADMAP.md`，仅在已完成或规划状态发生变化时更新
 
