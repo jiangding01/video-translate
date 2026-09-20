@@ -20,12 +20,16 @@ from xvt.pipeline import (
     run_subtitle_transcription,
     run_translation,
 )
-from xvt.pipeline.translation import _backoff_delay, load_translation_response
+from xvt.pipeline.translation import (
+    _backoff_delay,
+    load_translation_response,
+    translation_progress_rebuildable,
+)
 from xvt.process import CommandResult
 from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.translation_provider import ProviderResponseError, TranslationProviderError
-from xvt.workflow_config import WorkflowConfig, set_workflow_config
+from xvt.workflow_config import WorkflowConfig, get_workflow_config, set_workflow_config
 
 
 class TranslationPipelineTest(unittest.TestCase):
@@ -952,6 +956,213 @@ class TranslationPipelineTest(unittest.TestCase):
         self.assertEqual(persisted.config["source_language"], "en")
         # workflow Job 的质量由 workflow 配置派生，不得写入顶层 config。
         self.assertNotIn("translation_quality", persisted.config)
+
+    def _workflow_job_file(
+        self,
+        root: Path,
+        provider: str = "auto",
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> Path:
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        set_workflow_config(
+            job,
+            WorkflowConfig(
+                target_language="zh-CN", provider=provider, base_url=base_url, model=model
+            ),
+        )
+        return save_job(job)
+
+    _PROVIDER_ENV = {
+        "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1/",
+        "XVT_TRANSLATION_MODEL": "model-a",
+        "XVT_TRANSLATION_API_KEY": "sk-should-never-persist",
+    }
+
+    def test_run_translation_persists_resolved_provider_after_first_batch_succeeds(self) -> None:
+        # continue 不能再依赖当时进程的环境变量：首个批次成功后，
+        # 生效的 base_url / model 必须写回 job.config.workflow，api_key 永远不落盘。
+        def provider(batch, _config, *, correction=None, **_kwargs):
+            return {item.id: "你好。" for item in batch.items}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(root)
+            with (
+                patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=provider),
+            ):
+                result = run_translation(job_file, target_language="zh-CN")
+
+            persisted = load_job(job_file)
+            raw_job = job_file.read_text(encoding="utf-8")
+            workflow = get_workflow_config(persisted)
+
+        self.assertEqual(result.mode, "openai-compatible")
+        assert workflow is not None
+        self.assertEqual(workflow.base_url, "https://provider.example.com/v1")
+        self.assertEqual(workflow.model, "model-a")
+        self.assertEqual(workflow.provider, "auto")
+        self.assertNotIn("sk-should-never-persist", raw_job)
+
+    def test_run_translation_keeps_provider_null_when_first_batch_fails(self) -> None:
+        # 环境变量里是过期模型名时，run 不能先把坏值钉进 job.json：
+        # 首批 4xx 后字段保持 null，用户修好环境变量即可直接 continue。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(root)
+            with (
+                patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+                patch(
+                    "xvt.pipeline.translation.translate_batch",
+                    side_effect=TranslationProviderError(
+                        "translation provider returned HTTP 400", retryable=False
+                    ),
+                ),
+                self.assertRaises(TranslationProviderError),
+            ):
+                run_translation(job_file, target_language="zh-CN")
+
+            persisted = load_job(job_file)
+            workflow = get_workflow_config(persisted)
+
+        self.assertEqual(persisted.stages[StageName.TRANSLATE].status, StageStatus.FAILED)
+        assert workflow is not None
+        self.assertIsNone(workflow.base_url)
+        self.assertIsNone(workflow.model)
+
+    def test_run_translation_falls_back_to_persisted_provider_identity(self) -> None:
+        # HIGH-2：`xvt translate` 不传 --base-url/--model 时必须回退到 Job 固化值，
+        # 否则 translate 走环境变量、continue/status 走 Job 值，指纹分叉。
+        seen: list[object] = []
+
+        def provider(batch, config, *, correction=None, **_kwargs):
+            seen.append(config)
+            return {item.id: "你好。" for item in batch.items}
+
+        stale_env = {**self._PROVIDER_ENV, "XVT_TRANSLATION_MODEL": "model-stale"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(
+                root, base_url="https://persisted.example.com/v1", model="model-persisted"
+            )
+            with (
+                patch.dict(os.environ, stale_env, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=provider),
+            ):
+                run_translation(job_file, target_language="zh-CN")
+            workflow = get_workflow_config(load_job(job_file))
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].base_url, "https://persisted.example.com/v1")
+        self.assertEqual(seen[0].model, "model-persisted")
+        assert workflow is not None
+        self.assertEqual(workflow.model, "model-persisted")
+
+    def test_run_translation_explicit_override_replaces_persisted_identity(self) -> None:
+        # HIGH-2：CLI 显式传入的值覆盖 Job 固化值并写回（即便字段已非 null）。
+        seen: list[object] = []
+
+        def provider(batch, config, *, correction=None, **_kwargs):
+            seen.append(config)
+            return {item.id: "你好。" for item in batch.items}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(
+                root, base_url="https://persisted.example.com/v1", model="model-persisted"
+            )
+            with (
+                patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=provider),
+            ):
+                run_translation(
+                    job_file,
+                    target_language="zh-CN",
+                    base_url="https://override.example.com/v1/",
+                    model="model-override",
+                )
+            workflow = get_workflow_config(load_job(job_file))
+
+        self.assertEqual(seen[0].model, "model-override")
+        assert workflow is not None
+        self.assertEqual(workflow.base_url, "https://override.example.com/v1")
+        self.assertEqual(workflow.model, "model-override")
+
+    def test_persisted_provider_keeps_fingerprint_stable_across_environments(self) -> None:
+        # 写回后换一个环境变量不同的终端，进度 checkpoint 仍按 Job 里的 base_url / model
+        # 判定为可复用；反向对照证明没有写回值时过期环境变量会让指纹漂移。
+        stale_env = {**self._PROVIDER_ENV, "XVT_TRANSLATION_MODEL": "model-stale"}
+
+        def provider(batch, _config, *, correction=None, **_kwargs):
+            return {item.id: "你好。" for item in batch.items}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(root)
+            with (
+                patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=provider),
+            ):
+                run_translation(job_file, target_language="zh-CN")
+            job = load_job(job_file)
+            workflow = get_workflow_config(job)
+            assert workflow is not None
+            with patch.dict(os.environ, stale_env, clear=False):
+                rebuildable = translation_progress_rebuildable(job, workflow)
+                drifted = translation_progress_rebuildable(
+                    job, WorkflowConfig(target_language="zh-CN", provider="auto")
+                )
+
+        self.assertTrue(rebuildable)
+        self.assertFalse(drifted)
+
+    def test_agent_fallback_does_not_persist_provider_config(self) -> None:
+        # 降级为 Agent 模式（缺 API key）时 base_url / model 保持 null，
+        # 否则下次 continue 会被半套配置误导。
+        partial_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "model-a",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(root)
+            with patch.dict(os.environ, partial_env, clear=False):
+                os.environ.pop("XVT_TRANSLATION_API_KEY", None)
+                result = run_translation(job_file, target_language="zh-CN")
+            workflow = get_workflow_config(load_job(job_file))
+
+        self.assertEqual(result.mode, "agent")
+        self.assertNotIn("pinned to openai-compatible", result.fallback_reason or "")
+        assert workflow is not None
+        self.assertIsNone(workflow.base_url)
+        self.assertIsNone(workflow.model)
+
+    def test_agent_fallback_names_persisted_provider_when_only_api_key_is_missing(self) -> None:
+        # Job 已固化 provider 身份、当前终端只缺 API Key：降级不能静默。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._workflow_job_file(
+                root, base_url="https://persisted.example.com/v1", model="model-persisted"
+            )
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("XVT_TRANSLATION_API_KEY", None)
+                result = run_translation(job_file, target_language="zh-CN")
+
+        self.assertEqual(result.mode, "agent")
+        self.assertIn("missing API key environment variable", result.fallback_reason or "")
+        self.assertIn(
+            "pinned to openai-compatible "
+            "(model=model-persisted, base_url=https://persisted.example.com/v1)",
+            result.fallback_reason or "",
+        )
+        self.assertIn("$XVT_TRANSLATION_API_KEY", result.fallback_reason or "")
 
     def test_load_translation_response_rejects_boolean_cue_ids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

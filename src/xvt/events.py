@@ -180,9 +180,19 @@ def _redact_free_text(value: str) -> str:
     return _BEARER_PATTERN.sub(f"Bearer {_REDACTED}", value)
 
 
+def redact_text(value: str) -> str:
+    """对一段自由文本做完整脱敏：URL 中的 userinfo / 敏感 query，再是鉴权头、Bearer 与 userinfo。
+
+    事件边界之外也有文本会被持久化（例如失败原因经 ``set_stage`` 写进 ``job.json``、
+    被 ``status --json`` 原样输出），那些路径不经过 ``create_event``，需要在产生消息处
+    显式调用本函数。
+    """
+    return _redact_free_text(_URL_PATTERN.sub(lambda match: redact_url(match.group()), value))
+
+
 def _redact_event_value(value: Any) -> Any:
     if isinstance(value, str):
-        return _redact_free_text(_URL_PATTERN.sub(lambda match: redact_url(match.group()), value))
+        return redact_text(value)
     if isinstance(value, list):
         return [_redact_event_value(item) for item in value]
     if isinstance(value, tuple):

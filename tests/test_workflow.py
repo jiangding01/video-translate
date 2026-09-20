@@ -27,9 +27,11 @@ from xvt.pipeline import (
     source_review_input_path,
     translation_review_input_path,
 )
+from xvt.pipeline.common import load_cues
 from xvt.process import CommandResult
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
 from xvt.translate import GlossaryTerm, SemanticIssue, TranslationPolicy
+from xvt.translation_provider import TranslationProviderError
 from xvt.workflow import (
     WorkflowOptions,
     _burn_satisfied,
@@ -108,6 +110,69 @@ class WorkflowTest(unittest.TestCase):
             translate.assert_called_once()
             polish.assert_called_once()
             semantic_review.assert_called_once()
+
+    def test_continue_reuses_translation_progress_after_environment_model_changes(self) -> None:
+        # 端到端：run 首批成功、次批 4xx 中断后，换一个 XVT_TRANSLATION_MODEL 不同的终端
+        # 跑真实 continue 路径。provider 身份已固化进 Job，指纹不变：首批零调用复用，
+        # 只补跑次批。
+        provider_env = {
+            "XVT_TRANSLATION_BASE_URL": "https://provider.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "model-a",
+            "XVT_TRANSLATION_API_KEY": "secret",
+        }
+        stale_env = {**provider_env, "XVT_TRANSLATION_MODEL": "model-stale"}
+        seen: list[tuple[int, str]] = []
+
+        def first_run(batch, config, *, correction=None, **_kwargs):
+            seen.append((batch.id, config.model))
+            if batch.id != 1:
+                raise TranslationProviderError(
+                    "translation provider returned HTTP 400", retryable=False
+                )
+            return {item.id: "你好。" for item in batch.items}
+
+        def continued_run(batch, config, *, correction=None, **_kwargs):
+            seen.append((batch.id, config.model))
+            return {item.id: "世界。" for item in batch.items}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\nWorld.\n",
+                encoding="utf-8",
+            )
+            options = WorkflowOptions(
+                input=str(source),
+                output=root / "output",
+                target_language="zh-CN",
+                batch_size=1,
+            )
+            with (
+                patch.dict("os.environ", provider_env),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=first_run),
+                self.assertRaises(TranslationProviderError),
+            ):
+                run_workflow(options)
+            job_file = next((root / "output" / "jobs").glob("*/job.json"))
+            persisted = get_workflow_config(load_job(job_file))
+            assert persisted is not None
+            self.assertEqual(persisted.model, "model-a")
+            self.assertEqual(seen, [(1, "model-a"), (2, "model-a")])
+
+            with (
+                patch.dict("os.environ", stale_env),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=continued_run),
+            ):
+                result = continue_workflow(job_file)
+
+            translated = load_cues(valid_artifact_path(load_job(job_file), "translated_cues"))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(seen[2:], [(2, "model-a")])
+        # 收尾阶段会按字幕风格去掉句末句号，这里只关心两条译文分别来自首次 run 与 continue。
+        self.assertEqual([cue.target_text.rstrip("。") for cue in translated], ["你好", "世界"])
 
     def test_source_suspect_workflow_exposes_source_first_recovery_and_lazy_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

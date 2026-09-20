@@ -13,7 +13,7 @@ import random
 import shutil
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,7 @@ from xvt.workflow_config import (
     clear_burn_fingerprint,
     get_workflow_config,
     resolve_translation_quality,
+    set_workflow_config,
 )
 
 _RESPONSE_CORRECTION = (
@@ -915,6 +916,52 @@ def prepare_agent_translation(
         raise
 
 
+def _persist_resolved_provider(job: Job, provider_config: CompatibleProviderConfig) -> None:
+    """把实际生效的 base_url / model 写回 ``job.config["workflow"]``（调用方负责 save_job）。
+
+    端到端 Job 在 ``run`` 时可以不带 ``--base-url`` / ``--model``，此时两个字段落盘为 null，
+    ``resolve_provider`` 靠环境变量补齐。它们都参与翻译指纹：``continue`` 若在另一个环境变量
+    不同的终端里执行，指纹就会变化、批次进度清零，还可能拿过期模型名去撞 4xx。因此只要
+    openai-compatible 模式真的成功拿回过一个批次，就把生效值固化进 Job；后续 ``continue``
+    读到非 null 值便不再受进程环境影响。``xvt translate`` 显式传入的覆盖值同样写回，
+    保证 translate 与 continue / status 看到同一套身份。
+
+    必须在**首个批次成功之后**才调用：先写回再请求，环境变量里的过期模型名会先被钉进
+    job.json，用户修好环境变量也没有入口再改它（``continue`` 没有 ``--model``）。
+    指纹早在解析时已按同一份 ``provider_config`` 算出，推迟写回不影响一致性。
+    Agent 降级不会走到这里；``api_key`` 永远不落盘；原子 Job 没有 workflow 配置，不写。
+    """
+    workflow = get_workflow_config(job)
+    if workflow is None:
+        return
+    if workflow.base_url == provider_config.base_url and workflow.model == provider_config.model:
+        return
+    set_workflow_config(
+        job,
+        replace(workflow, base_url=provider_config.base_url, model=provider_config.model),
+    )
+
+
+def _fallback_reason_with_persisted_provider(
+    reason: str | None,
+    workflow: WorkflowConfig | None,
+    *,
+    api_key_env: str,
+) -> str | None:
+    """Job 已固化 provider 身份却仍降级时，把「缺的只是 API Key」这层原因说清楚，避免静默降级。
+
+    ``base_url`` / ``model`` 非空既可能是首批成功后写回，也可能是用户首次 ``run`` 时显式传入
+    （此时还从未翻译过），因此措辞只说「Job 钉住了这套身份」，不断言历史。
+    """
+    if reason is None or workflow is None or not (workflow.base_url and workflow.model):
+        return reason
+    return (
+        f"{reason}; this job is pinned to openai-compatible "
+        f"(model={workflow.model}, base_url={workflow.base_url}) "
+        f"but the current shell lacks ${api_key_env}"
+    )
+
+
 def run_translation(
     job_file: str | Path,
     *,
@@ -957,12 +1004,20 @@ def run_translation(
         (cue.source_language for cue in cues if cue.source_language),
         job.config.get("source_language", "auto"),
     )
+    if workflow is not None:
+        # 与 polish._polished_config 同口径：调用方未显式覆盖时回退到 Job 固化的身份，
+        # 否则 `xvt translate` 会走环境变量而 continue / status 走 Job 值，指纹分叉。
+        base_url = base_url if base_url is not None else workflow.base_url
+        model = model if model is not None else workflow.model
     mode, provider_config, fallback_reason = resolve_provider(
         provider,
         base_url=base_url,
         model=model,
         api_key_env=api_key_env,
         timeout_seconds=timeout_seconds,
+    )
+    fallback_reason = _fallback_reason_with_persisted_provider(
+        fallback_reason, workflow, api_key_env=api_key_env
     )
     batches: list[TranslationBatch] | None = None
     translation_fingerprint: str | None = None
@@ -1062,6 +1117,7 @@ def run_translation(
     artifacts_directory = get_job_directory(job) / "artifacts"
     progress_output = artifacts_directory / "translation-progress.json"
     batch_total = len(batches)
+    provider_persisted = False
     try:
         for batch in batches:
             raise_if_cancelled()
@@ -1102,6 +1158,10 @@ def run_translation(
             )
             translations.update(translated_batch)
             completed_batches.add(batch.id)
+            if not provider_persisted:
+                # 首个批次成功才固化 provider 身份；下面的 add_artifact 会一并 save_job。
+                _persist_resolved_provider(job, provider_config)
+                provider_persisted = True
             write_json(
                 progress_output,
                 {
@@ -1134,6 +1194,9 @@ def run_translation(
             error_category=error_category(error),
         )
         raise
+    if not provider_persisted:
+        # 全部批次都命中 checkpoint：指纹已按这套身份校验通过，同样值得固化。
+        _persist_resolved_provider(job, provider_config)
 
     response_path = artifacts_directory / "translation-response.json"
     write_json(

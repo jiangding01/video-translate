@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 from xvt.config import DEFAULT_TIMEOUT_SECONDS
 from xvt.errors import DependencyError, UserInputError
+from xvt.events import redact_text
 from xvt.translate import (
     PolishBatch,
     SemanticRepairBatch,
@@ -339,6 +340,66 @@ def _parse_retry_after(value: str | None) -> float | None:
     return max((moment - datetime.now(UTC)).total_seconds(), 0.0)
 
 
+# 错误响应体截断长度：足够放下常见的 JSON 错误说明（例如模型名不受支持），又不会把整页
+# HTML 错误页塞进一行终端输出或 JSONL 事件。
+_ERROR_BODY_LIMIT = 500
+_TRACE_HEADERS = ("x-request-id", "x-ds-trace-id")
+
+
+def _printable(text: str) -> str:
+    """剥离控制字符与零宽字符：换行折成空格，其余不可打印字符直接丢弃。"""
+    collapsed = " ".join(text.split())
+    return "".join(char for char in collapsed if char.isprintable())
+
+
+def _http_error_body(error: HTTPError) -> str:
+    """读取 HTTPError 的响应体并规整成一行可安全打印的摘要，读不出时返回空串。"""
+    try:
+        # 只读够截断所需的字节：整页 HTML 错误页或流式响应不该被完整拉进内存。
+        raw = error.read(_ERROR_BODY_LIMIT * 4)
+    except Exception:
+        # 响应体已被消费或连接已断：任何读取失败都只是丢失细节，不能反过来盖住原始状态码。
+        return ""
+    if not raw:
+        return ""
+    text = _printable(raw.decode("utf-8", errors="replace"))
+    if len(text) > _ERROR_BODY_LIMIT:
+        text = text[:_ERROR_BODY_LIMIT] + "..."
+    return text
+
+
+def _http_error_message(
+    error: HTTPError,
+    config: CompatibleProviderConfig,
+    *,
+    retryable: bool,
+) -> str:
+    """拼装 HTTP 错误消息：状态码 + 追踪 ID +（不可重试时）生效配置 + 服务端响应体。
+
+    响应体放在最后：``redact_text`` 里的鉴权头规则命中后会吞到行尾，body 若回显了
+    ``authorization:`` 之类字段，排在它后面的配置与追踪 ID 都会一起被吞掉。响应体经过
+    与事件边界同一套脱敏，因为这条消息还会经 ``set_stage`` 原样写进 ``job.json``。
+    ``api_key`` 再做一次子串替换兜底；请求头本身永远不进消息。
+    """
+    message = f"translation provider returned HTTP {error.code}"
+    if error.headers:
+        for name in _TRACE_HEADERS:
+            value = error.headers.get(name)
+            if value:
+                message = f"{message} [{name}={_printable(value)}]"
+                break
+    if not retryable:
+        # 4xx 多半是配置问题（模型名过期、端点写错）：直接把生效的 model / base_url 摆出来，
+        # 省去用户去猜「这次到底用了哪套环境变量」。
+        message = f"{message} (model={config.model}, base_url={config.base_url})"
+    body = _http_error_body(error)
+    if body:
+        message = f"{message}: {redact_text(body)}"
+    if config.api_key:
+        message = message.replace(config.api_key, "***")
+    return message
+
+
 def _request_batch(
     batch: TranslationBatch | PolishBatch | SemanticReviewBatch | SemanticRepairBatch,
     config: CompatibleProviderConfig,
@@ -378,9 +439,10 @@ def _request_batch(
         retry_after = None
         if error.headers:
             retry_after = _parse_retry_after(error.headers.get("Retry-After"))
+        retryable = error.code in RETRYABLE_HTTP_STATUS
         raise TranslationProviderError(
-            f"translation provider returned HTTP {error.code}",
-            retryable=error.code in RETRYABLE_HTTP_STATUS,
+            _http_error_message(error, config, retryable=retryable),
+            retryable=retryable,
             retry_after=retry_after,
         ) from error
     except URLError as error:
