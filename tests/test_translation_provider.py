@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import tempfile
@@ -656,6 +657,135 @@ class TranslationProviderTest(unittest.TestCase):
             )
 
         self.assertFalse(raised.exception.retryable)
+
+    def _raise_http_error(
+        self,
+        status: int,
+        body: bytes,
+        *,
+        headers: Message | None = None,
+        api_key: str = "secret",
+    ) -> TranslationProviderError:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, status, "error", headers, io.BytesIO(body))
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://api.example.com", "old-model", api_key),
+                opener=opener,
+            )
+        return raised.exception
+
+    def test_http_error_message_keeps_response_body_and_trace_id(self) -> None:
+        headers = Message()
+        headers["x-ds-trace-id"] = "trace-123"
+        body = (
+            b'{"error":{"message":"The supported API model names are deepseek-flash, '
+            b'deepseek-v4-pro, but you passed old-model"}}'
+        )
+
+        error = self._raise_http_error(400, body, headers=headers)
+
+        message = str(error)
+        self.assertTrue(
+            message.startswith(
+                "translation provider returned HTTP 400 [x-ds-trace-id=trace-123] "
+                "(model=old-model, base_url=https://api.example.com): "
+            ),
+            message,
+        )
+        self.assertIn("but you passed old-model", message)
+        self.assertFalse(error.retryable)
+
+    def test_http_error_message_truncates_and_sanitizes_body(self) -> None:
+        body = b"line one\r\n\x1b[2Jline two " + b"x" * 600
+
+        message = str(self._raise_http_error(400, body))
+
+        # ESC 被剥离，剩下的 "[2J" 是普通可打印字符，不再具备清屏能力。
+        self.assertIn("line one [2Jline two ", message)
+        self.assertNotIn("\r", message)
+        self.assertNotIn("\x1b", message)
+        self.assertTrue(message.endswith("..."), message)
+        self.assertLess(len(message), 700)
+
+    def test_http_error_message_survives_unreadable_body(self) -> None:
+        cue = Cue(1, 0, 1000, "Hello", source_language="en")
+        batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]
+
+        class BrokenBody:
+            def read(self, _size=-1):
+                raise OSError("connection closed")
+
+            def close(self):
+                pass
+
+        def opener(request, **_kwargs):
+            raise HTTPError(request.full_url, 502, "bad gateway", Message(), BrokenBody())
+
+        with self.assertRaises(TranslationProviderError) as raised:
+            translate_batch(
+                batch,
+                CompatibleProviderConfig("https://api.example.com", "old-model", "secret"),
+                opener=opener,
+            )
+
+        self.assertEqual(str(raised.exception), "translation provider returned HTTP 502")
+        self.assertTrue(raised.exception.retryable)
+
+    def test_http_error_message_survives_missing_headers(self) -> None:
+        # urllib 允许 HTTPError.headers 为 None（部分 opener 桩与旧代码路径）。
+        message = str(self._raise_http_error(404, b"not found", headers=None))
+
+        self.assertEqual(
+            message,
+            "translation provider returned HTTP 404 "
+            "(model=old-model, base_url=https://api.example.com): not found",
+        )
+
+    def test_http_error_message_decodes_non_utf8_body(self) -> None:
+        message = str(self._raise_http_error(400, "错误".encode("gb18030") + b" bad"))
+
+        self.assertIn("\ufffd", message)
+        self.assertTrue(message.endswith(" bad"), message)
+
+    def test_http_error_message_redacts_api_key_echoed_by_server(self) -> None:
+        message = str(
+            self._raise_http_error(401, b"bad token: sk-secret-key", api_key="sk-secret-key")
+        )
+
+        self.assertNotIn("sk-secret-key", message)
+        self.assertIn("bad token: ***", message)
+
+    def test_http_error_message_redacts_credentials_like_event_boundary(self) -> None:
+        # 这条消息会经 set_stage 写进 job.json 并被 status --json 原样输出，
+        # 必须在源头就套用事件边界同一套脱敏；配置放在 body 之前，不被行尾吞掉。
+        body = (
+            b"echo: Authorization: Bearer sk-leaked-token\n"
+            b"see https://user:pw@example.com/v1?api_key=leak"
+        )
+
+        message = str(self._raise_http_error(400, body))
+
+        self.assertNotIn("sk-leaked-token", message)
+        self.assertNotIn("user:pw@", message)
+        self.assertNotIn("api_key=leak", message)
+        self.assertIn("(model=old-model, base_url=https://api.example.com): ", message)
+
+    def test_non_retryable_http_error_reports_effective_provider_config(self) -> None:
+        message = str(self._raise_http_error(400, b'{"error":"model not found"}'))
+
+        self.assertIn("(model=old-model, base_url=https://api.example.com)", message)
+        self.assertNotIn("secret", message)
+
+    def test_retryable_http_error_omits_provider_config(self) -> None:
+        message = str(self._raise_http_error(503, b"overloaded"))
+
+        self.assertEqual(message, "translation provider returned HTTP 503: overloaded")
 
     def test_provider_classifies_remote_disconnect_as_retryable(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")

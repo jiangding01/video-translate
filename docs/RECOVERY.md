@@ -45,6 +45,22 @@
 1. `plan_advance_steps` 在**函数体最前**判定局部重译等待（`await_cue_retranslation`）。理由：它会叠加在一个译文目标已满足的 Job 上，放在后面就会被「已满足」短路掉。
 2. 在 `TRANSLATE` 等输入且 `translation_batches` checksum 有效时，早退为 `await_agent_translation`。这一早退**必须排在 `translated_cues` → `render` 之前**：新整轮请求不会失效旧译文，按 render 先判会把等待误报成「只差渲染」。
 
+## 翻译提供方身份的固化
+
+### 固化时机
+
+- 端到端 Job 的 `config.workflow.base_url` / `model` 允许在 `run` 时为 null，由环境变量补齐。两者都进入 API 翻译进度指纹，因此 `continue` 若在另一个环境变量不同的终端里执行，指纹会漂移、批次进度清零，还可能拿过期模型名去撞 4xx。
+- openai-compatible 模式在**首个翻译批次成功后**（或全部批次都命中 checkpoint、指纹按这套身份校验通过时）把实际生效的 `base_url` / `model` 写回 `config.workflow`，与该批次的 `save_job` 一并落盘。此后 `continue` / `status` 读到非 null 值，解析提供方与指纹都不再受进程环境影响。
+- `xvt translate` 在端到端 Job 上不传 `--base-url` / `--model` 时回退到 Job 固化值（与 `polish-translation` 同口径），显式传入则覆盖并按同一时机写回，保证 `translate` 与 `continue` / `status` 看到同一套身份。
+
+### 失败不写回的原因
+
+- 写回必须排在首个批次成功**之后**：先写回再请求，环境变量里的过期模型名会先被钉进 `job.json`，而 `continue` 没有 `--model`，用户修好环境变量也没有入口再改它。首批 4xx 后字段保持 null，修好环境变量即可直接 `continue`。
+- 指纹早在解析时已按同一份 provider 配置算出，推迟写回不影响一致性。
+- Agent 降级不写回（半套配置会误导下一次 `continue`）；原子 Job 没有 `config.workflow`，不写。
+- `api_key` 永不落盘，仍只读当前终端的环境变量。Job 已固化身份、当前终端只缺 API Key 时，auto 模式的降级原因会点名 Job 钉住的 `model` / `base_url` 与缺失的环境变量，不静默降级。
+- 换模型的途径：重新 `run`，或 `xvt translate JOB --target-language LANG --model NEW`，或直接编辑 `job.json`。
+
 ## 产物有效性校验与 checksum 记忆化
 
 ### 与 continue 同一套校验
