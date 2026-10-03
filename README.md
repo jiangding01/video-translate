@@ -838,6 +838,8 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 
 XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有传入 `--allow-auto-subtitles` 才会请求自动字幕。新 Job 默认 `--source-strategy auto`：人工候选 QA 通过直接采用，失败时先尝试对齐再回退 ASR；自动候选在翻译或烧录任务中最终使用 ASR，在只生成源字幕且 QA 通过时可直接采用。`subtitles` 强制候选为时间轴，`asr` 强制媒体转写（不能用于纯字幕输入，也不能与 `--align-subtitles` 同用）。候选 QA 与最终选择会写入 `source-candidate-qa.json`、`source-selection.json`。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
 
+显式请求 YouTube 平台字幕并传入 `--cookies-from-browser` 时，若登录态查询未找到匹配的人工字幕，且没有有效的已下载字幕或用户源字幕，XVT 会补做一次匿名查询。找到同一视频的匹配人工字幕后，字幕也匿名下载；该路径忽略 yt-dlp 本机配置以避免重新带入 Cookie，但保留显式代理，媒体下载仍使用原访问参数。补查失败会报错，不把提取失败当成字幕不存在。匿名来源记录在 `remote.json` 的 `subtitles_anonymous` 与 `remote_subtitles_selected` 事件的 `anonymous` 字段中。此行为同样适用于 `polished`；已有候选保留原来源分类，已生成源 cue 的 Job 不会自动更换源字幕。
+
 ### 7. 重建既有 Job 的源字幕
 
 当媒体 Job 的源字幕 QA 出现 error 时，可显式用 ASR 重建时间轴：

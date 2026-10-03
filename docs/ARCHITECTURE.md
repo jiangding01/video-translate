@@ -160,6 +160,8 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 
 - 不新增 Job stage，不升级 Job schema；源字幕选择复用转写腿，润色和语义校对作为 `translate` / `subtitle_qa` 的可恢复子步骤，通过 artifact、现有 stage 状态和事件 `detail` 细分。
 - Q2 已完成新 Job 的源字幕选择：平台字幕仅由显式 `--youtube-subtitles` 请求；`auto` 对通过 QA 的人工候选保留快速路径，对失败候选先对齐再 ASR，自动候选在翻译/烧录目标下使用 ASR；`subtitles` / `asr` 可显式覆盖。候选 QA、选择报告和最终 source cues 均为 checksum artifact；用户本地字幕默认保留。
+- YouTube 显式字幕请求在浏览器 Cookie 查询缺少匹配人工字幕时补做一次匿名查询；仅接受同一视频的匹配人工字幕。查询与字幕下载均忽略 yt-dlp 本机配置、保留显式代理，媒体下载沿用原访问参数。`remote_info.subtitles_anonymous` 记录字幕访问方式，更新后重新登记 checksum；补查失败阻断 inspect，不静默进入 ASR。
+- 已有有效下载字幕或用户源字幕时不补查、不替换来源元信息，避免恢复时把旧自动字幕误分类为人工字幕。
 - Q2 选择报告损坏或缺失但 source cues 仍有效时，只从既有 cue provenance 与校验通过的候选/对齐 artifact 重建审计报告，不重新选择或改写时间轴；原因记为 `selection_artifact_recovered`。
 - Q3 已完成既有媒体 Job 的显式 ASR 源重建；它不改变端到端目标或翻译策略，保留输入译文以重新映射，且不把重建隐式塞入 `continue`。
 - Q4 已完成：翻译以确定性语义组为上下文，按完整组装箱，模型只返回既有 cue ID 的文本；规则版本和 prompt 版本进入恢复边界。

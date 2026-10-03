@@ -25,6 +25,7 @@ class RemoteMediaInfo:
     webpage_url: str
     subtitle_languages: tuple[str, ...]
     automatic_subtitle_languages: tuple[str, ...]
+    subtitles_anonymous: bool = False
 
 
 def validate_remote_url(url: str) -> str:
@@ -78,6 +79,7 @@ def inspect_remote(
     *,
     cookies_from_browser: str | None = None,
     proxy: str | None = None,
+    anonymous: bool = False,
 ) -> RemoteMediaInfo:
     validated_url = validate_remote_url(url)
     command = [
@@ -86,7 +88,9 @@ def inspect_remote(
         "--skip-download",
         "--no-warnings",
     ]
-    if cookies_from_browser:
+    if anonymous:
+        command.append("--ignore-config")
+    elif cookies_from_browser:
         command.extend(["--cookies-from-browser", cookies_from_browser])
     if proxy:
         command.extend(["--proxy", proxy])
@@ -140,6 +144,7 @@ def download_remote_subtitles(
     automatic: bool = False,
     cookies_from_browser: str | None = None,
     proxy: str | None = None,
+    anonymous: bool = False,
     runner: CommandRunner = run_command,
 ) -> Path:
     validated_url = validate_remote_url(url)
@@ -163,7 +168,9 @@ def download_remote_subtitles(
         "-o",
         str(root / "source.%(ext)s"),
     ]
-    if cookies_from_browser:
+    if anonymous:
+        command.append("--ignore-config")
+    elif cookies_from_browser:
         command.extend(["--cookies-from-browser", cookies_from_browser])
     if proxy:
         command.extend(["--proxy", proxy])

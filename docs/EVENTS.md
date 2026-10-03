@@ -235,7 +235,8 @@ yt-dlp 下载进度（`download.py`）。
 | `job_id` | string | Job ID |
 | `job_file` | string | Job 文件路径 |
 | `language` | string | 选中的字幕语言 |
-| `automatic` | bool | 是否为自动选择（无用户指定语言时为 `true`） |
+| `automatic` | bool | 是否为平台自动生成字幕 |
+| `anonymous` | bool | 是否使用匿名补查得到的人工字幕及匿名下载；旧事件可能缺少该字段 |
 
 ### `source_selected`
 | 字段 | 类型 | 含义 |

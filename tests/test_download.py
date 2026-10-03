@@ -14,6 +14,43 @@ from xvt.process import CommandError, CommandResult
 
 
 class DownloadTest(unittest.TestCase):
+    def test_anonymous_inspection_ignores_config_and_cookie_but_keeps_proxy(self) -> None:
+        def runner(args):
+            self.assertIn("--ignore-config", args)
+            self.assertNotIn("--cookies-from-browser", args)
+            self.assertIn("--proxy", args)
+            return CommandResult(tuple(args), 0, '{"id":"abc"}', "")
+
+        inspect_remote(
+            "https://youtu.be/abc",
+            cookies_from_browser="chrome",
+            proxy="http://127.0.0.1:7890",
+            anonymous=True,
+            runner=runner,
+        )
+
+    def test_anonymous_subtitle_download_ignores_config_and_cookie_but_keeps_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def runner(args):
+                self.assertIn("--ignore-config", args)
+                self.assertNotIn("--cookies-from-browser", args)
+                self.assertIn("--proxy", args)
+                self.assertIn("--write-subs", args)
+                (root / "source.en.srt").write_text("subtitle", encoding="utf-8")
+                return CommandResult(tuple(args), 0, "", "")
+
+            download_remote_subtitles(
+                "https://youtu.be/abc",
+                root,
+                language="en",
+                cookies_from_browser="chrome",
+                proxy="http://127.0.0.1:7890",
+                anonymous=True,
+                runner=runner,
+            )
+
     def test_remote_inspection_forwards_explicit_access_options(self) -> None:
         def runner(args):
             self.assertIn("--cookies-from-browser", args)

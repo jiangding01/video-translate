@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -27,7 +27,8 @@ from xvt.download import (
     inspect_remote,
     select_subtitle_language,
 )
-from xvt.events import EventSink, EventType, create_event, job_event_fields
+from xvt.errors import DependencyError
+from xvt.events import EventSink, EventType, create_event, job_event_fields, redact_text
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Cue, Job, StageName, StageStatus, Transcript, Word
@@ -1087,6 +1088,7 @@ def _load_remote_info(path: Path) -> RemoteMediaInfo:
         webpage_url=str(data["webpage_url"]),
         subtitle_languages=tuple(data.get("subtitle_languages", ())),
         automatic_subtitle_languages=tuple(data.get("automatic_subtitle_languages", ())),
+        subtitles_anonymous=data.get("subtitles_anonymous", False),
     )
 
 
@@ -1112,6 +1114,42 @@ def _acquire_remote_job(
         add_artifact(job, "remote_info", remote_path, event_sink)
     else:
         remote_info = _load_remote_info(remote_path)
+    if (
+        job.config.get("youtube_subtitles")
+        and cookies_from_browser
+        and not job.config.get("subtitles")
+        and valid_artifact_path(job, "input_subtitles") is None
+        and valid_artifact_path(job, "downloaded_subtitles") is None
+        and urlparse(url).hostname
+        in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+        and select_subtitle_language(
+            str(job.config.get("subtitle_language") or ""), remote_info.subtitle_languages
+        )
+        is None
+    ):
+        set_stage(job, StageName.INSPECT, StageStatus.RUNNING, event_sink)
+        try:
+            anonymous_info = inspect_remote(url, proxy=proxy, anonymous=True)
+        except Exception as error:
+            raise DependencyError(
+                "人工平台字幕缺失后的匿名补查失败；无法确认字幕是否不存在。"
+                f" 请重试同一 Job。原因：{redact_text(str(error))}"
+            ) from error
+        if not remote_info.id or anonymous_info.id != remote_info.id:
+            raise ValueError("匿名字幕补查返回了不同的视频，拒绝采用")
+        if (
+            select_subtitle_language(
+                str(job.config.get("subtitle_language") or ""), anonymous_info.subtitle_languages
+            )
+            is not None
+        ):
+            remote_info = replace(
+                remote_info,
+                subtitle_languages=anonymous_info.subtitle_languages,
+                subtitles_anonymous=True,
+            )
+            write_json(remote_path, asdict(remote_info))
+            add_artifact(job, "remote_info", remote_path, event_sink)
     set_stage(job, StageName.INSPECT, StageStatus.SUCCEEDED, event_sink)
 
     candidate: AcquiredSubtitleCandidate | None = None
@@ -1164,6 +1202,7 @@ def _acquire_remote_job(
                 automatic=manual_language is None,
                 cookies_from_browser=cookies_from_browser,
                 proxy=proxy,
+                **({"anonymous": True} if remote_info.subtitles_anonymous else {}),
             )
             acquired_subtitles = True
             add_artifact(job, "downloaded_subtitles", selected_subtitles, event_sink)
@@ -1182,6 +1221,7 @@ def _acquire_remote_job(
                         **job_event_fields(job.id, get_job_file(job)),
                         language=selected_language,
                         automatic=manual_language is None,
+                        anonymous=remote_info.subtitles_anonymous,
                     )
                 )
 

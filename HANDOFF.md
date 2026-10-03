@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-08-30
+更新时间：2026-10-04
 
 ## 当前快照
 
@@ -12,7 +12,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 774 个测试、143 个子测试，全部通过 |
+| 自动化测试 | 838 个测试、156 个子测试，全部通过（2026-10-04） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -20,6 +20,10 @@
 | 默认 CLI 路径 | `run` → `status` → `continue`（批处理 `batch` / `batch-continue`） |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status` 查看 `recovery_plan` / `advance_steps`，再 `xvt continue` 按持久化目标补齐。翻译与烧录推进与 status 共用 `plan_advance_steps`。由 `run` / `continue` 按持久化目标完成的烧录写入 checksum 保护的 `version=2` burn proof，绑定烧录 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum；高级原子 `xvt burn` 不签发 workflow proof。仅有效 v2 proof 可让 `relink-burned-output` 重新关联已移动成品。若其余静态条件满足但已登记成品缺失或 checksum 失效，`status` 返回 `awaiting_input`，首选重新关联占位命令、备选显式 `continue` 重烧；这只表示成品可能可重新关联，执行时仍会校验实际源媒体内容。`batch-continue` 停在该状态，不自动重烧。旧/legacy fingerprint、媒体 QA/proof/fingerprint 无效仍为 `retryable`，只推荐重烧。
+
+2026-10-04：修复显式 YouTube 字幕请求在浏览器 Cookie 查询漏报人工字幕时直接回退 ASR 的问题。匹配人工字幕缺失时匿名补查一次，同一视频匹配成功后匿名下载字幕；显式代理保留、媒体访问方式不变。`remote_info.subtitles_anonymous` 与选字幕事件记录访问方式，下载中断恢复继续匿名；补查失败报错。已有源 cue 的 Job 不自动重建，原 polished Agent E2E 与默认质量决策仍是下一步。
+
+本次 review 补齐已有有效候选的保护：不重新补查、不把旧自动字幕重标为人工字幕。公开 YouTube 视频的临时 Job 已实际完成匿名补查、人工字幕下载与源字幕 QA，共 67 条 cue，无媒体下载、ASR 或翻译 API 调用；用户原 Job 保持原样。
 
 ## 项目背景
 
