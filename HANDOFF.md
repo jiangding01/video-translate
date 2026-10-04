@@ -14,7 +14,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 859 个测试、156 个子测试，全部通过（2026-10-04） |
+| 自动化测试 | 859 个测试、158 个子测试，全部通过（2026-10-04） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -26,6 +26,8 @@
 2026-10-04：修复显式 YouTube 字幕请求在浏览器 Cookie 查询漏报人工字幕时直接回退 ASR 的问题。匹配人工字幕缺失时匿名补查一次，同一视频匹配成功后匿名下载字幕；显式代理保留、媒体访问方式不变。`remote_info.subtitles_anonymous` 与选字幕事件记录访问方式，下载中断恢复继续匿名；补查失败报错。已有源 cue 的 Job 不自动重建，原 polished Agent E2E 与默认质量决策仍是下一步。
 
 本次 review 补齐已有有效候选的保护：不重新补查、不把旧自动字幕重标为人工字幕。公开 YouTube 视频的临时 Job 已实际完成匿名补查、人工字幕下载与源字幕 QA，共 67 条 cue，无媒体下载、ASR 或翻译 API 调用；用户原 Job 保持原样。
+
+CI 回归修复：烧录 QA 测试分别模拟布局测量成功和不可用，检查短字幕对应的 pass/warning、警告内容与 QA 放行状态，不再依赖宿主机 FFmpeg 和字体。生产 QA 规则保持不变。
 
 ## 项目背景
 
