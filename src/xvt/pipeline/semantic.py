@@ -25,12 +25,10 @@ from xvt.pipeline.common import (
     load_cues,
     load_user_response_json,
     set_stage,
+    translation_qa_context,
     write_json,
 )
 from xvt.pipeline.translation import (
-    _media_data,
-    _media_duration_ms,
-    _required_glossary_terms,
     complete_translated_outputs,
     finalize_translation,
     translate_batch_with_retries,
@@ -86,29 +84,29 @@ def _ensure_candidate_qa(
     candidate_path: Path,
     event_sink: EventSink | None,
 ) -> tuple[Path, tuple[dict[str, Any], ...]]:
-    existing = valid_artifact_path(job, "translation_candidate_qa")
-    if existing is not None:
-        issues = translation_candidate_qa_issues(job, candidate_path)
-        if issues is not None:
-            return existing, issues
-    media_data = _media_data(job)
+    # 字体安装与实际烧录媒体可能改变，不跨命令复用布局测量。
     report = check_subtitles(
         load_cues(candidate_path),
-        media_duration_ms=_media_duration_ms(media_data),
-        video_width=media_data.get("width"),
-        video_height=media_data.get("height"),
+        **translation_qa_context(job),
         require_translation=True,
-        required_terms=_required_glossary_terms(job),
     )
     path = get_job_directory(job) / "artifacts" / "translation-candidate-qa.json"
+    payload = {
+        "task": "translation_candidate_qa",
+        "version": TRANSLATION_CANDIDATE_QA_VERSION,
+        "candidate_cues_checksum": checksum(candidate_path),
+        **asdict(report),
+    }
+    existing = valid_artifact_path(job, "translation_candidate_qa")
+    if existing is not None:
+        # JSON 将 tuple 转为 list，比较同一序列化口径，避免无变化时改写 Job。
+        if json.loads(existing.read_text(encoding="utf-8")) == json.loads(json.dumps(payload)):
+            issues = translation_candidate_qa_issues(job, candidate_path)
+            if issues is not None:
+                return existing, issues
     write_json(
         path,
-        {
-            "task": "translation_candidate_qa",
-            "version": TRANSLATION_CANDIDATE_QA_VERSION,
-            "candidate_cues_checksum": checksum(candidate_path),
-            **asdict(report),
-        },
+        payload,
     )
     add_artifact(job, "translation_candidate_qa", path, event_sink)
     issues = translation_candidate_qa_issues(job, candidate_path)

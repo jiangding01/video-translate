@@ -83,6 +83,9 @@ def review_gate_satisfied(job: Job, report: Any) -> bool:
     acknowledged = acknowledged_review_issues(job)
     if acknowledged is None:
         return False
+    record = job.config.get("subtitle_review_acknowledgment", {})
+    if record.get("layout") != report.get("layout"):
+        return False
     review_issues: set[tuple[str, int]] = set()
     for issue in issues:
         if not isinstance(issue, dict):
@@ -108,13 +111,22 @@ def complete_qa_stage(
     if report.status == "needs_review":
         # 人工确认通道：仅当当前报告的全部 review 级问题都是用户已确认集合的
         # 子集时放行；出现任何新的 review 问题仍然阻断，error 级永不放行。
-        acknowledged = acknowledged_review_issues(job)
         review_issues = {
             _canonical_review_issue(issue.code, issue.cue_id)
             for issue in report.issues
             if issue.severity == "review"
         }
-        if acknowledged is not None and review_issues and review_issues <= acknowledged:
+        if review_gate_satisfied(
+            job,
+            {
+                "status": report.status,
+                "issues": [
+                    {"code": issue.code, "severity": issue.severity, "cue_id": issue.cue_id}
+                    for issue in report.issues
+                ],
+                "layout": report.layout,
+            },
+        ):
             if event_sink:
                 event_sink(
                     create_event(
@@ -195,6 +207,7 @@ def acknowledge_subtitle_review(
         "report_checksum": artifact_checksum_for(job, report_kind or "subtitle_qa"),
         "source_cues_checksum": artifact_checksum_for(job, "source_cues"),
         "acknowledged_issues": review_issues,
+        "layout": report.get("layout"),
         "acknowledged_at": utc_now(),
     }
     qa_record = job.stages[StageName.SUBTITLE_QA]

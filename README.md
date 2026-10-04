@@ -60,6 +60,10 @@ xvt batch-continue BATCH.json
 
 ## 完整命令与参数参考
 
+人工译文修订可先运行 `xvt apply JOB REVIEW --check`（或显式 `apply-translation-review-fixes ... --check`）。预检校验 JSON/SRT 身份、时间轴、译文完整性、术语和行宽，返回结构化 QA；有效退出 0，无效退出 2。它不写 Job、产物或锁文件，不调用翻译 API，也不执行语义复查；`--check` 不能与 `--continue` 合用。正式提交共享同一预检，仍有译文 QA 阻断项时拒绝保存，修好后再运行 `xvt apply JOB REVIEW --continue`。
+
+译文的行宽 QA 在已知画幅时使用 FFmpeg/libass，按最终 ASS 字体、字号和描边测量。超过建议字数但实际放得下时只给 warning；实际超出可用宽度时仍需处理。中文 36 显示单位仍是建议值。无画幅或测量失败时保留原有保守限制，测量失败另有 warning。语义校对、时间轴和术语规则保持有效；不要为满足字数建议删掉原文信息。预览与烧录也检查所选媒体、字体；换画幅或字体后不能复用旧布局确认。
+
 <!-- cli-reference:start -->
 
 以下内容覆盖当前 CLI 的全部命令和参数。运行 `xvt --help` 查看命令列表，运行 `xvt COMMAND --help` 查看某条命令接受的参数；这里补充参数用途、默认值和容易混淆的行为。方括号表示可选项，`...` 表示可重复参数。
@@ -174,10 +178,11 @@ xvt continue JOB_FILE [--cookies-from-browser BROWSER] [--proxy URL]
 <summary><code>xvt apply</code>：自动路由 Agent 或人工修订响应</summary>
 
 ```text
-xvt apply JOB_FILE RESPONSE_FILE [--continue] [--events-jsonl] [--fail-on-waiting]
+xvt apply JOB_FILE RESPONSE_FILE [--check | --continue] [--events-jsonl] [--fail-on-waiting]
 ```
 
 - 位置参数：`job_file`、`response_file`。
+- `--check` 仅预检人工译文 JSON/SRT，不保存、不调用模型；有效返回 0，无效返回 2，不能与 `--continue` 合用。
 - 可选参数：`--continue` 在回填成功后继续同一端到端工作流；`--events-jsonl` 输出纯 JSONL 事件。源文修订会失效译文及下游产物，因此不接受 `--continue`。
 - 停在等待态时的退出码：默认 0。加 `--fail-on-waiting` 后，`--continue` 的续跑停在 `awaiting_input` 时返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job 状态与事件流完全不变。不加 `--continue` 时该旗标没有作用——单纯的回填不会停在等待态。
 - 仅用于有持久化工作流目标且能从响应或等待状态确定路由的 Job；无法安全判断时会报错而不会猜测。
@@ -396,11 +401,11 @@ xvt apply-semantic-review JOB_FILE RESPONSE_FILE [--events-jsonl]
 <summary><code>xvt apply-translation-review-fixes</code>：应用人工译文修订</summary>
 
 ```text
-xvt apply-translation-review-fixes JOB_FILE RESPONSE_FILE [--events-jsonl]
+xvt apply-translation-review-fixes JOB_FILE RESPONSE_FILE [--check] [--events-jsonl]
 ```
 
 - 位置参数：`job_file`、`response_file`；支持生成的 JSON 模板或固定命名的修订 SRT。
-- 可选参数：`--events-jsonl`。
+- 可选参数：`--check` 只预检不保存；`--events-jsonl` 输出纯 JSONL。
 
 </details>
 
@@ -762,7 +767,7 @@ uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-revi
 | `items[].id` | cue ID，回填时必须完整保留模板的 ID 集合，且顺序为 ID 升序 |
 | `items[].source_text` | 该 cue 的源文（只读标注） |
 | `items[].must_fix` | 该 cue 是否被候选译文 QA 阻断；`true` 表示必须改到 QA 通过才能继续（只读标注） |
-| `items[].qa` | 该 cue 的阻断项列表，每项含 `code`、`message`；行宽超限时额外给出 `display_width` 与 `limit`，即「当前显示宽度 / 允许上限」（只读标注） |
+| `items[].qa` | 该 cue 的阻断项列表，每项含 `code`、`message`；行宽超限时额外给出 `display_width`、`limit`、`width_unit`，单位为 `ASS pixels` 或回退时的 `display units`（只读标注） |
 | `items[].text` | 当前译文，**唯一会被回填读取的可编辑字段** |
 
 同名的 `.srt` 通道只含 `#<cue id>` 注释行与译文正文，不带任何标注——那些注释行是解析锚点，不能改动。需要看标注时对照 JSON 模板即可，两条通道等价。

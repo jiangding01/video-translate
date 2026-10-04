@@ -2,6 +2,8 @@
 
 更新时间：2026-10-04
 
+2026-10-04 校对体验改动：译文 QA 已加入 FFmpeg/libass 实际 ASS 宽度测量，超过字数建议但容纳得下时仅 warning；测量不可用仍保守阻断。候选 QA、人工预检、译文收尾与烧录使用实际媒体/字体上下文，确认绑定 layout；预览不覆盖正式 QA。人工 JSON/SRT 修订新增 `apply --check`，正式提交也在写入前完整预检，不合格不改 Job 或失效下游。此次不修改语义 severity、源文重建和下载策略。实现与验证结果见本次分支；不重写用户已完成的视频任务。
+
 ## 当前快照
 
 | 项目 | 状态 |
@@ -12,7 +14,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 838 个测试、156 个子测试，全部通过（2026-10-04） |
+| 自动化测试 | 859 个测试、156 个子测试，全部通过（2026-10-04） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |

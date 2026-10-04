@@ -16,7 +16,7 @@ _LINE_WIDTH_PATTERN = re.compile(r"line width (\d+) exceeds (\d+)")
 
 
 def overflow_limits(message: str) -> tuple[int, int] | None:
-    """从 QA issue 的 message 中提取 ``(display_width, limit)``；不匹配返回 None。"""
+    """提取 QA message 的 ``(width, limit)``，单位由原 message 标明；不匹配返回 None。"""
 
     match = _LINE_WIDTH_PATTERN.search(message)
     if match is None:

@@ -6,6 +6,11 @@
 
 ### Added
 
+- 人工译文 JSON/SRT 修订新增 `apply --check` 与 `apply-translation-review-fixes --check` 只读预检：不写 Job、产物或锁文件，不调用模型；正式提交共享相同 QA，阻断项未修复时拒绝保存。
+- 译文行宽 QA 在已知画幅时按最终 ASS 字体、字号和描边用 FFmpeg/libass 测量；能容纳的字数建议超限仅 warning，实际超宽仍 review。测量失败回退保守规则。媒体与字体上下文用于候选、收尾及烧录，布局确认不能跨画幅/字体复用；预览不覆盖正式 QA。
+- 测量遇到缺字、不完整输出、重复帧序号、宽度与坐标不一致或画布边缘裁切时保守处理；重复 cue ID 判为 QA error，避免测量键覆盖后误放行。
+- 测量失败的 QA 报告仍绑定请求画幅与字体，避免两个回退报告都缺少布局身份而跨布局复用旧确认。
+
 - 端到端 Job 在 openai-compatible 模式下**首个翻译批次成功后**（或全部批次都命中 checkpoint 时）把实际生效的 `base_url` / `model` 写回 `job.config.workflow`；首批就失败时不写回，Agent 降级不写回，`api_key` 永不落盘。此后 `xvt continue` 与 `xvt status` 按 Job 内的值解析提供方与进度指纹，不再受 `XVT_TRANSLATION_BASE_URL` / `XVT_TRANSLATION_MODEL` 在另一个终端里的漂移影响（此前换终端会让指纹变化、批次进度清零，还可能拿过期模型名去撞 4xx）。`xvt translate` 在端到端 Job 上不传 `--base-url` / `--model` 时回退到 Job 固化值，显式传入则覆盖并写回；换模型可重新 `run`、`xvt translate JOB --model NEW` 或手改 `job.json`。写回刻意排在首批成功之后：`continue` 没有 `--model`，先写回会把环境变量里的过期模型名钉进 Job 且没有入口再改。
 - `--provider auto` 降级为 Agent 时，若 Job 已固化 Base URL 与模型、当前终端只缺 API Key，降级原因会点名 Job 钉住的 `model` / `base_url` 与缺失的环境变量（`this job is pinned to openai-compatible (model=…, base_url=…) but the current shell lacks $XVT_TRANSLATION_API_KEY`），不再只报一句缺配置。
 - 翻译提供方 HTTP 错误消息带上定位上下文：`translation provider returned HTTP <code> [x-request-id=…] (model=…, base_url=…): <响应体>`。追踪 ID（`x-request-id` / `x-ds-trace-id`）只在响应头带有时出现；生效的模型与端点只在不可重试的状态码上附带（4xx 多半是模型名过期、端点写错一类配置问题，直接摆出来省去猜「这次用了哪套环境变量」），可重试的 429 / 5xx 不附带；响应体折成一行、剥离控制字符与零宽字符、截断到 500 字符。此前只有一句 `returned HTTP 400`，看不出服务端到底拒绝了什么。

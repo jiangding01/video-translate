@@ -1,5 +1,13 @@
 # 恢复与回填契约
 
+## 人工译文预检与布局确认
+
+已知画幅但测量失败时仍保存请求画幅、字体样式及 `measurement=unavailable`；成功时为 `measured` 并保存宽度。回退字数规则不会丢失确认上下文，因此另一画幅或字体的旧确认也不能复用。
+
+`xvt apply JOB REVIEW --check` 和 `xvt apply-translation-review-fixes JOB REVIEW --check` 仅检查人工译文 JSON/SRT，不写 Job、artifact、事件日志或锁文件，不调用模型。返回 `translation_review_preflight`，包括 `valid`、`changed_ids`、`blockers` 和完整 `qa`；无效退出 2。统一入口仅允许译文修订路由使用该旗标，拒绝与 `--continue` 合用。正式提交重新执行相同检查，译文超宽或 error 未解决时不保存、不失效旧产物。
+
+已知画幅时，候选及最终译文 QA 按实际 ASS 样式测量可见宽度；建议字数超限但能容纳的降为 warning。测量失败保留原阻断规则。报告可包含 `layout`（画幅、样式、宽度和可用宽度），subtitle acknowledgment 绑定相同布局；旧无 layout 的确认仅匹配旧无 layout 的报告。换画幅、字体或测量结果后需重新判断，不能用旧确认放行新布局。恢复/status 仍严格只读，旧候选报告在实际推进时重算；烧录重查实际媒体与字体，新的 review 返回 workflow 等待态，不宣告完成。预览不改写正式 QA。
+
 本文是 `status` / `continue` / `batch` / `batch-continue` / `xvt apply` / `relink-burned-output` 共用恢复语义的单一来源。判定顺序、产物有效性口径、回填路由和烧录 proof 资格都以这里为准，其它文档不得另立说法。
 
 模块职责、artifact 依赖图与失效闭包见 [架构说明](ARCHITECTURE.md)；事件名与字段见 [事件说明](EVENTS.md)。

@@ -519,7 +519,7 @@ class BurnPreviewPipelineTest(unittest.TestCase):
 
             self.assertTrue(result.exists())
             qa_report = json.loads((artifacts / "qa-translated.json").read_text(encoding="utf-8"))
-            self.assertEqual(qa_report["status"], "needs_review")
+            self.assertEqual(qa_report["status"], "pass")
 
     def test_burn_rejects_needs_review_qa_without_acknowledgment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

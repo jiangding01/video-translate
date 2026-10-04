@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,10 @@ from xvt.pipeline.common import (
     checksum,
     load_cues,
     load_user_response_json,
+    translation_qa_context,
     write_json,
 )
-from xvt.qa import check_subtitles
+from xvt.qa import SubtitleQaReport, check_subtitles
 from xvt.recovery import valid_artifact_path
 from xvt.subtitles import load_review_srt, save_review_srt, save_subtitles
 from xvt.translation_provider import SEMANTIC_REVIEW_PROMPT_VERSION
@@ -660,6 +661,7 @@ def _translation_review_items(
         limits = overflow_limits(message)
         if limits is not None:
             annotation["display_width"], annotation["limit"] = limits
+            annotation["width_unit"] = "ASS pixels" if "ASS pixels" in message else "display units"
         grouped.setdefault(cue_id, []).append(annotation)
     return [
         {
@@ -852,12 +854,25 @@ def _srt_review_changes(
     return changes
 
 
-def apply_translation_review_fixes(
+@dataclass
+class _TranslationRevision:
+    job: Job
+    report_kind: str
+    candidate_kind: str
+    report_path: Path
+    report: dict[str, Any]
+    issues: list[dict[str, Any]]
+    qa_issues: list[dict[str, Any]]
+    fingerprint: str
+    reviewed: list[Cue]
+    changed_ids: set[int]
+    qa: SubtitleQaReport
+
+
+def _prepare_translation_revision(
     job_file: str | Path,
     response_file: str | Path,
-    *,
-    event_sink: EventSink | None = None,
-) -> tuple[Path, Path]:
+) -> _TranslationRevision:
     job = load_job(job_file)
     target = _target_kinds(job)
     if target is None:
@@ -894,6 +909,69 @@ def apply_translation_review_fixes(
             message = f"{message}; {blocked}"
         raise UserInputError(message)
     reviewed = [replace(cue, target_text=changes.get(cue.id, cue.target_text)) for cue in candidate]
+    qa = check_subtitles(reviewed, require_translation=True, **translation_qa_context(job))
+    return _TranslationRevision(
+        job,
+        report_kind,
+        candidate_kind,
+        report_path,
+        report,
+        issues,
+        qa_issues,
+        expected_fingerprint,
+        reviewed,
+        changed_ids,
+        qa,
+    )
+
+
+def _revision_preflight_result(revision: _TranslationRevision) -> dict[str, Any]:
+    blockers = [
+        asdict(issue)
+        for issue in revision.qa.issues
+        if issue.severity == "error"
+        or (issue.severity == "review" and issue.message.startswith("target line width "))
+    ]
+    return {
+        "task": "translation_review_preflight",
+        "valid": not blockers,
+        "changed_ids": sorted(revision.changed_ids),
+        "blockers": blockers,
+        "qa": asdict(revision.qa),
+    }
+
+
+def preflight_translation_review_fixes(
+    job_file: str | Path,
+    response_file: str | Path,
+) -> dict[str, Any]:
+    """只读校验 JSON/SRT 身份与修订后的确定性 QA；不写 Job、不调用模型。"""
+    return _revision_preflight_result(_prepare_translation_revision(job_file, response_file))
+
+
+def apply_translation_review_fixes(
+    job_file: str | Path,
+    response_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, Path]:
+    revision = _prepare_translation_revision(job_file, response_file)
+    preflight = _revision_preflight_result(revision)
+    if not preflight["valid"]:
+        details = "; ".join(
+            f"cue {issue['cue_id']}: {issue['code']}: {issue['message']}"
+            for issue in preflight["blockers"]
+        )
+        raise UserInputError(f"translation review preflight failed; no changes saved; {details}")
+    job = revision.job
+    report_kind, candidate_kind = revision.report_kind, revision.candidate_kind
+    report_path, report = revision.report_path, revision.report
+    issues, qa_issues = revision.issues, revision.qa_issues
+    expected_fingerprint = revision.fingerprint
+    reviewed, changed_ids = revision.reviewed, revision.changed_ids
+    affected = {cue_id for issue in issues for cue_id in issue["cue_ids"]} | {
+        issue["cue_id"] for issue in qa_issues
+    }
 
     artifacts_dir = get_job_directory(job) / "artifacts"
     revision_suffix = expected_fingerprint[:12]

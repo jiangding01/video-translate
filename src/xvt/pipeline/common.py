@@ -30,8 +30,10 @@ from xvt.events import (
 from xvt.job_store import get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Word
+from xvt.render import AssStyleOptions
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
-from xvt.workflow_config import clear_burn_fingerprint
+from xvt.translate import TranslationPolicy, translation_policy_from_dict
+from xvt.workflow_config import clear_burn_fingerprint, get_workflow_config
 
 
 def inspect_input(input_value: str) -> dict[str, Any]:
@@ -44,6 +46,49 @@ def inspect_input(input_value: str) -> dict[str, Any]:
 def is_subtitle_input(input_value: str) -> bool:
     parsed = urlparse(input_value)
     return not parsed.scheme and Path(input_value).suffix.lower() in SUPPORTED_SUBTITLE_EXTENSIONS
+
+
+def translation_qa_context(job: Job) -> dict[str, Any]:
+    """候选 QA、修订预检与译文收尾使用同一媒体及字体上下文。"""
+    from xvt.recovery import valid_artifact_path
+
+    config = get_workflow_config(job)
+    data: dict[str, Any] = {}
+    if config is not None and config.burn_media:
+        data = asdict(probe_media(config.burn_media))
+    elif job.config.get("input_kind") != "subtitle":
+        path = valid_artifact_path(job, "media_info")
+        if path is None:
+            raise ValueError("translation QA requires checksum-valid media metadata")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        source = valid_artifact_path(job, "source_video")
+        if source is not None and str(source) != data.get("path"):
+            data = asdict(probe_media(source))
+    return {
+        "media_duration_ms": data.get("duration_ms"),
+        "video_width": data.get("width"),
+        "video_height": data.get("height"),
+        "measure_layout": True,
+        "render_options": AssStyleOptions(
+            target_font=config.target_font if config else None,
+            source_font=config.source_font if config else None,
+        ),
+        "required_terms": required_glossary_terms(job),
+    }
+
+
+def resolved_translation_policy(job: Job) -> TranslationPolicy:
+    """workflow 策略快照优先，顶层配置作为原子 Job 的回退。"""
+    config = get_workflow_config(job)
+    return (
+        config.translation_policy
+        if config and config.translation_policy is not None
+        else translation_policy_from_dict(job.config.get("translation_policy"))
+    )
+
+
+def required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
+    return tuple((term.source, term.target) for term in resolved_translation_policy(job).terms)
 
 
 def media_info_from_remote_metadata(url: str, duration_ms: int) -> MediaInfo:

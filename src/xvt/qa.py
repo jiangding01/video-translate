@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 from unicodedata import east_asian_width
 
 from xvt.models import Cue
+from xvt.process import CommandError
+from xvt.render import AssStyleOptions, measure_bilingual_line_widths
 from xvt.subtitles import normalize_display_text
 
 
@@ -21,6 +24,7 @@ class SubtitleQaReport:
     status: str
     cue_count: int
     issues: tuple[SubtitleIssue, ...]
+    layout: dict[str, Any] | None = None
 
 
 def is_cjk_language(language: str | None) -> bool:
@@ -91,9 +95,21 @@ def _overflow_risk(
     *,
     video_width: int | None,
     video_height: int | None,
+    rendered_width: tuple[int, int] | None = None,
 ) -> tuple[str, str] | None:
     widths = [display_width(normalize_display_text(text))]
     soft_limit = display_width_limit(language)
+    if rendered_width is not None:
+        width, limit = rendered_width
+        if width > limit:
+            return "review", f"{role} line width {width} exceeds {limit} ASS pixels"
+        if widths[0] > soft_limit:
+            return (
+                "warning",
+                f"{role} line width {widths[0]} exceeds preferred {soft_limit} display units; "
+                "rendered line fits",
+            )
+        return None
     hard_limit = display_width_review_limit(
         language,
         video_width=video_width,
@@ -137,9 +153,47 @@ def check_subtitles(
     video_height: int | None = None,
     require_translation: bool = False,
     required_terms: tuple[tuple[str, str], ...] = (),
+    measure_layout: bool = False,
+    render_options: AssStyleOptions = AssStyleOptions(),
 ) -> SubtitleQaReport:
     issues = []
+    measured = {}
+    layout = None
+    if require_translation and measure_layout and video_width and video_height:
+        layout = {
+            "version": 1,
+            "video_width": video_width,
+            "video_height": video_height,
+            "target_font": render_options.target_font,
+            "source_font": render_options.source_font,
+            "style_options": asdict(render_options),
+            "measurement": "unavailable",
+        }
+        try:
+            measured = measure_bilingual_line_widths(
+                cues, video_width=video_width, video_height=video_height, options=render_options
+            )
+            layout["measurement"] = "measured"
+            layout["widths"] = [
+                [cue_id, role, width, limit]
+                for (cue_id, role), (width, limit) in sorted(measured.items())
+            ]
+        except (CommandError, ValueError, OSError):
+            issues.append(
+                SubtitleIssue(
+                    "layout_measurement_unavailable",
+                    "warning",
+                    0,
+                    "rendered width unavailable; conservative display-unit limits applied",
+                )
+            )
+    seen_ids: set[int] = set()
     for index, cue in enumerate(cues):
+        if cue.id in seen_ids:
+            issues.append(
+                SubtitleIssue("duplicate_cue_id", "error", cue.id, "cue IDs must be unique")
+            )
+        seen_ids.add(cue.id)
         if cue.end_ms <= cue.start_ms:
             issues.append(
                 SubtitleIssue("invalid_timestamp", "error", cue.id, "end must be after start")
@@ -195,6 +249,7 @@ def check_subtitles(
                     "source",
                     video_width=video_width,
                     video_height=video_height,
+                    rendered_width=measured.get((cue.id, "source")),
                 ),
                 _overflow_risk(
                     cue.target_text or "",
@@ -202,6 +257,7 @@ def check_subtitles(
                     "target",
                     video_width=video_width,
                     video_height=video_height,
+                    rendered_width=measured.get((cue.id, "target")),
                 ),
             ):
                 if overflow:
@@ -267,4 +323,4 @@ def check_subtitles(
         status = "warning"
     else:
         status = "pass"
-    return SubtitleQaReport(status=status, cue_count=len(cues), issues=tuple(issues))
+    return SubtitleQaReport(status=status, cue_count=len(cues), issues=tuple(issues), layout=layout)
