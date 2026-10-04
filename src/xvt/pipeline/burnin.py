@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from math import isfinite
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,18 +18,20 @@ from xvt.download import download_remote_media
 from xvt.errors import UserInputError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job
-from xvt.media import probe_media
-from xvt.models import Job, StageName, StageStatus
+from xvt.media import MediaInfo, probe_media
+from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.paths import assert_safe_output, protected_job_paths, resolve_absolute_output
 from xvt.pipeline.common import (
     add_artifact,
     error_category,
     invalidate_preview_artifacts,
     load_cues,
+    required_glossary_terms,
     set_stage,
     write_json,
 )
-from xvt.pipeline.review import review_gate_satisfied
+from xvt.pipeline.review import complete_qa_stage, review_gate_satisfied
+from xvt.qa import check_subtitles
 from xvt.recovery import atomic_translated_qa_rebuild_command, valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.workflow_config import get_workflow_config
@@ -106,6 +108,43 @@ def _assert_translated_qa_gate(job: Job, *, action: str) -> Path:
     return translated_path
 
 
+def _check_render_layout(
+    job: Job,
+    translated: list[Cue],
+    media_info: MediaInfo,
+    options: AssStyleOptions,
+    event_sink: EventSink | None,
+    *,
+    persist: bool = True,
+) -> None:
+    report = check_subtitles(
+        translated,
+        require_translation=True,
+        measure_layout=True,
+        media_duration_ms=media_info.duration_ms,
+        video_width=media_info.width,
+        video_height=media_info.height,
+        render_options=options,
+        required_terms=required_glossary_terms(job),
+    )
+    if not persist:
+        payload = asdict(report)
+        payload["issues"] = list(payload["issues"])
+        if not review_gate_satisfied(job, payload):
+            raise UserInputError(
+                "preview subtitle QA requires review for the selected media/fonts; "
+                "use the workflow media/fonts or fix the subtitles"
+            )
+        return
+    path = get_job_directory(job) / "artifacts" / "qa-translated.json"
+    write_json(path, asdict(report))
+    add_artifact(job, "translated_subtitle_qa", path, event_sink)
+    if not complete_qa_stage(job, report, event_sink):
+        raise UserInputError(
+            f"subtitle layout needs review for the current media/fonts; {_qa_gate_guidance(job)}"
+        )
+
+
 def preview_translated_job(
     job_file: str | Path,
     *,
@@ -166,6 +205,14 @@ def preview_translated_job(
     media_info = probe_media(media_path)
     if not media_info.has_video or not media_info.width or not media_info.height:
         raise ValueError("preview requires a video stream with known dimensions")
+    _check_render_layout(
+        job,
+        load_cues(translated_path),
+        media_info,
+        AssStyleOptions(target_font=target_font, source_font=source_font),
+        event_sink,
+        persist=False,
+    )
     if media_info.duration_ms <= 0:
         raise ValueError("preview requires media with a known positive duration")
 
@@ -327,6 +374,13 @@ def burn_translated_job(
             raise ValueError("burn-in requires a video stream with known dimensions")
 
         translated = load_cues(translated_cues_path)
+        _check_render_layout(
+            job,
+            translated,
+            media_info,
+            AssStyleOptions(target_font=target_font, source_font=source_font),
+            event_sink,
+        )
         # 路径校验放在 RENDER/BURN 记账之前，避免错误输出先留下半成品 stage 状态。
         artifacts_directory = get_job_directory(job) / "artifacts"
         ass_path = artifacts_directory / "bilingual.ass"

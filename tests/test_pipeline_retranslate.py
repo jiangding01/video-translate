@@ -61,7 +61,7 @@ class CueRetranslationTest(unittest.TestCase):
                 [
                     Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                     Artifact("bilingual_ass", str(stale_ass)),
                     Artifact("preview_video", str(stale_preview)),
                 ]
@@ -124,7 +124,7 @@ class CueRetranslationTest(unittest.TestCase):
                 [
                     Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                 ]
             )
             job_file = save_job(job)
@@ -164,7 +164,7 @@ class CueRetranslationTest(unittest.TestCase):
                 [
                     Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                 ]
             )
             job_file = save_job(job)
@@ -335,7 +335,7 @@ class CueRetranslationTest(unittest.TestCase):
                 [
                     Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                 ]
             )
             job_file = save_job(job)
@@ -423,7 +423,7 @@ class CueRetranslationInternalResponseReadTest(unittest.TestCase):
                 [
                     Artifact("source_cues", str(source_path)),
                     Artifact("translated_cues", str(translated_path)),
-                    Artifact("media_info", str(media_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
                 ]
             )
             job_file = save_job(job)

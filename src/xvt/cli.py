@@ -49,6 +49,7 @@ from xvt.pipeline import (
     cue_retranslation_waiting,
     inspect_input,
     interrupt_running_stage,
+    preflight_translation_review_fixes,
     prepare_agent_translation,
     prepare_source_review,
     preview_translated_job,
@@ -331,6 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
     unified_apply_parser.add_argument("job_file")
     unified_apply_parser.add_argument("response_file")
     unified_apply_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Read-only preflight for human translation review JSON/SRT; cannot use --continue",
+    )
+    unified_apply_parser.add_argument(
         "--continue",
         dest="continue_after_apply",
         action="store_true",
@@ -446,6 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_review_fixes_parser.add_argument("job_file")
     apply_review_fixes_parser.add_argument("response_file")
+    apply_review_fixes_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Read-only preflight for human translation review JSON/SRT",
+    )
     apply_review_fixes_parser.add_argument("--events-jsonl", action="store_true")
 
     prepare_source_review_parser = subparsers.add_parser(
@@ -1813,6 +1824,20 @@ def _cmd_apply_semantic_review(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_apply_translation_review_fixes(arguments: argparse.Namespace) -> int:
+    if getattr(arguments, "check", False):
+        result = preflight_translation_review_fixes(arguments.job_file, arguments.response_file)
+        if not arguments.events_jsonl:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["valid"]:
+            details = "; ".join(
+                f"cue {item['cue_id']}: {item['message']}" for item in result["blockers"]
+            )
+            raise UserInputError(
+                f"translation review preflight failed; no changes saved; {details}"
+            )
+        if arguments.events_jsonl:
+            _complete(arguments, preflight=result)
+        return 0
     event_sink = _event_sink(arguments)
     paths = apply_translation_review_fixes(
         arguments.job_file,
@@ -2179,6 +2204,11 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
             raise ValueError("job has no target language configured")
         routed.target_language = target_language
     continue_after_apply = bool(getattr(arguments, "continue_after_apply", False))
+    if getattr(arguments, "check", False):
+        if route != "apply-translation-review-fixes":
+            raise UserInputError("--check only supports human translation review JSON/SRT")
+        if continue_after_apply:
+            raise UserInputError("--check is read-only and cannot be combined with --continue")
     if continue_after_apply and route == "apply-source-review-fixes":
         raise UserInputError(_SOURCE_REVIEW_CONTINUE_HINT)
     if continue_after_apply:
@@ -2294,6 +2324,8 @@ _JOB_MUTATING_COMMANDS = frozenset(
 
 
 def _hold_execution_locks(parsed: argparse.Namespace) -> None:
+    if getattr(parsed, "check", False):
+        return
     if parsed.command in _JOB_MUTATING_COMMANDS:
         hold_job_lock(parsed.job_file)
     elif parsed.command == "batch-continue":

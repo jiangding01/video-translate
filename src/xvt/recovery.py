@@ -280,7 +280,8 @@ def _candidate_qa_blocker_reason(issues: tuple[dict[str, Any], ...]) -> str:
             # 宽度与上限只出现在 message 里；提取不到就退回只列 cue id，绝不猜数字。
             limits = overflow_limits(str(issue.get("message", "")))
             if limits is not None:
-                item = f"{cue_id}（{limits[0]}/{limits[1]}）"
+                unit = " ASS 像素" if "ASS pixels" in str(issue.get("message", "")) else ""
+                item = f"{cue_id}（{limits[0]}/{limits[1]}{unit}）"
         entries = grouped.setdefault(code, [])
         if item not in entries:
             entries.append(item)

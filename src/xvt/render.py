@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import pysubs2
 
 from xvt.models import Cue
+from xvt.process import run_command
 from xvt.subtitles import normalize_display_text
 
 
@@ -72,14 +75,13 @@ def default_target_size(video_height: int) -> int:
     return 20
 
 
-def save_bilingual_ass(
+def _styled_subtitles(
     cues: list[Cue],
-    path: str | Path,
     *,
     video_width: int,
     video_height: int,
     options: AssStyleOptions = AssStyleOptions(),
-) -> Path:
+) -> pysubs2.SSAFile:
     if video_width <= 0 or video_height <= 0:
         raise ValueError("video dimensions must be positive")
 
@@ -110,6 +112,108 @@ def save_bilingual_ass(
         marginv=options.margin_vertical,
         outline=1.0,
         shadow=0,
+    )
+    return subtitles
+
+
+def measure_bilingual_line_widths(
+    cues: list[Cue],
+    *,
+    video_width: int,
+    video_height: int,
+    options: AssStyleOptions = AssStyleOptions(),
+) -> dict[tuple[int, str], tuple[int, int]]:
+    """用烧录样式与 libass 测量可见文字及描边，单位为 ASS 坐标像素。"""
+    subtitles = _styled_subtitles(
+        cues, video_width=video_width, video_height=video_height, options=options
+    )
+    available = int(subtitles.info["PlayResX"])
+    # 扩大画布测自然宽度；碰到测量边界时仍判为超宽，不把裁切后的宽度当通过。
+    canvas_width = max(4096, available * 2)
+    subtitles.info["PlayResX"] = str(canvas_width)
+    entries = []
+    limits = []
+    for role, name in (("target", "Target"), ("source", "Source")):
+        style = subtitles.styles[name]
+        limits.append(available - style.marginl - style.marginr)
+        style.alignment = pysubs2.Alignment.MIDDLE_LEFT
+        style.marginl = 32
+        style.marginr = 0
+        style.outlinecolor = style.primarycolor
+        for cue in cues:
+            text = cue.target_text if role == "target" else cue.source_text
+            if not text or not text.strip():
+                continue
+            index = len(entries)
+            entries.append((cue.id, role, limits[-1]))
+            subtitles.events.append(
+                pysubs2.SSAEvent(
+                    start=index * 1000,
+                    end=(index + 1) * 1000,
+                    style=name,
+                    text=escape_ass_text(normalize_display_text(text)),
+                )
+            )
+    if not entries:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="xvt-layout-") as directory:
+        path = Path(directory) / "measure.ass"
+        subtitles.save(str(path), encoding="utf-8")
+        result = run_command(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=black@0:s={canvas_width}x288:r=1:d={len(entries)},format=rgba",
+                "-vf",
+                "ass=filename=measure.ass:alpha=1,extractplanes=a,bbox=min_val=0",
+                "-frames:v",
+                str(len(entries)),
+                "-f",
+                "null",
+                "-",
+            ],
+            cwd=directory,
+            timeout=60,
+        )
+    if "failed to find any fallback with glyph" in result.stderr:
+        raise ValueError("subtitle font cannot render every glyph")
+    measured = {}
+    seen_frames: set[int] = set()
+    pattern = r"n:(\d+)\s+pts:.*?x1:(\d+) x2:(\d+).*?w:(\d+) h:(\d+)"
+    for match in re.finditer(pattern, result.stderr):
+        index, left, right, width, height = map(int, match.groups())
+        if (
+            index in seen_frames
+            or index >= len(entries)
+            or height <= 0
+            or width <= 0
+            or width != right - left + 1
+        ):
+            raise ValueError("invalid subtitle width measurement")
+        seen_frames.add(index)
+        cue_id, role, limit = entries[index]
+        if left == 0 or right >= canvas_width - 1:
+            width = max(width, limit + 1)
+        measured[(cue_id, role)] = (width, limit)
+    if len(measured) != len(entries):
+        raise ValueError("incomplete subtitle width measurement")
+    return measured
+
+
+def save_bilingual_ass(
+    cues: list[Cue],
+    path: str | Path,
+    *,
+    video_width: int,
+    video_height: int,
+    options: AssStyleOptions = AssStyleOptions(),
+) -> Path:
+    subtitles = _styled_subtitles(
+        cues, video_width=video_width, video_height=video_height, options=options
     )
 
     for cue in cues:

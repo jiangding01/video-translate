@@ -6,6 +6,11 @@
 
 ### Added
 
+- 人工译文 JSON/SRT 修订新增 `apply --check` 与 `apply-translation-review-fixes --check` 只读预检：不写 Job、产物或锁文件，不调用模型；正式提交共享相同 QA，阻断项未修复时拒绝保存。
+- 译文行宽 QA 在已知画幅时按最终 ASS 字体、字号和描边用 FFmpeg/libass 测量；能容纳的字数建议超限仅 warning，实际超宽仍 review。测量失败回退保守规则。媒体与字体上下文用于候选、收尾及烧录，布局确认不能跨画幅/字体复用；预览不覆盖正式 QA。
+- 测量遇到缺字、不完整输出、重复帧序号、宽度与坐标不一致或画布边缘裁切时保守处理；重复 cue ID 判为 QA error，避免测量键覆盖后误放行。
+- 测量失败的 QA 报告仍绑定请求画幅与字体，避免两个回退报告都缺少布局身份而跨布局复用旧确认。
+
 - 端到端 Job 在 openai-compatible 模式下**首个翻译批次成功后**（或全部批次都命中 checkpoint 时）把实际生效的 `base_url` / `model` 写回 `job.config.workflow`；首批就失败时不写回，Agent 降级不写回，`api_key` 永不落盘。此后 `xvt continue` 与 `xvt status` 按 Job 内的值解析提供方与进度指纹，不再受 `XVT_TRANSLATION_BASE_URL` / `XVT_TRANSLATION_MODEL` 在另一个终端里的漂移影响（此前换终端会让指纹变化、批次进度清零，还可能拿过期模型名去撞 4xx）。`xvt translate` 在端到端 Job 上不传 `--base-url` / `--model` 时回退到 Job 固化值，显式传入则覆盖并写回；换模型可重新 `run`、`xvt translate JOB --model NEW` 或手改 `job.json`。写回刻意排在首批成功之后：`continue` 没有 `--model`，先写回会把环境变量里的过期模型名钉进 Job 且没有入口再改。
 - `--provider auto` 降级为 Agent 时，若 Job 已固化 Base URL 与模型、当前终端只缺 API Key，降级原因会点名 Job 钉住的 `model` / `base_url` 与缺失的环境变量（`this job is pinned to openai-compatible (model=…, base_url=…) but the current shell lacks $XVT_TRANSLATION_API_KEY`），不再只报一句缺配置。
 - 翻译提供方 HTTP 错误消息带上定位上下文：`translation provider returned HTTP <code> [x-request-id=…] (model=…, base_url=…): <响应体>`。追踪 ID（`x-request-id` / `x-ds-trace-id`）只在响应头带有时出现；生效的模型与端点只在不可重试的状态码上附带（4xx 多半是模型名过期、端点写错一类配置问题，直接摆出来省去猜「这次用了哪套环境变量」），可重试的 429 / 5xx 不附带；响应体折成一行、剥离控制字符与零宽字符、截断到 500 字符。此前只有一句 `returned HTTP 400`，看不出服务端到底拒绝了什么。
@@ -40,6 +45,8 @@
 - advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]`：显式以 ASR 重建既有媒体 Job 的源字幕，不由 `continue` 自动执行。复用校验通过的 words/audio/本地或已下载媒体，远程缺 checkpoint 时才重取；持久化 ASR 策略、修复意图并关闭对齐，失效源 cue、候选 QA、选择、重分段及全部下游产物，同时保留输入译文字幕以重新验证映射。重建中断后 `status` 继续给出显式修复命令；端到端 Job 成功后用 `continue`，旧原子 Job 用 `translate`。不新增 stage、schema 或事件类型，复用 `source_selected` 与 `cli_completed`。
 
 ### Fixed
+
+- 修复带浏览器 Cookie 时 yt-dlp 因字幕 PO Token 限制漏报 YouTube 人工字幕、XVT 直接回退 ASR 的问题：显式字幕请求缺少匹配人工字幕且没有有效候选时匿名补查，并匿名下载找到的同视频人工字幕。访问方式随 checksum 保护的元信息恢复；补查失败明确报错，已有候选保留来源分类，现有源 cue 与译文不自动替换。
 
 - 失败原因写入 `job.json` 与 `status --json` 之前已经过脱敏。`set_stage` 记录的错误文本不经过 `create_event` 的事件边界，提供方回显在响应体里的 `Authorization` 头、URL userinfo、签名查询参数会原样落盘；现在 HTTP 错误消息在产生处就套用与事件同一套脱敏（`events.redact_text`），并对 API Key 再做一次子串替换兜底，响应体排在追踪 ID 与配置之后，避免鉴权头规则吞到行尾时把它们一并吞掉。
 - 同一 cue 的源文与译文同时超宽时，译文超宽不再被源文吞掉。双语字幕 QA 此前用 `overflow = source_overflow or target_overflow` 短路求值，每条 cue 只产出一条 `bilingual_overflow_risk`：源文先命中就再也轮不到译文，而下游 `translation_candidate_qa` 只把 message 以 `target line width ` 开头的那条认作可通过改译文解决的阻断项，于是这类 cue 的译文超宽既不进候选 QA 门禁、也不进译文修订模板，用户手上留着一条过宽的译文却拿不到任何提示。现在源文与译文各自独立判定、各自产出一条 issue，宽度阈值与 severity 计算完全不变。用户可见的行为变化：源文 warning 叠加译文 review 的组合，候选 QA 报告 status 会正确升为 `needs_review` 并把该 cue 纳入修订范围——这是缺陷修复后的正确终态，不是回归。

@@ -1148,14 +1148,26 @@ def _advance_workflow(
 
     # 翻译副作用之后重新判定：不可使用入口处缓存的 plan 步骤表。
     if goals.needs_burn and not _burn_satisfied(job, config):
-        _ensure_burn(
-            path,
-            job,
-            config,
-            cookies_from_browser=cookies_from_browser,
-            proxy=proxy,
-            event_sink=event_sink,
-        )
+        try:
+            _ensure_burn(
+                path,
+                job,
+                config,
+                cookies_from_browser=cookies_from_browser,
+                proxy=proxy,
+                event_sink=event_sink,
+            )
+        except UserInputError:
+            refreshed = load_job(path)
+            if refreshed.stages[StageName.SUBTITLE_QA].status is not StageStatus.AWAITING_INPUT:
+                raise
+            return _emit_waiting(
+                job=refreshed,
+                path=path,
+                message="字幕布局需要确认；运行 continue --acknowledge-subtitle-review 后继续。",
+                artifacts=_current_artifacts(refreshed),
+                event_sink=event_sink,
+            )
         job = load_job(path)
 
     artifacts = _current_artifacts(job)

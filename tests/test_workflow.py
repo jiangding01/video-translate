@@ -807,6 +807,50 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         burn.assert_called_once()
 
+    def test_new_burn_layout_review_returns_waiting_without_completion_or_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {
+                    "workflow": {"target_language": "zh-CN", "burn": True},
+                },
+            )
+            save_job(job)
+            events = []
+
+            def blocked_burn(job_file, **_kwargs):
+                current = load_job(job_file)
+                current.stages[StageName.SUBTITLE_QA].status = StageStatus.AWAITING_INPUT
+                save_job(current)
+                raise UserInputError("layout requires review")
+
+            with (
+                patch(
+                    "xvt.workflow.valid_artifact_path",
+                    side_effect=lambda _job, kind: (
+                        Path(f"/tmp/{kind}.json")
+                        if kind
+                        in {
+                            "source_cues",
+                            "source_srt",
+                            "translated_cues",
+                            "translated_srt",
+                            "bilingual_srt",
+                            "translated_subtitle_qa",
+                        }
+                        else None
+                    ),
+                ),
+                patch("xvt.workflow.burn_translated_job", side_effect=blocked_burn),
+                patch("xvt.workflow._record_burn_fingerprint") as proof,
+            ):
+                result = continue_workflow(get_job_file(job), event_sink=events.append)
+            self.assertEqual(result.status, "awaiting_input")
+            self.assertIn("workflow_waiting", [event.type for event in events])
+            self.assertNotIn("workflow_completed", [event.type for event in events])
+            proof.assert_not_called()
+
     def test_continue_does_not_duplicate_current_burn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job(

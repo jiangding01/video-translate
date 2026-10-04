@@ -493,7 +493,21 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             self.assertTrue(result.exists())
 
     def test_burn_accepts_acknowledged_needs_review_qa(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        for measurement_available in (True, False):
+            with self.subTest(measurement_available=measurement_available):
+                self._assert_burn_accepts_acknowledged_review(measurement_available)
+
+    def _assert_burn_accepts_acknowledged_review(self, measurement_available: bool) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+                side_effect=(
+                    None if measurement_available else ValueError("measurement unavailable")
+                ),
+            ) as measure,
+        ):
             root = Path(directory)
             media = root / "input.mp4"
             media.write_bytes(b"video")
@@ -519,7 +533,13 @@ class BurnPreviewPipelineTest(unittest.TestCase):
 
             self.assertTrue(result.exists())
             qa_report = json.loads((artifacts / "qa-translated.json").read_text(encoding="utf-8"))
-            self.assertEqual(qa_report["status"], "needs_review")
+            measure.assert_called_once()
+            self.assertEqual(qa_report["status"], "pass" if measurement_available else "warning")
+            self.assertEqual(
+                [issue["code"] for issue in qa_report["issues"]],
+                [] if measurement_available else ["layout_measurement_unavailable"],
+            )
+            self.assertEqual(load_job(job_file).stages["subtitle_qa"].status, StageStatus.SUCCEEDED)
 
     def test_burn_rejects_needs_review_qa_without_acknowledgment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

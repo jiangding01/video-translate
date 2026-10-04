@@ -32,14 +32,16 @@ from xvt.pipeline.common import (
     load_cues,
     load_user_response_json,
     parse_cue_text_items,
+    resolved_translation_policy,
     set_stage,
+    translation_qa_context,
     write_json,
 )
 from xvt.pipeline.review import complete_qa_stage
 from xvt.process import raise_if_cancelled
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
-from xvt.render import save_bilingual_ass
+from xvt.render import AssStyleOptions, save_bilingual_ass
 from xvt.subtitles import load_subtitles, save_subtitles
 from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
@@ -160,24 +162,6 @@ def translate_batch_with_retries(
                 on_retry(request_attempt, delay, "invalid provider response")
             time.sleep(delay)
             raise_if_cancelled()
-
-
-def resolved_translation_policy(job: Job) -> TranslationPolicy:
-    """按 Job 类型解析生效的翻译策略：workflow 快照优先，顶层配置是原子 Job 的回退位置。
-
-    workflow Job 的策略快照存在 ``job.config["workflow"]`` 里，顶层 ``translation_policy``
-    只是原子 Job 的回退位置；两处都要读，否则 workflow 路径的术语表校验会静默失效。
-    译文 QA、Agent 润色 manifest 与局部重译 manifest 共用本函数，避免同一语义出现多份
-    实现后各自漂移。
-    """
-    workflow = get_workflow_config(job)
-    if workflow is not None and workflow.translation_policy is not None:
-        return workflow.translation_policy
-    return translation_policy_from_dict(job.config.get("translation_policy"))
-
-
-def _required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:
-    return tuple((term.source, term.target) for term in resolved_translation_policy(job).terms)
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
@@ -735,14 +719,12 @@ def _qa_and_render_translation(
             event_sink,
             extras={"detail": "translated"},
         )
-        media_data = _media_data(job)
+        context = translation_qa_context(job)
+        media_data = {"width": context["video_width"], "height": context["video_height"]}
         report = check_subtitles(
             translated,
-            media_duration_ms=_media_duration_ms(media_data),
-            video_width=media_data.get("width"),
-            video_height=media_data.get("height"),
+            **context,
             require_translation=True,
-            required_terms=_required_glossary_terms(job),
         )
         qa_path = artifacts_directory / "qa-translated.json"
         write_json(qa_path, asdict(report))
@@ -810,11 +792,16 @@ def _render_translated_outputs(
     width = int(media_data.get("width") or 0)
     height = int(media_data.get("height") or 0)
     if width > 0 and height > 0:
+        config = get_workflow_config(job)
         ass_path = save_bilingual_ass(
             translated,
             artifacts_directory / "bilingual.ass",
             video_width=width,
             video_height=height,
+            options=AssStyleOptions(
+                target_font=config.target_font if config else None,
+                source_font=config.source_font if config else None,
+            ),
         )
         add_artifact(job, "bilingual_ass", ass_path, event_sink)
         paths.append(ass_path)
