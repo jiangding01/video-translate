@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### YouTube 下载画质修复
+
+- 显式 Cookie 的完整视频获取比较原访问与匿名访问，优先原音轨及更高分辨率，无 1080p 上限。固定格式 ID、临时隔离下载与 ffprobe 校验防止悄悄降为 360p；提取不完整或比较失败明确停止，发布拒绝覆盖现有文件。
+- 新增可选 `media_download_selection` 诊断 artifact/事件与脱敏摘要，不影响旧媒体的 checksum 恢复；旧低清 Job 不自动重下载，可通过 `burn --media` 使用高清文件重烧。
+
 ### Added
 
 - 人工译文 JSON/SRT 修订新增 `apply --check` 与 `apply-translation-review-fixes --check` 只读预检：不写 Job、产物或锁文件，不调用模型；正式提交共享相同 QA，阻断项未修复时拒绝保存。
@@ -45,6 +50,8 @@
 - advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]`：显式以 ASR 重建既有媒体 Job 的源字幕，不由 `continue` 自动执行。复用校验通过的 words/audio/本地或已下载媒体，远程缺 checkpoint 时才重取；持久化 ASR 策略、修复意图并关闭对齐，失效源 cue、候选 QA、选择、重分段及全部下游产物，同时保留输入译文字幕以重新验证映射。重建中断后 `status` 继续给出显式修复命令；端到端 Job 成功后用 `continue`，旧原子 Job 用 `translate`。不新增 stage、schema 或事件类型，复用 `source_selected` 与 `cli_completed`。
 
 ### Fixed
+
+- 原子 `burn` 对替代媒体或字体的布局 QA 不再覆盖工作流正式报告：本地替代媒体过短、窄画幅或字体超宽导致检查失败时 Job 保持原样，切回原目标仍可 `continue`。检查前发生的远程媒体获取仍按原契约持久化。端到端烧录继续持久化布局 QA，并保留 review 等待与 error 阻断。
 
 - 修复带浏览器 Cookie 时 yt-dlp 因字幕 PO Token 限制漏报 YouTube 人工字幕、XVT 直接回退 ASR 的问题：显式字幕请求缺少匹配人工字幕且没有有效候选时匿名补查，并匿名下载找到的同视频人工字幕。访问方式随 checksum 保护的元信息恢复；补查失败明确报错，已有候选保留来源分类，现有源 cue 与译文不自动替换。
 

@@ -219,6 +219,27 @@ def artifact_checksum_for(job: Job, kind: str) -> str | None:
     return artifact.checksum if artifact else None
 
 
+def record_media_download_selection(job: Job, media: Path, event_sink: EventSink | None) -> None:
+    path = media.with_suffix(".download.json")
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or data.get("media_checksum") != checksum(media):
+        return
+    add_artifact(job, "media_download_selection", path, event_sink)
+    if event_sink:
+        event_sink(
+            create_event(
+                EventType.MEDIA_DOWNLOAD_SELECTION,
+                **job_event_fields(job.id, get_job_file(job)),
+                summary_path=str(path),
+            )
+        )
+
+
 def invalidate_rendered_artifacts(job: Job) -> None:
     # 失效集合由依赖图闭包推导：translated_cues 的全部下游产物。
     invalidated_kinds = downstream_of(ArtifactKind.TRANSLATED_CUES)

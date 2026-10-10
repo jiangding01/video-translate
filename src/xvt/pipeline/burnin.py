@@ -26,6 +26,7 @@ from xvt.pipeline.common import (
     error_category,
     invalidate_preview_artifacts,
     load_cues,
+    record_media_download_selection,
     required_glossary_terms,
     set_stage,
     write_json,
@@ -132,7 +133,7 @@ def _check_render_layout(
         payload["issues"] = list(payload["issues"])
         if not review_gate_satisfied(job, payload):
             raise UserInputError(
-                "preview subtitle QA requires review for the selected media/fonts; "
+                "subtitle QA blocks rendering for the selected media/fonts; "
                 "use the workflow media/fonts or fix the subtitles"
             )
         return
@@ -340,6 +341,7 @@ def burn_translated_job(
     proxy: str | None = None,
     target_font: str | None = None,
     source_font: str | None = None,
+    persist_workflow_qa: bool = False,
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
@@ -364,6 +366,7 @@ def burn_translated_job(
                         event_sink=event_sink,
                     )
                     add_artifact(job, "source_video", media_path, event_sink)
+                    record_media_download_selection(job, media_path, event_sink)
             else:
                 media_path = Path(job.input).expanduser()
         if not media_path.is_file():
@@ -380,6 +383,7 @@ def burn_translated_job(
             media_info,
             AssStyleOptions(target_font=target_font, source_font=source_font),
             event_sink,
+            persist=persist_workflow_qa,
         )
         # 路径校验放在 RENDER/BURN 记账之前，避免错误输出先留下半成品 stage 状态。
         artifacts_directory = get_job_directory(job) / "artifacts"

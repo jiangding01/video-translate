@@ -39,6 +39,7 @@ from xvt.pipeline.common import (
     is_subtitle_input,
     load_cues,
     media_info_from_remote_metadata,
+    record_media_download_selection,
     set_stage,
     write_json,
 )
@@ -1300,6 +1301,7 @@ def _acquire_remote_job(
                 event_sink=event_sink,
             )
             add_artifact(job, "downloaded_media", source, event_sink)
+            record_media_download_selection(job, source, event_sink)
         media_info = probe_media(source)
         if download_for_burn and valid_artifact_path(job, "source_video") is None:
             add_artifact(job, "source_video", source, event_sink)

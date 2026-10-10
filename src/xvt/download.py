@@ -1,20 +1,235 @@
 from __future__ import annotations
 
 import json
+import math
+import os
+import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from xvt.checksums import file_checksum
 from xvt.errors import DependencyError
 from xvt.events import EventSink, EventType, create_event
+from xvt.media import probe_media
 from xvt.process import CommandError, CommandResult, run_command
 
 CommandRunner = Callable[..., CommandResult]
 
-# 视频格式回退链：优先分离流合并，再试渐进式 360p(18)，最后任意 best。
-VIDEO_FORMAT_SELECTOR = "bv*+ba/b/18/best"
+VIDEO_FORMAT_SELECTOR = "bv*+ba/b"
+
+
+@dataclass(frozen=True, slots=True)
+class VideoSelection:
+    video_id: str
+    format_id: str
+    width: int
+    height: int
+    duration_ms: int
+    has_audio: bool
+    language: str | None
+    original_audio: bool
+    incomplete: bool
+
+
+def _probe_video(
+    url: str, cookies: str | None, proxy: str | None, runner: CommandRunner
+) -> VideoSelection:
+    command = [
+        "yt-dlp",
+        "--skip-download",
+        "--no-playlist",
+        "--no-progress",
+        "--verbose",
+        "--dump-single-json",
+        "-f",
+        VIDEO_FORMAT_SELECTOR,
+        "--format-sort-force",
+        "-S",
+        "lang,res",
+    ]
+    if cookies:
+        command.extend(["--cookies-from-browser", cookies])
+    else:
+        command.append("--ignore-config")
+    if proxy:
+        command.extend(["--proxy", proxy])
+    command.append(url)
+    try:
+        result = runner(command, timeout=60)
+    except CommandError as error:
+        raise DependencyError("视频画质查询失败；请对同一 Job 重试，或提供本地视频。") from error
+    try:
+        data = json.loads(result.stdout)
+        parts = data.get("requested_formats") or [data]
+        video = next(p for p in parts if p.get("vcodec") not in {None, "none"})
+        audio = next((p for p in parts if p.get("acodec") not in {None, "none"}), None)
+        video_id = data["id"]
+        format_id = data["format_id"]
+        width, height = video["width"], video["height"]
+        duration = data["duration"]
+        if (
+            not isinstance(video_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", video_id)
+            or not isinstance(format_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]+", format_id)
+            or type(width) is not int
+            or type(height) is not int
+            or min(width, height) <= 0
+            or type(duration) not in {int, float}
+            or not math.isfinite(duration)
+            or duration <= 0
+            or data.get("is_live")
+            or data.get("live_status") in {"is_live", "post_live"}
+        ):
+            raise ValueError("invalid video metadata")
+        language = audio.get("language") if audio else None
+        if language is not None and (
+            not isinstance(language, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", language)
+        ):
+            raise ValueError("invalid audio language")
+    except (ValueError, TypeError, KeyError, StopIteration, AttributeError) as error:
+        raise DependencyError("视频画质查询返回不完整或无效的格式信息。") from error
+    diagnostics = "\n".join(
+        line.casefold()
+        for line in result.stderr.splitlines()
+        if line.startswith(("WARNING:", "ERROR:"))
+    )
+    incomplete = any(
+        marker in diagnostics
+        for marker in (
+            "formats have been skipped",
+            "formats may be missing",
+            "challenge solving failed",
+            "signature extraction failed",
+            "nsig extraction failed",
+            "formats require a gvs po token",
+        )
+    )
+    return VideoSelection(
+        video_id,
+        format_id,
+        width,
+        height,
+        round(duration * 1000),
+        audio is not None,
+        language,
+        # YouTube's extractor marks original audio with preference 10 (default/dubbed is lower).
+        audio is not None and audio.get("language_preference") == 10,
+        incomplete,
+    )
+
+
+def _download_compared_video(
+    url: str,
+    root: Path,
+    cookies: str,
+    proxy: str | None,
+    event_sink: EventSink | None,
+    runner: CommandRunner,
+) -> Path:
+    configured = _probe_video(url, cookies, proxy, runner)
+    anonymous = _probe_video(url, None, proxy, runner)
+    parsed = urlparse(url)
+    expected_id = (
+        parsed.path.strip("/").split("/")[0]
+        if parsed.hostname == "youtu.be"
+        else (parse_qs(parsed.query).get("v") or [None])[0]
+    )
+    if expected_id is None and parsed.path.strip("/").split("/")[0] in {"shorts", "embed", "live"}:
+        expected_id = parsed.path.strip("/").split("/")[-1]
+    if expected_id and configured.video_id != expected_id:
+        raise DependencyError("视频画质查询与请求的视频 ID 不一致。")
+    if (
+        configured.video_id != anonymous.video_id
+        or abs(configured.duration_ms - anonymous.duration_ms) > 500
+    ):
+        raise DependencyError("匿名画质查询返回不同的视频或时长，拒绝下载。")
+    selected = configured
+    access = "configured"
+    if (
+        anonymous.original_audio
+        and not configured.original_audio
+        or anonymous.original_audio == configured.original_audio
+        and min(anonymous.width, anonymous.height) > min(configured.width, configured.height)
+    ):
+        if configured.has_audio and not anonymous.has_audio:
+            raise DependencyError("匿名高清视频缺少原视频音轨，拒绝替换。")
+        if (
+            configured.original_audio
+            and anonymous.original_audio
+            and configured.language
+            and anonymous.language
+            and configured.language.split("-", 1)[0].casefold()
+            != anonymous.language.split("-", 1)[0].casefold()
+        ):
+            raise DependencyError("匿名高清视频音轨语言与原访问方式不同，拒绝替换。")
+        selected, access = anonymous, "anonymous"
+    if selected.incomplete or anonymous.incomplete:
+        raise DependencyError("视频格式提取不完整，无法确认最高画质；请重试或提供本地高清视频。")
+    with tempfile.TemporaryDirectory(prefix=".xvt-download-", dir=root) as directory:
+        temporary = Path(directory)
+        # Exact IDs prevent a later extraction from silently choosing a lower format.
+        downloaded = download_remote_media(
+            url,
+            temporary,
+            cookies_from_browser=cookies if access == "configured" else None,
+            proxy=proxy,
+            event_sink=event_sink,
+            runner=runner,
+            _selection=selected,
+            _anonymous=access == "anonymous",
+        )
+        info = probe_media(downloaded, runner=runner)
+        if (
+            (info.width, info.height) != (selected.width, selected.height)
+            or not info.has_video
+            or selected.has_audio
+            and not info.has_audio
+            or abs(info.duration_ms - selected.duration_ms) > 500
+        ):
+            raise DependencyError("下载视频与选中高清格式不符，拒绝登记低清或不完整媒体。")
+        destination = root / downloaded.name
+        if destination.exists() or destination.is_symlink():
+            raise DependencyError(
+                "下载目标已存在，拒绝覆盖；请使用本地媒体入口或清理未登记文件后重试。"
+            )
+        report = {
+            "version": 1,
+            "video_id": selected.video_id,
+            "access": access,
+            "format_id": selected.format_id,
+            "width": info.width,
+            "height": info.height,
+            "duration_ms": info.duration_ms,
+            "audio_language": selected.language,
+            "original_audio": selected.original_audio,
+            "reason": (
+                "anonymous_higher_resolution"
+                if access == "anonymous"
+                and min(selected.width, selected.height) > min(configured.width, configured.height)
+                else "anonymous_original_audio"
+                if access == "anonymous"
+                else "configured_best"
+            ),
+            "media_checksum": file_checksum(downloaded),
+        }
+        report_path = downloaded.with_suffix(".download.json")
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        # A hard link publishes atomically without overwriting a concurrently created file.
+        try:
+            os.link(downloaded, destination)
+        except FileExistsError as error:
+            raise DependencyError("下载目标已存在，拒绝覆盖。") from error
+        try:
+            os.link(report_path, destination.with_suffix(".download.json"))
+        except OSError:
+            # Diagnostics are optional; a valid published media file remains usable.
+            pass
+        return destination
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,12 +412,24 @@ def download_remote_media(
     proxy: str | None = None,
     event_sink: EventSink | None = None,
     runner: CommandRunner = run_command,
+    _selection: VideoSelection | None = None,
+    _anonymous: bool = False,
 ) -> Path:
     validated_url = validate_remote_url(url)
     root = Path(output_directory).expanduser()
     if not root.is_absolute():
         raise ValueError("download output directory must be absolute")
     root.mkdir(parents=True, exist_ok=True)
+    if (
+        not audio_only
+        and cookies_from_browser
+        and _selection is None
+        and urlparse(validated_url).hostname
+        in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+    ):
+        return _download_compared_video(
+            validated_url, root, cookies_from_browser, proxy, event_sink, runner
+        )
 
     command = [
         "yt-dlp",
@@ -227,7 +454,19 @@ def download_remote_media(
     if audio_only:
         command.extend(["-f", "bestaudio/best"])
     else:
-        command.extend(["-f", VIDEO_FORMAT_SELECTOR, "--merge-output-format", "mp4"])
+        command.extend(
+            [
+                "-f",
+                _selection.format_id if _selection else VIDEO_FORMAT_SELECTOR,
+                "--merge-output-format",
+                "mp4",
+                "--format-sort-force",
+                "-S",
+                "lang,res",
+            ]
+        )
+    if _anonymous:
+        command.append("--ignore-config")
     if cookies_from_browser:
         command.extend(["--cookies-from-browser", cookies_from_browser])
     if proxy:
