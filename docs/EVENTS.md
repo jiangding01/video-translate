@@ -203,6 +203,10 @@ stage 状态迁移（`pipeline/common.py`），由 `StageStatus → EventType` �
 
 ## 下载
 
+### `media_download_selection`
+
+Cookie YouTube 完整视频实际下载并校验成功后，pipeline 登记可选诊断摘要时发出。`data` 包含公共 Job 字段及 `summary_path: string`。摘要 `version=1` 包含视频 ID、`access`（`configured` / `anonymous`）、固定格式 ID、实际尺寸与时长、音轨语言、`original_audio`、选择原因与媒体 checksum；无 Cookie、签名 URL 或原始诊断日志。摘要缺失、损坏或 checksum 不匹配时不发该事件，也不影响媒体有效性。
+
 yt-dlp 下载进度（`download.py`）。
 
 ### `download_progress`

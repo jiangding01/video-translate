@@ -170,7 +170,7 @@ class DownloadTest(unittest.TestCase):
 
             download_remote_media("https://youtu.be/abc", root, runner=runner)
 
-        self.assertEqual(VIDEO_FORMAT_SELECTOR, "bv*+ba/b/18/best")
+        self.assertEqual(VIDEO_FORMAT_SELECTOR, "bv*+ba/b")
         format_index = calls[0].index("-f")
         self.assertEqual(calls[0][format_index + 1], VIDEO_FORMAT_SELECTOR)
         self.assertIn("--merge-output-format", calls[0])
@@ -233,6 +233,7 @@ class DownloadTest(unittest.TestCase):
             download_remote_media(
                 "https://youtu.be/abc",
                 root,
+                audio_only=True,
                 cookies_from_browser="chrome",
                 proxy="http://127.0.0.1:7890",
                 runner=runner,

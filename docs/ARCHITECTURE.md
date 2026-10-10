@@ -1,10 +1,16 @@
 # 架构说明
 
+## YouTube 完整视频画质选择
+
+`download.download_remote_media` 统一转写与远程烧录的完整视频获取。显式 Cookie 的 YouTube 输入串行查询配置访问与匿名访问：yt-dlp 内部按原音轨和分辨率排序，跨访问方式优先已标记原音轨，再比较短边尺寸，无分辨率上限。获选格式 ID 固定，下载在输出目录的独立临时子目录进行，ffprobe 核对尺寸、音视频流和时长后以原子无覆盖 hard link 发布；失败不登记有效媒体。
+
+可选白名单摘要由 `pipeline.common.record_media_download_selection` 在媒体登记后关联。`media_download_selection` 依赖 `downloaded_media` / `source_video` 的失效传播；媒体不反向依赖摘要。缺失、损坏或 checksum 不匹配的摘要被忽略，不影响媒体恢复。摘要事件仅提供 Job 字段与 `summary_path`，不携带原始提取日志或签名 URL。
+
 ## 译文布局 QA 与人工修订预检
 
 `pipeline.common.translation_qa_context` 统一候选 QA、修订预检与译文收尾的媒体、字体和术语上下文；显式 workflow 媒体优先，否则使用 checksum 有效的媒体产物。`render` 共用 ASS 样式构造，单次 FFmpeg/libass 调用测量每条源文、译文的可见宽度及描边。`qa` 将实际超宽判为 review，实际容纳得下的建议字数超限仅 warning；测量失败回退保守规则。报告的 `layout` 保存画幅、样式及测量结果，确认记录同时绑定该上下文。
 
-人工修订先经只读解析与完整候选 QA，再由正式 apply 写修订产物和失效下游。`--check` 复用同一入口但不获取执行锁、不写文件、不调用模型。烧录对实际媒体和字体重跑 QA；预览检查同样的布局，但不覆盖正式 QA artifact。此路径不改变 cue ID 或时间轴，不新增 stage、artifact kind 或事件类型。
+人工修订先经只读解析与完整候选 QA，再由正式 apply 写修订产物和失效下游。`--check` 复用同一入口但不获取执行锁、不写文件、不调用模型。烧录对实际媒体和字体重跑 QA；原子烧录与预览的布局检查只读，不覆盖正式 QA artifact 或更新字幕 QA stage；此前发生的远程媒体获取仍正常持久化。`workflow._ensure_burn` 显式启用 `persist_workflow_qa`，仅按持久化目标执行的烧录保存布局 QA 并更新字幕 QA stage。此路径不改变 cue ID 或时间轴，不新增 stage、artifact kind 或事件类型。
 
 ## 设计目标
 

@@ -284,7 +284,9 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "QA must pass"):
                 preview_translated_job(job_file)
 
-    def _run_burn(self, job_file: Path, artifacts: Path, media: Path):
+    def _run_burn(
+        self, job_file: Path, artifacts: Path, media: Path, *, persist_workflow_qa: bool = False
+    ):
         input_info = MediaInfo(
             str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
         )
@@ -310,7 +312,7 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             patch("xvt.pipeline.burnin.probe_media", side_effect=[input_info, output_info]),
             patch("xvt.pipeline.burnin.burn_subtitles", side_effect=burn),
         ):
-            return burn_translated_job(job_file)
+            return burn_translated_job(job_file, persist_workflow_qa=persist_workflow_qa)
 
     def test_burn_rejects_failed_translated_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -494,10 +496,18 @@ class BurnPreviewPipelineTest(unittest.TestCase):
 
     def test_burn_accepts_acknowledged_needs_review_qa(self) -> None:
         for measurement_available in (True, False):
-            with self.subTest(measurement_available=measurement_available):
-                self._assert_burn_accepts_acknowledged_review(measurement_available)
+            for persist_workflow_qa in (False, True):
+                with self.subTest(
+                    measurement_available=measurement_available,
+                    persist_workflow_qa=persist_workflow_qa,
+                ):
+                    self._assert_burn_accepts_acknowledged_review(
+                        measurement_available, persist_workflow_qa
+                    )
 
-    def _assert_burn_accepts_acknowledged_review(self, measurement_available: bool) -> None:
+    def _assert_burn_accepts_acknowledged_review(
+        self, measurement_available: bool, persist_workflow_qa: bool
+    ) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch(
@@ -529,11 +539,18 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             _acknowledge_review_issues(job, artifacts, [["line_too_wide", 1]])
             job_file = save_job(job)
 
-            result = self._run_burn(job_file, artifacts, media)
+            qa_path = artifacts / "qa-translated.json"
+            before_qa = qa_path.read_bytes()
+            result = self._run_burn(
+                job_file, artifacts, media, persist_workflow_qa=persist_workflow_qa
+            )
 
             self.assertTrue(result.exists())
-            qa_report = json.loads((artifacts / "qa-translated.json").read_text(encoding="utf-8"))
             measure.assert_called_once()
+            if not persist_workflow_qa:
+                self.assertEqual(qa_path.read_bytes(), before_qa)
+                return
+            qa_report = json.loads(qa_path.read_text(encoding="utf-8"))
             self.assertEqual(qa_report["status"], "pass" if measurement_available else "warning")
             self.assertEqual(
                 [issue["code"] for issue in qa_report["issues"]],

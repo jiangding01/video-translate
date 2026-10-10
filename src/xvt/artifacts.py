@@ -16,6 +16,7 @@ class ArtifactKind(StrEnum):
 
     REMOTE_INFO = "remote_info"
     DOWNLOADED_MEDIA = "downloaded_media"
+    MEDIA_DOWNLOAD_SELECTION = "media_download_selection"
     DOWNLOADED_SUBTITLES = "downloaded_subtitles"
     SOURCE_VIDEO = "source_video"
     MEDIA_INFO = "media_info"
@@ -74,6 +75,9 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.TRANSLATION_REVIEW_REVISION: frozenset(),
     # 下载与源媒体。
     ArtifactKind.DOWNLOADED_MEDIA: frozenset({ArtifactKind.REMOTE_INFO}),
+    ArtifactKind.MEDIA_DOWNLOAD_SELECTION: frozenset(
+        {ArtifactKind.DOWNLOADED_MEDIA, ArtifactKind.SOURCE_VIDEO}
+    ),
     ArtifactKind.DOWNLOADED_SUBTITLES: frozenset({ArtifactKind.REMOTE_INFO}),
     ArtifactKind.SOURCE_VIDEO: frozenset({ArtifactKind.REMOTE_INFO}),
     # 转写链。

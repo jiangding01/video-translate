@@ -1006,6 +1006,7 @@ def _ensure_burn(
         proxy=proxy,
         target_font=config.target_font,
         source_font=config.source_font,
+        persist_workflow_qa=True,
         event_sink=event_sink,
     )
     _record_burn_fingerprint(path)

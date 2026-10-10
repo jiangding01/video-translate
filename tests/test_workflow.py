@@ -17,6 +17,7 @@ from xvt.pipeline import (
     apply_agent_translation,
     apply_cue_retranslation,
     apply_subtitle_translation,
+    burn_translated_job,
     cue_retranslation_waiting,
     prepare_agent_semantic_review,
     prepare_agent_translation,
@@ -1130,6 +1131,66 @@ class WorkflowTest(unittest.TestCase):
         ):
             job.stages[stage].status = StageStatus.SUCCEEDED
         return save_job(job), qa_path
+
+    def test_atomic_burn_layout_failure_preserves_workflow_qa_and_recovery(self) -> None:
+        for duration, width, height, font, target_width in (
+            (500, 640, 360, None, 40),
+            (4000, 360, 640, None, 600),
+            (4000, 640, 360, "Wide Font", 600),
+        ):
+            with self.subTest(duration=duration, width=width, font=font):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    job_file, qa_path = self._standard_job_with_translated_outputs(root, "你好世界")
+                    original = root / "original.mp4"
+                    original.write_bytes(b"original")
+                    alternate = root / "alternate.mp4"
+                    alternate.write_bytes(b"alternate")
+                    selected_media = original if font else alternate
+                    job = load_job(job_file)
+                    job.input = str(original)
+                    job.config["input_kind"] = "video"
+                    job.config["workflow"]["burn"] = True
+                    save_job(job)
+                    before_job, before_qa = job_file.read_bytes(), qa_path.read_bytes()
+                    info = MediaInfo(
+                        str(selected_media),
+                        duration,
+                        5,
+                        "mp4",
+                        width,
+                        height,
+                        30,
+                        "h264",
+                        "aac",
+                        True,
+                        True,
+                    )
+                    with (
+                        patch("xvt.pipeline.burnin.probe_media", return_value=info),
+                        patch(
+                            "xvt.qa.measure_bilingual_line_widths",
+                            return_value={
+                                (1, "target"): (target_width, 492),
+                                (1, "source"): (55, 492),
+                            },
+                        ),
+                        patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                        self.assertRaises(UserInputError),
+                    ):
+                        burn_translated_job(job_file, media=selected_media, target_font=font)
+                    burn.assert_not_called()
+                    self.assertEqual(qa_path.read_bytes(), before_qa)
+                    self.assertEqual(job_file.read_bytes(), before_job)
+                    with (
+                        patch("xvt.workflow.burn_translated_job") as workflow_burn,
+                        patch("xvt.workflow._record_burn_fingerprint"),
+                    ):
+                        result = continue_workflow(job_file)
+                    self.assertEqual(result.status, "completed")
+                    workflow_burn.assert_called_once()
+                    self.assertIsNone(workflow_burn.call_args.kwargs["media"])
+                    self.assertTrue(workflow_burn.call_args.kwargs["persist_workflow_qa"])
 
     def test_continue_rebuilds_translated_qa_report_without_retranslating(self) -> None:
         """译文 QA 报告单独失效必须能被 continue 零 API 成本重建，且二次 continue 幂等。

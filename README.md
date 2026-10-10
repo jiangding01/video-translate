@@ -62,7 +62,7 @@ xvt batch-continue BATCH.json
 
 人工译文修订可先运行 `xvt apply JOB REVIEW --check`（或显式 `apply-translation-review-fixes ... --check`）。预检校验 JSON/SRT 身份、时间轴、译文完整性、术语和行宽，返回结构化 QA；有效退出 0，无效退出 2。它不写 Job、产物或锁文件，不调用翻译 API，也不执行语义复查；`--check` 不能与 `--continue` 合用。正式提交共享同一预检，仍有译文 QA 阻断项时拒绝保存，修好后再运行 `xvt apply JOB REVIEW --continue`。
 
-译文的行宽 QA 在已知画幅时使用 FFmpeg/libass，按最终 ASS 字体、字号和描边测量。超过建议字数但实际放得下时只给 warning；实际超出可用宽度时仍需处理。中文 36 显示单位仍是建议值。无画幅或测量失败时保留原有保守限制，测量失败另有 warning。语义校对、时间轴和术语规则保持有效；不要为满足字数建议删掉原文信息。预览与烧录也检查所选媒体、字体；换画幅或字体后不能复用旧布局确认。
+译文的行宽 QA 在已知画幅时使用 FFmpeg/libass，按最终 ASS 字体、字号和描边测量。超过建议字数但实际放得下时只给 warning；实际超出可用宽度时仍需处理。中文 36 显示单位仍是建议值。无画幅或测量失败时保留原有保守限制，测量失败另有 warning。语义校对、时间轴和术语规则保持有效；不要为满足字数建议删掉原文信息。预览与烧录也检查所选媒体、字体；换画幅或字体后不能复用旧布局确认。原子 `burn` / `preview` 的临时布局检查不覆盖正式 QA，检查失败后仍可按原目标 `continue`；`run` / `continue` 保存工作流目标的布局 QA。
 
 <!-- cli-reference:start -->
 
@@ -844,6 +844,12 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有传入 `--allow-auto-subtitles` 才会请求自动字幕。新 Job 默认 `--source-strategy auto`：人工候选 QA 通过直接采用，失败时先尝试对齐再回退 ASR；自动候选在翻译或烧录任务中最终使用 ASR，在只生成源字幕且 QA 通过时可直接采用。`subtitles` 强制候选为时间轴，`asr` 强制媒体转写（不能用于纯字幕输入，也不能与 `--align-subtitles` 同用）。候选 QA 与最终选择会写入 `source-candidate-qa.json`、`source-selection.json`。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
 
 显式请求 YouTube 平台字幕并传入 `--cookies-from-browser` 时，若登录态查询未找到匹配的人工字幕，且没有有效的已下载字幕或用户源字幕，XVT 会补做一次匿名查询。找到同一视频的匹配人工字幕后，字幕也匿名下载；该路径忽略 yt-dlp 本机配置以避免重新带入 Cookie，但保留显式代理，媒体下载仍使用原访问参数。补查失败会报错，不把提取失败当成字幕不存在。匿名来源记录在 `remote.json` 的 `subtitles_anonymous` 与 `remote_subtitles_selected` 事件的 `anonymous` 字段中。此行为同样适用于 `polished`；已有候选保留原来源分类，已生成源 cue 的 Job 不会自动更换源字幕。
+
+### YouTube 视频下载画质
+
+完整 YouTube 视频下载显式使用 `bv*+ba/b`、`lang,res` 排序，不设 1080p 上限。传入浏览器 Cookie 时比较原访问方式与忽略本机配置的匿名方式，保留显式代理；优先原音轨，再比较短边分辨率，同等条件保留原访问方式。固定获选格式 ID 下载后，以 ffprobe 核对尺寸、音视频流和时长；格式提取不完整或比较失败时停止，不悄悄改选低清。匿名查询失败也会保守停止，受限视频可使用本地媒体入口。
+
+成功下载可生成 `source.download.json` 与可选 `media_download_selection` artifact，记录尺寸、访问方式、音轨身份与 checksum，不保存 Cookie 或签名 URL。该摘要不决定媒体有效性。升级后旧 Job 仍复用 checksum 有效的低清媒体，不自动重下载；已有译文需要高清重烧时使用 `xvt burn JOB --media /path/to/HD.mp4 --output /path/to/output.mp4`。
 
 ### 7. 重建既有 Job 的源字幕
 
