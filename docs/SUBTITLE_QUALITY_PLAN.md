@@ -200,7 +200,7 @@ Q5 的决策完备实施方案见 [Q5 可恢复字幕润色技术方案](Q5_TRAN
 - `standard`：语义组翻译草稿直接作为最终候选，随后运行确定性 QA。
 - `polished`：Q5 先增加草稿后的上下文润色；Q6 再在同一质量模式中增加语义校对和最多一次定向修复。
 
-实施初期保持 `standard` 为默认，完成完整真实 E2E 验收后，新 Job 默认切为：
+默认保持 `standard + faithful`。2026-10-11 polished Agent 主链真实 E2E 已通过（见 [验收记录](POLISHED_AGENT_E2E_ACCEPTANCE.md)），但单一样本没有证明默认切换的质量及成本收益；多样本对照后再评估以下组合，不自动切换：
 
 ```text
 translation_style=natural

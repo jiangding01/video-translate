@@ -16,7 +16,7 @@
 
 - 不改变时间轴、cue ID、翻译职责边界等不可破坏约束。
 - 不新增 GUI、队列、并发批处理或远程执行能力。
-- 不在本方案内切换默认翻译质量（仍待真实 E2E 后决定）。
+- 不在本方案内切换默认翻译质量（Agent 主链真实 E2E 后仍保持 standard + faithful，多样本对照后再评估）。
 - R3 各项在真实 polished E2E 验收完成前不启动实施，避免与质量闭环验收互相干扰。
 
 ## 审查发现汇总（证据基线 `ab28aff`）
@@ -44,7 +44,7 @@
 - **已完成**：R1 全部四项（PR #68，堆叠于 #67）；R2.4 文案拆分与 R2.5 收口已在真实 Job 上实证（PR #67），R2.4 两阶段随后以 v2 proof Job、CLI 和批处理集成测试完成。R1.3 落地时发现 semantic ↔ review/revision 之间存在函数级惰性 import 打破加载期循环，守卫测试只约束模块顶层依赖方向，该循环留待 R3.1 传输层重构一并消解。R2.1 `_run_command` 拆分已完成：26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 分发表，`_run_command` 缩减至 4 行查表逻辑。R2.2 统一 `apply` 路由已完成：人工修订模板按 task 字段路由、Agent 响应（无 task 字段）按 Job 等待步骤路由的两级路由，仅支持有 `config.workflow` 目标的端到端 Job，原 `apply-*` 命令全部保留。
   R2.3 译文修订 SRT 通道已完成：`review/translation-review-<fp12>.srt` 与同名 JSON 同时生成（旧 Job 首次 `ensure_translation_review_input` 时按同一 fingerprint 补齐），`apply-translation-review-fixes` 按后缀分派到 SRT / JSON 解析器，两者汇聚成同一个 `changes` 映射后共用 fingerprint 绑定、只改 `target_text`、review-only 复查。SRT 无 fingerprint 字段，改由文件名承载校验；cue ID 按 `(start_ms, end_ms)` 精确匹配还原，因此改时间轴、增删 cue 都在解析边界失败，无需额外校验。统一入口 `xvt apply` 按固定文件名识别修订 SRT，不再把它误引导到 `import-translation`。补成功路径测试时发现 `_srt_review_changes` 的完整性断言把 cue ID 集合与时间轴键集合相比，SRT 通道的成功路径原本永远抛"removed a cue"——修正为与 `by_timing.values()` 比较。
 
-- **进行中**：polished Agent 路径真实 E2E 与默认质量决策；其后启动 R3.1。R2.3 源文修订 SRT 通道已完成：与译文通道共用文件名 fingerprint、时间轴精确匹配、注释 ID 校验和统一 `xvt apply` 路由契约，JSON/SRT 回填汇聚到同一 `changes` 语义。
+- **已完成**：2026-10-11 polished Agent 主链真实 E2E（平台人工字幕到整段烧录），默认保持 standard + faithful；见 [验收记录](POLISHED_AGENT_E2E_ACCEPTANCE.md)。Q6.2 语义收敛验证之后再启动 R3.1。R2.3 源文修订 SRT 通道已完成：与译文通道共用文件名 fingerprint、时间轴精确匹配、注释 ID 校验和统一 `xvt apply` 路由契约，JSON/SRT 回填汇聚到同一 `changes` 语义。
 
 ## R1：工程加固（低风险，可立即实施）
 
@@ -159,8 +159,8 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 ## 交付顺序建议
 
 1. **立即**：R1 全部（四项合计改动量小，可一到两个 PR）。
-2. **GUI 之前**：R2.1、R2.2、R2.3 译文/源文修订 SRT 通道与 R2.4 两阶段恢复安全均已完成；下一项转入 polished Agent 路径真实 E2E。
-3. **质量验收**：polished API 路径真实 E2E 已完成；继续完成 Agent 路径真实 E2E，并据此决定是否调整默认质量。
+2. **GUI 之前**：R2.1、R2.2、R2.3 译文/源文修订 SRT 通道与 R2.4 两阶段恢复安全均已完成；polished Agent 主链真实 E2E 也已完成，下一项是 Q6.2 语义收敛验证。
+3. **质量验收**：polished API 路径真实 E2E 已完成；Agent 主链真实 E2E 已于 2026-10-11 完成；默认保持 standard + faithful，继续做 Q6.2 收敛验证及多样本质量/成本对照。
 4. **质量验收之后**：R3.1 → R3.2，随后再设计 Q7 翻译上下文与术语候选包，避免新增模型步骤后立即重做 provider 和 checkpoint；R3.3 重新评估，R3.4 可穿插。
 5. **上述内核稳定后**：实现只消费现有事件、Job、QA artifact、人工修订 SRT 和预览能力的可视化校对工作台。
 

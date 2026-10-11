@@ -2,13 +2,15 @@
 
 更新时间：2026-10-11
 
+2026-10-11 polished Agent 验收：独立临时 Job 完成公开视频下载、84 条英文人工字幕、Agent natural + polished 翻译与语义校对、1080p H.264/AAC 整段烧录及媒体 QA。24 个 artifact 全部校验通过，时间轴和源文不变；错误 fingerprint 回填不改 Job/manifest，完成后 continue 不重翻译/重烧。字幕 QA 有 17 条 warning、无阻断项。三帧目视抽查正常。此样本不覆盖 ASR 或真实语义修复，默认保持 standard + faithful；下一项为 Q6.2 语义复查收敛验证。详见 [验收记录](docs/POLISHED_AGENT_E2E_ACCEPTANCE.md)。
+
 2026-10-11 YouTube 画质修复：已复现 Chrome Cookie 仅返回 360p，而匿名提供 1080p。完整视频获取现比较两种访问方式，原音轨优先、分辨率无上限、固定格式 ID、独立临时下载与实际媒体校验；原子发布拒绝覆盖。新增可选脱敏摘要，不自动更换旧 Job 媒体或字幕。check 专项与对抗复查已修复缺格式判定、无音轨候选及覆盖竞态，最终无剩余发现。全量 868 测试、176 子测试通过，Ruff、help、doctor 通过；授权临时整段下载得到 1920×1080、原音轨与正常时长。隔离验证及限制见 [画质修复记录](docs/YOUTUBE_DOWNLOAD_QUALITY_PLAN.md)。用户已授权最终检查通过后提交推送；实际提交状态以 Git 记录为准。
 
 2026-10-04 校对体验改动：译文 QA 已加入 FFmpeg/libass 实际 ASS 宽度测量，超过字数建议但容纳得下时仅 warning；测量不可用仍保守阻断。候选 QA、人工预检、译文收尾与烧录使用实际媒体/字体上下文，确认绑定 layout；预览不覆盖正式 QA。人工 JSON/SRT 修订新增 `apply --check`，正式提交也在写入前完整预检，不合格不改 Job 或失效下游。此次不修改语义 severity、源文重建和下载策略。实现与验证结果见本次分支；不重写用户已完成的视频任务。
 
 ## 当前快照
 
-2026-10-04 review 修复：原子 `burn` 与 `preview` 的所选媒体/字体 QA 只读，不覆盖工作流正式报告；本地替代媒体或字体导致布局失败时 Job 不变，检查前发生的远程媒体获取仍按原契约持久化。端到端 `run` / `continue` 仍持久化目标布局 QA。短视频、窄画幅和字体变化的回归覆盖失败后继续原工作流。polished Agent 本地纯字幕 CLI 冒烟已完成，3 条 cue 时间轴保持不变、14 个 artifact 校验通过；公开视频到烧录的完整 Agent 验收仍待做。
+2026-10-04 review 修复：原子 `burn` 与 `preview` 的所选媒体/字体 QA 只读，不覆盖工作流正式报告；本地替代媒体或字体导致布局失败时 Job 不变，检查前发生的远程媒体获取仍按原契约持久化。端到端 `run` / `continue` 仍持久化目标布局 QA。短视频、窄画幅和字体变化的回归覆盖失败后继续原工作流。polished Agent 本地纯字幕 CLI 冒烟已完成，3 条 cue 时间轴保持不变、14 个 artifact 校验通过；公开视频到烧录的 Agent 主链验收已于 2026-10-11 完成，覆盖范围见本文件顶部验收记录。
 
 | 项目 | 状态 |
 | --- | --- |
@@ -27,7 +29,7 @@
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status` 查看 `recovery_plan` / `advance_steps`，再 `xvt continue` 按持久化目标补齐。翻译与烧录推进与 status 共用 `plan_advance_steps`。由 `run` / `continue` 按持久化目标完成的烧录写入 checksum 保护的 `version=2` burn proof，绑定烧录 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum；高级原子 `xvt burn` 不签发 workflow proof。仅有效 v2 proof 可让 `relink-burned-output` 重新关联已移动成品。若其余静态条件满足但已登记成品缺失或 checksum 失效，`status` 返回 `awaiting_input`，首选重新关联占位命令、备选显式 `continue` 重烧；这只表示成品可能可重新关联，执行时仍会校验实际源媒体内容。`batch-continue` 停在该状态，不自动重烧。旧/legacy fingerprint、媒体 QA/proof/fingerprint 无效仍为 `retryable`，只推荐重烧。
 
-2026-10-04：修复显式 YouTube 字幕请求在浏览器 Cookie 查询漏报人工字幕时直接回退 ASR 的问题。匹配人工字幕缺失时匿名补查一次，同一视频匹配成功后匿名下载字幕；显式代理保留、媒体访问方式不变。`remote_info.subtitles_anonymous` 与选字幕事件记录访问方式，下载中断恢复继续匿名；补查失败报错。已有源 cue 的 Job 不自动重建，原 polished Agent E2E 与默认质量决策仍是下一步。
+2026-10-04：修复显式 YouTube 字幕请求在浏览器 Cookie 查询漏报人工字幕时直接回退 ASR 的问题。匹配人工字幕缺失时匿名补查一次，同一视频匹配成功后匿名下载字幕；显式代理保留、媒体访问方式不变。`remote_info.subtitles_anonymous` 与选字幕事件记录访问方式，下载中断恢复继续匿名；补查失败报错。已有源 cue 的 Job 不自动重建，polished Agent 主链 E2E 已于 2026-10-11 完成，默认质量继续保持 standard + faithful。
 
 本次 review 补齐已有有效候选的保护：不重新补查、不把旧自动字幕重标为人工字幕。公开 YouTube 视频的临时 Job 已实际完成匿名补查、人工字幕下载与源字幕 QA，共 67 条 cue，无媒体下载、ASR 或翻译 API 调用；用户原 Job 保持原样。
 
@@ -321,7 +323,7 @@ media-qa.json
 ## 已知限制
 
 - 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
-- 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；默认是否切换为 `natural + polished` 仍需真实 E2E 验收。
+- 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；Agent 主链真实 E2E 已通过，但默认切换仍需多样本质量与成本对照。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
 - 回填失败后的等待保持已修复（见「翻译」一节：用户模式的 `apply-cue-retranslation` / `apply-translation` / `import-translation` 校验失败不改写 stage，`cue_retranslation_waiting` 另外接受 `failed` 以兜住 API 模式重译失败与历史 Job）。仍存在的限制：stage 语义不区分「重译失败」与「等待被放弃」，放弃一次已请求的重译没有专门命令，靠重跑 `retranslate-cues` 重建 manifest，或直接开一轮整轮翻译取代它（`prepare_agent_translation` 会移走重译 manifest，且在途整轮请求优先）。用户模式的回填错误也不在 Job 上留痕（只有命令行报错，stage 不记 `error`），排查要看命令输出而不是 `job.json`。等待期间 `TRANSLATE` stage 停在 `awaiting_input` / `failed` 是表象，不影响判定。
@@ -335,7 +337,7 @@ media-qa.json
 
 ### Q1-Q6.1：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；下一步是完成 polished Agent 路径真实 E2E，再决定是否切换默认质量，随后进入 R3.1/R3.2。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful；下一步完成 Q6.2 语义收敛验证，随后进入 R3.1/R3.2。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
@@ -357,7 +359,7 @@ media-qa.json
 
 **Q6.1b：源文修订与多路径引导已完成。** `prepare-source-review JOB --cue ID` 生成绑定当前 source checksum 和精确 ID 集合的 JSON 与同 fingerprint SRT；`apply-source-review-fixes` 接受任一载体且只修改 source text，保留 cue 时间轴、words、置信度和 provenance。SRT 用固定文件名承载 fingerprint，按原时间轴还原 cue ID；改时间轴、增删 cue、注释 ID 不符、空文本或改名均被拒绝。接受结果以 fingerprint 文件保存，并在一次 Job 原子保存中切换 `source_review_revision`、source cue、`selected_kind=human_reviewed` 的选择记录、源 QA 和可用 SRT；QA 阻断时不登记 source SRT，确认后 `continue` 从人工 cue 恢复。旧翻译、润色、语义报告、译文修订、渲染和烧录全部失效，上游媒体与转写证据保留；导入译文任务明确拒绝。Q6 的 `source_suspect` 现在会自动准备源文模板，`status` 优先源文修订并同时提供译文修订和直接确认；旧等待 Job 由 `continue` 懒生成，避免在恢复命令中展开大量 cue ID。
 
-**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，解析器拒绝无变化建议、`source_suspect` 非空建议和单 cue `awkward_join`。translation/polish/review/repair prompt 当前为 v5/v3/v4/v3；旧 checkpoint 与带版本指纹的 Agent manifest 安全失效。人工修订 Agent manifest 可只复查 `changed_ids` 命中的完整语义组，相邻组只读。2026-08-08 的历史真实 API polished 回归证据保持有效；下一步完成 Agent 路径 E2E，再决定默认质量。
+**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，解析器拒绝无变化建议、`source_suspect` 非空建议和单 cue `awkward_join`。translation/polish/review/repair prompt 当前为 v5/v3/v4/v3；旧 checkpoint 与带版本指纹的 Agent manifest 安全失效。人工修订 Agent manifest 可只复查 `changed_ids` 命中的完整语义组，相邻组只读。2026-08-08 的历史真实 API polished 回归证据保持有效；2026-10-11 Agent 主链 E2E 已完成，默认保持 standard + faithful；下一步验证 Q6.2 语义复查收敛。
 
 **简中模型译文标点收口已完成。** 初译、一次翻译加润色、显式润色、语义修复和局部重译共用同一写入边界：消除全角 `，`、`。`，句中位置按需替换为一个半角空格以保留 `OpenAI GPT-5` 一类词边界，行尾与换行前直接移除；模型把省略号写成的连续全角句号归一为单个 `…`；问号、感叹号、分号、冒号、破折号、ASCII 标点一律保留，不折叠模型原有换行。左右同形的引号（`"`、`'`、`＂`、`＇`）按上下文推断开闭方向，英文词内撇号和数字后的尺寸符号不参与引号计数，补出的空格始终落在引号之外。源 cue 末尾为问句而译文缺少句末语义标点时补 `？`，位置镜像源文中问号相对末尾闭合符号的位置（源文 `(ready?)` 得到 `（准备好了吗？）`，源文 `Is it (a)?` 得到 `是吗（a）？`），译文闭合符号少于源文时按译文实际数量收敛。语义审查把半角空格和 cue 边界视为有效分隔，不会仅因缺少全角逗号或句号报告 `awkward_join`。处理范围严格限于显式 `zh-CN` / `zh-Hans` 等简中标签；导入译文、人工译文修订、源字幕、bare `zh`、繁中及其他目标语言保持不变。恢复中的 API checkpoint 与 Agent 回填通过相同路径，保证重放文本和 checksum 一致。
 
@@ -371,9 +373,9 @@ media-qa.json
 - **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；局部重译是显式例外：`apply-cue-retranslation` 需要 `xvt apply` 拿不到的 cue ID 与目标语言，因此无论响应带不带 `task`（协议一致的重译响应只有 `fingerprint` + `items`，靠「有有效重译 manifest 且 `translate` 在等输入」识别）都以 `invalid_input` 报错并给出可复制的手工命令；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
 - **已完成**：R2.3 译文与源文修订 SRT 人工通道——两类 JSON 模板旁均写出同 fingerprint 的 `*-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前文本），可用任意字幕工具编辑；对应 `apply-*-review-fixes` 按后缀识别，统一入口 `xvt apply` 按固定文件名路由。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。JSON/SRT 汇聚为同一 `changes` 语义；旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出两种载体。
 - **已完成**：R2.4 两阶段——`relink-burned-output` 仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径；legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。恢复导航在其余静态条件满足、但已登记成品缺失或 checksum 失效时返回 `awaiting_input`，首选重新关联、备选显式重烧；建议仅表示可能可关联，relink 会复核源媒体内容。`batch-continue` 将该状态作为停止态，不自动重烧。媒体 QA、proof 或 fingerprint 无效仍为 `retryable`。polished 质量另加一条限制：只有语义候选已收尾（语义校对通过且 `translated_cues` 与最终候选一致）才给 relink 导航，否则 continue 的收尾会改写译文 cue、让刚关联的成品指纹失效。详见 [R2.4 技术方案](docs/R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
-- **待做**：polished Agent 路径真实 E2E 与默认质量决策；随后按 R3.1 provider 传输统一 → R3.2 内容寻址 step 缓存推进架构演进。
+- **待做**：Q6.2 语义复查收敛验证与多样本质量/成本对照；polished Agent 主链 E2E 已通过，默认保持 standard + faithful。随后按 R3.1 provider 传输统一 → R3.2 内容寻址 step 缓存推进架构演进。
 
-全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），Agent 路径 polished E2E 与默认质量切换决策仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。
+全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），2026-10-11 Agent 主链 polished E2E 已通过，默认决定继续保持 standard + faithful；多样本对照仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。
 
 ### 已完成：CLI 阶段语义与完成摘要打磨
 

@@ -43,4 +43,4 @@ Agent manifest 必须绑定当前 Job、source/candidate checksum、目标语言
 - `source_suspect` 不会因其他问题完成修复而消失。
 - 最终报告只批准其实际复查过且 artifact 链完整的候选。
 - 语义确认失效规则正确，且确定性 QA 仍能阻断。
-- 默认继续保持 `standard + faithful`；是否切换为 `natural + polished` 留待真实 E2E 验收。
+- 默认继续保持 `standard + faithful`；2026-10-11 polished Agent 主链真实 E2E 已通过，覆盖范围见 [验收记录](POLISHED_AGENT_E2E_ACCEPTANCE.md)。单一样本不足以支持默认切换，是否采用 `natural + polished` 仍需多样本质量与成本对照。

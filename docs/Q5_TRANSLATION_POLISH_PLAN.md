@@ -318,6 +318,8 @@ Q5a 独立可用：用户可以对任意现代端到端 Job 的现有译文补�
 
 Q5b 完成后 Q5 已闭环。默认仍是 `standard + faithful`；切换 `natural + polished` 必须等待 Q6 和真实 E2E。
 
+2026-10-11 补充：polished Agent 主链真实 E2E 已完成，一次翻译润色、语义校对和工作流整段烧录均通过。单一样本不支持默认切换，仍保持 `standard + faithful`；详情与覆盖限制见 [验收记录](POLISHED_AGENT_E2E_ACCEPTANCE.md)。
+
 两个 PR 都会超过 6 个文件，按项目约束在各自分支内拆成三组可单独验证的提交：
 
 1. 协议与纯逻辑：`translate.py`、`translation_provider.py`、`pipeline/polish.py` 及对应单元测试。
