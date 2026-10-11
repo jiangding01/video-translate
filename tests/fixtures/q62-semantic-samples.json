@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "scope": "Short historical subtitle excerpts. Cue IDs are renumbered and test timestamps are synthetic. Labels are text judgments, not audio-confirmed truth or model benchmarks.",
+  "environment": {
+    "origin": "Historical environment-variable revision sequence, October 2026",
+    "historical_prompt_version": 4,
+    "original_cue_ids": [54, 55, 56],
+    "origin_report_checksum": "3d23373277d6d660e37472e4c642d1b4229432529d1f4500079edb6e60f0c0df",
+    "source": [
+      "the model to Sonnet right in the frontmatter,",
+      "or use the CLAUDE_CODE_SUBAGENT_MODEL environment variable in",
+      "settings.json to set the default for all of them in just one place."
+    ],
+    "candidate": [
+      "在 frontmatter 里把模型设成 Sonnet",
+      "用CLAUDE_CODE_SUBAGENT_MODEL环境变量",
+      "在settings.json统一设子代理默认值"
+    ],
+    "variants": [
+      {"text": "用CLAUDE_CODE_SUBAGENT_MODEL环境变量", "missing": "alternative", "evidence": "or"},
+      {"text": "或用CLAUDE_CODE_SUBAGENT_MODEL变量", "missing": "environment qualifier", "evidence": "environment"},
+      {"text": "或环境变量CLAUDE_CODE_SUBAGENT_MODEL", "missing": "use predicate", "evidence": "use"}
+    ],
+    "issue": {
+      "category": "omission", "cue_ids": [2], "severity": "review",
+      "message": "The alternative relation, environment qualifier and use predicate must all remain.",
+      "suggested_items": [{"id": 2, "text": "或用CLAUDE_CODE_SUBAGENT_MODEL环境变量"}]
+    }
+  },
+  "join": {
+    "origin": "Historical adjacent-predicate revision sequence, September 2026",
+    "historical_prompt_version": 4,
+    "original_cue_ids": [19, 20],
+    "origin_report_checksum": "2c1cb22732de5f6193371d3a49346f9bdca3308726ee47f2dee4a26cd3b005ad",
+    "source": [
+      "In other words, a traditional program, really, a deterministic",
+      "program with just a little bit of AI sprinkled in."
+    ],
+    "candidate": ["换句话说，是一个传统程序", "是一个只加了一点点AI的确定性程序"],
+    "issue": {
+      "category": "awkward_join", "cue_ids": [1, 2], "severity": "review",
+      "message": "The adjacent cues repeat the predicate. Repair the complete utterance.",
+      "suggested_items": [
+        {"id": 1, "text": "换句话说，这是一个传统程序，"},
+        {"id": 2, "text": "一个只加了一点点AI的确定性程序"}
+      ]
+    }
+  },
+  "source_suspect": {
+    "origin": "Historical mod/model ambiguity, October 2026",
+    "historical_prompt_version": 4,
+    "original_cue_ids": [75, 76, 77, 78],
+    "origin_report_checksum": "8d02d83091d094844911f8aa493a5baeb4e13be6807e28b3c47ff89c2f2792fb",
+    "source": [
+      "And when I then ask Claude to write a message,",
+      "it still uses the real email address because a",
+      "model render only changes what shows up on screen.",
+      "So the model never saw my version."
+    ],
+    "candidate": [
+      "接着 当我让 Claude 写一条消息时",
+      "它仍然使用真实邮箱地址 因为",
+      "模型渲染只改变屏幕上显示的内容",
+      "所以模型从未看到我的版本"
+    ],
+    "issue": {
+      "category": "source_suspect", "cue_ids": [2, 3], "severity": "review",
+      "message": "The source span model render is suspicious in the mod context; audio verification is unresolved.",
+      "suggested_items": []
+    }
+  },
+  "unchanged_suggestion": {
+    "origin": "Historical prompt-v2 final report, August 2026; suggestion for the last cue was unchanged",
+    "historical_prompt_version": 2,
+    "original_cue_ids": [109, 110, 111],
+    "origin_report_checksum": "727470bf574b8d4ba29e69ceba86fd9f4e46d5268618aeaa108a7f0c9c69a7b0",
+    "source": [
+      "The MX-5 is a car that, you know, yes, it's two seats and it",
+      "might not be a family hatchback, but it's still very liveable,",
+      "usable every day."
+    ],
+    "candidate": ["MX-5就是这样：没错 只有两个座位", "它算不上家用掀背车 但日常开很顺手", "每天都能开"],
+    "issue": {
+      "category": "awkward_join", "cue_ids": [1, 2, 3], "severity": "review",
+      "message": "Historical suggestion added punctuation but left the final suggested cue unchanged.",
+      "suggested_items": [
+        {"id": 1, "text": "MX-5就是这样：没错，它是两座车，"},
+        {"id": 2, "text": "它算不上家用掀背车，但日常开很顺手，"},
+        {"id": 3, "text": "每天都能开"}
+      ]
+    }
+  }
+}
