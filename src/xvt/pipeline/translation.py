@@ -29,7 +29,7 @@ from xvt.pipeline.common import (
     checksum,
     emit_agent_fallback,
     error_category,
-    invalidate_preview_artifacts,
+    invalidate_rendered_artifacts,
     load_cues,
     load_user_response_json,
     parse_cue_text_items,
@@ -1399,7 +1399,7 @@ def apply_agent_translation(
     )
     set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
     return finalize_translation(
-        job, translated, event_sink, invalidate=invalidate_preview_artifacts
+        job, translated, event_sink, invalidate=invalidate_rendered_artifacts
     )
 
 
@@ -1462,5 +1462,5 @@ def apply_subtitle_translation(
         )
         raise
     return finalize_translation(
-        job, translated, event_sink, invalidate=invalidate_preview_artifacts
+        job, translated, event_sink, invalidate=invalidate_rendered_artifacts
     )
