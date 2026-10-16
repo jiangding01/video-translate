@@ -14,15 +14,14 @@ from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
     add_artifact,
     checksum,
-    error_category,
+    emit_agent_fallback,
     load_cues,
     load_user_response_json,
     parse_cue_text_items,
     set_stage,
     write_json,
 )
-from xvt.pipeline.translation import TranslationRunResult, translate_batch_with_retries
-from xvt.process import raise_if_cancelled
+from xvt.pipeline.translation import TranslationRunResult, run_provider_batches
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
@@ -480,15 +479,15 @@ def _run_translation_polish(
             extras={"phase": "polish"},
         )
         if fallback_reason and event_sink:
-            event_sink(
-                create_event(
-                    EventType.TRANSLATION_FALLBACK,
-                    **job_event_fields(job.id, get_job_file(job)),
-                    phase="polish",
-                    mode="agent",
-                    reason=fallback_reason,
-                    path=str(batches_path),
-                )
+            # 润色侧的降级事件带 phase="polish"；AWAITING_INPUT 已在上面单独设过，
+            # helper 只发事件。文案也刻意不走 _fallback_reason_with_persisted_provider，
+            # 与协议快照 polish_agent_rerun 场景冻住的那段不对称一致。
+            emit_agent_fallback(
+                job,
+                manifest_path=batches_path,
+                reason=fallback_reason,
+                event_sink=event_sink,
+                phase="polish",
             )
         return TranslationRunResult("agent", (batches_path,), fallback_reason)
     if provider_config is None:
@@ -506,69 +505,29 @@ def _run_translation_polish(
         )
     completed, translations = _load_progress(job, batches, fingerprint, event_sink)
     progress_path = get_job_directory(job) / "artifacts" / "translation-polish-progress.json"
-    try:
-        for batch in batches:
-            raise_if_cancelled()
-            if batch.id in completed:
-                continue
-            if event_sink:
-                event_sink(
-                    create_event(
-                        EventType.TRANSLATION_BATCH_STARTED,
-                        **job_event_fields(job.id, get_job_file(job)),
-                        phase="polish",
-                        batch=batch.id,
-                        batch_total=len(batches),
-                    )
-                )
 
-            def emit_retry(attempt: int, delay: float, reason: str) -> None:
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.TRANSLATION_BATCH_RETRYING,
-                            **job_event_fields(job.id, get_job_file(job)),
-                            phase="polish",
-                            batch=batch.id,
-                            batch_total=len(batches),
-                            attempt=attempt,
-                            delay_seconds=delay,
-                            reason=reason,
-                        )
-                    )
+    def record_batch(batch: PolishBatch, polished_batch: dict[int, str]) -> None:
+        translations.update(polished_batch)
+        completed.add(batch.id)
+        _write_progress(job, progress_path, fingerprint, completed, translations, event_sink)
 
-            translations.update(
-                translate_batch_with_retries(
-                    batch,
-                    provider_config,
-                    max_retries=config.max_retries,
-                    on_retry=emit_retry,
-                    request=polish_batch,
-                )
-            )
-            completed.add(batch.id)
-            _write_progress(job, progress_path, fingerprint, completed, translations, event_sink)
-            if event_sink:
-                event_sink(
-                    create_event(
-                        EventType.TRANSLATION_BATCH_COMPLETED,
-                        **job_event_fields(job.id, get_job_file(job)),
-                        phase="polish",
-                        batch=batch.id,
-                        batch_total=len(batches),
-                    )
-                )
-    except Exception as error:
-        set_stage(
-            job,
-            StageName.TRANSLATE,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=error_category(error),
-            extras={"phase": "polish"},
-        )
-        raise
+    # 润色相对初译只有四处差异，全部由 run_provider_batches 的参数承接：
+    # request=polish_batch（显式传，让 `xvt.pipeline.polish.polish_batch` 这个桩位继续有效）、
+    # 批次事件带 phase="polish"、失败收口的 extras 也带 phase="polish"（stage_extras），
+    # 以及 checkpoint 跳过只看批次 ID —— 覆盖范围由 _load_progress 读 checkpoint 时已校验，
+    # 这里无须再比对 cue 集合。
+    run_provider_batches(
+        job,
+        batches,
+        provider_config=provider_config,
+        max_retries=config.max_retries,
+        event_sink=event_sink,
+        request=polish_batch,
+        phase="polish",
+        stage_extras={"phase": "polish"},
+        skip=lambda batch: batch.id in completed,
+        on_result=record_batch,
+    )
     rendered = _finalize_polish(
         job,
         load_cues(draft_path),

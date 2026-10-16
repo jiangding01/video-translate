@@ -2,6 +2,8 @@
 
 更新时间：2026-10-17
 
+2026-10-17 R3.1 Phase 4b：polish 接入共享批次循环，并收敛两处 Agent 降级事件。`_run_translation_polish` 的循环块 62 → 22 行，差异全部参数化：`request=polish_batch`（显式传，保住 `xvt.pipeline.polish.polish_batch` 这个桩位）、批次事件带 `phase=polish`、checkpoint 跳过只看 `batch.id in completed`、每批后 `_write_progress` 走 `on_result`。`run_provider_batches` 新增 4a 预留未加的 `stage_extras`（默认 `None`，只服务润色失败收口的 `extras={"phase": "polish"}`，与事件里的 `phase` 刻意不互相派生），并补上它的专项测试 `test_api_polish_failure_marks_stage_with_polish_phase`——此前全仓无人断言润色失败事件的 `phase`。`pipeline/common.py` 新增叶子 helper `emit_agent_fallback`，收敛 translation 与 polish 两处 `TRANSLATION_FALLBACK` 发射（`phase=None` 时不写该键）；helper 只发事件，不含 `set_stage(AWAITING_INPUT)`——两处的 stage 位置与 extras 本就不同。polish 侧 `_load_progress` 的 `translation_progress_reset` 保持原样未动（Phase 1 记录的快照已知缺口）。协议快照零 diff；负向取证：去掉 `stage_extras` 只有新增的 polish 测试会红（快照不覆盖润色失败路径），漏传 fallback 的 `phase` 则 `polish_agent_rerun` 场景会红。
+
 2026-10-17 R3.1 Phase 4a：provider 批次循环单份化（translation 与 retranslate）。`pipeline/translation.py` 新增 `run_provider_batches`，承接取消点、批次事件、逐批回调与失败时的 stage 收口；`run_translation` 的循环块 82 → 40 行，`retranslate_cues` 44 → 23 行。两处的真实差异全部参数化保留：局部重译不发 `translation_batch_started` / `translation_batch_completed`、没有 checkpoint、事件不带 `phase`，初译只在 polished 质量下带 `phase=draft`。共享循环刻意留在 `translation.py` 而非新模块：38 处测试桩钉在该模块的 `translate_batch` / `time.sleep` / `_backoff_delay` 上，移出会一次性废掉这些桩并与 translation 成环。协议快照零 diff；负向取证确认把「重译不发进度事件」这条差异错误统一后快照会红。原 Phase 3（Agent 交接前奏单份化）已折入 Phase 4：实测 `TRANSLATION_FALLBACK` 全仓只有 2 处发射，不值一轮独立 PR，留到 4b 随 polish 循环一起收。
 
 2026-10-17 R3.1 Phase 2：消解 pipeline 包内的函数级 import 环。新增零依赖叶子 `src/xvt/pipeline/semantic_state.py`，下移 `semantic_review_target` 及其完整传递闭包共 18 个只读派生函数（批次重算、policy 回退、报告解析、repair checkpoint 读取、Agent 结果解析与序列化），`review` / `revision` 顶层 import 该叶子，`semantic` 顶层 import `review` / `revision` / 该叶子，原先 8 处函数体内惰性 import 全部消除。纯搬移：18 个函数在改名映射下 AST 完全等价，协议快照零 diff。`tests/test_pipeline_imports.py` 新增 ast 守卫，禁止 pipeline 包内出现任何函数级 `xvt.pipeline.*` import（覆盖任意嵌套深度与自引用）并防止扫描范围静默缩小。`xvt.recovery` ⇄ `xvt.pipeline` 的跨层环不在本阶段范围。
@@ -28,7 +30,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 886 个测试、178 个子测试，全部通过（2026-10-17） |
+| 自动化测试 | 887 个测试、178 个子测试，全部通过（2026-10-17） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -345,7 +347,7 @@ media-qa.json
 
 ### Q1-Q6.1：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful。Q6.2 剩余的模型收敛实测需单独授权，因此先推进 R3.1：Phase 1 协议快照回归网、Phase 2 函数级 import 环消解与 Phase 4a（translation + retranslate 批次循环单份化）均已于 2026-10-17 完成，下一步是 Phase 4b 接入 polish 循环并顺带收敛两处 `TRANSLATION_FALLBACK` 发射。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful。Q6.2 剩余的模型收敛实测需单独授权，因此先推进 R3.1：Phase 1 协议快照回归网、Phase 2 函数级 import 环消解、Phase 4a（translation + retranslate 批次循环单份化）与 Phase 4b（polish 接入共享循环 + `TRANSLATION_FALLBACK` 收敛）均已于 2026-10-17 完成，下一步是 Phase 4c 接入 semantic 的三条循环——它还有两条 4a/4b 都没承接的差异（事件多带 `batch_index`、循环内根本不收口 stage），要等真实调用点才给 `run_provider_batches` 加参数。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 

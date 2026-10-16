@@ -560,6 +560,45 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             }
             self.assertEqual(batch_phases, {"draft", "polish"})
 
+    def test_api_polish_failure_marks_stage_with_polish_phase(self) -> None:
+        """润色批次失败时的 stage 收口必须带 ``phase=polish``。
+
+        这是润色相对初译 / 局部重译唯一的失败收口差异（共享批次循环的
+        ``stage_extras`` 参数就只为它存在），丢了它人类进度与事件消费方会把润色失败
+        误读成初译失败。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            events = []
+
+            with (
+                patch.dict("os.environ", {"TEST_POLISH_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.polish.polish_batch",
+                    side_effect=RuntimeError("polish crashed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "polish crashed"),
+            ):
+                run_translation_polish(
+                    job_file,
+                    provider="openai-compatible",
+                    base_url="https://example.com/v1",
+                    model="model",
+                    api_key_env="TEST_POLISH_API_KEY",
+                    max_retries=0,
+                    event_sink=events.append,
+                )
+
+            failures = [event for event in events if event.type == "stage_failed"]
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0].data["stage"], "translate")
+            self.assertEqual(failures[0].data["phase"], "polish")
+            self.assertEqual(failures[0].data["error"]["category"], "workflow")
+            self.assertEqual(failures[0].data["error"]["message"], "polish crashed")
+            stage = load_job(job_file).stages[StageName.TRANSLATE]
+            self.assertIs(stage.status, StageStatus.FAILED)
+
     def test_api_polish_resumes_from_valid_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

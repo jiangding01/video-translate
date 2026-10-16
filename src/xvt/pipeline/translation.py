@@ -27,6 +27,7 @@ from xvt.pipeline.common import (
     add_artifact,
     artifact_path,
     checksum,
+    emit_agent_fallback,
     error_category,
     invalidate_preview_artifacts,
     load_cues,
@@ -177,6 +178,7 @@ def run_provider_batches(
     request: Callable[..., Any] | None = None,
     response_correction: str = _RESPONSE_CORRECTION,
     phase: str | None = None,
+    stage_extras: dict[str, Any] | None = None,
     emit_progress_events: bool = True,
     skip: Callable[[Any], bool] | None = None,
     on_result: Callable[[Any, Any], None] | None = None,
@@ -197,20 +199,30 @@ def run_provider_batches(
     参数与四条链路之间的真实差异一一对应：
 
     - ``phase``：事件里的 ``phase`` 字段。初译只在 ``--translation-quality polished`` 下
-      带 ``"draft"``，局部重译完全不带；``None`` 表示不写这个键（不是写 null）。
+      带 ``"draft"``，润色带 ``"polish"``，局部重译完全不带；``None`` 表示不写这个键
+      （不是写 null）。
+    - ``stage_extras``：失败收口 ``set_stage(TRANSLATE, failed)`` 的 ``extras``。它与
+      ``phase`` **不是**一回事，不能互相派生：初译带 ``phase="draft"`` 但失败事件历来
+      不带任何 extras，润色则必须带 ``extras={"phase": "polish"}``。``None`` 表示不带，
+      与初译 / 局部重译重构前的失败事件逐字节一致。
     - ``emit_progress_events``：是否发 ``translation_batch_started`` /
       ``translation_batch_completed``。局部重译只发重试事件，传 ``False``。
       重试事件（``translation_batch_retrying``）不受此开关影响，四条链路都发。
     - ``skip``：checkpoint 跳过判定。初译要求「批次已登记完成**且**译文覆盖该批全部 cue」；
-      局部重译没有 checkpoint，传 ``None``。
+      润色只看 ``batch.id in completed``（覆盖范围由 ``_load_progress`` 在读 checkpoint 时
+      一次性校验）；局部重译没有 checkpoint，传 ``None``。
     - ``on_result``：每批成功后的落盘与记账（初译：累积译文、写
       ``translation-progress.json``、登记 artifact、首批成功后固化 provider 身份；
+      润色：累积译文、记完成批次、写 ``translation-polish-progress.json``；
       局部重译：只在内存里累积）。它在 ``translation_batch_completed`` **之前**调用，
       与重构前的顺序一致。
     - ``request`` / ``response_correction``：原样透传给 ``translate_batch_with_retries``。
-      两处调用点都不传，默认 ``request=None`` 让默认名仍在本模块全局里解析，桩位不变。
+      初译与局部重译都不传，默认 ``request=None`` 让默认名 ``translate_batch`` 仍在本模块
+      全局里解析，桩位不变；润色显式传 ``polish_batch``，同理保住
+      ``xvt.pipeline.polish.polish_batch`` 这个桩位。
 
-    失败一律按 ``TRANSLATE`` / ``failed`` 收口后 re-raise，与重构前两处的 ``except`` 相同。
+    失败一律按 ``TRANSLATE`` / ``failed``（``extras=stage_extras``）收口后 re-raise，与重构前
+    三处的 ``except`` 相同。
     ``raise_if_cancelled()`` 保持在每批开头（紧接 ``skip`` 判定之前）。
     """
     batch_total = len(batches)
@@ -274,6 +286,7 @@ def run_provider_batches(
             event_sink,
             error=str(error),
             error_category=error_category(error),
+            extras=stage_extras,
         )
         raise
 
@@ -1163,14 +1176,13 @@ def run_translation(
     )
     if mode == "agent":
         if fallback_reason and event_sink:
-            event_sink(
-                create_event(
-                    EventType.TRANSLATION_FALLBACK,
-                    **job_event_fields(job.id, get_job_file(job)),
-                    mode="agent",
-                    reason=fallback_reason,
-                    path=str(batches_path),
-                )
+            # 初译侧的降级事件不带 phase；AWAITING_INPUT 已由上面的
+            # prepare_agent_translation(await_input=True) 设过，helper 只发事件。
+            emit_agent_fallback(
+                job,
+                manifest_path=batches_path,
+                reason=fallback_reason,
+                event_sink=event_sink,
             )
         return TranslationRunResult("agent", (batches_path,), fallback_reason)
 
