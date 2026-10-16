@@ -11,8 +11,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from xvt.config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
-from xvt.events import EventSink, EventType, create_event, job_event_fields
-from xvt.job_store import get_job_directory, get_job_file, load_job
+from xvt.events import EventSink
+from xvt.job_store import get_job_directory, load_job
 from xvt.models import Cue, Job, StageName, StageStatus
 from xvt.pipeline.common import (
     add_artifact,
@@ -29,10 +29,9 @@ from xvt.pipeline.translation import (
     TranslationRunResult,
     finalize_translation,
     resolved_translation_policy,
-    translate_batch_with_retries,
+    run_provider_batches,
     translations_from_response,
 )
-from xvt.process import raise_if_cancelled
 from xvt.recovery import file_checksum as readonly_file_checksum
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
@@ -370,44 +369,23 @@ def retranslate_cues(
     if provider_config is None:
         raise RuntimeError("translation provider configuration was not resolved")
 
-    translations = {}
+    translations: dict[int, str] = {}
     set_stage(job, StageName.TRANSLATE, StageStatus.RUNNING, event_sink)
-    batch_total = len(batches)
-    try:
-        for batch in batches:
-            raise_if_cancelled()
 
-            def emit_retry(attempt: int, delay: float, reason: str) -> None:
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.TRANSLATION_BATCH_RETRYING,
-                            **job_event_fields(job.id, get_job_file(job)),
-                            batch=batch.id,
-                            batch_total=batch_total,
-                            attempt=attempt,
-                            delay_seconds=delay,
-                            reason=reason,
-                        )
-                    )
+    def record_batch(_batch: TranslationBatch, translated_batch: dict[int, str]) -> None:
+        translations.update(translated_batch)
 
-            translated_batch = translate_batch_with_retries(
-                batch,
-                provider_config,
-                max_retries=max_retries,
-                on_retry=emit_retry,
-            )
-            translations.update(translated_batch)
-    except Exception as error:
-        set_stage(
-            job,
-            StageName.TRANSLATE,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=error_category(error),
-        )
-        raise
+    # 局部重译不发批次进度事件、没有 checkpoint，也不带 phase：差异全部由
+    # run_provider_batches 的参数承接，重试事件与失败收口与初译共用同一份实现。
+    run_provider_batches(
+        job,
+        batches,
+        provider_config=provider_config,
+        max_retries=max_retries,
+        event_sink=event_sink,
+        emit_progress_events=False,
+        on_result=record_batch,
+    )
 
     response_path = artifacts_directory / "cue-retranslation-response.json"
     write_json(
