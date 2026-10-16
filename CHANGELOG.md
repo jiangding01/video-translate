@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- 修复译文二次回填后交付旧字幕的正确性问题：`xvt apply` / `apply-translation` 的 Agent 响应回填与 `import-translation` 的导入译文回填此前只失效预览链（`preview.ass` 及其下游），不失效 `translated.srt` / `bilingual.srt` / `bilingual.ass`，也不重置 SUBTITLE_QA / RENDER / BURN / MEDIA_QA 与烧录 fingerprint。于是一个已完成并渲染过的 Job 回填新译文、而新译文的字幕 QA 落在 `needs_review` 时，收尾在 QA 关口停住不再渲染，磁盘上的 SRT 仍是上一版且 checksum 有效；`status` / `continue` / `batch-continue` 据此判定译文目标已完成并发 `workflow_completed`，用户拿到的字幕与 Job 里的译文 cue 不一致，等于把 QA 未放行的内容当成交付。两处回填改用与局部重译、语义校对收尾相同的完整失效闭包（`translated_cues` 的全部下游 + 清烧录 fingerprint + 重置上述四个 stage）。首次翻译不受影响（那时下游产物尚未登记，失效是空操作，stage 紧接着由译文 QA 与渲染重新推进）；已经踩到的 Job 运行一次 `xvt verify` 后按 `status` 的 `render` 步骤 `continue` 即可重建正确字幕。随之而来的一个用户可见变化：在**已烧录**的 Job 上回填新译文，现在会一并撤销 `burned_video`、烧录 fingerprint 与媒体 QA 的登记，需要重新烧录；此前只撤销预览链，成品会被保留下来并与新译文不一致。这与局部重译、语义校对收尾的既有行为一致。
+
 - 原子 `burn` 对替代媒体或字体的布局 QA 不再覆盖工作流正式报告：本地替代媒体过短、窄画幅或字体超宽导致检查失败时 Job 保持原样，切回原目标仍可 `continue`。检查前发生的远程媒体获取仍按原契约持久化。端到端烧录继续持久化布局 QA，并保留 review 等待与 error 阻断。
 
 - 修复带浏览器 Cookie 时 yt-dlp 因字幕 PO Token 限制漏报 YouTube 人工字幕、XVT 直接回退 ASR 的问题：显式字幕请求缺少匹配人工字幕且没有有效候选时匿名补查，并匿名下载找到的同视频人工字幕。访问方式随 checksum 保护的元信息恢复；补查失败明确报错，已有候选保留来源分类，现有源 cue 与译文不自动替换。

@@ -13,6 +13,7 @@ from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
+    acknowledge_subtitle_review,
     apply_agent_translation,
     apply_subtitle_translation,
     prepare_agent_translation,
@@ -20,15 +21,24 @@ from xvt.pipeline import (
     run_subtitle_transcription,
     run_translation,
 )
+from xvt.pipeline.common import load_cues
 from xvt.pipeline.translation import (
     _backoff_delay,
     load_translation_response,
     translation_progress_rebuildable,
 )
 from xvt.process import CommandResult
+from xvt.qa import display_width, display_width_review_limit
 from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.translation_provider import ProviderResponseError, TranslationProviderError
+from xvt.workflow import (
+    WorkflowOptions,
+    _translation_satisfied,
+    continue_workflow,
+    plan_advance_steps,
+    run_workflow,
+)
 from xvt.workflow_config import WorkflowConfig, get_workflow_config, set_workflow_config
 
 
@@ -1314,6 +1324,143 @@ class TranslationPipelineTest(unittest.TestCase):
             )
 
             self.assertTrue(translated.exists())
+
+
+class TranslationRevisionInvalidationTest(unittest.TestCase):
+    """译文二次回填时的失效口径：新译文一旦卡在 QA，旧渲染产物不得继续冒充交付物。"""
+
+    def _agent_subtitle_job(self, root: Path) -> Path:
+        """纯字幕 Job（无媒体，不触发 ASS/烧录），停在 Agent 等待回填。"""
+
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:05,000\nHello world.\n",
+            encoding="utf-8",
+        )
+        waiting = run_workflow(
+            WorkflowOptions(
+                input=str(source),
+                output=root / "output",
+                language="en",
+                target_language="zh-CN",
+                provider="agent",
+            )
+        )
+        self.assertEqual(waiting.status, "awaiting_input")
+        return waiting.job_file
+
+    def _render_first_translation(self, job_file: Path, root: Path) -> None:
+        """第一轮译文 QA 通过并渲染出 translated.srt / bilingual.srt。"""
+
+        response = root / "response-v1.json"
+        response.write_text(
+            json.dumps({"items": [{"id": 1, "text": "初版译文"}]}),
+            encoding="utf-8",
+        )
+        apply_agent_translation(job_file, response, target_language="zh-CN")
+        self.assertEqual(continue_workflow(job_file).status, "completed")
+
+    def _over_wide_translation(self) -> str:
+        """稳定落在 needs_review 的译文：CJK 显示宽度越过硬阈值即为 review 级。
+
+        纯字幕 Job 没有画幅，``check_subtitles`` 不做 ASS 实测，判定只依赖
+        ``display_width``，因此不受宿主机字体与 FFmpeg 影响。
+        """
+
+        text = "超长译文" * 5
+        self.assertGreater(display_width(text), display_width_review_limit("zh-CN"))
+        return text
+
+    def test_needs_review_retranslation_invalidates_stale_rendered_subtitles(self) -> None:
+        """回归：Agent 回填的 v2 译文卡在 needs_review 时，v1 的 SRT 必须一并失效。
+
+        旧口径只失效 preview 链，translated.srt / bilingual.srt 仍停在 v1 且
+        checksum 有效，``_translation_satisfied`` 据此判定「译文目标已完成」，
+        用户拿到的字幕与 Job 里的 v2 cue 不一致 —— QA 未放行的内容被当成交付。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._agent_subtitle_job(root)
+            self._render_first_translation(job_file, root)
+
+            job = load_job(job_file)
+            config = get_workflow_config(job)
+            stale_translated = valid_artifact_path(job, "translated_srt")
+            stale_bilingual = valid_artifact_path(job, "bilingual_srt")
+            self.assertIsNotNone(stale_translated)
+            self.assertIsNotNone(stale_bilingual)
+            assert stale_translated is not None and stale_bilingual is not None
+            self.assertTrue(_translation_satisfied(job, config))
+
+            revised = self._over_wide_translation()
+            response = root / "response-v2.json"
+            response.write_text(
+                json.dumps({"items": [{"id": 1, "text": revised}]}),
+                encoding="utf-8",
+            )
+            outputs = apply_agent_translation(job_file, response, target_language="zh-CN")
+            # QA 未放行：收尾只返回 QA 报告，不渲染。
+            self.assertEqual([path.name for path in outputs], ["qa-translated.json"])
+
+            job = load_job(job_file)
+            qa_path = valid_artifact_path(job, "translated_subtitle_qa")
+            self.assertIsNotNone(qa_path)
+            assert qa_path is not None
+            self.assertEqual(
+                json.loads(qa_path.read_text(encoding="utf-8"))["status"],
+                "needs_review",
+            )
+
+            # 用户可见后果 1：过期的 v1 字幕不再是「已登记且 checksum 有效」的交付物。
+            self.assertIsNone(valid_artifact_path(job, "translated_srt"))
+            self.assertIsNone(valid_artifact_path(job, "bilingual_srt"))
+            self.assertNotIn(revised, stale_translated.read_text(encoding="utf-8"))
+            # 用户可见后果 2：译文目标未完成，continue / status 不得宣告完成。
+            self.assertFalse(_translation_satisfied(job, config))
+            assert config is not None
+            self.assertIn("render", plan_advance_steps(job, config))
+            # stage 与 burn fingerprint 回到待推进状态。
+            self.assertIs(job.stages[StageName.SUBTITLE_QA].status, StageStatus.AWAITING_INPUT)
+            for stage in (StageName.RENDER, StageName.BURN, StageName.MEDIA_QA):
+                self.assertIs(job.stages[stage].status, StageStatus.PENDING)
+            self.assertFalse(any(item.kind == "burn_fingerprint" for item in job.artifacts))
+
+            # 用户可见后果 3：承认 review 后 continue 重新渲染出与 v2 cue 一致的 SRT。
+            acknowledge_subtitle_review(job_file)
+            self.assertEqual(continue_workflow(job_file).status, "completed")
+            job = load_job(job_file)
+            rendered = valid_artifact_path(job, "translated_srt")
+            translated_cues = valid_artifact_path(job, "translated_cues")
+            self.assertIsNotNone(rendered)
+            self.assertIsNotNone(translated_cues)
+            assert rendered is not None and translated_cues is not None
+            target_text = load_cues(translated_cues)[0].target_text
+            self.assertEqual(target_text, revised)
+            self.assertIn(revised, rendered.read_text(encoding="utf-8"))
+
+    def test_needs_review_imported_translation_invalidates_stale_rendered_subtitles(self) -> None:
+        """同一口径必须覆盖导入译文字幕入口（``apply_subtitle_translation``）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._agent_subtitle_job(root)
+            self._render_first_translation(job_file, root)
+
+            revised = self._over_wide_translation()
+            imported = root / "imported.srt"
+            imported.write_text(
+                f"1\n00:00:00,000 --> 00:00:05,000\n{revised}\n",
+                encoding="utf-8",
+            )
+            outputs = apply_subtitle_translation(job_file, imported, target_language="zh-CN")
+            self.assertEqual([path.name for path in outputs], ["qa-translated.json"])
+
+            job = load_job(job_file)
+            config = get_workflow_config(job)
+            self.assertIsNone(valid_artifact_path(job, "translated_srt"))
+            self.assertIsNone(valid_artifact_path(job, "bilingual_srt"))
+            self.assertFalse(_translation_satisfied(job, config))
 
 
 if __name__ == "__main__":
