@@ -2,6 +2,8 @@
 
 更新时间：2026-10-17
 
+2026-10-17 R3.1 Phase 4c：semantic 接入共享批次循环，Phase 4 收尾——四条链路（translation / retranslate / polish / semantic）至此共用 `run_provider_batches` 一份循环骨架。`_run_review_phase`（初审 / 复审共用，三次调用）与 `_run_repair_phase` 两处同形循环各减 20 / 26 行，`_emit_batch_event` 这个只服务于它们的 helper 一并删除（`semantic.py` 1163 → 1094 行）。semantic 相对已接入三处的两条新差异按参数化承接，没有硬塞：`with_batch_index=True` 让共享循环内部 `enumerate(batches, start=1)` 把**本轮 1 起序号**注入 started / retrying / completed 三类事件（它与稳定的 `batch.id` 是两个不同的东西，混用就是历史上「批次 38/1」那个显示 bug）；`fail_stage=False` 表示循环内不收口 stage——语义校对的 stage 失败由 `run_translation_semantic_review` 的外层 `except` 统一带 `extras={"phase": "semantic_review"}` 收口，循环里再收一次会多发一个不带 phase 的 `stage_failed`。其余差异走既有参数：`request=semantic_review_batch` / `semantic_repair_batch`（显式传，保住 51 + 11 处桩位）、review 传 `_SEMANTIC_REVIEW_RESPONSE_CORRECTION` 而 repair 沿用默认、`phase` 为 `semantic_review` / `repair`、`skip=batch.id in completed`、`on_result` 写 checkpoint。循环之后那次额外的 `_write_review_checkpoint` / `_write_repair_checkpoint`（重新赋值 `path` / `progress_path` 的那行）保留在循环外。链路决策逻辑（初审 → 可修复？→ 修复 → 复审 → 确认/等待）零改动，留给 Phase 5。协议快照零 diff；`fail_stage=False` 此前全仓无覆盖，新增 `test_api_review_failure_collars_stage_once_with_semantic_phase` 与 `test_api_repair_failure_collars_stage_once_with_semantic_phase` 两条（887 → 889）。负向取证：把 `fail_stage` 写死 True 时这两条新测试红（`stage_failed` 2 != 1，快照不覆盖失败路径仍绿）；去掉 `batch_index` 注入时 `api_polished` 快照场景与 `test_human_revision_scopes_review_and_preserves_untouched_issues` 红。下一项是 Phase 5（语义链路编排单份化）。
+
 2026-10-17 R3.1 Phase 4b：polish 接入共享批次循环，并收敛两处 Agent 降级事件。`_run_translation_polish` 的循环块 62 → 22 行，差异全部参数化：`request=polish_batch`（显式传，保住 `xvt.pipeline.polish.polish_batch` 这个桩位）、批次事件带 `phase=polish`、checkpoint 跳过只看 `batch.id in completed`、每批后 `_write_progress` 走 `on_result`。`run_provider_batches` 新增 4a 预留未加的 `stage_extras`（默认 `None`，只服务润色失败收口的 `extras={"phase": "polish"}`，与事件里的 `phase` 刻意不互相派生），并补上它的专项测试 `test_api_polish_failure_marks_stage_with_polish_phase`——此前全仓无人断言润色失败事件的 `phase`。`pipeline/common.py` 新增叶子 helper `emit_agent_fallback`，收敛 translation 与 polish 两处 `TRANSLATION_FALLBACK` 发射（`phase=None` 时不写该键）；helper 只发事件，不含 `set_stage(AWAITING_INPUT)`——两处的 stage 位置与 extras 本就不同。polish 侧 `_load_progress` 的 `translation_progress_reset` 保持原样未动（Phase 1 记录的快照已知缺口）。协议快照零 diff；负向取证：去掉 `stage_extras` 只有新增的 polish 测试会红（快照不覆盖润色失败路径），漏传 fallback 的 `phase` 则 `polish_agent_rerun` 场景会红。
 
 2026-10-17 R3.1 Phase 4a：provider 批次循环单份化（translation 与 retranslate）。`pipeline/translation.py` 新增 `run_provider_batches`，承接取消点、批次事件、逐批回调与失败时的 stage 收口；`run_translation` 的循环块 82 → 40 行，`retranslate_cues` 44 → 23 行。两处的真实差异全部参数化保留：局部重译不发 `translation_batch_started` / `translation_batch_completed`、没有 checkpoint、事件不带 `phase`，初译只在 polished 质量下带 `phase=draft`。共享循环刻意留在 `translation.py` 而非新模块：38 处测试桩钉在该模块的 `translate_batch` / `time.sleep` / `_backoff_delay` 上，移出会一次性废掉这些桩并与 translation 成环。协议快照零 diff；负向取证确认把「重译不发进度事件」这条差异错误统一后快照会红。原 Phase 3（Agent 交接前奏单份化）已折入 Phase 4：实测 `TRANSLATION_FALLBACK` 全仓只有 2 处发射，不值一轮独立 PR，留到 4b 随 polish 循环一起收。
@@ -30,7 +32,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 887 个测试、178 个子测试，全部通过（2026-10-17） |
+| 自动化测试 | 889 个测试、178 个子测试，全部通过（2026-10-17） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
