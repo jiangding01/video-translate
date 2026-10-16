@@ -192,6 +192,40 @@ def interrupt_running_stage(
     return True
 
 
+def emit_agent_fallback(
+    job: Job,
+    *,
+    manifest_path: Path,
+    reason: str,
+    event_sink: EventSink,
+    phase: str | None = None,
+) -> None:
+    """发射 Agent 降级事件 ``translation_fallback``（初译与润色共用的唯一实现）。
+
+    ``phase=None`` 时**不写**这个键（而不是写 null）：初译侧的降级事件历来不带 phase，
+    润色侧带 ``phase="polish"``，协议快照把这条不对称冻在 ``standard_agent_fallback``
+    与 ``polish_agent_rerun`` 两个场景里。
+
+    只发事件，不设 stage。两处调用点的 ``AWAITING_INPUT`` 位置与 extras 本就不同
+    （初译在 ``prepare_agent_translation`` 内受 ``await_input`` 控制，润色在 agent 分支里
+    先 RUNNING 再 AWAITING_INPUT 且带 ``extras={"phase": "polish"}``），把 stage 迁移并进来
+    只会制造无谓的分支。
+
+    ``reason`` / ``event_sink`` 都是必填：「没有降级原因或没有 sink 就不发」这条守卫留在
+    调用点（``if fallback_reason and event_sink:``），与重构前完全一致。
+    """
+    event_sink(
+        create_event(
+            EventType.TRANSLATION_FALLBACK,
+            **job_event_fields(job.id, get_job_file(job)),
+            **({"phase": phase} if phase is not None else {}),
+            mode="agent",
+            reason=reason,
+            path=str(manifest_path),
+        )
+    )
+
+
 def write_json(path: Path, data: Any) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
