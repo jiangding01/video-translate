@@ -13,7 +13,7 @@ from xvt.candidate_qa import (
     TRANSLATION_CANDIDATE_QA_VERSION,
     translation_candidate_qa_issues,
 )
-from xvt.events import EventSink, EventType, create_event, job_event_fields
+from xvt.events import EventSink
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Job, StageName, StageStatus
 from xvt.pipeline.common import (
@@ -48,9 +48,8 @@ from xvt.pipeline.semantic_state import (
 from xvt.pipeline.translation import (
     complete_translated_outputs,
     finalize_translation,
-    translate_batch_with_retries,
+    run_provider_batches,
 )
-from xvt.process import raise_if_cancelled
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
@@ -164,28 +163,6 @@ def _fingerprint(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-
-
-def _emit_batch_event(
-    event_type: EventType,
-    job: Job,
-    phase: str,
-    batch: int,
-    total: int,
-    event_sink: EventSink | None,
-    **data: Any,
-) -> None:
-    if event_sink:
-        event_sink(
-            create_event(
-                event_type,
-                **job_event_fields(job.id, get_job_file(job)),
-                phase=phase,
-                batch=batch,
-                batch_total=total,
-                **data,
-            )
-        )
 
 
 def _merge_issues(
@@ -330,42 +307,9 @@ def _run_review_phase(
     if not reusable and any(artifact.kind == kind for artifact in job.artifacts):
         _invalidate_semantic_downstream(job, ArtifactKind(kind))
     path = get_job_directory(job) / "artifacts" / filename
-    for batch_index, batch in enumerate(batches, start=1):
-        raise_if_cancelled()
-        if batch.id in completed:
-            continue
-        _emit_batch_event(
-            EventType.TRANSLATION_BATCH_STARTED,
-            job,
-            phase,
-            batch.id,
-            len(batches),
-            event_sink,
-            batch_index=batch_index,
-        )
 
-        def emit_retry(attempt: int, delay: float, reason: str) -> None:
-            _emit_batch_event(
-                EventType.TRANSLATION_BATCH_RETRYING,
-                job,
-                phase,
-                batch.id,
-                len(batches),
-                event_sink,
-                batch_index=batch_index,
-                attempt=attempt,
-                delay_seconds=delay,
-                reason=reason,
-            )
-
-        results[batch.id] = translate_batch_with_retries(
-            batch,
-            provider_config,
-            max_retries=config.max_retries,
-            on_retry=emit_retry,
-            request=semantic_review_batch,
-            response_correction=_SEMANTIC_REVIEW_RESPONSE_CORRECTION,
-        )
+    def record_batch(batch: SemanticReviewBatch, issues: tuple[SemanticIssue, ...]) -> None:
+        results[batch.id] = issues
         _write_review_checkpoint(
             job,
             kind=kind,
@@ -379,15 +323,28 @@ def _run_review_phase(
             preserved_issues=preserved_issues,
             review_scope=review_scope,
         )
-        _emit_batch_event(
-            EventType.TRANSLATION_BATCH_COMPLETED,
-            job,
-            phase,
-            batch.id,
-            len(batches),
-            event_sink,
-            batch_index=batch_index,
-        )
+
+    # 语义校对相对初译 / 润色 / 局部重译只多两处差异，都由 run_provider_batches 的参数承接：
+    # 批次事件多带本轮 1 起序号（with_batch_index，共享循环内部 enumerate 注入），以及失败
+    # 不在循环里收口（fail_stage=False）—— stage 失败由 run_translation_semantic_review 的外层
+    # except 统一带 phase="semantic_review" 收口，这里再收一次会多发一个 stage_failed 事件。
+    # request 显式传，让 `xvt.pipeline.semantic.semantic_review_batch` 这个桩位继续有效。
+    run_provider_batches(
+        job,
+        batches,
+        provider_config=provider_config,
+        max_retries=config.max_retries,
+        event_sink=event_sink,
+        request=semantic_review_batch,
+        response_correction=_SEMANTIC_REVIEW_RESPONSE_CORRECTION,
+        phase=phase,
+        with_batch_index=True,
+        fail_stage=False,
+        skip=lambda batch: batch.id in completed,
+        on_result=record_batch,
+    )
+    # 这次写盘在循环之外：全部批次都跳过（checkpoint 已完整）时也要把报告重写一遍并
+    # 拿到登记后的 path。
     path = _write_review_checkpoint(
         job,
         kind=kind,
@@ -482,41 +439,8 @@ def _run_repair_phase(
     ):
         _invalidate_semantic_downstream(job, ArtifactKind.TRANSLATION_SEMANTIC_REPAIR)
     progress_path = get_job_directory(job) / "artifacts" / "translation-semantic-repair.json"
-    for batch_index, batch in enumerate(batches, start=1):
-        raise_if_cancelled()
-        if batch.id in completed:
-            continue
-        _emit_batch_event(
-            EventType.TRANSLATION_BATCH_STARTED,
-            job,
-            "repair",
-            batch.id,
-            len(batches),
-            event_sink,
-            batch_index=batch_index,
-        )
 
-        def emit_retry(attempt: int, delay: float, reason: str) -> None:
-            _emit_batch_event(
-                EventType.TRANSLATION_BATCH_RETRYING,
-                job,
-                "repair",
-                batch.id,
-                len(batches),
-                event_sink,
-                batch_index=batch_index,
-                attempt=attempt,
-                delay_seconds=delay,
-                reason=reason,
-            )
-
-        values = translate_batch_with_retries(
-            batch,
-            provider_config,
-            max_retries=config.max_retries,
-            on_retry=emit_retry,
-            request=semantic_repair_batch,
-        )
+    def record_batch(batch: SemanticRepairBatch, values: dict[int, str]) -> None:
         if repaired.keys() & values.keys():
             raise ValueError("semantic repair batches overlap")
         repaired.update(values)
@@ -531,15 +455,22 @@ def _run_repair_phase(
             mode,
             event_sink,
         )
-        _emit_batch_event(
-            EventType.TRANSLATION_BATCH_COMPLETED,
-            job,
-            "repair",
-            batch.id,
-            len(batches),
-            event_sink,
-            batch_index=batch_index,
-        )
+
+    # 与初审 / 复审同样的两处差异（batch_index 与不在循环里收口 stage）；修复不传
+    # response_correction，沿用 translation 的默认纠错提示词，与重构前一致。
+    run_provider_batches(
+        job,
+        batches,
+        provider_config=provider_config,
+        max_retries=config.max_retries,
+        event_sink=event_sink,
+        request=semantic_repair_batch,
+        phase="repair",
+        with_batch_index=True,
+        fail_stage=False,
+        skip=lambda batch: batch.id in completed,
+        on_result=record_batch,
+    )
     progress_path = _write_repair_checkpoint(
         job,
         progress_path,

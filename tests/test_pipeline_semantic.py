@@ -452,6 +452,69 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             with self.assertRaisesRegex(UserInputError, "confirmable"):
                 acknowledge_translation_review(job_file)
 
+    def test_api_review_failure_collars_stage_once_with_semantic_phase(self) -> None:
+        """语义初审批次失败只能收口一次 stage，且必须带 ``phase=semantic_review``。
+
+        共享批次循环的 ``fail_stage=False`` 参数就为这条链路存在：语义校对的 stage 失败由
+        ``run_translation_semantic_review`` 的外层 ``except`` 统一收口。循环里再收一次会多发
+        一个 ``stage_failed``，而且先发的那个不带 phase，事件消费方会把语义校对失败误读成
+        初译失败。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            events = []
+
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch(
+                    "xvt.pipeline.semantic.semantic_review_batch",
+                    side_effect=RuntimeError("review crashed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "review crashed"),
+            ):
+                run_translation_semantic_review(job_file, event_sink=events.append)
+
+            failures = [event for event in events if event.type == "stage_failed"]
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0].data["stage"], "translate")
+            self.assertEqual(failures[0].data["phase"], "semantic_review")
+            self.assertEqual(failures[0].data["error"]["category"], "workflow")
+            self.assertEqual(failures[0].data["error"]["message"], "review crashed")
+            stage = load_job(job_file).stages[StageName.TRANSLATE]
+            self.assertIs(stage.status, StageStatus.FAILED)
+
+    def test_api_repair_failure_collars_stage_once_with_semantic_phase(self) -> None:
+        """定向修复批次失败同样只收口一次 stage，phase 仍是 ``semantic_review``。
+
+        修复阶段的批次事件带 ``phase=repair``，但 stage 收口归外层统一管，不随批次 phase 变。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            issue = SemanticIssue("omission", (1,), "review", "missing", ())
+            events = []
+
+            with (
+                patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+                patch("xvt.pipeline.semantic.semantic_review_batch", return_value=(issue,)),
+                patch(
+                    "xvt.pipeline.semantic.semantic_repair_batch",
+                    side_effect=RuntimeError("repair crashed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "repair crashed"),
+            ):
+                run_translation_semantic_review(job_file, event_sink=events.append)
+
+            failures = [event for event in events if event.type == "stage_failed"]
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0].data["phase"], "semantic_review")
+            self.assertEqual(failures[0].data["error"]["message"], "repair crashed")
+            repair_batches = [
+                event.data
+                for event in events
+                if event.type == "translation_batch_started" and event.data["phase"] == "repair"
+            ]
+            self.assertEqual([item["batch_index"] for item in repair_batches], [1])
+
     def test_source_suspect_survives_unrelated_api_repair(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_file = self._job(Path(directory))

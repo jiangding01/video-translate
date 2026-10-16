@@ -180,6 +180,8 @@ def run_provider_batches(
     phase: str | None = None,
     stage_extras: dict[str, Any] | None = None,
     emit_progress_events: bool = True,
+    with_batch_index: bool = False,
+    fail_stage: bool = True,
     skip: Callable[[Any], bool] | None = None,
     on_result: Callable[[Any, Any], None] | None = None,
 ) -> None:
@@ -208,6 +210,16 @@ def run_provider_batches(
     - ``emit_progress_events``：是否发 ``translation_batch_started`` /
       ``translation_batch_completed``。局部重译只发重试事件，传 ``False``。
       重试事件（``translation_batch_retrying``）不受此开关影响，四条链路都发。
+    - ``with_batch_index``：批次事件是否额外带 ``batch_index``，即**本轮循环的 1 起序号**，
+      由这里的 ``enumerate`` 注入。它与稳定的 ``batch.id`` 是两个不同的东西：恢复后只跑
+      剩余批次时 ``batch.id`` 可能是 38 而本轮序号是 1，把两者混用会显示成「批次 38/1」。
+      只有语义校对（初审 / 修复 / 复审）历来带它，初译、润色与局部重译都不带，所以默认
+      ``False``；三类事件（started / retrying / completed）同时带或同时不带。
+    - ``fail_stage``：失败时是否在这里 ``set_stage(TRANSLATE, failed)``。初译、润色与局部
+      重译都在这里收口；语义校对不收，它的 stage 失败由
+      ``run_translation_semantic_review`` 的外层 ``except`` 统一带
+      ``extras={"phase": "semantic_review"}`` 收口，这里再收一次会多发一个 ``stage_failed``
+      事件（且第一个不带 phase）。传 ``False`` 时异常原样向外抛。
     - ``skip``：checkpoint 跳过判定。初译要求「批次已登记完成**且**译文覆盖该批全部 cue」；
       润色只看 ``batch.id in completed``（覆盖范围由 ``_load_progress`` 在读 checkpoint 时
       一次性校验）；局部重译没有 checkpoint，传 ``None``。
@@ -221,17 +233,20 @@ def run_provider_batches(
       全局里解析，桩位不变；润色显式传 ``polish_batch``，同理保住
       ``xvt.pipeline.polish.polish_batch`` 这个桩位。
 
-    失败一律按 ``TRANSLATE`` / ``failed``（``extras=stage_extras``）收口后 re-raise，与重构前
-    三处的 ``except`` 相同。
+    ``fail_stage=True`` 时失败一律按 ``TRANSLATE`` / ``failed``（``extras=stage_extras``）收口后
+    re-raise，与重构前初译 / 润色 / 局部重译三处的 ``except`` 相同。
     ``raise_if_cancelled()`` 保持在每批开头（紧接 ``skip`` 判定之前）。
     """
     batch_total = len(batches)
     phase_fields = {"phase": phase} if phase is not None else {}
     try:
-        for batch in batches:
+        for batch_index, batch in enumerate(batches, start=1):
             raise_if_cancelled()
             if skip is not None and skip(batch):
                 continue
+            # 本轮序号只在显式要求时才进事件，键位紧跟 batch_total，与重构前 semantic 的
+            # `_emit_batch_event(..., batch_index=...)` 完全一致。
+            index_fields = {"batch_index": batch_index} if with_batch_index else {}
             if emit_progress_events and event_sink:
                 event_sink(
                     create_event(
@@ -240,6 +255,7 @@ def run_provider_batches(
                         **phase_fields,
                         batch=batch.id,
                         batch_total=batch_total,
+                        **index_fields,
                     )
                 )
 
@@ -252,6 +268,7 @@ def run_provider_batches(
                             **phase_fields,
                             batch=batch.id,
                             batch_total=batch_total,
+                            **index_fields,
                             attempt=attempt,
                             delay_seconds=delay,
                             reason=reason,
@@ -276,18 +293,20 @@ def run_provider_batches(
                         **phase_fields,
                         batch=batch.id,
                         batch_total=batch_total,
+                        **index_fields,
                     )
                 )
     except Exception as error:
-        set_stage(
-            job,
-            StageName.TRANSLATE,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=error_category(error),
-            extras=stage_extras,
-        )
+        if fail_stage:
+            set_stage(
+                job,
+                StageName.TRANSLATE,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=error_category(error),
+                extras=stage_extras,
+            )
         raise
 
 
