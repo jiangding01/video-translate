@@ -1,0 +1,1820 @@
+{
+  "_comment": [
+    "R3.1 Phase 1 provider 协议快照的 golden 值，由 tests/test_provider_protocol_snapshot.py",
+    "的 builder 生成。重构后这里出现 diff，回退重构，不要改本文件。",
+    "normalized_keys 非空表示该产物内容嵌了 job id（或 job-id 派生的 fingerprint），",
+    "冻的是把这些键替换成占位符后的规范化投影 checksum；为空表示冻的是原始文件字节。"
+  ],
+  "scenarios": {
+    "api_polished": {
+      "modes": {
+        "translation": "openai-compatible",
+        "polish": "openai-compatible",
+        "semantic": [
+          "completed",
+          "openai-compatible"
+        ]
+      },
+      "provider_calls": {
+        "review_batches": [
+          [
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            4
+          ],
+          [
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            4
+          ]
+        ]
+      },
+      "events": [
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_batches"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "translation_provider_selected",
+          "phase": "draft"
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "draft",
+          "batch": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "draft",
+          "batch": 1
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "draft",
+          "batch": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "draft",
+          "batch": 2
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "draft",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "draft",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_response"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_draft_cues"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_batches"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running",
+          "phase": "polish"
+        },
+        {
+          "type": "translation_provider_selected",
+          "phase": "polish"
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "polish",
+          "batch": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "polish",
+          "batch": 1
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "polish",
+          "batch": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "polish",
+          "batch": 2
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "polish",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "polish",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polished_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded",
+          "phase": "polish"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_candidate_qa"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running",
+          "phase": "semantic_review"
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "semantic_review",
+          "batch": 1,
+          "batch_index": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "semantic_review",
+          "batch": 1,
+          "batch_index": 1
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "semantic_review",
+          "batch": 2,
+          "batch_index": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "semantic_review",
+          "batch": 2,
+          "batch_index": 2
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "semantic_review",
+          "batch": 3,
+          "batch_index": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "semantic_review",
+          "batch": 3,
+          "batch_index": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa"
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "repair",
+          "batch": 1,
+          "batch_index": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_repair"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "repair",
+          "batch": 1,
+          "batch_index": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_repair"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_repaired_cues"
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "semantic_review",
+          "batch": 1,
+          "batch_index": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa_final"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "semantic_review",
+          "batch": 1,
+          "batch_index": 1
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "semantic_review",
+          "batch": 2,
+          "batch_index": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa_final"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "semantic_review",
+          "batch": 2,
+          "batch_index": 2
+        },
+        {
+          "type": "translation_batch_started",
+          "phase": "semantic_review",
+          "batch": 3,
+          "batch_index": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa_final"
+        },
+        {
+          "type": "translation_batch_completed",
+          "phase": "semantic_review",
+          "batch": 3,
+          "batch_index": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa_final"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_candidate_qa"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "subtitle_qa",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_subtitle_qa"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "subtitle_qa",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "render",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_srt"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "bilingual_srt"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "render",
+          "status": "succeeded"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1f2e0c115c83987bacd881f5bec89a72104213c4c7dab704ba3d1e5d2291903b",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_progress",
+          "name": "translation-progress.json",
+          "checksum": "34eb8631b2932e978701cd04c35e15e9a566ea7c0708d5379a32b12f0ee0c926",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_response",
+          "name": "translation-response.json",
+          "checksum": "df95acbb07c66b5f6a75a3363cf285f4a6634ea3946c2685e8d7c8115554ecfb",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_draft_cues",
+          "name": "translation-draft-cues.json",
+          "checksum": "173dc006382354d6fc18498f5aefd5f745d5911b3cdd4523783ad97bd6c79bf6",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_polish_batches",
+          "name": "translation-polish-batches.json",
+          "checksum": "d25020da8cf340cb9e4376b14901c90323714cc9dc03ba02035805f2654fede1",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_polish_progress",
+          "name": "translation-polish-progress.json",
+          "checksum": "fc260ef4c32cfab91408c5cae4654999c430d907a2a329c33da5de6e4513277c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_polished_cues",
+          "name": "translation-polished-cues.json",
+          "checksum": "8e244eb6d37f00ecff770c199d14e6cc1ab75cd5316bc31848bf6de85a0f6dbc",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_semantic_qa",
+          "name": "translation-semantic-qa.json",
+          "checksum": "8ab3da745e22ad9b608177ee40f5f8b19b0f9841c4aa2341c4c382421d145bd8",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_semantic_repair",
+          "name": "translation-semantic-repair.json",
+          "checksum": "29902a9144b4acfa5992858f6992d3260fd6b098fc60fde97e3311a6ddb69ae2",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_repaired_cues",
+          "name": "translation-repaired-cues.json",
+          "checksum": "e0b68c1f423c78baf1ab85cb2681572fa3b165f49bf03b71eba1f8aa03a2c288",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_semantic_qa_final",
+          "name": "translation-semantic-qa-final.json",
+          "checksum": "77218b9c107b960f5af25d060fbf2923a02aba8e400a3bb91131db217c3b59bb",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_candidate_qa",
+          "name": "translation-candidate-qa.json",
+          "checksum": "7cb7b55c5fba8989ca74f7eaa3096fa29469576b6010683d5cf3b919230a1e3e",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_cues",
+          "name": "translated-cues.json",
+          "checksum": "e0b68c1f423c78baf1ab85cb2681572fa3b165f49bf03b71eba1f8aa03a2c288",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_subtitle_qa",
+          "name": "qa-translated.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_srt",
+          "name": "translated.srt",
+          "checksum": "332589c0e9dfa896b80c0c98c1081b3cded5d897e61d0a84a77b76fd67c405b5",
+          "normalized_keys": []
+        },
+        {
+          "kind": "bilingual_srt",
+          "name": "bilingual.srt",
+          "checksum": "e76226544f9f9e1a378a8902188d14b1d8c02a4faa1f73eafa3860f3be9ecf30",
+          "normalized_keys": []
+        }
+      ],
+      "fingerprints": {
+        "translation": "cfa2dbb7632a88013bcfbd43cb4f2e49eb70c9929ea98a5e0d2a8402f65f5d7f",
+        "polish_batches": "f47977b699a0671d0c857031e6d3e23b37212f8edf469d88181631f0c04c5af0",
+        "polish_progress": "f47977b699a0671d0c857031e6d3e23b37212f8edf469d88181631f0c04c5af0",
+        "semantic_review": "af3752a12d527f5c7220b2468ba9b9bdd1bb9ac0d390a0ed1f44b8ed585ed8b3",
+        "semantic_repair": "ef8ac93e48a60b6b8af58d11e916ae5aeef4e9225d0b86f71f614498966da8c9",
+        "semantic_final_review": "0077fd948c1ead214d59803c514dd2d884d7332e7e2a554ad3814434b604220c"
+      }
+    },
+    "agent_polished": {
+      "modes": {
+        "translation": "agent",
+        "semantic_prepare": [
+          "awaiting_agent",
+          "agent"
+        ],
+        "semantic_apply": [
+          "completed",
+          "agent"
+        ]
+      },
+      "manifests": {
+        "translate_and_polish_keys": [
+          "job_id",
+          "source_language",
+          "target_language",
+          "prompt_version",
+          "semantic_grouping_version",
+          "policy",
+          "source_cues_checksum",
+          "batches",
+          "batch_size",
+          "task",
+          "task_version",
+          "fingerprint"
+        ],
+        "semantic_agent_keys": [
+          "job_id",
+          "task",
+          "task_version",
+          "source_cues_checksum",
+          "candidate_cues_checksum",
+          "candidate_qa_checksum",
+          "target_language",
+          "review_prompt_version",
+          "repair_prompt_version",
+          "semantic_grouping_version",
+          "batches",
+          "status",
+          "fingerprint"
+        ],
+        "semantic_agent_at_awaiting": {
+          "checksum": "8b950e3ffe2b3ba2beb47531a3b53d63880b60ebfac9925dcca94ace1da6f37a",
+          "normalized_keys": [
+            "fingerprint",
+            "job_id"
+          ]
+        },
+        "semantic_batches": [
+          [
+            1,
+            [
+              1
+            ]
+          ],
+          [
+            2,
+            [
+              2,
+              3
+            ]
+          ],
+          [
+            3,
+            [
+              4
+            ]
+          ]
+        ]
+      },
+      "events": [
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_batches"
+        },
+        {
+          "type": "stage_waiting",
+          "stage": "translate",
+          "status": "awaiting_input"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_progress"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running",
+          "phase": "polish"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polished_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded",
+          "phase": "polish"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_candidate_qa"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa"
+        },
+        {
+          "type": "stage_waiting",
+          "stage": "translate",
+          "status": "awaiting_input",
+          "phase": "semantic_review"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_repair"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_repaired_cues"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_semantic_qa_final"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_candidate_qa"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "subtitle_qa",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_subtitle_qa"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "subtitle_qa",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "render",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_srt"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "bilingual_srt"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "render",
+          "status": "succeeded"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1c7c8fd8d97be44dc0eb4d07140ef702574a382dc981650abf6cd78717ed1e11",
+          "normalized_keys": [
+            "fingerprint",
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_polish_progress",
+          "name": "translation-polish-progress.json",
+          "checksum": "58c770ebc7cdc4750619a6710d40c167500bb0d227a22889c40e5540fe3a48d8",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translation_polished_cues",
+          "name": "translation-polished-cues.json",
+          "checksum": "8e244eb6d37f00ecff770c199d14e6cc1ab75cd5316bc31848bf6de85a0f6dbc",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_semantic_qa",
+          "name": "translation-semantic-qa.json",
+          "checksum": "faf2f77926d5451c5ef2d1e2f922f7aad48c4fb77ed0fa00d22fb24926e98e44",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translation_semantic_repair",
+          "name": "translation-semantic-repair.json",
+          "checksum": "52d8b9af21d5d0c700bf4827b5ee3f37a41221efe2b652dd745237dbc3a6306a",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translation_repaired_cues",
+          "name": "translation-repaired-cues.json",
+          "checksum": "e0b68c1f423c78baf1ab85cb2681572fa3b165f49bf03b71eba1f8aa03a2c288",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_semantic_qa_final",
+          "name": "translation-semantic-qa-final.json",
+          "checksum": "28c0f7c3b62600573a5f702edb6f6f26f8d50da45a36d98a2c6209c396acf13f",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translation_candidate_qa",
+          "name": "translation-candidate-qa.json",
+          "checksum": "7cb7b55c5fba8989ca74f7eaa3096fa29469576b6010683d5cf3b919230a1e3e",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_cues",
+          "name": "translated-cues.json",
+          "checksum": "e0b68c1f423c78baf1ab85cb2681572fa3b165f49bf03b71eba1f8aa03a2c288",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_subtitle_qa",
+          "name": "qa-translated.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_srt",
+          "name": "translated.srt",
+          "checksum": "332589c0e9dfa896b80c0c98c1081b3cded5d897e61d0a84a77b76fd67c405b5",
+          "normalized_keys": []
+        },
+        {
+          "kind": "bilingual_srt",
+          "name": "bilingual.srt",
+          "checksum": "e76226544f9f9e1a378a8902188d14b1d8c02a4faa1f73eafa3860f3be9ecf30",
+          "normalized_keys": []
+        }
+      ],
+      "fingerprint_links": [
+        [
+          "translation-batches.json",
+          "translation-polish-progress.json"
+        ],
+        [
+          "translation-semantic-qa.json",
+          "translation-semantic-repair.json",
+          "translation-semantic-qa-final.json"
+        ]
+      ]
+    },
+    "standard_agent_fallback": {
+      "modes": {
+        "translation": "agent"
+      },
+      "fallback_reason": "missing API key environment variable TEST_TRANSLATION_API_KEY; this job is pinned to openai-compatible (model=snapshot-model, base_url=https://provider.example.com/v1) but the current shell lacks $TEST_TRANSLATION_API_KEY",
+      "persisted_provider": [
+        "auto",
+        "https://provider.example.com/v1",
+        "snapshot-model"
+      ],
+      "manifests": {
+        "translation_batches_keys": [
+          "job_id",
+          "source_language",
+          "target_language",
+          "prompt_version",
+          "semantic_grouping_version",
+          "policy",
+          "source_cues_checksum",
+          "batches"
+        ],
+        "batches": [
+          [
+            1,
+            [
+              1
+            ]
+          ],
+          [
+            2,
+            [
+              2,
+              3
+            ]
+          ],
+          [
+            3,
+            [
+              4
+            ]
+          ]
+        ]
+      },
+      "events": [
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_batches"
+        },
+        {
+          "type": "stage_waiting",
+          "stage": "translate",
+          "status": "awaiting_input"
+        },
+        {
+          "type": "translation_fallback",
+          "mode": "agent",
+          "reason": "missing API key environment variable TEST_TRANSLATION_API_KEY; this job is pinned to openai-compatible (model=snapshot-model, base_url=https://provider.example.com/v1) but the current shell lacks $TEST_TRANSLATION_API_KEY"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1f2e0c115c83987bacd881f5bec89a72104213c4c7dab704ba3d1e5d2291903b",
+          "normalized_keys": [
+            "job_id"
+          ]
+        }
+      ]
+    },
+    "api_progress_reset": {
+      "modes": {
+        "first": "openai-compatible",
+        "second": "openai-compatible"
+      },
+      "events": [
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_batches"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "translation_provider_selected"
+        },
+        {
+          "type": "translation_batch_started",
+          "batch": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "batch": 1
+        },
+        {
+          "type": "translation_batch_started",
+          "batch": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "batch": 2
+        },
+        {
+          "type": "translation_batch_started",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_response"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "subtitle_qa",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_subtitle_qa"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "subtitle_qa",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "render",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_srt"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "bilingual_srt"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "render",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_batches"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "translation_provider_selected"
+        },
+        {
+          "type": "translation_progress_reset",
+          "reason": "translation fingerprint changed"
+        },
+        {
+          "type": "translation_batch_started",
+          "batch": 1
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "batch": 1
+        },
+        {
+          "type": "translation_batch_started",
+          "batch": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "batch": 2
+        },
+        {
+          "type": "translation_batch_started",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_progress"
+        },
+        {
+          "type": "translation_batch_completed",
+          "batch": 3
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_response"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "subtitle_qa",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_subtitle_qa"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "subtitle_qa",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "render",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_srt"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "bilingual_srt"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "render",
+          "status": "succeeded"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1f2e0c115c83987bacd881f5bec89a72104213c4c7dab704ba3d1e5d2291903b",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_progress",
+          "name": "translation-progress.json",
+          "checksum": "41cfb8945d4fdae8548c40b35423826fe2985def1a170318ef5c3f9c4816cd99",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_response",
+          "name": "translation-response.json",
+          "checksum": "df95acbb07c66b5f6a75a3363cf285f4a6634ea3946c2685e8d7c8115554ecfb",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_cues",
+          "name": "translated-cues.json",
+          "checksum": "173dc006382354d6fc18498f5aefd5f745d5911b3cdd4523783ad97bd6c79bf6",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_subtitle_qa",
+          "name": "qa-translated.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_srt",
+          "name": "translated.srt",
+          "checksum": "a4c1c32de36c5e3d504e8c66bd15adbe0409a3618add4d943e4d2f9f84dda375",
+          "normalized_keys": []
+        },
+        {
+          "kind": "bilingual_srt",
+          "name": "bilingual.srt",
+          "checksum": "100a517c01562520076ac221845eade8d3a66c137fc7a1ad6ba6e017b9145f15",
+          "normalized_keys": []
+        }
+      ],
+      "fingerprints": {
+        "first_translation": "cfa2dbb7632a88013bcfbd43cb4f2e49eb70c9929ea98a5e0d2a8402f65f5d7f",
+        "second_translation": "b43eafe0c56924242945d3e78def7e04bf805804e44b0174efecd019a6195e1b"
+      }
+    },
+    "retranslate_api": {
+      "modes": {
+        "retranslate": "openai-compatible"
+      },
+      "provider_calls": {
+        "corrections": [
+          null,
+          null,
+          null
+        ]
+      },
+      "manifests": {
+        "cue_retranslation_keys": [
+          "task",
+          "task_version",
+          "job_id",
+          "source_cues_checksum",
+          "translated_cues_checksum",
+          "source_language",
+          "target_language",
+          "policy",
+          "prompt_version",
+          "semantic_grouping_version",
+          "batches",
+          "fingerprint"
+        ],
+        "task": [
+          "retranslate_cues",
+          1
+        ],
+        "batches": [
+          [
+            1,
+            [
+              2
+            ]
+          ],
+          [
+            2,
+            [
+              3
+            ]
+          ]
+        ]
+      },
+      "events": [
+        {
+          "type": "artifact_created",
+          "kind": "cue_retranslation_batches"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "translation_batch_retrying",
+          "batch": 1,
+          "reason": "provider temporarily unavailable",
+          "attempt": 2
+        },
+        {
+          "type": "artifact_created",
+          "kind": "cue_retranslation_response"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "subtitle_qa",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_subtitle_qa"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "subtitle_qa",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "render",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_srt"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "bilingual_srt"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "render",
+          "status": "succeeded"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1f2e0c115c83987bacd881f5bec89a72104213c4c7dab704ba3d1e5d2291903b",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_progress",
+          "name": "translation-progress.json",
+          "checksum": "1c50f01e029635edf830a741e7132aa1af3c3923d0a418fb86696cbf2fbdc36e",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translation_response",
+          "name": "translation-response.json",
+          "checksum": "df95acbb07c66b5f6a75a3363cf285f4a6634ea3946c2685e8d7c8115554ecfb",
+          "normalized_keys": []
+        },
+        {
+          "kind": "cue_retranslation_batches",
+          "name": "cue-retranslation-batches.json",
+          "checksum": "467f0047b20c81125076666259dd28e96460a9dd5f4b4d54af2b2d4b328596e4",
+          "normalized_keys": [
+            "fingerprint",
+            "job_id"
+          ]
+        },
+        {
+          "kind": "cue_retranslation_response",
+          "name": "cue-retranslation-response.json",
+          "checksum": "cb1fe263b16b616bc8a408e4252fdb077079d553d9ed2d05ea289e6332691658",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translated_cues",
+          "name": "translated-cues.json",
+          "checksum": "504aac55cfe2a2a3ed3f7261d1639aebb2507648247288512dbe88633febb01f",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_subtitle_qa",
+          "name": "qa-translated.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_srt",
+          "name": "translated.srt",
+          "checksum": "32c46d883eddcd3f291a9e65675fac2867ded83cacc8874e9e4cbe6eac8cb856",
+          "normalized_keys": []
+        },
+        {
+          "kind": "bilingual_srt",
+          "name": "bilingual.srt",
+          "checksum": "bcc68d6bb1908589b94f5f011581a666d57e2b244dbedbc295073e62f0f614c0",
+          "normalized_keys": []
+        }
+      ],
+      "fingerprint_links": [
+        [
+          "translation-progress.json"
+        ],
+        [
+          "cue-retranslation-batches.json",
+          "cue-retranslation-response.json"
+        ]
+      ],
+      "fingerprints": {
+        "translation": "cfa2dbb7632a88013bcfbd43cb4f2e49eb70c9929ea98a5e0d2a8402f65f5d7f"
+      }
+    },
+    "retranslate_agent": {
+      "modes": {
+        "retranslate": "agent"
+      },
+      "applied_names": [
+        "translated.srt",
+        "bilingual.srt"
+      ],
+      "manifests": {
+        "cue_retranslation_keys": [
+          "task",
+          "task_version",
+          "job_id",
+          "source_cues_checksum",
+          "translated_cues_checksum",
+          "source_language",
+          "target_language",
+          "policy",
+          "prompt_version",
+          "semantic_grouping_version",
+          "batches",
+          "fingerprint"
+        ],
+        "task": [
+          "retranslate_cues",
+          1
+        ],
+        "cue_retranslation_at_awaiting": {
+          "checksum": "467f0047b20c81125076666259dd28e96460a9dd5f4b4d54af2b2d4b328596e4",
+          "normalized_keys": [
+            "fingerprint",
+            "job_id"
+          ]
+        },
+        "batches": [
+          [
+            1,
+            [
+              2
+            ]
+          ],
+          [
+            2,
+            [
+              3
+            ]
+          ]
+        ]
+      },
+      "events": [
+        {
+          "type": "artifact_created",
+          "kind": "cue_retranslation_batches"
+        },
+        {
+          "type": "stage_waiting",
+          "stage": "translate",
+          "status": "awaiting_input"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "subtitle_qa",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_subtitle_qa"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "subtitle_qa",
+          "status": "succeeded"
+        },
+        {
+          "type": "stage_started",
+          "stage": "render",
+          "status": "running"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translated_srt"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "bilingual_srt"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "render",
+          "status": "succeeded"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1f2e0c115c83987bacd881f5bec89a72104213c4c7dab704ba3d1e5d2291903b",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_progress",
+          "name": "translation-progress.json",
+          "checksum": "1c50f01e029635edf830a741e7132aa1af3c3923d0a418fb86696cbf2fbdc36e",
+          "normalized_keys": [
+            "fingerprint"
+          ]
+        },
+        {
+          "kind": "translation_response",
+          "name": "translation-response.json",
+          "checksum": "df95acbb07c66b5f6a75a3363cf285f4a6634ea3946c2685e8d7c8115554ecfb",
+          "normalized_keys": []
+        },
+        {
+          "kind": "cue_retranslation_batches",
+          "name": "cue-retranslation-batches.json",
+          "checksum": "467f0047b20c81125076666259dd28e96460a9dd5f4b4d54af2b2d4b328596e4",
+          "normalized_keys": [
+            "fingerprint",
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translated_cues",
+          "name": "translated-cues.json",
+          "checksum": "504aac55cfe2a2a3ed3f7261d1639aebb2507648247288512dbe88633febb01f",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_subtitle_qa",
+          "name": "qa-translated.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translated_srt",
+          "name": "translated.srt",
+          "checksum": "32c46d883eddcd3f291a9e65675fac2867ded83cacc8874e9e4cbe6eac8cb856",
+          "normalized_keys": []
+        },
+        {
+          "kind": "bilingual_srt",
+          "name": "bilingual.srt",
+          "checksum": "bcc68d6bb1908589b94f5f011581a666d57e2b244dbedbc295073e62f0f614c0",
+          "normalized_keys": []
+        }
+      ],
+      "fingerprint_links": [
+        [
+          "translation-progress.json"
+        ],
+        [
+          "cue-retranslation-batches.json"
+        ]
+      ],
+      "fingerprints": {
+        "translation": "cfa2dbb7632a88013bcfbd43cb4f2e49eb70c9929ea98a5e0d2a8402f65f5d7f"
+      }
+    },
+    "polish_agent_rerun": {
+      "modes": {
+        "polish": "agent"
+      },
+      "fallback_reason": "missing API key environment variable TEST_TRANSLATION_API_KEY",
+      "applied_names": [
+        "translation-polished-cues.json"
+      ],
+      "manifests": {
+        "translation_polish_keys": [
+          "job_id",
+          "fingerprint",
+          "prompt_version",
+          "semantic_grouping_version",
+          "batches"
+        ],
+        "translation_polish_at_awaiting": {
+          "checksum": "3d4041b74dd29e410eb305eb742cb1bea6541e00bd21606e3363962255acfcb1",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        "batches": [
+          [
+            1,
+            [
+              1
+            ]
+          ],
+          [
+            2,
+            [
+              2,
+              3
+            ]
+          ],
+          [
+            3,
+            [
+              4
+            ]
+          ]
+        ]
+      },
+      "events": [
+        {
+          "type": "artifact_created",
+          "kind": "translation_draft_cues"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_batches"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running",
+          "phase": "polish"
+        },
+        {
+          "type": "stage_waiting",
+          "stage": "translate",
+          "status": "awaiting_input",
+          "phase": "polish"
+        },
+        {
+          "type": "translation_fallback",
+          "phase": "polish",
+          "mode": "agent",
+          "reason": "missing API key environment variable TEST_TRANSLATION_API_KEY"
+        },
+        {
+          "type": "stage_started",
+          "stage": "translate",
+          "status": "running",
+          "phase": "polish"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polish_progress"
+        },
+        {
+          "type": "artifact_created",
+          "kind": "translation_polished_cues"
+        },
+        {
+          "type": "stage_completed",
+          "stage": "translate",
+          "status": "succeeded",
+          "phase": "polish"
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "input_subtitles",
+          "name": "input-subtitles.srt",
+          "checksum": "15cc83e84ca8ac2f3673ffc014b07d7ebb180c9db43f040541c85eb442006478",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_cues",
+          "name": "source-cues.json",
+          "checksum": "643927a5b06ababcf7695ade7e10a21b6bc717961c3c4fb6037b0cc84fd274c1",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_selection",
+          "name": "source-selection.json",
+          "checksum": "8b2b03dcc0f4a4443a89d4927943c78a639d602be2553e7ca008e3aa529f8ff4",
+          "normalized_keys": []
+        },
+        {
+          "kind": "subtitle_qa",
+          "name": "qa.json",
+          "checksum": "2501c48131660e2d50208fc6d691e512fd2221a7b46669cb01b99085e3c4ee9c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "source_srt",
+          "name": "source.srt",
+          "checksum": "b43de7ba64ab8b0085d298d964d21ec0bde2440bdfa7c015db49d7ca63c8ec0c",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_batches",
+          "name": "translation-batches.json",
+          "checksum": "1f2e0c115c83987bacd881f5bec89a72104213c4c7dab704ba3d1e5d2291903b",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_progress",
+          "name": "translation-progress.json",
+          "checksum": "34eb8631b2932e978701cd04c35e15e9a566ea7c0708d5379a32b12f0ee0c926",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_response",
+          "name": "translation-response.json",
+          "checksum": "df95acbb07c66b5f6a75a3363cf285f4a6634ea3946c2685e8d7c8115554ecfb",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_draft_cues",
+          "name": "translation-draft-cues.json",
+          "checksum": "173dc006382354d6fc18498f5aefd5f745d5911b3cdd4523783ad97bd6c79bf6",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_polish_batches",
+          "name": "translation-polish-batches.json",
+          "checksum": "3d4041b74dd29e410eb305eb742cb1bea6541e00bd21606e3363962255acfcb1",
+          "normalized_keys": [
+            "job_id"
+          ]
+        },
+        {
+          "kind": "translation_polish_progress",
+          "name": "translation-polish-progress.json",
+          "checksum": "cffe3439fa8a5f1312e763b18dca225908d2acd015edd0a992cab61a083f34c5",
+          "normalized_keys": []
+        },
+        {
+          "kind": "translation_polished_cues",
+          "name": "translation-polished-cues.json",
+          "checksum": "8e244eb6d37f00ecff770c199d14e6cc1ab75cd5316bc31848bf6de85a0f6dbc",
+          "normalized_keys": []
+        }
+      ],
+      "fingerprints": {
+        "polish_batches": "8ec9d26e3b7224aaf60b79148b0cdf8414255352c6c6fbf74069c52c875642b5",
+        "polish_progress": "8ec9d26e3b7224aaf60b79148b0cdf8414255352c6c6fbf74069c52c875642b5"
+      }
+    }
+  }
+}

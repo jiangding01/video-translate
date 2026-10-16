@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-11
+更新时间：2026-10-17
+
+2026-10-17 R3.1 Phase 1：provider 协议快照回归网落地（`tests/test_provider_protocol_snapshot.py` 与 `tests/fixtures/provider-protocol-snapshot.json`），零生产代码改动。7 个场景冻结 API polished、Agent polished、`auto` 降级、进度重置、局部重译（API 与 Agent）和显式补跑润色（Agent）的事件序列、artifact 内容 checksum、manifest 键序与 fingerprint；负向对照确认改掉事件发射点、事件类型、artifact 文件名或 manifest 键名都会让快照变红。R3.1 据此拆为 5 个独立可合阶段，后续每个阶段以「快照零 diff」为硬验收，出现 diff 即回退而不改 golden。已知缺口：polish 侧 `translation_progress_reset`、Agent 链路 fingerprint 字面值（绑定 job id，只冻自洽性与传播分组）、provider 彻底失败后的 stage 收口文案。
 
 2026-10-11 Q6.2 离线基线：只读扫描全部 20 个历史 Job，整理 39 份语义报告与 26 次已接受修订，提取 4 类最小样本并增加确定性边界测试。多轮修订引入不同遗漏、源文疑点保留和历史无变化建议分别处理；不把模型输出当真值，不修改生产提示词或默认质量。当前模型重复输入实验与原音 oracle 仍待验证，Q6.2 未整体完成。详见 [收敛基线](docs/Q6_2_CONVERGENCE_BASELINE.md)。
 
@@ -22,7 +24,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 868 个测试、176 个子测试，全部通过（2026-10-11） |
+| 自动化测试 | 885 个测试、178 个子测试，全部通过（2026-10-17） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -339,7 +341,7 @@ media-qa.json
 
 ### Q1-Q6.1：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful；下一步完成 Q6.2 语义收敛验证，随后进入 R3.1/R3.2。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful。Q6.2 剩余的模型收敛实测需单独授权，因此先推进 R3.1：Phase 1 协议快照回归网已于 2026-10-17 完成，下一步是 Phase 2 消解 semantic ↔ review/revision 的函数级 import 环。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
