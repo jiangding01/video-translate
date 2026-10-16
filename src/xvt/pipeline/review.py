@@ -19,6 +19,7 @@ from xvt.pipeline.common import (
     artifact_checksum_for,
     set_stage,
 )
+from xvt.pipeline.semantic_state import semantic_review_target
 from xvt.recovery import valid_artifact_path
 
 # 同一「显示宽度超限」风险在源字幕 QA 与双语 QA 中使用不同 code：
@@ -284,8 +285,6 @@ def translation_review_acknowledged(job: Job, report_path: Path) -> bool:
     record = job.config.get("translation_review_acknowledgment")
     if not isinstance(record, dict):
         return False
-    from xvt.pipeline.semantic import semantic_review_target
-
     target = semantic_review_target(job)
     if target is None or target[0] != report_path:
         return False
@@ -321,8 +320,6 @@ def acknowledge_translation_review(
     event_sink: EventSink | None = None,
 ) -> Path:
     job = load_job(job_file)
-    from xvt.pipeline.semantic import semantic_review_target
-
     target = semantic_review_target(job)
     if target is None:
         raise UserInputError("no confirmable semantic review report found")

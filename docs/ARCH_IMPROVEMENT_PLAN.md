@@ -131,7 +131,7 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 - 顺带收敛翻译逻辑的文件边界：`translate.py`（分组与批次协议）、`translation_provider.py`（传输）、`pipeline/translation|polish|semantic.py`（编排）职责单一化，消除 F4 之外残余的交叉引用。
 - 测试策略：provider 以参数注入（延续 `opener` 的 DI 先例），新编排测试传 fake provider 对象，逐步替换 `mock.patch` 模块函数的用法（F11）；迁移期间两种方式并存。
 - 验收：polish/semantic/retranslate 的 API 与 Agent 行为测试全部通过且编排实现只有一份；对既有等待中 Job 的回填回归测试通过。
-- **实施拆分（2026-10-17 定，5 个独立可合阶段）**：Phase 1 协议快照回归网（**已完成**）→ Phase 2 消解 semantic ↔ review/revision 的函数级 import 环（抽 `pipeline/semantic_state.py`，R1.3 的欠账）→ Phase 3 Agent 交接前奏单份化 → Phase 4 API 批次循环单份化（translation+retranslate / polish / semantic 分三次提交）→ Phase 5 语义链路编排单份化（Agent 作为传输，`run_translation_semantic_review` 与 `apply_agent_semantic_review` 的链路决策合一）。每阶段的硬验收是 `tests/test_provider_protocol_snapshot.py` 零 diff。
+- **实施拆分（2026-10-17 定，5 个独立可合阶段）**：Phase 1 协议快照回归网（**已完成**）→ Phase 2 消解 semantic ↔ review/revision 的函数级 import 环（抽 `pipeline/semantic_state.py`，R1.3 的欠账；**已完成**，实际下移整个传递闭包 18 个只读派生函数，并新增 ast 守卫禁止包内函数级 import）→ Phase 3 Agent 交接前奏单份化 → Phase 4 API 批次循环单份化（translation+retranslate / polish / semantic 分三次提交）→ Phase 5 语义链路编排单份化（Agent 作为传输，`run_translation_semantic_review` 与 `apply_agent_semantic_review` 的链路决策合一）。每阶段的硬验收是 `tests/test_provider_protocol_snapshot.py` 零 diff。
 - 原文两处前提已按代码实况更正：① 传输与重试早已由 `pipeline/translation.py` 的 `translate_batch_with_retries` 统一（provider 批次函数经 `request=` 注入），剩余工作是其上的编排而非传输本身；② `Pending(manifest)` 不能按批次返回——Agent 一次为全部批次写一份 manifest，分片落盘会直接破坏「manifest 格式不变」的红线，所以抽象按**步骤**（一组批次）而非按批次。
 - Phase 4 的共享循环放在 `pipeline/translation.py` 内，不新建模块：测试把 38 处桩钉在 `xvt.pipeline.translation` 的 `translate_batch` / `time.sleep` / `_backoff_delay` 上，把重试实现移出会一并废掉这些桩，且新模块与 translation 互相依赖会成环。polish/semantic/retranslate 已依赖 translation，放这里零新依赖边。
 
