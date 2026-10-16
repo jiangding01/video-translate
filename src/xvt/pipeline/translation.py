@@ -12,7 +12,7 @@ import math
 import random
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -162,6 +162,120 @@ def translate_batch_with_retries(
                 on_retry(request_attempt, delay, "invalid provider response")
             time.sleep(delay)
             raise_if_cancelled()
+
+
+ProviderBatch = TranslationBatch | PolishBatch | SemanticReviewBatch | SemanticRepairBatch
+
+
+def run_provider_batches(
+    job: Job,
+    batches: Sequence[ProviderBatch],
+    *,
+    provider_config: CompatibleProviderConfig,
+    max_retries: int,
+    event_sink: EventSink | None,
+    request: Callable[..., Any] | None = None,
+    response_correction: str = _RESPONSE_CORRECTION,
+    phase: str | None = None,
+    emit_progress_events: bool = True,
+    skip: Callable[[Any], bool] | None = None,
+    on_result: Callable[[Any, Any], None] | None = None,
+) -> None:
+    """按批次串行调用 provider 的**唯一**循环骨架：取消点、批次事件、逐批回调与失败收口。
+
+    `translate_batch_with_retries` 统一了单批的传输与重试，这个函数统一它外面那层循环；
+    两者必须留在同一个模块里，原因是实测的，不是风格偏好：
+
+    - **桩位**：大量测试把桩打在 ``xvt.pipeline.translation`` 的 ``translate_batch`` /
+      ``time.sleep`` / ``_backoff_delay`` 上（局部重译的用例也打在这里，因为它复用
+      ``translate_batch_with_retries`` 的默认 ``request``）。把循环或重试实现搬到新模块，
+      默认 ``request`` 的名字解析就会离开本模块全局，这些桩会一次性失效，provider 调用
+      绕过所有既有打桩点。
+    - **依赖方向**：新模块若 import 重试实现就会与 translation 成环；而 polish /
+      semantic / retranslate 已经依赖 translation，放这里零新增依赖边。
+
+    参数与四条链路之间的真实差异一一对应：
+
+    - ``phase``：事件里的 ``phase`` 字段。初译只在 ``--translation-quality polished`` 下
+      带 ``"draft"``，局部重译完全不带；``None`` 表示不写这个键（不是写 null）。
+    - ``emit_progress_events``：是否发 ``translation_batch_started`` /
+      ``translation_batch_completed``。局部重译只发重试事件，传 ``False``。
+      重试事件（``translation_batch_retrying``）不受此开关影响，四条链路都发。
+    - ``skip``：checkpoint 跳过判定。初译要求「批次已登记完成**且**译文覆盖该批全部 cue」；
+      局部重译没有 checkpoint，传 ``None``。
+    - ``on_result``：每批成功后的落盘与记账（初译：累积译文、写
+      ``translation-progress.json``、登记 artifact、首批成功后固化 provider 身份；
+      局部重译：只在内存里累积）。它在 ``translation_batch_completed`` **之前**调用，
+      与重构前的顺序一致。
+    - ``request`` / ``response_correction``：原样透传给 ``translate_batch_with_retries``。
+      两处调用点都不传，默认 ``request=None`` 让默认名仍在本模块全局里解析，桩位不变。
+
+    失败一律按 ``TRANSLATE`` / ``failed`` 收口后 re-raise，与重构前两处的 ``except`` 相同。
+    ``raise_if_cancelled()`` 保持在每批开头（紧接 ``skip`` 判定之前）。
+    """
+    batch_total = len(batches)
+    phase_fields = {"phase": phase} if phase is not None else {}
+    try:
+        for batch in batches:
+            raise_if_cancelled()
+            if skip is not None and skip(batch):
+                continue
+            if emit_progress_events and event_sink:
+                event_sink(
+                    create_event(
+                        EventType.TRANSLATION_BATCH_STARTED,
+                        **job_event_fields(job.id, get_job_file(job)),
+                        **phase_fields,
+                        batch=batch.id,
+                        batch_total=batch_total,
+                    )
+                )
+
+            def emit_retry(attempt: int, delay: float, reason: str) -> None:
+                if event_sink:
+                    event_sink(
+                        create_event(
+                            EventType.TRANSLATION_BATCH_RETRYING,
+                            **job_event_fields(job.id, get_job_file(job)),
+                            **phase_fields,
+                            batch=batch.id,
+                            batch_total=batch_total,
+                            attempt=attempt,
+                            delay_seconds=delay,
+                            reason=reason,
+                        )
+                    )
+
+            result = translate_batch_with_retries(
+                batch,
+                provider_config,
+                max_retries=max_retries,
+                on_retry=emit_retry,
+                request=request,
+                response_correction=response_correction,
+            )
+            if on_result is not None:
+                on_result(batch, result)
+            if emit_progress_events and event_sink:
+                event_sink(
+                    create_event(
+                        EventType.TRANSLATION_BATCH_COMPLETED,
+                        **job_event_fields(job.id, get_job_file(job)),
+                        **phase_fields,
+                        batch=batch.id,
+                        batch_total=batch_total,
+                    )
+                )
+    except Exception as error:
+        set_stage(
+            job,
+            StageName.TRANSLATE,
+            StageStatus.FAILED,
+            event_sink,
+            error=str(error),
+            error_category=error_category(error),
+        )
+        raise
 
 
 def load_translation_response(response_file: str | Path, expected_ids: set[int]) -> dict[int, str]:
@@ -1103,84 +1217,42 @@ def run_translation(
 
     artifacts_directory = get_job_directory(job) / "artifacts"
     progress_output = artifacts_directory / "translation-progress.json"
-    batch_total = len(batches)
     provider_persisted = False
-    try:
-        for batch in batches:
-            raise_if_cancelled()
-            batch_ids = {item.id for item in batch.items}
-            if batch.id in completed_batches and batch_ids <= translations.keys():
-                continue
-            if event_sink:
-                event_sink(
-                    create_event(
-                        EventType.TRANSLATION_BATCH_STARTED,
-                        **job_event_fields(job.id, get_job_file(job)),
-                        **({"phase": "draft"} if quality == "polished" else {}),
-                        batch=batch.id,
-                        batch_total=batch_total,
-                    )
-                )
 
-            def emit_retry(attempt: int, delay: float, reason: str) -> None:
-                if event_sink:
-                    event_sink(
-                        create_event(
-                            EventType.TRANSLATION_BATCH_RETRYING,
-                            **job_event_fields(job.id, get_job_file(job)),
-                            **({"phase": "draft"} if quality == "polished" else {}),
-                            batch=batch.id,
-                            batch_total=batch_total,
-                            attempt=attempt,
-                            delay_seconds=delay,
-                            reason=reason,
-                        )
-                    )
+    def skip_completed_batch(batch: TranslationBatch) -> bool:
+        batch_ids = {item.id for item in batch.items}
+        return batch.id in completed_batches and batch_ids <= translations.keys()
 
-            translated_batch = translate_batch_with_retries(
-                batch,
-                provider_config,
-                max_retries=max_retries,
-                on_retry=emit_retry,
-            )
-            translations.update(translated_batch)
-            completed_batches.add(batch.id)
-            if not provider_persisted:
-                # 首个批次成功才固化 provider 身份；下面的 add_artifact 会一并 save_job。
-                _persist_resolved_provider(job, provider_config)
-                provider_persisted = True
-            write_json(
-                progress_output,
-                {
-                    "fingerprint": translation_fingerprint,
-                    "completed_batches": sorted(completed_batches),
-                    "items": [
-                        {"id": cue_id, "text": text}
-                        for cue_id, text in sorted(translations.items())
-                    ],
-                },
-            )
-            add_artifact(job, "translation_progress", progress_output, event_sink)
-            if event_sink:
-                event_sink(
-                    create_event(
-                        EventType.TRANSLATION_BATCH_COMPLETED,
-                        **job_event_fields(job.id, get_job_file(job)),
-                        **({"phase": "draft"} if quality == "polished" else {}),
-                        batch=batch.id,
-                        batch_total=batch_total,
-                    )
-                )
-    except Exception as error:
-        set_stage(
-            job,
-            StageName.TRANSLATE,
-            StageStatus.FAILED,
-            event_sink,
-            error=str(error),
-            error_category=error_category(error),
+    def record_batch(batch: TranslationBatch, translated_batch: dict[int, str]) -> None:
+        nonlocal provider_persisted
+        translations.update(translated_batch)
+        completed_batches.add(batch.id)
+        if not provider_persisted:
+            # 首个批次成功才固化 provider 身份；下面的 add_artifact 会一并 save_job。
+            _persist_resolved_provider(job, provider_config)
+            provider_persisted = True
+        write_json(
+            progress_output,
+            {
+                "fingerprint": translation_fingerprint,
+                "completed_batches": sorted(completed_batches),
+                "items": [
+                    {"id": cue_id, "text": text} for cue_id, text in sorted(translations.items())
+                ],
+            },
         )
-        raise
+        add_artifact(job, "translation_progress", progress_output, event_sink)
+
+    run_provider_batches(
+        job,
+        batches,
+        provider_config=provider_config,
+        max_retries=max_retries,
+        event_sink=event_sink,
+        phase="draft" if quality == "polished" else None,
+        skip=skip_completed_batch,
+        on_result=record_batch,
+    )
     if not provider_persisted:
         # 全部批次都命中 checkpoint：指纹已按这套身份校验通过，同样值得固化。
         _persist_resolved_provider(job, provider_config)
