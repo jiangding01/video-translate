@@ -23,6 +23,7 @@ from xvt.pipeline.common import (
     translation_qa_context,
     write_json,
 )
+from xvt.pipeline.semantic_state import semantic_review_target
 from xvt.qa import SubtitleQaReport, check_subtitles
 from xvt.recovery import valid_artifact_path
 from xvt.subtitles import load_review_srt, save_review_srt, save_subtitles
@@ -451,8 +452,6 @@ def apply_source_review_fixes(
 
 
 def _target_kinds(job: Job) -> tuple[str, str, Path, Path] | None:
-    from xvt.pipeline.semantic import semantic_review_target
-
     target = semantic_review_target(job)
     if target is None:
         return None
