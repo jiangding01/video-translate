@@ -1,7 +1,8 @@
 """字幕 QA `needs_review` 报告的人工确认通道。
 
-确认记录持久化在 job.config，绑定 source cue checksum 与具体 review 问题集合；
-字幕变化或出现新的 review 问题后自动失效，error 级问题永不放行。
+确认记录持久化在 job.config，绑定 source cue checksum、**被确认的那份 QA 报告的
+checksum** 与具体 review 问题集合；源字幕或译文任一变化（报告 checksum 随之变化）
+或出现新的 review 问题后自动失效，error 级问题永不放行。
 """
 
 from __future__ import annotations
@@ -24,6 +25,12 @@ from xvt.recovery import valid_artifact_path
 
 # 同一「显示宽度超限」风险在源字幕 QA 与双语 QA 中使用不同 code：
 # 确认匹配按规范化后的问题族比较，用户对某个 cue 的宽度风险只需确认一次。
+# 可被确认的 QA 报告种类，按优先级排列（译文报告优先于源字幕报告）。
+# 写入侧（`acknowledge_subtitle_review` 选报告）与校验侧（`acknowledged_review_issues`
+# 校验 `report_kind`）必须同源：各写一份字面量时，新增报告种类只改一边不会有任何
+# 东西变红，确认通道会悄悄对新种类失效或放行。
+ACKNOWLEDGEABLE_QA_KINDS = ("translated_subtitle_qa", "subtitle_qa")
+
 _REVIEW_CODE_FAMILIES = {
     "line_too_wide": "display_width",
     "bilingual_overflow_risk": "display_width",
@@ -37,12 +44,28 @@ def _canonical_review_issue(code: str, cue_id: int) -> tuple[str, int]:
 def acknowledged_review_issues(job: Job) -> set[tuple[str, int]] | None:
     """返回仍然有效的已确认 review 问题集合；确认不存在或已失效时返回 None。
 
-    有效性绑定 source_cues 的 checksum：字幕内容变化后旧确认自动失效。
+    有效性同时绑定 source_cues 与**被确认的那份 QA 报告**的 checksum：源字幕或译文
+    任一变化，报告 checksum 随之变化，旧确认自动失效，必须重新查看报告再确认。
     """
     record = job.config.get("subtitle_review_acknowledgment")
     if not isinstance(record, dict):
         return None
     if record.get("source_cues_checksum") != artifact_checksum_for(job, "source_cues"):
+        return None
+    # 确认还必须绑定它被给出时用户看到的那份报告。`report_kind` / `report_checksum`
+    # 自确认通道引入起就一直落盘，但校验侧从未使用——于是「为 v1 译文确认过 cue 3
+    # 行宽超限」会自动代签一条内容完全不同、恰好同样在 cue 3 超宽的 v2 译文，而用户
+    # 从没看过它（四条译文回填路径都暴露）。
+    #
+    # 这条比对不会误伤「确认 → continue」：QA 报告是确定性的（只含 status / cue_count
+    # / issues / layout，无时间戳），同输入重算逐字节相同。
+    report_kind = record.get("report_kind")
+    if report_kind not in ACKNOWLEDGEABLE_QA_KINDS:
+        return None
+    report_checksum = artifact_checksum_for(job, report_kind)
+    # 报告缺失时 `artifact_checksum_for` 返回 None；不排除它的话，一条写着
+    # `report_checksum: null` 的伪造记录会因「两边都是 None」而相等蒙混过关。
+    if report_checksum is None or record.get("report_checksum") != report_checksum:
         return None
     issues = record.get("acknowledged_issues")
     if not isinstance(issues, list):
@@ -170,15 +193,16 @@ def acknowledge_subtitle_review(
     """人工确认当前 `needs_review` 的字幕 QA 报告，允许工作流继续。
 
     - 只确认 review 级问题；报告含 error 级问题或整体 `failed` 时拒绝。
-    - 确认记录持久化到 job.config，绑定 source_cues checksum 与具体问题集合；
-      字幕内容变化或出现新的 review 问题后自动失效，需重新查看报告确认。
+    - 确认记录持久化到 job.config，绑定 source_cues checksum、被确认的那份报告的
+      checksum 与具体问题集合；源字幕或译文任一变化、或出现新的 review 问题后自动
+      失效，需重新查看报告再确认。
     - 原始 QA 报告保持 `needs_review` 不被改写；放行事实以结构化事件与
       config 记录留痕，而不是把 QA 伪装成自然通过。
     """
     job = load_job(job_file)
     report_kind = None
     report_path = None
-    for kind in ("translated_subtitle_qa", "subtitle_qa"):
+    for kind in ACKNOWLEDGEABLE_QA_KINDS:
         candidate = valid_artifact_path(job, kind)
         if candidate is not None:
             report_kind = kind

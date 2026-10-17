@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,23 @@ from xvt.pipeline import interrupt_running_stage
 from xvt.qa import check_subtitles, display_width, display_width_limit
 from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.segment import SegmentationConfig, segment_transcript
+
+
+def _register_acknowledged_report(job, artifacts: Path, issues: list[dict]) -> dict:
+    """登记一份 `needs_review` 源字幕 QA 报告，并返回绑定到它的确认记录字段。
+
+    真实确认通道（`acknowledge_subtitle_review`）总是把 `report_kind` /
+    `report_checksum` 一起落盘，手搓 fixture 必须照做，否则确认对任何报告都无效，
+    测试会因为「记录格式不全」而不是它想验的原因变绿。
+    """
+    report_path = artifacts / "qa.json"
+    report_path.write_text(
+        json.dumps({"status": "needs_review", "cue_count": 1, "issues": issues}),
+        encoding="utf-8",
+    )
+    checksum = file_checksum(report_path)
+    job.artifacts.append(Artifact("subtitle_qa", str(report_path), checksum))
+    return {"report_kind": "subtitle_qa", "report_checksum": checksum}
 
 
 class PipelineTest(unittest.TestCase):
@@ -288,10 +306,14 @@ class PipelineTest(unittest.TestCase):
             job = create_job("/tmp/input.srt", root)
             artifacts = root / "jobs" / job.id / "artifacts"
             artifacts.mkdir()
+            report_fields = _register_acknowledged_report(
+                job, artifacts, [{"code": "line_too_wide", "severity": "review", "cue_id": 1}]
+            )
             cues_path = artifacts / "source-cues.json"
             cues_path.write_text("[]", encoding="utf-8")
             job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
             job.config["subtitle_review_acknowledgment"] = {
+                **report_fields,
                 "source_cues_checksum": file_checksum(cues_path),
                 "acknowledged_issues": [["line_too_wide", 1]],
             }
@@ -300,6 +322,104 @@ class PipelineTest(unittest.TestCase):
             # 字幕内容变化（checksum 改变）后确认失效。
             cues_path.write_text("[{}]", encoding="utf-8")
             job.artifacts[-1] = Artifact("source_cues", str(cues_path), file_checksum(cues_path))
+            self.assertIsNone(acknowledged_review_issues(job))
+
+    def test_acknowledgment_does_not_sign_off_a_different_translation(self) -> None:
+        """源字幕不变、问题码与 cue id 都相同，但译文换了一段：旧确认不得代签。
+
+        修复前只比对 `source_cues_checksum`：用户为 v1 译文确认过「cue 1 行宽超限」
+        之后，一条内容完全不同、恰好同样在 cue 1 超宽的 v2 译文会被旧确认自动放行，
+        而用户从没看过它。
+        """
+
+        from xvt.pipeline import acknowledge_subtitle_review
+        from xvt.pipeline.common import write_json
+        from xvt.pipeline.review import acknowledged_review_issues, review_gate_satisfied
+
+        def register_translated_qa(job, artifacts: Path, target_text: str) -> dict:
+            """按生产写法登记一份当前译文的译文 QA 报告，返回报告内容。"""
+            cue = Cue(
+                1,
+                0,
+                5000,
+                "Short source",
+                target_text,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            qa_path = artifacts / "qa-translated.json"
+            write_json(qa_path, asdict(check_subtitles([cue], require_translation=True)))
+            job.artifacts = [
+                item for item in job.artifacts if item.kind != "translated_subtitle_qa"
+            ]
+            job.artifacts.append(
+                Artifact("translated_subtitle_qa", str(qa_path), file_checksum(qa_path))
+            )
+            # 与生产消费方一致：门判定读的是落盘后再解析出来的报告（issues 为 list）。
+            return json.loads(qa_path.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.srt", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            source_cue = Cue(1, 0, 5000, "Short source", source_language="en")
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(
+                json.dumps([asdict(source_cue)], ensure_ascii=False), encoding="utf-8"
+            )
+            job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
+
+            first = register_translated_qa(job, artifacts, "超长字幕" * 20)
+            self.assertEqual(first["status"], "needs_review")
+            job_file = save_job(job)
+            acknowledge_subtitle_review(job_file)
+
+            job = load_job(job_file)
+            self.assertEqual(acknowledged_review_issues(job), {("display_width", 1)})
+            self.assertTrue(review_gate_satisfied(job, first))
+
+            # v2 译文：内容完全不同，但同样在 cue 1 触发同一个 review 问题码。
+            second = register_translated_qa(job, artifacts, "完全不同的译文内容" * 20)
+            review_codes = [
+                (issue["code"], issue["cue_id"])
+                for issue in second["issues"]
+                if issue["severity"] == "review"
+            ]
+            self.assertEqual(
+                review_codes,
+                [
+                    (issue["code"], issue["cue_id"])
+                    for issue in first["issues"]
+                    if issue["severity"] == "review"
+                ],
+            )
+            self.assertNotEqual(first, second)
+            self.assertIsNone(acknowledged_review_issues(job))
+            self.assertFalse(review_gate_satisfied(job, second))
+
+    def test_acknowledgment_rejects_unregistered_report(self) -> None:
+        """伪造记录写着合法 report_kind 但报告未登记，`report_checksum` 为 null。
+
+        `artifact_checksum_for` 此时返回 None，不显式排除就会「两边都是 None」相等。
+        """
+
+        from xvt.pipeline.review import acknowledged_review_issues
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.srt", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text("[]", encoding="utf-8")
+            job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
+            job.config["subtitle_review_acknowledgment"] = {
+                "report_kind": "translated_subtitle_qa",
+                "report_checksum": None,
+                "source_cues_checksum": file_checksum(cues_path),
+                "acknowledged_issues": [["line_too_wide", 1]],
+            }
             self.assertIsNone(acknowledged_review_issues(job))
 
     def test_acknowledgment_rejects_boolean_cue_ids(self) -> None:
@@ -312,10 +432,14 @@ class PipelineTest(unittest.TestCase):
             job = create_job("/tmp/input.srt", root)
             artifacts = root / "jobs" / job.id / "artifacts"
             artifacts.mkdir()
+            report_fields = _register_acknowledged_report(
+                job, artifacts, [{"code": "line_too_wide", "severity": "review", "cue_id": 1}]
+            )
             cues_path = artifacts / "source-cues.json"
             cues_path.write_text("[]", encoding="utf-8")
             job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
             job.config["subtitle_review_acknowledgment"] = {
+                **report_fields,
                 "source_cues_checksum": file_checksum(cues_path),
                 "acknowledged_issues": [["line_too_wide", True]],
             }
@@ -330,10 +454,14 @@ class PipelineTest(unittest.TestCase):
             job = create_job("/tmp/input.srt", root)
             artifacts = root / "jobs" / job.id / "artifacts"
             artifacts.mkdir()
+            report_fields = _register_acknowledged_report(
+                job, artifacts, [{"code": "line_too_wide", "severity": "review", "cue_id": 1}]
+            )
             cues_path = artifacts / "source-cues.json"
             cues_path.write_text("[]", encoding="utf-8")
             job.artifacts.append(Artifact("source_cues", str(cues_path), file_checksum(cues_path)))
             job.config["subtitle_review_acknowledgment"] = {
+                **report_fields,
                 "source_cues_checksum": file_checksum(cues_path),
                 "acknowledged_issues": [["line_too_wide", 1]],
             }

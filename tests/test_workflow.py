@@ -1330,6 +1330,7 @@ class WorkflowTest(unittest.TestCase):
         from dataclasses import asdict
 
         from xvt.models import Cue
+        from xvt.pipeline.common import write_json
         from xvt.qa import check_subtitles
 
         source = root / "source.srt"
@@ -1371,13 +1372,10 @@ class WorkflowTest(unittest.TestCase):
         bilingual_srt_path = artifacts / "bilingual.srt"
         bilingual_srt_path.write_text("stale-render", encoding="utf-8")
         qa_path = artifacts / "qa-translated.json"
-        qa_path.write_text(
-            json.dumps(
-                asdict(check_subtitles([translated_cue], require_translation=True)),
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+        # 必须与生产写法（`pipeline.common.write_json`，缩进 JSON）逐字节一致：
+        # 紧凑 JSON 解析后字段相同但字节不同，continue 重建报告后 checksum 会变，
+        # 绑定报告 checksum 的已存确认就会被误判为失效——测试不能自带这种偏差。
+        write_json(qa_path, asdict(check_subtitles([translated_cue], require_translation=True)))
         job.artifacts.extend(
             [
                 Artifact(kind, str(path), file_checksum(path))
