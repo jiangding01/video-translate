@@ -57,6 +57,10 @@
 
 ### Fixed
 
+- 端到端推进在宣告完成前增加 fail-closed 终检：`run` / `continue` 发 `workflow_completed` 之前断言恢复计划器（`plan_advance_steps`）已经没有任何剩余步骤，不为空就以内部错误（退出码 4）终止，错误消息带上计划器列出的步骤。此前执行侧与计划器对同一份 Job 状态可能给出相反结论——执行侧跑完一轮烧录就直接宣告完成，而计划器仍然列着 `burn`——这种不一致会让 `status` 说「还差一步」而 `continue` 说「已完成」，批处理更会把条目记成完成，用户再也不会回来看它。守卫刻意不降级成警告：误报完成比显式失败危险得多。正常完成路径不受影响；若在真实任务上撞到这个错误，请运行 `xvt status JOB` 查看剩余步骤并附带该 Job 反馈，这是程序侧不变量被破坏，不是用户输入问题。
+
+- 「媒体 QA 是否通过」的判定收敛为一份实现（原先烧录满足度、成品重新关联资格、`relink-burned-output` 与恢复原因文案各写一遍），并补上不打桩的真实状态回归：成品 checksum 有效、派生指纹匹配，但 `media_qa` stage 失败或报告判定不是 `pass` 时，烧录目标必须判未完成并给出 `burn`。这两道条件此前没有任何测试覆盖（唯一相邻的测试都先删掉了成品，判定在更早的一步就早退了），删掉它们全量测试仍然全绿。无用户可见行为变化。
+
 - 修复端到端 Job 上 `xvt translate` / `xvt prepare-translation` 丢掉 Job 固化翻译策略与 `batch_size` 的问题：此前这两条命令只按 CLI 参数现算 `TranslationPolicy`，不回退 `job.config.workflow` 快照（`base_url` / `model` 早有回退）。于是 `run --glossary ...` 之后执行 `xvt translate JOB --target-language L`（恰是恢复计划里「放弃重译」的推荐命令）会产出不带术语的译文，而译文 QA 仍按 workflow 快照判 `glossary_violation`，用户在术语死锁里出不来；openai-compatible 模式下策略与 `batch_size` 都参与翻译指纹，漂移会让已完成的批次进度判为不可复用，全部批次重付一次翻译费。现在未显式传入时逐字段回退快照：只给 `--glossary` 时风格仍沿用快照，只给 `--translation-style` 时术语表仍沿用快照，显式值永远压过快照。随之 `translate` / `prepare-translation` 的 `--batch-size` 与 `--translation-style` 不再带默认值（与 `polish-translation` 同口径），未指定时取 Job 值、没有 workflow 的原子 Job 取原默认值，行为与此前一致。
 
 - 修复 Agent 批次 manifest 失效后端到端 Job 卡死的问题：`TRANSLATE` 停在 `awaiting_input`、`translation_batches` 已经 checksum 失效、且 Job 内没有有效译文 cue 时，`plan_advance_steps` 的兜底分支此前仍返回 `await_agent_translation`。结果三条命令互指——`status` 说等回填，`xvt apply` 被 manifest 校验拒绝（没有任何响应能回填这次等待），`continue` 只发一次 waiting，用户没有出口。现在这种状态给出可推进的 `translate`（导入译文 Job 给出 `import_translation`），与 `recovery` 的原子分支同口径；`continue` 的执行侧同步要求 manifest 有效，否则重建批次并给出新的回填请求。

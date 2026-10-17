@@ -1061,7 +1061,11 @@ def _recovery_for_workflow(
         REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
         translation_progress_rebuildable,
     )
-    from xvt.workflow import burned_output_relink_recovery_available, plan_advance_steps
+    from xvt.workflow import (
+        burned_output_relink_recovery_available,
+        media_qa_failure,
+        plan_advance_steps,
+    )
 
     steps = plan_advance_steps(job, workflow)
     if not steps:
@@ -1211,7 +1215,7 @@ def _recovery_for_workflow(
     elif "render" in steps:
         reason = "译文 cue 已就绪，可以补齐字幕渲染产物后继续。"
     elif "burn" in steps:
-        reason = _burn_recovery_reason(job, valid_artifacts)
+        reason = _burn_recovery_reason(valid_artifacts, media_qa_blocker=media_qa_failure(job))
     else:
         reason = "存在未完成的工作流步骤，可以继续。"
 
@@ -1223,11 +1227,19 @@ def _recovery_for_workflow(
     )
 
 
-def _burn_recovery_reason(job: Job, valid_artifacts: dict[str, Path]) -> str:
-    """烧录未完成时的人类可读原因；媒体 QA 文案与历史 status 输出保持一致。"""
+def _burn_recovery_reason(valid_artifacts: dict[str, Path], *, media_qa_blocker: str | None) -> str:
+    """烧录未完成时的人类可读原因。
 
-    media_qa_status = job.stages[StageName.MEDIA_QA].status
-    if media_qa_status is not StageStatus.SUCCEEDED:
+    ``media_qa_blocker`` 由调用方用 ``workflow.media_qa_failure`` 算出，这里**不再**
+    自己重写 stage 判定（那是收敛前「媒体 QA 过了」的第四种口径）。
+
+    刻意只在 ``"stage"`` 这一个标签上分叉：本函数是文案排序，不是放行判定。报告
+    侧的三类失败（``missing`` / ``unreadable`` / ``status``）继续沿用下面的成品与
+    指纹文案——它们对用户更具体，而且 ``_burn_satisfied`` 早已独立地把这些状态判成
+    未完成，不存在误报完成的风险。要改这个排序属于用户可见行为变更，应单独决策。
+    """
+
+    if media_qa_blocker == "stage":
         return "烧录尚未通过媒体 QA，可以重新烧录并检查输出视频。"
     if "burned_video" not in valid_artifacts:
         return (

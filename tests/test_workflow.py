@@ -1,16 +1,19 @@
+import ast
 import json
 import os
 import tempfile
 import unittest
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from xvt.errors import UserInputError
+import xvt.workflow
+from xvt.errors import ExitCode, InternalError, UserInputError
 from xvt.events import EventType
 from xvt.job_store import create_job, get_job_directory, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
-from xvt.models import Artifact, StageName, StageStatus, Transcript, Word
+from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
     TranslationRunResult,
     apply_agent_semantic_review,
@@ -30,10 +33,13 @@ from xvt.pipeline import (
 )
 from xvt.pipeline.common import load_cues
 from xvt.process import CommandResult
+from xvt.qa import check_subtitles
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
+from xvt.subtitles import save_subtitles
 from xvt.translate import GlossaryTerm, SemanticIssue, TranslationPolicy
 from xvt.translation_provider import TranslationProviderError
 from xvt.workflow import (
+    _RELINK_MEDIA_QA_MESSAGES,
     WorkflowOptions,
     _burn_satisfied,
     _record_burn_fingerprint,
@@ -53,6 +59,103 @@ from xvt.workflow_config import (
     require_workflow_config,
     set_workflow_config,
 )
+
+# 下面几个 helper 是「打桩也必须产生真实副作用」的共享实现。
+# 历史上这批测试把 run_translation / apply_subtitle_translation / burn_translated_job
+# 打成「返回假路径、完全不碰 Job」的替身，然后断言 result.status == "completed"——
+# 于是「completed 对应一个真的完成了的 Job」这件事从来没有被验证过（REVIEW_FINDINGS
+# 的 F6 / O5）。桩只用来避开真实翻译 API 与 FFmpeg，落盘与登记必须照真实运行来。
+_SOURCE_SRT_TEXT = "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n"
+_SOURCE_CUE = Cue(1, 0, 2000, "Hello world.", source_language="en")
+_TRANSLATED_CUE = replace(_SOURCE_CUE, target_text="你好世界。", target_language="zh-CN")
+
+
+def _register_artifact(job: Job, kind: str, path: Path) -> None:
+    """登记（或替换）一个 checksum 有效的 artifact。"""
+
+    job.artifacts = [item for item in job.artifacts if item.kind != kind]
+    job.artifacts.append(Artifact(kind, str(path), file_checksum(path)))
+
+
+def _job_artifacts_directory(job: Job) -> Path:
+    directory = get_job_directory(job) / "artifacts"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _write_source_leg_artifacts(job_file: Path) -> None:
+    """落盘转写腿的真实产物（source_cues + source_srt）。
+
+    ``continue_workflow`` 在推进翻译/烧录之前要求这两者 checksum 有效，
+    否则会回去跑 resume；真实状态下它们由转写腿写出。
+    """
+
+    job = load_job(job_file)
+    directory = _job_artifacts_directory(job)
+    cues_path = directory / "source-cues.json"
+    cues_path.write_text(json.dumps([asdict(_SOURCE_CUE)], ensure_ascii=False), encoding="utf-8")
+    srt_path = directory / "source.srt"
+    srt_path.write_text(_SOURCE_SRT_TEXT, encoding="utf-8")
+    _register_artifact(job, "source_cues", cues_path)
+    _register_artifact(job, "source_srt", srt_path)
+    job.stages[StageName.SUBTITLE_QA].status = StageStatus.SUCCEEDED
+    save_job(job)
+
+
+def _complete_translation_artifacts(job_file: Path) -> tuple[Path, ...]:
+    """翻译桩的真实副作用：写出译文 cue、两份 SRT 与通过的译文 QA 报告并登记。
+
+    返回值与真实 ``run_translation`` / ``apply_subtitle_translation`` 一致
+    （用户可见的译文字幕路径）。
+    """
+
+    job = load_job(job_file)
+    directory = _job_artifacts_directory(job)
+    cues_path = directory / "translated-cues.json"
+    cues_path.write_text(
+        json.dumps([asdict(_TRANSLATED_CUE)], ensure_ascii=False), encoding="utf-8"
+    )
+    translated_srt = save_subtitles(
+        [_TRANSLATED_CUE], directory / "translated.srt", mode="translated"
+    )
+    bilingual_srt = save_subtitles([_TRANSLATED_CUE], directory / "bilingual.srt", mode="bilingual")
+    qa_path = directory / "qa-translated.json"
+    report = check_subtitles([_TRANSLATED_CUE], require_translation=True)
+    assert report.status == "pass", report.status
+    qa_path.write_text(json.dumps(asdict(report), ensure_ascii=False), encoding="utf-8")
+    for kind, path in (
+        ("translated_cues", cues_path),
+        ("translated_srt", translated_srt),
+        ("bilingual_srt", bilingual_srt),
+        ("translated_subtitle_qa", qa_path),
+    ):
+        _register_artifact(job, kind, path)
+    for stage in (StageName.TRANSLATE, StageName.SUBTITLE_QA, StageName.RENDER):
+        job.stages[stage].status = StageStatus.SUCCEEDED
+    save_job(job)
+    return (translated_srt, bilingual_srt)
+
+
+def _complete_burn_artifacts(job_file: Path, burned_path: Path) -> Path:
+    """烧录桩的真实副作用：写出成品、登记 artifact、写出通过的媒体 QA 报告。
+
+    真实 ``burn_translated_job`` 会在成功后把 BURN / MEDIA_QA 两个 stage 推到
+    succeeded 并登记 ``burned_video`` / ``media_qa``；桩必须造出同样的状态，
+    否则 ``_burn_satisfied`` 永远为假而测试却断言 completed。
+    """
+
+    burned_path.parent.mkdir(parents=True, exist_ok=True)
+    burned_path.write_bytes(b"burned-output")
+    job = load_job(job_file)
+    directory = _job_artifacts_directory(job)
+    media_qa_path = directory / "media-qa.json"
+    media_qa_path.write_text('{"status": "pass", "issues": []}\n', encoding="utf-8")
+    _register_artifact(job, "burned_video", burned_path)
+    _register_artifact(job, "media_qa", media_qa_path)
+    for stage in (StageName.BURN, StageName.MEDIA_QA):
+        job.stages[stage].status = StageStatus.SUCCEEDED
+    save_job(job)
+    return burned_path
 
 
 class WorkflowTest(unittest.TestCase):
@@ -353,28 +456,35 @@ class WorkflowTest(unittest.TestCase):
 
     def test_automatic_translation_and_burn_run_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            job = create_job("/tmp/video.mp4", directory)
+            media = Path(directory) / "video.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), directory)
             events = []
             burned_path = Path(directory) / "burned.mp4"
 
-            def fake_burn(job_file, **_kwargs):
-                # 模拟真实烧录：写出成品并在 Job 上登记 checksum 有效的 artifact。
-                burned_path.write_bytes(b"video")
-                burned_job = load_job(job_file)
-                burned_job.artifacts.append(
-                    Artifact("burned_video", str(burned_path), file_checksum(burned_path))
+            def fake_transcribe(_input, _output, *, workflow_config, **_kwargs):
+                # 真实 run_transcription 会把 workflow 目标固化进 Job；桩必须同样落盘，
+                # 否则 _record_burn_fingerprint 读不到持久化目标会静默跳过 proof 登记。
+                job.config["workflow"] = workflow_config
+                save_job(job)
+                return job
+
+            def fake_translate(job_file, **_kwargs):
+                # 翻译桩只避开真实 API：译文 cue / 两份 SRT / 译文 QA 报告照真实运行落盘并登记。
+                return TranslationRunResult(
+                    "openai-compatible", _complete_translation_artifacts(job_file)
                 )
-                save_job(burned_job)
-                return burned_path
+
+            def fake_burn(job_file, **_kwargs):
+                # 烧录桩只避开 FFmpeg：成品、媒体 QA 报告与 BURN/MEDIA_QA 两个 stage
+                # 都照真实运行推进，之后 _record_burn_fingerprint 走真实实现登记 v2 proof。
+                return _complete_burn_artifacts(job_file, burned_path)
 
             with (
-                patch("xvt.workflow.run_transcription", return_value=job) as transcribe,
+                patch("xvt.workflow.run_transcription", side_effect=fake_transcribe) as transcribe,
                 patch(
                     "xvt.workflow.run_translation",
-                    return_value=TranslationRunResult(
-                        "openai-compatible",
-                        (Path("/tmp/translated.srt"), Path("/tmp/bilingual.ass")),
-                    ),
+                    side_effect=fake_translate,
                 ) as translate,
                 patch(
                     "xvt.workflow.burn_translated_job",
@@ -383,7 +493,7 @@ class WorkflowTest(unittest.TestCase):
             ):
                 result = run_workflow(
                     WorkflowOptions(
-                        input="/tmp/video.mp4",
+                        input=str(media),
                         output=directory,
                         target_language="zh-CN",
                         translation_style="natural",
@@ -469,11 +579,22 @@ class WorkflowTest(unittest.TestCase):
     def test_external_translation_skips_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job("/tmp/video.mp4", directory)
+
+            def fake_transcribe(_input, _output, *, workflow_config, **_kwargs):
+                # 真实 run_transcription 会把 workflow 目标固化进 Job；桩同口径落盘。
+                job.config["workflow"] = workflow_config
+                save_job(job)
+                return job
+
+            def fake_apply(job_file, _subtitles, **_kwargs):
+                # 导入译文的真实副作用：译文 cue、两份 SRT 与译文 QA 报告全部落盘并登记。
+                return _complete_translation_artifacts(job_file)
+
             with (
-                patch("xvt.workflow.run_transcription", return_value=job),
+                patch("xvt.workflow.run_transcription", side_effect=fake_transcribe),
                 patch(
                     "xvt.workflow.apply_subtitle_translation",
-                    return_value=(Path("/tmp/bilingual.srt"),),
+                    side_effect=fake_apply,
                 ) as apply_translation,
                 patch("xvt.workflow.run_translation") as translate,
             ):
@@ -487,9 +608,9 @@ class WorkflowTest(unittest.TestCase):
                     )
                 )
 
-        self.assertEqual(result.status, "completed")
-        apply_translation.assert_called_once()
-        translate.assert_not_called()
+            self.assertEqual(result.status, "completed")
+            apply_translation.assert_called_once()
+            translate.assert_not_called()
 
     def test_burn_requires_target_language(self) -> None:
         with self.assertRaisesRegex(ValueError, "--burn requires --target-language"):
@@ -710,33 +831,24 @@ class WorkflowTest(unittest.TestCase):
                     }
                 },
             )
-            save_job(job)
-            with (
-                patch(
-                    "xvt.workflow.valid_artifact_path",
-                    side_effect=lambda _job, kind: (
-                        Path("/tmp/source-cues.json")
-                        if kind in {"source_cues", "source_srt"}
-                        else None
-                    ),
+            job_file = save_job(job)
+            _write_source_leg_artifacts(job_file)
+            with patch(
+                "xvt.workflow.run_translation",
+                side_effect=lambda job_file, **_kwargs: TranslationRunResult(
+                    "openai-compatible", _complete_translation_artifacts(job_file)
                 ),
-                patch(
-                    "xvt.workflow.run_translation",
-                    return_value=TranslationRunResult(
-                        "openai-compatible", (Path("/tmp/translated.srt"),)
-                    ),
-                ) as translate,
-            ):
-                result = continue_workflow(get_job_file(job))
+            ) as translate:
+                result = continue_workflow(job_file)
 
-        self.assertEqual(result.status, "completed")
-        self.assertEqual(
-            translate.call_args.kwargs["policy"],
-            TranslationPolicy(
-                style="natural",
-                terms=(GlossaryTerm("OpenAI", "OpenAI"),),
-            ),
-        )
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                translate.call_args.kwargs["policy"],
+                TranslationPolicy(
+                    style="natural",
+                    terms=(GlossaryTerm("OpenAI", "OpenAI"),),
+                ),
+            )
 
     def test_continue_defaults_translation_policy_for_old_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -745,32 +857,25 @@ class WorkflowTest(unittest.TestCase):
                 directory,
                 {"workflow": {"target_language": "zh-CN", "burn": False}},
             )
-            save_job(job)
-            with (
-                patch(
-                    "xvt.workflow.valid_artifact_path",
-                    side_effect=lambda _job, kind: (
-                        Path("/tmp/source-cues.json")
-                        if kind in {"source_cues", "source_srt"}
-                        else None
-                    ),
+            job_file = save_job(job)
+            _write_source_leg_artifacts(job_file)
+            with patch(
+                "xvt.workflow.run_translation",
+                side_effect=lambda job_file, **_kwargs: TranslationRunResult(
+                    "openai-compatible", _complete_translation_artifacts(job_file)
                 ),
-                patch(
-                    "xvt.workflow.run_translation",
-                    return_value=TranslationRunResult(
-                        "openai-compatible", (Path("/tmp/translated.srt"),)
-                    ),
-                ) as translate,
-            ):
-                result = continue_workflow(get_job_file(job))
+            ) as translate:
+                result = continue_workflow(job_file)
 
-        self.assertEqual(result.status, "completed")
-        self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy())
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy())
 
     def test_continue_burns_after_agent_translation_was_applied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / "video.mp4"
+            media.write_bytes(b"media")
             job = create_job(
-                "/tmp/video.mp4",
+                str(media),
                 directory,
                 {
                     "workflow": {
@@ -780,33 +885,25 @@ class WorkflowTest(unittest.TestCase):
                     }
                 },
             )
-            job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
-            save_job(job)
-            with (
-                patch("xvt.workflow.valid_artifact_path") as valid,
-                patch(
-                    "xvt.workflow.burn_translated_job",
-                    return_value=Path("/tmp/burned.mp4"),
-                ) as burn,
-                patch("xvt.workflow._record_burn_fingerprint"),
-            ):
-                valid.side_effect = lambda _job, kind: (
-                    Path(f"/tmp/{kind}.json")
-                    if kind
-                    in {
-                        "source_cues",
-                        "source_srt",
-                        "translated_cues",
-                        "translated_srt",
-                        "bilingual_srt",
-                        "translated_subtitle_qa",
-                    }
-                    else None
-                )
-                result = continue_workflow(get_job_file(job))
+            job_file = save_job(job)
+            _write_source_leg_artifacts(job_file)
+            _complete_translation_artifacts(job_file)
+            # 译文产物齐备，但 TRANSLATE 仍停在 Agent 回填前的 awaiting_input 残留态：
+            # continue 必须据产物判定译文已满足并直接推进烧录。
+            applied = load_job(job_file)
+            applied.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+            save_job(applied)
+            burned_path = Path(directory) / "burned.mp4"
+            with patch(
+                "xvt.workflow.burn_translated_job",
+                side_effect=lambda job_file, **_kwargs: _complete_burn_artifacts(
+                    job_file, burned_path
+                ),
+            ) as burn:
+                result = continue_workflow(job_file)
 
-        self.assertEqual(result.status, "completed")
-        burn.assert_called_once()
+            self.assertEqual(result.status, "completed")
+            burn.assert_called_once()
 
     def test_new_burn_layout_review_returns_waiting_without_completion_or_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -897,46 +994,115 @@ class WorkflowTest(unittest.TestCase):
 
     def test_continue_retries_burn_when_media_qa_failed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "video.mp4"
+            media.write_bytes(b"media")
             job = create_job(
-                "/tmp/video.mp4",
+                str(media),
                 directory,
-                {
-                    "workflow": {
-                        "target_language": "zh-CN",
-                        "burn": True,
-                        "burn_fingerprint": "current",
-                    }
-                },
+                {"workflow": {"target_language": "zh-CN", "burn": True}},
             )
-            job.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
-            save_job(job)
-            with (
-                patch("xvt.workflow.valid_artifact_path") as valid,
-                patch("xvt.workflow._burn_fingerprint", return_value="current"),
-                patch(
-                    "xvt.workflow.burn_translated_job",
-                    return_value=Path("/tmp/burned.mp4"),
-                ) as burn,
-                patch("xvt.workflow._record_burn_fingerprint"),
-            ):
-                valid.side_effect = lambda _job, kind: (
-                    Path(f"/tmp/{kind}")
-                    if kind
-                    in {
-                        "source_cues",
-                        "source_srt",
-                        "translated_cues",
-                        "translated_srt",
-                        "bilingual_srt",
-                        "translated_subtitle_qa",
-                        "burned_video",
-                    }
-                    else None
-                )
-                result = continue_workflow(get_job_file(job))
+            job_file = save_job(job)
+            _write_source_leg_artifacts(job_file)
+            _complete_translation_artifacts(job_file)
+            # 上一轮烧录的真实残留：成品与媒体 QA 报告都在，但 QA 判 failed 且 stage 为 failed。
+            stale_burned = root / "stale-burned.mp4"
+            stale_burned.write_bytes(b"stale-burned-output")
+            stale = load_job(job_file)
+            stale_media_qa = _job_artifacts_directory(stale) / "media-qa.json"
+            stale_media_qa.write_text('{"status": "failed", "issues": []}\n', encoding="utf-8")
+            _register_artifact(stale, "burned_video", stale_burned)
+            _register_artifact(stale, "media_qa", stale_media_qa)
+            stale.stages[StageName.BURN].status = StageStatus.SUCCEEDED
+            stale.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
+            save_job(stale)
+            # 登记 checksum 有效的 v2 proof：指纹是匹配的，唯一的未满足项是媒体 QA。
+            _record_burn_fingerprint(job_file)
 
-        self.assertEqual(result.status, "completed")
-        burn.assert_called_once()
+            burned_path = root / "burned.mp4"
+            with patch(
+                "xvt.workflow.burn_translated_job",
+                side_effect=lambda job_file, **_kwargs: _complete_burn_artifacts(
+                    job_file, burned_path
+                ),
+            ) as burn:
+                result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            burn.assert_called_once()
+
+    def _burnable_job(self, root: Path) -> Path:
+        """构造译文目标已满足、只剩烧录目标的端到端 Job（产物与 stage 均为真实状态）。"""
+
+        media = root / "video.mp4"
+        media.write_bytes(b"media")
+        job = create_job(
+            str(media),
+            root,
+            {"workflow": {"target_language": "zh-CN", "burn": True}},
+        )
+        job_file = save_job(job)
+        _write_source_leg_artifacts(job_file)
+        _complete_translation_artifacts(job_file)
+        return job_file
+
+    def test_completion_guard_rejects_planner_inconsistency(self) -> None:
+        """执行侧跑完烧录但产物没真正满足时必须 fail closed，不得发 workflow_completed。
+
+        这里注入的不一致正是 F6 那批桩制造的状态：烧录「成功」返回却没有推进媒体 QA。
+        守卫之前，``_advance_workflow`` 会照常发完成事件并返回 completed，而
+        ``status`` / ``batch-continue`` 的 planner 仍然列着 ``burn``。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._burnable_job(root)
+            config = require_workflow_config(load_job(job_file))
+            burned_path = root / "burned.mp4"
+            events = []
+
+            def incomplete_burn(job_file, **_kwargs):
+                burned_path.write_bytes(b"burned-output")
+                current = load_job(job_file)
+                _register_artifact(current, "burned_video", burned_path)
+                save_job(current)
+                return burned_path
+
+            with (
+                patch("xvt.workflow.burn_translated_job", side_effect=incomplete_burn),
+                self.assertRaises(InternalError) as caught,
+            ):
+                continue_workflow(job_file, event_sink=events.append)
+
+            self.assertIn("burn", str(caught.exception))
+            self.assertEqual(caught.exception.category, "workflow")
+            self.assertEqual(caught.exception.exit_code, ExitCode.WORKFLOW_ERROR)
+            types = [event.type for event in events]
+            self.assertNotIn("workflow_completed", types)
+            self.assertIn("workflow_failed", types)
+            self.assertEqual(plan_advance_steps(load_job(job_file), config), ("burn",))
+
+    def test_completion_guard_allows_consistent_completion(self) -> None:
+        """planner 与执行侧一致时守卫不得误伤：照常发 workflow_completed。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._burnable_job(root)
+            config = require_workflow_config(load_job(job_file))
+            burned_path = root / "burned.mp4"
+            events = []
+
+            with patch(
+                "xvt.workflow.burn_translated_job",
+                side_effect=lambda job_file, **_kwargs: _complete_burn_artifacts(
+                    job_file, burned_path
+                ),
+            ):
+                result = continue_workflow(job_file, event_sink=events.append)
+
+            self.assertEqual(result.status, "completed")
+            self.assertIn("workflow_completed", [event.type for event in events])
+            self.assertEqual(plan_advance_steps(load_job(job_file), config), ())
 
     def test_continue_renders_srt_from_cues_after_review_without_retranslating(self) -> None:
         """译文 QA needs_review 阻断后：acknowledge + continue 必须写出 SRT，且不重打翻译 API。"""
@@ -1182,10 +1348,13 @@ class WorkflowTest(unittest.TestCase):
                     burn.assert_not_called()
                     self.assertEqual(qa_path.read_bytes(), before_qa)
                     self.assertEqual(job_file.read_bytes(), before_job)
-                    with (
-                        patch("xvt.workflow.burn_translated_job") as workflow_burn,
-                        patch("xvt.workflow._record_burn_fingerprint"),
-                    ):
+                    burned_path = root / "workflow-burned.mp4"
+                    with patch(
+                        "xvt.workflow.burn_translated_job",
+                        side_effect=lambda job_file, **_kwargs: _complete_burn_artifacts(
+                            job_file, burned_path
+                        ),
+                    ) as workflow_burn:
                         result = continue_workflow(job_file)
                     self.assertEqual(result.status, "completed")
                     workflow_burn.assert_called_once()
@@ -1652,6 +1821,57 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             )
             fingerprint_path.write_text('{"fingerprint": "tampered"}\n', encoding="utf-8")
             self.assertFalse(_burn_satisfied(job, config))
+
+    def test_burn_not_satisfied_when_media_qa_blocks_a_valid_burned_output(self) -> None:
+        """成品与指纹都有效时，媒体 QA 的两道判定仍必须各自独立地否决「已完成」。
+
+        这两道判定（MEDIA_QA stage 必须 succeeded、媒体 QA 报告 status 必须 pass）
+        此前零覆盖：唯一相邻的 relink 测试都先删掉了烧录成品，``_burn_satisfied``
+        在第一道 ``burned_video`` 校验就早退了，媒体 QA 分支根本走不到。
+        放过的 bug 是「legacy Job 原子重烧后媒体 QA 失败，continue / status 判已完成」，
+        直接违反 AGENTS 不可破坏约束第 4 条。本测试不打任何桩。
+        """
+
+        for case in ("media_qa_stage", "media_qa_report_status"):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as directory:
+                    job_file, _burned, _candidate = self._relinkable_job(Path(directory))
+                    # 基线：成品存在、媒体 QA 通过、v2 proof 匹配 → 目标已满足。
+                    satisfied = load_job(job_file)
+                    config = WorkflowConfig.from_dict(satisfied.config["workflow"])
+                    self.assertTrue(_burn_satisfied(satisfied, config))
+                    self.assertEqual(plan_advance_steps(satisfied, config), ())
+
+                    blocked = load_job(job_file)
+                    media_qa_path = Path(
+                        next(
+                            artifact.path
+                            for artifact in blocked.artifacts
+                            if artifact.kind == "media_qa"
+                        )
+                    )
+                    if case == "media_qa_stage":
+                        # 报告仍是 pass，只有 stage 停在 failed（原子重烧后的真实残留）。
+                        blocked.stages[StageName.MEDIA_QA].status = StageStatus.FAILED
+                    else:
+                        # stage 仍是 succeeded，只有报告判定不是 pass；checksum 一并更新，
+                        # 否则会被「报告失效」这条更早的判定接走，测不到 status 比较。
+                        media_qa_path.write_text(
+                            '{"status": "failed", "issues": []}\n', encoding="utf-8"
+                        )
+                        blocked.artifacts = [
+                            Artifact("media_qa", str(media_qa_path), file_checksum(media_qa_path))
+                            if artifact.kind == "media_qa"
+                            else artifact
+                            for artifact in blocked.artifacts
+                        ]
+                    save_job(blocked)
+
+                    blocked = load_job(job_file)
+                    self.assertIsNotNone(valid_artifact_path(blocked, "burned_video"))
+                    self.assertIsNotNone(valid_artifact_path(blocked, "media_qa"))
+                    self.assertFalse(_burn_satisfied(blocked, config))
+                    self.assertEqual(plan_advance_steps(blocked, config), ("burn",))
 
     def test_relink_burned_output_restores_artifact_validity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2734,6 +2954,34 @@ class StaleAgentManifestPlanTest(unittest.TestCase):
         self.assertEqual(result.status, "awaiting_input")
         self.assertTrue(manifest_valid)
         self.assertEqual(steps, ("await_agent_translation",))
+
+
+class RelinkMediaQaMessageCoverageTest(unittest.TestCase):
+    """`media_qa_failure` 的每个标签都必须有对应的 relink 报错文案。
+
+    两者是「判定」与「文案」的分离：判定返回字符串标签，relink 侧按标签查表。
+    新增标签却忘了加文案时，用户拿到的是 ``KeyError`` 而不是可读报错，而标签类型
+    只是 ``str | None``，静态检查拦不住。这里用 ast 取 ``media_qa_failure`` 体内
+    return 的字面量，与文案表的键集合比对，把这条脱节钉住。
+    """
+
+    def test_every_failure_label_has_a_relink_message(self) -> None:
+        source = Path(xvt.workflow.__file__).read_text(encoding="utf-8")
+        function = next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == "media_qa_failure"
+        )
+        labels = {
+            node.value.value
+            for node in ast.walk(function)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+
+        self.assertTrue(labels, "没有从 media_qa_failure 解析出任何标签，守卫会空转")
+        self.assertEqual(labels, set(_RELINK_MEDIA_QA_MESSAGES))
 
 
 if __name__ == "__main__":
