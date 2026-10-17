@@ -16,7 +16,7 @@ from xvt.pipeline import (
 )
 from xvt.pipeline.revision import source_review_stem
 from xvt.recovery import file_checksum, valid_artifact_path
-from xvt.workflow import _source_selection_satisfied, continue_workflow
+from xvt.workflow import continue_workflow, source_selection_matches
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
@@ -152,7 +152,7 @@ class SourceReviewPipelineTest(unittest.TestCase):
             assert selection_path is not None
             selection = json.loads(selection_path.read_text(encoding="utf-8"))
             self.assertEqual(selection["selected_kind"], "human_reviewed")
-            self.assertTrue(_source_selection_satisfied(job))
+            self.assertTrue(source_selection_matches(job))
             revision_path = valid_artifact_path(job, "source_review_revision")
             assert revision_path is not None
             revision = json.loads(revision_path.read_text(encoding="utf-8"))
@@ -182,7 +182,7 @@ class SourceReviewPipelineTest(unittest.TestCase):
                     artifact.checksum = file_checksum(revision_path)
             save_job(job)
 
-            self.assertFalse(_source_selection_satisfied(load_job(job_file)))
+            self.assertFalse(source_selection_matches(load_job(job_file)))
 
     def test_stale_response_and_unknown_ids_do_not_change_job(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -426,7 +426,7 @@ class SourceReviewPipelineTest(unittest.TestCase):
             self.assertIsNotNone(valid_artifact_path(job, "source_review_revision"))
             self.assertIsNotNone(valid_artifact_path(job, "subtitle_qa"))
             self.assertIsNone(valid_artifact_path(job, "source_srt"))
-            self.assertTrue(_source_selection_satisfied(job))
+            self.assertTrue(source_selection_matches(job))
 
     def test_acknowledged_review_resumes_from_edited_source_cues(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

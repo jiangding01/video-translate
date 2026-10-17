@@ -69,11 +69,27 @@
 
 **本轮新发现的相邻缺口（未修）**：polished 原子 Job 在同一状态下，让路后会先命中「润色候选有效，可以重新执行原子翻译命令继续语义校对」那条 retryable 分支（它排在原子等待分支之前），推荐的 `translate --translation-quality polished` 同样会盖掉刚写入的 manifest。这是原子分支内部的判定顺序问题，不属于 qa_blocked 让路，需单独决策。
 
-### F5 `workflow.py` 逐字复制 pipeline 的 3 个函数 — ✅ 已核验，待修
+### F5 `workflow.py` 逐字复制 pipeline 的 3 个函数 — ✅ 已核验，**已修（本轮）**
 
 `workflow.py` 的 `_source_selection_satisfied` 与 `pipeline/transcription.py` 的 `_source_selection_matches` 逐行相同（仅调用名差异），另两处复制自 `pipeline/common.py`。违反 AGENTS「`workflow.py` 只负责编排，不应复制 pipeline 包的算法」。
 
-风险：以后给 `selected_kind` 加新分支只改一边，`continue` 与 `resume` 对「源是否满足」的判定分叉。修法：workflow 改为引用 pipeline（把源选择函数公有化 + re-export）。无测试桩阻碍。
+风险：以后给 `selected_kind` 加新分支只改一边，`continue` 与 `resume` 对「源是否满足」的判定分叉。
+
+**三处的最终定位**（清单原文只说「另两处复制自 `common.py`」，本轮逐字比对确认）：
+
+| workflow.py 的副本 | pipeline 的原件 | 差异 |
+| --- | --- | --- |
+| `_source_selection_satisfied` | `transcription._source_selection_matches` | 只差 helper 名（`_artifact_checksum` vs `artifact_checksum_for`）与 `"none"` vs `SourceCandidateKind.NONE`（`StrEnum`，相等） |
+| `_artifact_checksum` | `common.artifact_checksum_for`（即清单说的「`record_media_download_selection` 一带」，就在它上面一个函数） | 逐字相同 |
+| `_error_category` | `common.error_category` | 逐字相同 |
+
+已修：`transcription._source_selection_matches` 按 R1.4「跨模块 `_` 前缀符号公有化」的先例改名为 `source_selection_matches` 并加 docstring 说明它是源腿满足度的唯一实现；三个名字一并经 `pipeline/__init__` re-export；`workflow.py` 删掉三份副本改为引用。行为零变化（三份副本语义等价，`SourceCandidateKind` 是 `StrEnum`）。`tests/test_pipeline_imports.py` 的白名单**无需改动**：没有新增包内依赖边，`transcription → common` 本就在白名单里。
+
+测试桩：清单原文说「无测试桩阻碍」，不完全准确——`tests/test_pipeline_revision.py` 有一处**直接 import**（`from xvt.workflow import _source_selection_satisfied`，3 个调用点），不是 `patch()` 桩。已同步改名，仍从 `xvt.workflow` 导入（保留「这条判定确实是 workflow 在用」的覆盖），三条断言一字未改。
+
+**第四份副本（本轮一并收掉）**：`batch.py` 也自己写了一份 `_error_category`，与 `common.error_category` 逐字相同。清单 F5 只点名 `workflow.py`，但这是同一个缺陷隔一个文件——批处理自己算一遍 error category，哪天 `common.error_category` 改了分类规则，批处理条目的 `error.category` 就会和 Job 事件里的对不上，而两边都绿。已改为复用 pipeline 实现。改完全仓 `def _error_category` / `def _artifact_checksum` / `def _source_selection_satisfied` 零命中。
+
+守卫：新增 `tests/test_workflow.py::WorkflowReusesPipelineHelpersTest`，用 `assertIs` 把四个名字（含 `batch.error_category`）钉成 pipeline 的那一份对象。红先自证两种形态都红——① 名字在 `xvt.workflow` 上缺席（修复前的真实形态）→ 3 条全 `AttributeError`；② 有人重新在 `workflow.py` 里定义同名副本 → `assertIs` 失败。
 
 ### F6 烧录满足度 3+1 份口径，且两道媒体 QA 条件零测试覆盖 — ○ 已复现，**已修（本轮）**
 
@@ -105,9 +121,16 @@
 | relink 的四条媒体 QA 报错文案 | **刻意差异**（UX），按标签映射保留逐字措辞 |
 | `recovery._burn_recovery_reason` 的文案排序 | **刻意差异**：它是文案排序而非放行判定。报告侧三类失败（`missing` / `unreadable` / `status`）继续走「成品缺失 / 指纹失效」文案——对用户更具体，且 `_burn_satisfied` 早已独立判这些状态为未完成，不存在误报完成。改这个排序是用户可见行为变更（`tests/test_recovery.py` 的两条测试钉住了现文案），不塞进纯重构阶段 |
 
-### F7 人工修订预检的 error 级阻断无测试 — ○ 已复现，待修
+### F7 人工修订预检的 error 级阻断无测试 — ○ 已复现，**已修（本轮）**
 
-`pipeline/revision.py` 的 error 级阻断删掉后全量仍绿；现有测试只覆盖行宽阻断。放过的 bug：修订删掉术语表译名 → `glossary_violation`（error）→ `apply --check` 报 `valid: true`，正式 apply 落盘，违反「写入前重复预检」契约（下游 QA 门仍会拦烧录，但修订已经写进 Job）。补一条 glossary 用例即可。
+`pipeline/revision.py` 的 error 级阻断删掉后全量仍绿；现有测试只覆盖行宽阻断。放过的 bug：修订删掉术语表译名 → `glossary_violation`（error）→ `apply --check` 报 `valid: true`，正式 apply 落盘，违反「写入前重复预检」契约（下游 QA 门仍会拦烧录，但修订已经写进 Job）。
+
+已修：`tests/test_revision_preflight.py` 新增 `_glossary_response` 构造器与两条用例，全程走真实 QA、不打桩绕过判定——术语表经 `translation_policy` 落进 workflow 快照，`translation_qa_context` 把它读成 `required_terms`，由 `check_subtitles` 真实判出 `glossary_violation`：
+
+- `test_glossary_violation_blocks_preflight_and_formal_apply`：修订提交一条**短**译文（不触发任何行宽问题，所以唯一能让预检变红的就是 error 级那一支），断言 `valid: false`、blocker 只有 `glossary_violation` 且 `severity == "error"`、没有任何 blocker 的 message 以 `target line width ` 开头（否则这条测试证明不了 error 级分支还活着）、预检前后全目录 checksum 快照不变、正式 apply 抛 `no changes saved` 且不落 `translation_reviewed_cues`。
+- `test_glossary_compliant_revision_passes_preflight`：对照组，补回术语译名后放行，证明阻断不是「凡术语表就一律挡」。
+
+变异自证：删掉 `issue.severity == "error"` 那一支后全量 927 条里**恰好只有新增的那一条**变红。
 
 ### F8 签名参数脱敏名单不全 — ○ 已实测，**已修（本轮）**
 
@@ -137,7 +160,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O4 | `paths.py` 的覆盖保护只认已登记 artifact；纯音频 Job 执行 `burn --output <job.input 的路径>` 会被 `ffmpeg -y` 静默覆盖原始媒体 | **值得做**，几行；后果是用户数据丢失。保护集加入本地 `job.input` 与用户原始字幕路径 |
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | 可做，几行；落在协议快照的已知盲区（烧录链路）内 |
-| O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | 各约半小时 |
+| O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | **已修（本轮）**，见下方 O7 条目 |
 | O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | 部分值得做 |
 | O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | 值得做，分钟级 |
 | O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | 值得评估 |
@@ -161,6 +184,14 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 - **query 串一并拒绝**：它既可能携带签名凭据，又会被 `base_url.rstrip("/") + "/chat/completions"` 拼成无效端点（`https://host/v1?x=1/chat/completions`）。入口报错比留到请求时报 404 更清楚。Azure OpenAI 的 `?api-version=` 写法本来就在这条拼接下不可用，此改动只是把静默失败变成明确失败。
 
 测试：`tests/test_translation_provider.py` 新增 4 条——userinfo 在 `auto` / `openai-compatible` 两种 provider 下都被拒且消息不含凭据、query 串被拒、环境变量来源的 base_url 同样被校验、正常 base_url 仍能解析并保留 `rstrip("/")` 行为。
+
+### O7 三个守卫缺口 — **已修（本轮）**
+
+**O7a `AWAIT_STEPS` 是手抄清单**。新增 `tests/test_workflow.py::AwaitStepsCoverageTest`：ast 解析 `plan_advance_steps`，从各条 `return`（递归进元组）与 `steps.append(...)` 两条出路收集字符串字面量，凡以 `await_` 开头的都必须在 `workflow.AWAIT_STEPS` 里。**双向都核**——`AWAIT_STEPS` 的 docstring 本来就声称它是「planner 可能返回的全部等待步骤名」，所以反向也不许有死条目；另有一条非空断言防守卫空转。收 `append` 这条路是刻意的：只看 `return` 的话，把步骤名改成先 append 再 `return tuple(steps)` 就能绕过守卫。自证：给 planner 临时加 `return ("await_xxx",)` 与 `steps.append("await_appended")` 两种形态，守卫各自变红（验完删除）。
+
+**O7b 全仓无 subprocess / shell 守卫**。新增 `tests/test_subprocess_boundary.py`，四条 ast 守卫：① `src/xvt/` 下除 `process.py` 外不得 import `subprocess`；② 反向钉住 `process.py` 真的在用 `subprocess`（否则例外声明空转，守卫自己先烂掉）；③ 全仓**含 `process.py`** 不得出现 `shell=True` 关键字实参——参数数组是唯一执行形式，这条没有例外，`process.py` 的例外只针对 import；④ 不得调用 `os.system` / `os.popen`，它们只收 shell 字符串，只禁 `subprocess` 会把这条后门留着。用 ast 而非文本扫描，续行写法与注释/字符串字面量都影响不了判定；`setUp` 里有扫描文件数下限断言，防止扫描根指错后静默空过。自证：`doctor.py` 临时 `import subprocess`、`process.py` 的 `Popen` 临时加 `shell=True`、`doctor.py` 临时加 `os.system(...)`，三种变异各自只打红对应那一条（验完删除）。AGENTS 不可破坏约束 6 的措辞已同步写明这条守卫。
+
+**O7c `checksum=None → warn` 分支无测试**。清单的说法**属实，已独立复验**：把 `recovery.verify_artifact` 的 `"warn"` 改成 `"pass"`，全量 915 条 + 235 subtests 仍然全绿。新增 `tests/test_recovery.py::RecoveryTest::test_verify_job_warns_on_artifact_without_checksum`，除了钉住 verify 的三元结果（`warn` 不升级为 `fail`、`warning_count == 1`、message 与 `expected_checksum: null`），还钉住**下游后果**：`valid_artifact_path` 对这种 artifact 必须返回 `None`。后者才是真正的风险面——`verify_artifact` 同时是 `valid_artifact_path` 的判定来源，一旦退化成 `pass`，一个从未登记过内容 checksum 的文件就会被恢复链路当成有效产物复用，违反不可破坏约束 9。
 
 ## 观察（危害低，可不处理）
 
@@ -195,7 +226,10 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 1. ~~**正确性剩余**：F2 + F3 + F4 + O5。~~ F2 / F3 / F4 / O5 均已修（本轮）。
 2. ~~**持久化脱敏收口**：F1 + F8 + O3。~~ 三条均已修（本轮），约束 5 现在在 `job.json` 层成立（在 `set_stage` 边界统一脱敏）。AGENTS 约束 5 的措辞已同步。
 3. **N1 设计决策**：先定「确认是否绑定译文内容」，再动手。
-4. **烧录判定收敛与 fail-closed 补洞**：~~F6 + O5~~ + F7 + O7。F6 / O5 已修（本轮，四阶段：改桩 → 真实状态测试 → 口径收敛 → 终检守卫），剩 F7（人工修订预检的 error 级阻断无测试）与 O7（三个守卫缺口）。
-5. 之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。
+4. ~~**烧录判定收敛与 fail-closed 补洞**：F6 + O5 + F7 + O7。~~ 四条均已修：F6 / O5（上一轮，四阶段：改桩 → 真实状态测试 → 口径收敛 → 终检守卫），F7 / O7（本轮，与 F5 同一批「守卫与去重」）。
+5. ~~**去重**：F5。~~ 已修（本轮）。
+6. 之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。
+
+**剩余未处理**：N1（需设计决策）、F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1 / O2 / O4 / O6 / O8 / O9 / O10 / O11，以及「观察」与「未验证」两节。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

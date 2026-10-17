@@ -16,7 +16,13 @@
 from __future__ import annotations
 
 from xvt.pipeline.burnin import burn_translated_job, preview_translated_job
-from xvt.pipeline.common import inspect_input, interrupt_running_stage, is_subtitle_input
+from xvt.pipeline.common import (
+    artifact_checksum_for,
+    error_category,
+    inspect_input,
+    interrupt_running_stage,
+    is_subtitle_input,
+)
 from xvt.pipeline.polish import (
     agent_translation_polish_manifest_valid,
     apply_agent_translation_polish,
@@ -72,6 +78,7 @@ from xvt.pipeline.transcription import (
     run_remote_transcription,
     run_subtitle_transcription,
     run_transcription,
+    source_selection_matches,
 )
 from xvt.pipeline.translation import (
     REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
@@ -106,6 +113,7 @@ __all__ = [
     "agent_translation_polish_started",
     "agent_translation_polish_waiting",
     "apply_agent_translation",
+    "artifact_checksum_for",
     "apply_agent_semantic_review",
     "apply_agent_translation_polish",
     "apply_cue_retranslation",
@@ -120,6 +128,7 @@ __all__ = [
     "finalize_acknowledged_subtitle_review",
     "inspect_input",
     "ensure_translation_review_input",
+    "error_category",
     "interrupt_running_stage",
     "is_subtitle_input",
     "prepare_agent_translation",
@@ -151,6 +160,7 @@ __all__ = [
     "source_review_input_path",
     "source_review_stem",
     "source_review_supported",
+    "source_selection_matches",
     "source_suspect_cue_ids",
     "agent_semantic_review_waiting",
 ]

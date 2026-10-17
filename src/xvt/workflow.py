@@ -31,12 +31,14 @@ from xvt.pipeline import (
     agent_translation_polish_started,
     agent_translation_polish_waiting,
     apply_subtitle_translation,
+    artifact_checksum_for,
     burn_translated_job,
     complete_acknowledged_semantic_review,
     complete_agent_polished_outputs,
     complete_translated_outputs,
     cue_retranslation_waiting,
     ensure_semantic_review_inputs,
+    error_category,
     finalize_acknowledged_subtitle_review,
     is_subtitle_input,
     resume_job,
@@ -48,6 +50,7 @@ from xvt.pipeline import (
     semantic_review_approved,
     semantic_review_satisfied,
     semantic_review_waiting,
+    source_selection_matches,
     translation_polish_satisfied,
     translation_progress_rebuildable,
 )
@@ -225,54 +228,15 @@ class WorkflowResult:
     message: str | None = None
 
 
-def _error_category(error: Exception) -> str:
-    return getattr(error, "category", "workflow")
-
-
-def _artifact_checksum(job: Job, kind: str) -> str | None:
-    artifact = next((item for item in job.artifacts if item.kind == kind), None)
-    return artifact.checksum if artifact else None
-
-
-def _source_selection_satisfied(job: Job) -> bool:
-    path = valid_artifact_path(job, "source_selection")
-    source_checksum = _artifact_checksum(job, "source_cues")
-    if path is None or source_checksum is None:
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return False
-    if not isinstance(data, dict) or data.get("source_cues_checksum") != source_checksum:
-        return False
-    if data.get("selected_kind") == "human_reviewed":
-        revision_path = valid_artifact_path(job, "source_review_revision")
-        if revision_path is None:
-            return False
-        try:
-            revision = json.loads(revision_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return False
-        return (
-            isinstance(revision, dict)
-            and revision.get("reviewed_source_cues_checksum") == source_checksum
-        )
-    return (
-        data.get("candidate_kind") == "none"
-        or job.config.get("input_kind") == "subtitle"
-        or valid_artifact_path(job, "source_candidate_qa") is not None
-    )
-
-
 def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
-    translated_checksum = _artifact_checksum(job, "translated_cues")
+    translated_checksum = artifact_checksum_for(job, "translated_cues")
     if not translated_checksum:
         return None
 
     media_value = config.burn_media or job.input
     parsed = urlparse(str(media_value))
     if parsed.scheme in {"http", "https"} and parsed.hostname:
-        media_identity: object = _artifact_checksum(job, "source_video") or str(media_value)
+        media_identity: object = artifact_checksum_for(job, "source_video") or str(media_value)
     else:
         media_path = Path(str(media_value)).expanduser()
         if not media_path.is_file():
@@ -300,7 +264,7 @@ def _burn_source_media_checksum(job: Job, config: WorkflowConfig) -> str | None:
     parsed = urlparse(str(media_value))
     if parsed.scheme in {"http", "https"} and parsed.hostname:
         media_path = valid_artifact_path(job, "source_video")
-        return _artifact_checksum(job, "source_video") if media_path is not None else None
+        return artifact_checksum_for(job, "source_video") if media_path is not None else None
     media_path = Path(str(media_value)).expanduser()
     return file_checksum(media_path) if media_path.is_file() else None
 
@@ -1317,7 +1281,7 @@ def run_workflow(
                 create_event(
                     EventType.WORKFLOW_FAILED,
                     **job_event_fields(job_id, job_file),
-                    **error_event_fields(_error_category(error), str(error)),
+                    **error_event_fields(error_category(error), str(error)),
                 )
             )
         raise
@@ -1347,8 +1311,8 @@ def continue_workflow(
         # 被人工确认放行）：与缺 source_cues 一样先补齐转写腿再推进。
         source_cues = valid_artifact_path(job, "source_cues")
         source_srt = valid_artifact_path(job, "source_srt")
-        source_selection_missing = (
-            "source_strategy" in job.config and not _source_selection_satisfied(job)
+        source_selection_missing = "source_strategy" in job.config and not source_selection_matches(
+            job
         )
         if source_cues is None or source_srt is None or source_selection_missing:
             if source_cues is not None:
@@ -1385,7 +1349,7 @@ def continue_workflow(
                 create_event(
                     EventType.WORKFLOW_FAILED,
                     **job_event_fields(job.id, path),
-                    **error_event_fields(_error_category(error), str(error)),
+                    **error_event_fields(error_category(error), str(error)),
                 )
             )
         raise

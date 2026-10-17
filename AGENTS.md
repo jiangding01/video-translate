@@ -15,7 +15,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 3. 翻译模型只负责文本。媒体获取、分段、时间轴、QA、渲染和烧录必须由确定性代码完成。
 4. 字幕 QA 或媒体 QA 失败时，任务必须失败或等待人工处理，不能继续烧录或宣告完成。已知画幅的译文行宽以实际 ASS 字体、字号和描边测量为准；测量异常回退保守规则，确认绑定布局，不跨画幅或字体复用。人工译文 `apply --check` 必须只读，正式 apply 在写入前重复预检。
 5. API Key 只从环境变量读取。Cookie 内容、代理凭据、签名 URL、本地媒体和生成产物不得提交到仓库，也不得原样写入事件。翻译提供方的 Base URL 与模型可以固化进 Job，但只在首个批次成功后写回，且 `resolve_provider` 在确认一条 Base URL 真的会被用来发请求时拒绝带用户名密码或 query 串的地址（`InvalidURL` 消息不带 scheme，脱敏规则够不着它；配置不齐全时 `auto` 仍按契约降级，那条 Base URL 既不发请求也不落盘）；API Key 永不落盘。错误文本的脱敏在**边界**集中做，不靠调用方自觉：事件走 `create_event`，`job.json` 走 `pipeline.common.set_stage`（它在写 `record.error` 之前统一调用 `redact_text`，两条出口给出同一份文本）。新增持久化出口时要么接入既有边界，要么在新边界上补一道，不要在调用点逐处补 `redact_text`。
-6. 外部命令必须以参数数组执行，不拼接 shell 字符串。
+6. 外部命令必须以参数数组执行，不拼接 shell 字符串。`src/xvt/` 下只有 `process.py` 可以 import `subprocess`，全仓任何位置都不得出现 `shell=True`、`os.system` 或 `os.popen`。这条由 `tests/test_subprocess_boundary.py` 的 AST 守卫强制，不再只靠自觉。
 7. Job、batch manifest 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。烧录成品重新关联只能由 checksum 有效的 v2 proof 授权，proof 必须绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum；legacy fingerprint 不得绕过重烧。
 8. 每个 Job 当前只支持一个目标语言。不要在现有 schema 上隐式加入多目标语言。
 9. 产物有效性只认内容 checksum。size、mtime 等文件元数据只能用于**证伪**（与登记值不符即失效），不得用于**证实**有效；`cp -p`、`rsync -a` 和备份还原都会保留 mtime。
@@ -49,9 +49,9 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/paths.py` | 烧录/预览输出绝对路径与覆盖保护（源媒体、job 文件、已登记 artifact） |
 | `src/xvt/events.py` | JSONL 事件和通用 URL 脱敏 |
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
-| `tests/` | 与源码模块对应的单元和流程测试 |
+| `tests/` | 与源码模块对应的单元和流程测试；另有三类跨文件守卫：`test_pipeline_imports.py`（包内依赖方向）、`test_cli_command_tables.py`（CLI 命令表硬关系）、`test_subprocess_boundary.py`（不可破坏约束 6） |
 
-`workflow.py` 只负责编排，不应复制 `pipeline` 包的媒体或字幕算法。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。`pipeline` 包内依赖方向保持无环：`common ← review ← {transcription, translation, burnin}`，`common ← semantic_state ← {review, revision}`，`retranslate` 依赖 `translation`，`semantic` 依赖 `translation` 与 `{review, revision, semantic_state}`，`resegment` 只依赖 `common`，`burnin` 依赖 `common` 与 `review`（烧录/预览与 workflow 共用同一 QA 放行谓词），`polish` 依赖 `translation`，`revision` 依赖 `common` 与 `semantic_state`；新增子模块时不得引入反向依赖，公共入口一律经 `__init__` re-export。**包内已无函数级 import 环**：所有包内依赖都是模块顶层 import，`tests/test_pipeline_imports.py` 同时守卫顶层依赖边白名单与「函数体内不得出现 `from xvt.pipeline.*`」，需要共享只读状态时把它下移到叶子模块，而不是用惰性 import 规避循环。
+`workflow.py` 只负责编排，不应复制 `pipeline` 包的媒体或字幕算法；跨模块复用的判定一律把 pipeline 侧的私有名公有化并经 `pipeline/__init__` re-export，由 `tests/test_workflow.py::WorkflowReusesPipelineHelpersTest` 以对象身份钉住（当前为 `source_selection_matches` / `artifact_checksum_for` / `error_category`）。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。`pipeline` 包内依赖方向保持无环：`common ← review ← {transcription, translation, burnin}`，`common ← semantic_state ← {review, revision}`，`retranslate` 依赖 `translation`，`semantic` 依赖 `translation` 与 `{review, revision, semantic_state}`，`resegment` 只依赖 `common`，`burnin` 依赖 `common` 与 `review`（烧录/预览与 workflow 共用同一 QA 放行谓词），`polish` 依赖 `translation`，`revision` 依赖 `common` 与 `semantic_state`；新增子模块时不得引入反向依赖，公共入口一律经 `__init__` re-export。**包内已无函数级 import 环**：所有包内依赖都是模块顶层 import，`tests/test_pipeline_imports.py` 同时守卫顶层依赖边白名单与「函数体内不得出现 `from xvt.pipeline.*`」，需要共享只读状态时把它下移到叶子模块，而不是用惰性 import 规避循环。
 
 ## CLI 语义
 
@@ -66,7 +66,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 - `xvt prepare-source-review JOB --cue ID` / `apply-source-review-fixes JOB REVIEW` 显式修订源 cue 文本，保留 ID、时间轴、words 和 provenance，立即重跑源字幕 QA，并失效旧翻译及全部下游；导入译文工作流不支持。
 - `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
 - Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先回填再运行 `continue`。
-- `xvt apply JOB RESPONSE` 是统一回填入口：人工修订模板按 `task` 字段路由，人工修订 SRT 按固定文件名识别，Agent 响应按 Job 当前等待步骤路由。**路由不出来时报错而不猜测**，改用对应的显式 `apply-*` 命令（它们保留为稳定入口，语义零改动）。**新增等待步骤必须在 `cli._STEP_ROUTES` 与 `cli._UNROUTABLE_AWAIT_STEPS` 两张表之一里表态**，守卫测试强制。`--continue` 透传、源文修订拒绝该组合的理由与各场景推荐命令详见 [恢复与回填契约](docs/RECOVERY.md#xvt-apply-统一回填路由)。
+- `xvt apply JOB RESPONSE` 是统一回填入口：人工修订模板按 `task` 字段路由，人工修订 SRT 按固定文件名识别，Agent 响应按 Job 当前等待步骤路由。**路由不出来时报错而不猜测**，改用对应的显式 `apply-*` 命令（它们保留为稳定入口，语义零改动）。**新增等待步骤必须先登记进 `workflow.AWAIT_STEPS`，再在 `cli._STEP_ROUTES` 与 `cli._UNROUTABLE_AWAIT_STEPS` 两张表之一里表态**，守卫测试强制：`tests/test_workflow.py::AwaitStepsCoverageTest` 用 AST 比对 `plan_advance_steps` 实际产出的 `await_*` 与 `AWAIT_STEPS`，双向都不许有差集（漏登记会让 `recovery` 的让路判定与 `xvt apply` 的路由一起静默失效）。`--continue` 透传、源文修订拒绝该组合的理由与各场景推荐命令详见 [恢复与回填契约](docs/RECOVERY.md#xvt-apply-统一回填路由)。
 - `--translation-quality polished` 在润色候选后必须完成 Q6 语义校对；API 最多修复一次并复查，Agent 使用 `apply-semantic-review` 回填合并响应。仍有 review 问题时运行 `continue --acknowledge-translation-review`；确认不能绕过确定性字幕 QA。
 - `xvt polish-translation JOB` 为已有端到端 Job 显式补跑润色；API 模式逐批 checkpoint，Agent 模式必须先运行 `apply-polish-translation`，再由 `continue` 进入语义校对。
 - `xvt verify JOB` 重新计算 artifact checksum。恢复逻辑只能复用校验通过的文件。
