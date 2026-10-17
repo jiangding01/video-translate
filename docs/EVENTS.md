@@ -48,6 +48,8 @@
 | --- | --- | --- |
 | `steps` | string[] | 计划执行的步骤名列表，如 `["transcribe", "translate", "burn"]` |
 
+只有 `xvt run` 首跑会发这条事件。`continue` 不重发计划，只发带 `continuation=true` 的 `workflow_started`；它的剩余步骤看 `status` / `recovery_plan` 的 `advance_steps`。
+
 ### `workflow_waiting`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |

@@ -826,6 +826,63 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 ],
             )
 
+    def test_agent_one_shot_polished_job_rejects_polish_rerun_with_reason(self) -> None:
+        """Agent `translate_and_polish` Job 结构上就没有 draft，不是 checkpoint 失效。
+
+        这类 Job 的润色在初译那一步就做完了，永远不会写
+        `translation-draft-cues.json`，所以「补跑 Q5a 润色」这条路对它根本不适用。
+        报错必须说清这一点，而不是复用「checkpoint 失效、需要恢复草稿」的文案。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            set_workflow_config(
+                job,
+                WorkflowConfig(
+                    target_language="zh-CN",
+                    provider="agent",
+                    batch_size=1,
+                    translation_quality="polished",
+                ),
+            )
+            save_job(job)
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                translation_quality="polished",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            response = root / "response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 1, "text": "你好。"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+            self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
+
+            with self.assertRaises(ValueError) as caught:
+                run_translation_polish(job_file)
+
+            message = str(caught.exception)
+            self.assertIn("translate_and_polish", message)
+            self.assertIn("translation-draft-cues.json", message)
+            self.assertNotIn("no valid translation draft checkpoint", message)
+            # Job 不被这次拒绝改写：仍是一个译文目标已满足的 polished Job。
+            self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
+
     def test_provider_override_reruns_completed_polish_from_original_draft(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

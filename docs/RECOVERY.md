@@ -79,6 +79,8 @@
 
 遗留情形：用户在一个**已满足**的 polished Job 上显式重开 `polish-translation` 或语义校对的 Agent 等待时，计划仍会是空的（`status` 报 complete）。它不是本轮修复的路径，也没有已知的 E2E 复现；真要修就按第 2 条同样补一条满足度之前的早退，并同步更新上面那张表态表。
 
+相邻但**不同**的一种情形已经有出口：Agent `task=translate_and_polish` 的一次成型 Job 结构上就没有 `translation-draft-cues.json`，`polish-translation` 对它根本开不起来——`pipeline.polish._prepare_draft` 复用 `agent_translation_polish_started` 识别这类 Job，以退出码 2 明确拒绝并说明「润色在初译那一步就完成了」，不再和「当前目标已完成」的恢复建议拼成一句自相矛盾的话。「draft 曾存在但 checksum 失效」仍走原来那条「需要恢复原始译文草稿」的引导，两种情形不共用文案。
+
 ### 宣告完成前的终检守卫
 
 `_advance_workflow` 在发 `workflow_completed` **之前**重新跑一次 `plan_advance_steps`，不为空就抛 `InternalError`（`category="workflow"`，退出码 4），消息列出剩余步骤。执行侧与 planner 对同一份 Job 状态给出相反结论属于内部不一致：`status` 会说还差一步而 `continue` 说已完成，`batch-continue` 更会把条目记成完成，用户不会再回来看它。守卫刻意 fail closed，不降级成警告。

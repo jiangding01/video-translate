@@ -21,7 +21,11 @@ from xvt.pipeline.common import (
     set_stage,
     write_json,
 )
-from xvt.pipeline.translation import TranslationRunResult, run_provider_batches
+from xvt.pipeline.translation import (
+    TranslationRunResult,
+    agent_translation_polish_started,
+    run_provider_batches,
+)
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
     SEMANTIC_GROUPING_VERSION,
@@ -41,6 +45,16 @@ from xvt.workflow_config import (
     get_workflow_config,
     require_workflow_config,
     set_workflow_config,
+)
+
+# Agent 的 `translate_and_polish` 一次成型：初译与润色在同一次回填里完成，Job 里
+# 从来不会出现 `translation-draft-cues.json`。这类 Job 缺 draft 不是「checkpoint 失效、
+# 需要恢复草稿」，而是「补跑 Q5a 润色这条路对它结构上不适用」——两种情形必须给出不同
+# 的报错，否则用户照着「恢复草稿」的提示折腾一个根本没有草稿的 Job。
+AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE = (
+    "this job uses the Agent translate_and_polish manifest, which produces the polished "
+    "translation inside the translate step and never writes translation-draft-cues.json; "
+    "polish-translation does not apply to it — run xvt status JOB to see the remaining steps"
 )
 
 
@@ -122,6 +136,9 @@ def _prepare_draft(
     existing = valid_artifact_path(job, "translation_draft_cues")
     if config.translation_quality == "polished":
         if existing is None:
+            # 复用 planner / recovery 已有的那条「Agent 一次成型」判定，不另造谓词。
+            if agent_translation_polish_started(job):
+                raise ValueError(AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE)
             raise ValueError("polished workflow has no valid translation draft checkpoint")
         identity_changed = (
             config.provider,
