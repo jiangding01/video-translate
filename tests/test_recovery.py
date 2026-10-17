@@ -712,6 +712,64 @@ class RecoveryTest(unittest.TestCase):
         self.assertIsNone(plan.primary_command)
         self.assertEqual(plan.advance_steps, ("repair_polish_draft",))
 
+    def _invalid_polish_draft_job(self, root: Path, *, with_translated_srt: bool):
+        """`repair_polish_draft` 的 manual_fix 骨架；可选挂一份 checksum 有效的译文字幕。"""
+
+        job = create_job("/tmp/input.mp4", root)
+        job.config["workflow"] = {
+            "target_language": "zh-CN",
+            "translation_quality": "polished",
+            "provider": "agent",
+        }
+        self._add_artifact(job, root, "source_cues")
+        draft = self._add_artifact(job, root, "translation_draft_cues")
+        self._add_artifact(job, root, "translation_polish_batches")
+        if with_translated_srt:
+            self._add_artifact(job, root, "translated_srt", content="1\n")
+        draft.write_text("corrupt", encoding="utf-8")
+        return save_job(job), draft
+
+    def test_repair_polish_draft_offers_import_translation_with_valid_subtitle(self) -> None:
+        """Job 内有 checksum 有效的译文字幕时，manual_fix 必须给出确切的重新导入命令。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _draft = self._invalid_polish_draft_job(root, with_translated_srt=True)
+            translated_srt = root / "translated_srt.json"
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertEqual(plan.advance_steps, ("repair_polish_draft",))
+        self.assertEqual(
+            plan.primary_command,
+            "xvt import-translation "
+            f"{shlex.quote(str(job_file))} {shlex.quote(str(translated_srt))} "
+            "--target-language zh-CN",
+        )
+        expected_alternative = (
+            f"xvt translate {shlex.quote(str(job_file))} --target-language zh-CN --provider agent"
+        )
+        self.assertEqual(plan.alternative_commands, (expected_alternative,))
+        self.assertIn("重跑", plan.reason)
+
+    def test_repair_polish_draft_without_subtitle_names_the_missing_draft_path(self) -> None:
+        """没有可复用字幕时仍不推荐命令，但必须点名那个缺失/已变化的草稿文件。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, draft = self._invalid_polish_draft_job(root, with_translated_srt=False)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIsNone(plan.primary_command)
+        self.assertIn(str(draft), plan.reason)
+        expected_alternative = (
+            f"xvt translate {shlex.quote(str(job_file))} --target-language zh-CN --provider agent"
+        )
+        self.assertEqual(plan.alternative_commands, (expected_alternative,))
+
     def test_recovery_plan_workflow_translate_exposes_advance_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

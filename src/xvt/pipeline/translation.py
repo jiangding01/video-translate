@@ -755,9 +755,30 @@ def complete_agent_polished_outputs(
     *,
     event_sink: EventSink | None = None,
 ) -> tuple[Path, ...]:
+    """一次成型 ``translate_and_polish`` 的收尾：润色译文直接来自单次 Agent 响应。
+
+    这条路径**从不写** ``translation-draft-cues.json``——初译与润色在同一次回填里
+    完成，``translation_polished_cues`` 派生自 ``source_cues`` 与那份响应，不派生自
+    任何草稿。因此 Job 里残留的 ``translation_draft_cues`` 登记（只可能来自此前某一
+    轮 Q5a 润色）已经不属于 Job 的当前状态：它一路挂到 ``completed``，让 ``status``
+    报 complete 并推荐 ``xvt verify``，而 ``verify`` 必然以「artifact file is missing」
+    失败（完成标准：Job、stage、artifact、checksum 和事件能够解释任务当前状态）。
+
+    摘记录沿用既有的「按 kind 过滤 ``job.artifacts``」失效机制，不另造写法；只摘这
+    一条，**不**用 ``downstream_of(TRANSLATION_DRAFT_CUES)``——那个闭包包含本函数
+    刚刚产出的 ``translation_polished_cues``。恢复依据（约束 7）不受影响：planner 的
+    polished 腿对一次成型 Job 走 ``agent_translation_polish_core_satisfied`` /
+    ``agent_translation_polish_started``（两者都只看 manifest 与响应，不看草稿），
+    ``polish-translation`` 本来就以 ``AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE`` 拒绝这
+    类 Job，``translation_progress`` 等 checkpoint 记录原样保留。物理文件（若还在）
+    不删，只是不再被登记为本 Job 的产物。
+    """
+
     job = load_job(job_file)
     expected = _agent_polished_cues(job)
     artifacts_directory = get_job_directory(job) / "artifacts"
+    stale_draft = {ArtifactKind.TRANSLATION_DRAFT_CUES}
+    job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in stale_draft]
     polished_path = valid_artifact_path(job, "translation_polished_cues")
     if polished_path is None or load_cues(polished_path) != expected:
         invalidated = downstream_of(ArtifactKind.TRANSLATION_POLISHED_CUES)

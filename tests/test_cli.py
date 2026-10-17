@@ -37,6 +37,7 @@ from xvt.pipeline import (
     TranslationRunResult,
     apply_agent_semantic_review,
     apply_agent_translation,
+    apply_agent_translation_polish,
     apply_cue_retranslation,
     prepare_agent_semantic_review,
     prepare_agent_translation,
@@ -51,8 +52,13 @@ from xvt.pipeline.revision import (
     translation_review_stem,
 )
 from xvt.process import CommandCancelled
-from xvt.recovery import file_checksum, valid_artifact_path
-from xvt.workflow import AWAIT_STEPS, WorkflowResult, _record_burn_fingerprint
+from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
+from xvt.workflow import (
+    AWAIT_STEPS,
+    WorkflowResult,
+    _record_burn_fingerprint,
+    plan_advance_steps,
+)
 from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
@@ -635,6 +641,161 @@ class CliTest(unittest.TestCase):
             encoding="utf-8",
         )
         apply_agent_semantic_review(job_file, response)
+
+    def _apply_agent_polish(self, job_file: Path, root: Path, text: str) -> None:
+        """回填一次 Agent 润色响应（fingerprint 取自当前 manifest，不在测试里复刻计算）。"""
+
+        manifest_path = valid_artifact_path(load_job(job_file), "translation_polish_batches")
+        self.assertIsNotNone(manifest_path)
+        assert manifest_path is not None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        response = root / f"polish-{manifest['fingerprint'][:12]}.json"
+        response.write_text(
+            json.dumps(
+                {"fingerprint": manifest["fingerprint"], "items": [{"id": 1, "text": text}]}
+            ),
+            encoding="utf-8",
+        )
+        apply_agent_translation_polish(job_file, response)
+
+    def _completed_agent_polished_job(self, root: Path) -> Path:
+        """真实跑完的 polished + Agent Job：初译 → 润色 → 语义校对 → completed。
+
+        与 `_agent_one_shot_polished_job` 的差别在于它**经过** `translation-draft-cues.json`，
+        所以可以用来构造「草稿丢失但最终译文仍在」的恢复状态。全程零网络零模型：
+        provider 是 agent，每一步都照真实路径落盘产物、登记 artifact、推进 stage。
+        """
+
+        job_file = self._standard_agent_translated_job(root)
+        run_translation_polish(job_file, provider="agent")
+        self._apply_agent_polish(job_file, root, "译文一（润色）")
+        self._complete_agent_semantic_review(job_file, root)
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertEqual(main(["continue", str(job_file)]), 0)
+        job = load_job(job_file)
+        config = WorkflowConfig.from_dict(job.config["workflow"])
+        self.assertEqual(plan_advance_steps(job, config), ())
+        return job_file
+
+    def test_missing_polish_draft_recovery_command_drives_job_to_completion(self) -> None:
+        """`repair_polish_draft` 的 manual_fix 必须给出真能推进的出口。
+
+        构造：跑完的 polished + Agent Job 删掉 `translation-draft-cues.json`
+        （一个文件，不碰别的）。此时 `translated.srt` 仍 checksum 有效，
+        `translation_progress` 在 Agent 模式下永远不可零成本重建，于是落到
+        manual_fix。此前该分支 `primary_command=None` / `alternative_commands=[]`，
+        人类可读输出只有一句「after repairs 再看 status」，对用户是纯死路。
+
+        断言不止于命令字符串：照恢复计划**推荐的那条命令**原样执行，再按既有
+        Agent 协议把 Job 驱动回 completed，并要求 verify 全绿。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._completed_agent_polished_job(root)
+            job = load_job(job_file)
+            draft = valid_artifact_path(job, "translation_draft_cues")
+            translated_srt = valid_artifact_path(job, "translated_srt")
+            self.assertIsNotNone(draft)
+            self.assertIsNotNone(translated_srt)
+            assert draft is not None and translated_srt is not None
+            draft.unlink()
+
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.advance_steps, ("repair_polish_draft",))
+            self.assertEqual(plan.category, "manual_fix")
+            primary = plan.primary_command or ""
+            self.assertIn("import-translation", primary)
+            # 必须是 Job 内那条 checksum 有效字幕的确切路径，不是「通常还在」的猜测。
+            self.assertIn(shlex.quote(str(translated_srt)), primary)
+            self.assertTrue(
+                any("translate" in command for command in plan.alternative_commands),
+                plan.alternative_commands,
+            )
+            self.assertNotIn("xvt continue", primary)
+            self.assertFalse(
+                any("xvt continue" in command for command in plan.alternative_commands),
+                plan.alternative_commands,
+            )
+
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(main(shlex.split(primary)[1:]), 0)
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+            self._apply_agent_polish(job_file, root, "译文一（重新润色）")
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+            self._complete_agent_semantic_review(job_file, root)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+
+            job = load_job(job_file)
+            config = WorkflowConfig.from_dict(job.config["workflow"])
+            self.assertEqual(plan_advance_steps(job, config), ())
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+            self.assertEqual(verify_job(job_file)["status"], "pass")
+
+    def test_one_shot_translate_drops_dead_draft_record_so_verify_passes(self) -> None:
+        """一次成型 `translate_and_polish` 收尾后不得留下指向不存在文件的 artifact 记录。
+
+        另一条出口是整轮重译：它把 manifest 重写成 `translate_and_polish`，译文直接
+        由单次响应产出，从不写 `translation-draft-cues.json`。此前那条已失效的
+        `translation_draft_cues` 记录一直挂到 completed，于是 `status` 报 complete
+        并推荐 `xvt verify`，而 `verify` 必然以 `artifact file is missing` 失败。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._completed_agent_polished_job(root)
+            draft = valid_artifact_path(load_job(job_file), "translation_draft_cues")
+            self.assertIsNotNone(draft)
+            assert draft is not None
+            draft.unlink()
+
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "translate",
+                            str(job_file),
+                            "--target-language",
+                            "zh-CN",
+                            "--provider",
+                            "agent",
+                        ]
+                    ),
+                    0,
+                )
+            manifest_path = valid_artifact_path(load_job(job_file), "translation_batches")
+            self.assertIsNotNone(manifest_path)
+            assert manifest_path is not None
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["task"], "translate_and_polish")
+            response = root / "one-shot-response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": manifest["fingerprint"],
+                        "items": [{"id": 1, "text": "译文一（一次成型）"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_agent_translation(job_file, response, target_language="zh-CN")
+            self.assertNotIn(
+                "translation_draft_cues",
+                {artifact.kind for artifact in load_job(job_file).artifacts},
+            )
+            self._complete_agent_semantic_review(job_file, root)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "complete")
+            self.assertIn("verify", plan.primary_command or "")
+            # status 推荐的那条 verify 必须真的通过，而不是必然 fail。
+            self.assertEqual(verify_job(job_file)["status"], "pass")
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(shlex.split(plan.primary_command or "")[1:]), 0)
 
     def test_polish_translation_agent_wait_prints_next_command(self) -> None:
         """润色落到 Agent 等待时必须直接给出下一步命令。
