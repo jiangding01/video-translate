@@ -1785,6 +1785,10 @@ def _cmd_polish_translation(arguments: argparse.Namespace) -> int:
         print(f"mode: {result.mode}")
         for path in result.paths:
             print(path)
+        if result.mode == "agent":
+            # 润色落到 Agent 等待时也要给出下一步命令（`apply-polish-translation` →
+            # `continue`），与 run / continue 的等待出口同一套恢复导航，不另造文案。
+            _print_recovery_navigation(arguments.job_file)
     return 0
 
 

@@ -305,6 +305,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 - yt-dlp 的 `-o` 模板不转义 output root 里的 `%`（元数据展开可能写到 Job 目录外，事后检查只报错不清理）。
 - `relink` 在源媒体缺失时误报 "fingerprint is stale"。
 - `repair_polish_draft` 的 `manual_fix` 没有给出可执行命令（依赖 F2 修复后补）。
+- **○ 已复现（polished 真实 E2E 验收）：`xvt apply JOB RESPONSE --continue` 在一条命令内把译文 QA 与渲染做了两遍。** 语义收尾先产出一次完整的译文 QA + 渲染产物，紧接着的 `continue` 腿又从同一份 cue 重算一次，结果逐字相同、Job 状态正确，纯属重复做功（纯字幕 Job 上只是几十毫秒，长片 + 已知画幅的 libass 行宽测量会明显变贵）。**本轮刻意未修**：要动语义收尾与 `continue` 腿的衔接（谁负责渲染、谁只负责推进），风险大于收益，需要单独立项并补「收尾产物被 `continue` 复用而不重算」的测试。
 - `translation.py` 的 `agent_translation_polish_*` 与 `polish.py` 的同名前缀谓词含义相反，建议改名 `agent_translate_and_polish_*`。
 - README 用法块漏了 `--fail-on-waiting`。
 

@@ -35,8 +35,10 @@ from xvt.pipeline import (
     RebuildSourceResult,
     ResegmentationResult,
     TranslationRunResult,
+    apply_agent_semantic_review,
     apply_agent_translation,
     apply_cue_retranslation,
+    prepare_agent_semantic_review,
     prepare_agent_translation,
     retranslate_cues,
     run_subtitle_transcription,
@@ -545,6 +547,159 @@ class CliTest(unittest.TestCase):
         self.assertIsNone(polish.call_args.kwargs["provider"])
         self.assertIsNone(polish.call_args.kwargs["batch_size"])
         self.assertIn("mode: agent", output.getvalue())
+
+    def _standard_agent_translated_job(self, root: Path) -> Path:
+        """端到端 standard Job：源字幕 + 一轮 Agent 初译已回填，可补跑润色。"""
+
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        job_file = get_job_file(job)
+        set_workflow_config(
+            job,
+            WorkflowConfig(target_language="zh-CN", provider="agent", batch_size=1),
+        )
+        save_job(job)
+        prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+            await_input=False,
+        )
+        apply_agent_translation(
+            job_file,
+            self._write_response(str(root), {"items": [{"id": 1, "text": "译文一"}]}),
+            target_language="zh-CN",
+        )
+        return job_file
+
+    def _agent_one_shot_polished_job(self, root: Path) -> Path:
+        """端到端 polished + Agent Job：`translate_and_polish` 一次成型，结构上没有 draft。"""
+
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        job_file = get_job_file(job)
+        set_workflow_config(
+            job,
+            WorkflowConfig(
+                target_language="zh-CN",
+                provider="agent",
+                batch_size=1,
+                translation_quality="polished",
+            ),
+        )
+        save_job(job)
+        manifest_path = prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+            translation_quality="polished",
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["task"], "translate_and_polish")
+        response = root / "polished-response.json"
+        response.write_text(
+            json.dumps(
+                {
+                    "fingerprint": manifest["fingerprint"],
+                    "items": [{"id": 1, "text": "你好。"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        apply_agent_translation(job_file, response, target_language="zh-CN")
+        return job_file
+
+    def _complete_agent_semantic_review(self, job_file: Path, root: Path) -> None:
+        manifest_path = prepare_agent_semantic_review(job_file)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        response = root / "semantic-response.json"
+        response.write_text(
+            json.dumps(
+                {
+                    "fingerprint": manifest["fingerprint"],
+                    "initial_results": [
+                        {"batch": batch["id"], "issues": []} for batch in manifest["batches"]
+                    ],
+                    "repair_results": [],
+                    "final_results": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        apply_agent_semantic_review(job_file, response)
+
+    def test_polish_translation_agent_wait_prints_next_command(self) -> None:
+        """润色落到 Agent 等待时必须直接给出下一步命令。
+
+        `run` / `continue` 的等待出口都把 `apply-*` 命令拼好了，这条命令此前只打印
+        `mode: agent` 与 manifest 路径，用户得再跑一次 `xvt status` 才知道下一步。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._standard_agent_translated_job(root)
+            output = StringIO()
+
+            with redirect_stdout(output):
+                return_code = main(["polish-translation", str(job_file)])
+
+            printed = output.getvalue()
+
+        self.assertEqual(return_code, 0)
+        self.assertIn("mode: agent", printed)
+        self.assertIn(f"xvt apply-polish-translation {shlex.quote(str(job_file))}", printed)
+
+    def test_polish_translation_keeps_non_waiting_output_unchanged(self) -> None:
+        """非等待态（reused / API）不该被等待态导航污染。"""
+
+        output = StringIO()
+        result = TranslationRunResult("reused", (Path("/tmp/translated.srt"),))
+        with (
+            patch("xvt.cli.run_translation_polish", return_value=result),
+            redirect_stdout(output),
+        ):
+            return_code = main(["polish-translation", "/tmp/job.json"])
+
+        printed = output.getvalue()
+        self.assertEqual(return_code, 0)
+        self.assertEqual(printed, "mode: reused\n/tmp/translated.srt\n")
+
+    def test_polish_translation_on_agent_one_shot_job_explains_unsupported(self) -> None:
+        """Agent 一次成型的 polished Job 上补跑润色：报错要说清这类 Job 不适用。
+
+        旧行为是「polished workflow has no valid translation draft checkpoint」+
+        「恢复建议：当前目标已完成」两句拼在一起，读着互相打架，而真正的原因
+        （`translate_and_polish` 从不写 `translation-draft-cues.json`）一句没说。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._agent_one_shot_polished_job(root)
+            self._complete_agent_semantic_review(job_file, root)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+            errors = StringIO()
+
+            with redirect_stdout(StringIO()), redirect_stderr(errors):
+                return_code = main(["polish-translation", str(job_file)])
+
+            printed = errors.getvalue()
+
+        self.assertEqual(return_code, ExitCode.USER_ERROR)
+        self.assertIn("translate_and_polish", printed)
+        self.assertIn("translation-draft-cues.json", printed)
+        self.assertNotIn("no valid translation draft checkpoint", printed)
+        # 复现报告里的那一对：报错与「当前目标已完成」并排出现。修好报错之后这两句
+        # 互相印证（这条路不适用 + 目标确实已完成），不再读着像自相矛盾。
+        self.assertIn("当前目标已完成", printed)
 
     def test_apply_polish_translation_forwards_response(self) -> None:
         paths = (Path("/tmp/translated.srt"), Path("/tmp/bilingual.srt"))

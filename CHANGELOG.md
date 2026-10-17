@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`polish-translation` 落到 Agent 等待时直接给出下一步命令。** 此前它只打印 `mode: agent` 和 manifest 路径，用户得再跑一次 `xvt status` 才知道要回填 `apply-polish-translation`——而 `run` / `continue` 的等待出口早就把命令拼好了。现在这条命令复用同一套恢复导航，等待态打印可直接复制执行的 `apply-polish-translation` 与 `continue`。非等待态（`reused` / API 模式）的输出一字未改，`--events-jsonl` 的事件流也不变。
+
+### Fixed
+
+- **Agent 一次成型的 `polished` Job 上补跑润色，报错不再和恢复建议自相矛盾。** `task=translate_and_polish` 的 manifest 把初译与润色合在同一次回填里完成，这类 Job 从来不写 `translation-draft-cues.json`，所以 `xvt polish-translation` 对它结构上就不适用。此前它报「polished workflow has no valid translation draft checkpoint」，紧跟着的恢复建议却说「当前目标已完成，可以校验已有产物」，两句拼在一起读着互相打架，而真正的原因一句没说。现在这类 Job 的报错明确说明「润色在初译那一步就完成了，`polish-translation` 不适用」，并指向 `xvt status`；「草稿曾经存在但 checksum 失效」仍是原来那条「需要恢复草稿」的引导，两种情形不再共用一句话。退出码仍为 2，Job 不被这次拒绝改写。
+
+### Documentation
+
+- README 的 Q5a 补跑一节明确排除 Agent `polished` Job：既不能用 `polish-translation` 补跑润色，也不存在「草稿失效需要恢复」这件事（要改译文走 `retranslate-cues` 或重跑一轮完整翻译）。
+- README 事件章节此前把 `workflow_planned` 写成端到端链路通用事件。实现上它**只有 `run` 首跑会发**，`continue` 只发带 `continuation=true` 的 `workflow_started`，剩余步骤由 `advance_steps` 给出。这是刻意设计，改的是文档措辞；`docs/EVENTS.md` 同步补注。
+
 ## [0.2.0] - 2026-10-17
 
 本版把 0.1.1 之后累积的全部工作一次发出，重点是**正确性与安全边界**，不是新功能：译文二次回填不再交付旧字幕、两条不同路径的术语死锁、带凭据的 Base URL 与落盘错误文本的脱敏、人工确认不再代签未看过的译文、在途 Agent 等待不再被「已满足」判定吞掉。内部另有一轮架构收敛（四条链路共用一份 provider 批次循环）与一批常驻守卫（协议快照、完成前终检、多条 AST 守卫），它们对用户不可见，但决定了上面这些问题以后能不能被及时发现。
