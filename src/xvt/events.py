@@ -128,6 +128,13 @@ _SENSITIVE_DATA_KEYS = {
     "token",
     "secret",
 }
+# 签名 URL 的 query 参数名没有跨云统一命名，精确名单必然追不上（AWS 的
+# x-amz-signature、GCS v4 的 X-Goog-Signature、阿里云的 auth_key、腾讯的
+# q-signature 各写各的）。改为三层判定，见 _is_sensitive_query_key。
+#
+# 第一层：历史精确名单。下面两层如今已经完全覆盖它（api_key → 分段 "key"，
+# x-amz-signature → 子串 "signature"，等等），保留它是为了把「这些键确定敏感」
+# 写死在代码里：后两层的规则日后若被收窄，这一层仍然兜住既有行为。
 _SENSITIVE_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -141,6 +148,47 @@ _SENSITIVE_QUERY_KEYS = {
     "x-amz-security-token",
     "x-amz-signature",
 }
+# 第二层：这几个词出现在键名任意位置都视为凭据。它们几乎不会构成正常参数名的
+# 一部分，误伤面最小，而覆盖面最广（x-goog-signature / x-amz-credential /
+# csrf_token / OSSAccessKeyId / SecretAccessKey 全部命中）。
+_SENSITIVE_QUERY_SUBSTRINGS = (
+    "signature",
+    "credential",
+    "token",
+    "secret",
+    "password",
+    "accesskey",
+    "apikey",
+)
+# 第三层：这几个词做子串必然误伤（key → monkey/keyword，sig → design/signal，
+# auth → author，pwd → 无常见误伤但保持同口径），因此只在把键名按非字母数字
+# 字符切段后、某一整段与之相等时才命中（auth_key → ["auth", "key"] 命中）。
+_SENSITIVE_QUERY_SEGMENTS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "key",
+        "sig",
+        "pwd",
+        "passwd",
+    }
+)
+_QUERY_KEY_SEGMENT_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+
+def _is_sensitive_query_key(key: str) -> bool:
+    """判定一个 URL query 参数名是否承载凭据。
+
+    精确名单 → 子串规则 → 分段整词规则，三层任一命中即脱敏。分层的唯一目的是
+    在「漏掉新签名方案」与「误伤正常参数」之间取舍：覆盖面靠子串，安全边界靠分段。
+    """
+    normalized = key.lower()
+    if normalized in _SENSITIVE_QUERY_KEYS:
+        return True
+    if any(marker in normalized for marker in _SENSITIVE_QUERY_SUBSTRINGS):
+        return True
+    segments = _QUERY_KEY_SEGMENT_SEPARATOR.split(normalized)
+    return any(segment in _SENSITIVE_QUERY_SEGMENTS for segment in segments)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +216,7 @@ def redact_url(value: str) -> str:
     )
     query = urlencode(
         [
-            (key, _REDACTED if key.lower() in _SENSITIVE_QUERY_KEYS else query_value)
+            (key, _REDACTED if _is_sensitive_query_key(key) else query_value)
             for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
         ]
     )
@@ -184,9 +232,17 @@ def _redact_free_text(value: str) -> str:
 def redact_text(value: str) -> str:
     """对一段自由文本做完整脱敏：URL 中的 userinfo / 敏感 query，再是鉴权头、Bearer 与 userinfo。
 
-    事件边界之外也有文本会被持久化（例如失败原因经 ``set_stage`` 写进 ``job.json``、
-    被 ``status --json`` 原样输出），那些路径不经过 ``create_event``，需要在产生消息处
-    显式调用本函数。
+    两条持久化边界都已集中接入本函数，调用方不需要（也不应依赖自觉）逐处调用：
+
+    - 事件边界：``create_event`` → ``_redact_event_value``。
+    - ``job.json`` 边界：``pipeline.common.set_stage`` 在写 ``record.error`` 之前统一调用，
+      因此 ``status --json`` 输出的失败原因也是脱敏后的。
+
+    本函数**幂等**：对已脱敏文本再调用一次结果不变（``set_stage`` 脱敏后，其事件分支
+    会再经 ``create_event`` 脱敏一次，两条出口必须给出同一份文本）。
+
+    边界之外新增持久化出口时，仍需显式调用本函数——但不要把它作为**已有**两条边界的
+    替代方案，在调用点重复脱敏只会掩盖边界缺口。
     """
     return _redact_free_text(_URL_PATTERN.sub(lambda match: redact_url(match.group()), value))
 

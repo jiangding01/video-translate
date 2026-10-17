@@ -14,7 +14,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 2. 用户提供源字幕时，默认保留原时间轴。只有用户明确要求，才运行 Whisper 对齐。
 3. 翻译模型只负责文本。媒体获取、分段、时间轴、QA、渲染和烧录必须由确定性代码完成。
 4. 字幕 QA 或媒体 QA 失败时，任务必须失败或等待人工处理，不能继续烧录或宣告完成。已知画幅的译文行宽以实际 ASS 字体、字号和描边测量为准；测量异常回退保守规则，确认绑定布局，不跨画幅或字体复用。人工译文 `apply --check` 必须只读，正式 apply 在写入前重复预检。
-5. API Key 只从环境变量读取。Cookie 内容、代理凭据、签名 URL、本地媒体和生成产物不得提交到仓库，也不得原样写入事件。翻译提供方的 Base URL 与模型可以固化进 Job，但只在首个批次成功后写回；API Key 永不落盘，任何会持久化的错误文本都必须先脱敏。
+5. API Key 只从环境变量读取。Cookie 内容、代理凭据、签名 URL、本地媒体和生成产物不得提交到仓库，也不得原样写入事件。翻译提供方的 Base URL 与模型可以固化进 Job，但只在首个批次成功后写回，且 `resolve_provider` 在确认一条 Base URL 真的会被用来发请求时拒绝带用户名密码或 query 串的地址（`InvalidURL` 消息不带 scheme，脱敏规则够不着它；配置不齐全时 `auto` 仍按契约降级，那条 Base URL 既不发请求也不落盘）；API Key 永不落盘。错误文本的脱敏在**边界**集中做，不靠调用方自觉：事件走 `create_event`，`job.json` 走 `pipeline.common.set_stage`（它在写 `record.error` 之前统一调用 `redact_text`，两条出口给出同一份文本）。新增持久化出口时要么接入既有边界，要么在新边界上补一道，不要在调用点逐处补 `redact_text`。
 6. 外部命令必须以参数数组执行，不拼接 shell 字符串。
 7. Job、batch manifest 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。烧录成品重新关联只能由 checksum 有效的 v2 proof 授权，proof 必须绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum；legacy fingerprint 不得绕过重烧。
 8. 每个 Job 当前只支持一个目标语言。不要在现有 schema 上隐式加入多目标语言。

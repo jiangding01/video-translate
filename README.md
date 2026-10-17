@@ -100,7 +100,7 @@ xvt batch-continue BATCH.json
 | `--target-language LANG` | 目标语言代码，例如 `zh-CN`。 |
 | `--translation-quality standard\|polished` | 翻译质量链，默认 `standard`；`polished` 增加润色、语义校对和最多一次定向修复。 |
 | `--provider auto\|openai-compatible\|agent` | 翻译提供方，默认 `auto`：配置完整时调用兼容 API，否则生成 Agent 批次。Job 已固化 Base URL 与模型、当前终端只缺 API Key 时，降级原因会指名缺的是哪个环境变量。 |
-| `--base-url URL` | OpenAI-compatible API 根地址；XVT 请求 `<base-url>/chat/completions`。不传时读 `XVT_TRANSLATION_BASE_URL`；端到端 Job 在首个翻译批次成功后把生效值写回 `job.config.workflow`，此后 `continue` / `status` 不再受该环境变量漂移影响。 |
+| `--base-url URL` | OpenAI-compatible API 根地址；XVT 请求 `<base-url>/chat/completions`。不传时读 `XVT_TRANSLATION_BASE_URL`；端到端 Job 在首个翻译批次成功后把生效值写回 `job.config.workflow`，此后 `continue` / `status` 不再受该环境变量漂移影响。**不得带用户名密码或 query 串**（`https://user:pw@host/v1`、`https://host/v1?api-version=x`）：这类地址会被直接拒绝，凭据请放进 API Key 环境变量。 |
 | `--model NAME` | 翻译模型名称。不传时读 `XVT_TRANSLATION_MODEL`；写回规则与 `--base-url` 相同。换模型请重新 `run`，或对已有 Job 执行 `xvt translate JOB --model NEW`。 |
 | `--api-key-env NAME` | 保存 API Key 的环境变量名，默认 `XVT_TRANSLATION_API_KEY`；参数值是变量名，不是密钥。 |
 | `--batch-size N` | 每个翻译请求最多包含的 cue 数，默认 `25`；语义组不会被批次边界拆开。 |
@@ -682,7 +682,9 @@ export XVT_TRANSLATION_API_KEY="secret"
 
 `--provider auto` 仅在 Base URL、模型和 API Key 都存在时调用 API。配置不完整时会安全降级为 Agent 模式，生成 `artifacts/translation-batches.json`。显式传入 `--provider openai-compatible` 时，缺失配置会直接失败。Job 已固化 Base URL 与模型、当前终端只缺 API Key 时，降级原因会点名 Job 钉住的提供方身份与缺失的环境变量（例如 `this job is pinned to openai-compatible (model=…, base_url=…) but the current shell lacks $XVT_TRANSLATION_API_KEY`），不会静默换成 Agent 批次。
 
-API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误、5xx、分块响应中途断开和 TLS 连接中途终止会退避重试；证书校验失败等信任链问题立即失败。
+Base URL 带用户名密码（`https://user:pw@host/v1`）或 query 串时，只要这条 Base URL 真的会被用来发请求（即 Base URL、模型与 API Key 都齐备），`auto` 与 `openai-compatible` 都会直接报错。报错只点名主机名，不回显凭据。配置不齐全时 `auto` 仍按既有契约降级成 Agent 模式——那条 Base URL 既不发请求也不落盘。原因：这类地址在发请求时抛的是 `nonnumeric port: 'pw@host'`，不带协议前缀，脱敏规则够不着它，而 Base URL 还会随 `job.config.workflow` 落盘。
+
+API Key 只从环境变量读取，不会写入命令行、事件或 `job.json`。stage 失败原因在写进 `job.json` 之前统一脱敏，`xvt status --json` 输出的失败消息与 JSONL 事件里的是同一份文本。翻译按批次保存到 `artifacts/translation-progress.json`，只有输入、模型、端点和提示词版本完全一致时才复用进度。429 会遵循 `Retry-After`，网络错误、5xx、分块响应中途断开和 TLS 连接中途终止会退避重试；证书校验失败等信任链问题立即失败。
 
 端到端 Job 的 Base URL 与模型在**首个翻译批次成功后**（或全部批次都命中 checkpoint 时）写回 `job.config.workflow`，此后 `continue` 与 `status` 都按 Job 内的值解析提供方与进度指纹，不再受 `XVT_TRANSLATION_BASE_URL` / `XVT_TRANSLATION_MODEL` 在另一个终端里的漂移影响；首批就失败时不写回，环境变量里的过期模型名不会先被钉进 Job（`continue` 没有 `--model`，写进去就没有入口再改）。API Key 永不落盘。要换模型：重新 `run`，或对已有 Job 执行 `xvt translate JOB --target-language LANG --model NEW`（显式值覆盖并写回），或直接编辑 `job.json` 里的 `config.workflow.base_url` / `model`。
 

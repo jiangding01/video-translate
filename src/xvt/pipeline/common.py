@@ -26,6 +26,7 @@ from xvt.events import (
     create_event,
     error_event_fields,
     job_event_fields,
+    redact_text,
 )
 from xvt.job_store import get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
@@ -138,10 +139,18 @@ def set_stage(
     error_category: str = "workflow",
     extras: dict[str, Any] | None = None,
 ) -> None:
+    # AGENTS 不可破坏约束 5：任何会持久化的错误文本都必须先脱敏。失败原因来自
+    # yt-dlp / ffmpeg 的原始 stderr、403 detail、翻译提供方 4xx 响应，里面带签名
+    # URL、Cookie、代理凭据与 base_url。它经 record.error 写进 job.json，再被
+    # `status --json` 原样输出——这条链路不经过 create_event，必须在**这个边界**
+    # 集中脱敏，而不是指望十几个调用点各自记得调 redact_text。
+    # 事件分支复用同一份脱敏文本：redact_text 幂等，create_event 再脱敏一次结果不变，
+    # 两条出口因此不会给出不一致的失败原因。
+    redacted_error = redact_text(error) if error is not None else None
     record = job.stages[stage]
     now = utc_now()
     record.status = status
-    record.error = error
+    record.error = redacted_error
     if status == StageStatus.RUNNING:
         record.started_at = now
         record.completed_at = None
@@ -155,8 +164,8 @@ def set_stage(
             "stage": stage.value,
             "status": status.value,
         }
-        if status == StageStatus.FAILED and error is not None:
-            payload.update(error_event_fields(error_category, error))
+        if status == StageStatus.FAILED and redacted_error is not None:
+            payload.update(error_event_fields(error_category, redacted_error))
         if extras:
             # 不允许覆盖 stage 信封核心字段，避免调用方误伤事件契约。
             for key, value in extras.items():

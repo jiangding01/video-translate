@@ -30,13 +30,22 @@
 
 最小修法是在 `invalidate_rendered_artifacts` 里一并 pop，但会改变「acknowledge 之后 continue」的现有体验（确认会被紧随其后的回填清掉），需要先确认既有用例是否仍成立。**这是本清单里唯一需要先做设计决策再动手的条目。**
 
-### F1 `stage.error` 裸写进 `job.json`，绕过脱敏 — ✅ 已核验，待修
+### F1 `stage.error` 裸写进 `job.json`，绕过脱敏 — ✅ 已核验，**已修（本轮）**
 
 `pipeline/common.py` 的 `set_stage` 里 `record.error = error` 后直接 `save_job`；同一函数的事件分支走 `error_event_fields` 是脱敏的，持久化分支不是。`job_store.py` 全文无 `redact`。约 18 个调用点传 `error=str(error)`，而 `CommandError` 内嵌 yt-dlp / ffmpeg 原始 stderr（`process.py`），403 分支原样拼 detail（`download.py`），翻译 4xx 带 base_url（`translation_provider.py`）。
 
 后果：签名 URL、Cookie 路径、代理凭据明文落盘，`status --json` 原样输出。**AGENTS 不可破坏约束第 5 条「任何会持久化的错误文本都必须先脱敏」目前在 job.json 层不成立。**
 
-修法：`set_stage` 入口统一 `redact_text(error)`（1 行）+ 一条「job.json 不含签名/Cookie」的落盘断言测试。工作量：小时级。
+已修：`pipeline/common.py` 的 `set_stage` 在函数入口算一次 `redacted_error = redact_text(error) if error is not None else None`，`record.error` 与 `stage_failed` 事件的 `error_event_fields` 都用它——两条出口因此给出同一份文本（`redact_text` 幂等，事件分支再脱敏一次结果不变）。**刻意不补那约 18 个 `error=str(error)` 调用点**：靠调用方自觉的契约已经漏了 18 次，再补一遍还会漏第 19 次。`events.redact_text` 的 docstring 同步改写为「事件与 `job.json` 两条持久化边界都已集中接入」，并写明幂等保证。新增 `tests/test_pipeline.py::StageErrorRedactionTest`，5 个 subtest 覆盖签名 URL、Cookie 头、代理 userinfo、Bearer、provider base_url 五类真实来源，断言落在「`job.json` 落盘后的原始文本不含明文凭据」上，并校验事件与 `job.json` 文本一致。另补一条守卫 `test_messages_compared_by_value_survive_redaction_unchanged`：`pipeline/review.py:246` 用 `record.error != SUBTITLE_REVIEW_REQUIRED_MESSAGE` 识别并收口确认后的过期阻断错误，脱敏一旦改写这条常量，收口会静默失效且没有测试直接指向脱敏。当前常量是纯英文散文，脱敏为空操作。
+
+**同轮排查的其它持久化出口**（如实记录，均未改动）：
+
+- `batch.json` 的 `item["error"]`：`batch.py:400` 与 `:455` 已经通过 `create_event(...).data` round-trip 脱敏，无缺口。
+- `job.config` 的凭据相关字段：远程 Job 只存 `proxy_enabled: bool` 与 `cookies_from_browser`（浏览器名），本就不落凭据。
+- `job.config["workflow"]["base_url"]`：曾是 O3 的洞，本轮由入口校验堵上。
+- `artifacts/source-candidate-qa.json` 的 `invalid_candidate` issue message 带 `load_subtitles` 的 `str(error)`，**不过脱敏边界**。未改：内容是本地路径加解析错误，无凭据面；而 QA message 被 `candidate_qa.overflow_limits` 的正则解析，改动面大于收益。
+- `pipeline/revision.py:413` 的 `qa_record.error = qa_message` 绕过 `set_stage` 直写 `record.error`。未改：取值只有两个硬编码常量，零凭据面。**但目前没有守卫阻止下一处这样写**——可考虑补一条「只有 `set_stage` 能写 `record.error` 的非 None 值」的 AST 守卫（与 O7 的守卫缺口同族）。
+- `job.input`：用户原样输入的 URL，是恢复依据，按原样落盘。用户若把签名 URL 当输入，它在 `job.json` 里是明文而在 `job_started` 事件里已脱敏，这条不对称是刻意的。
 
 ### F2 端到端 Job 上 `xvt translate` 丢持久化 policy 与 batch_size — ○ 已复现，**已修（本轮）**
 
@@ -80,11 +89,19 @@
 
 `pipeline/revision.py` 的 error 级阻断删掉后全量仍绿；现有测试只覆盖行宽阻断。放过的 bug：修订删掉术语表译名 → `glossary_violation`（error）→ `apply --check` 报 `valid: true`，正式 apply 落盘，违反「写入前重复预检」契约（下游 QA 门仍会拦烧录，但修订已经写进 Job）。补一条 glossary 用例即可。
 
-### F8 签名参数脱敏名单不全 — ○ 已实测，待修
+### F8 签名参数脱敏名单不全 — ○ 已实测，**已修（本轮）**
 
 `events.py` 的拒绝名单漏掉 GCS v4 的 `X-Goog-Signature` / `X-Goog-Credential` 与阿里云 `auth_key`（实测原样保留）；腾讯 `q-signature`、Akamai `hdnts` 为推断。与 AGENTS「签名 URL 不得原样写入事件」不符。主用例是 YouTube，触发概率偏低。
 
-修法：名单改「精确键 + 子串规则」（键名含 signature / credential / token / auth 即脱敏）+ 参数化测试。
+已修：新增 `_is_sensitive_query_key`，`redact_url` 改为调用它，三层判定：
+
+1. **精确名单**（原 `_SENSITIVE_QUERY_KEYS` 原封不动保留），保证向后兼容。
+2. **子串规则** `signature` / `credential` / `token` / `secret` / `password` / `accesskey` / `apikey`：这几个词几乎不构成正常参数名的一部分，误伤面最小而覆盖面最广（`X-Goog-Signature`、`X-Amz-Credential`、`q-signature`、`csrf_token`、`OSSAccessKeyId`、`SecretAccessKey` 全部命中）。
+3. **分段整词规则** `auth` / `authorization` / `key` / `sig` / `pwd` / `passwd`：把键名小写后按 `[^a-z0-9]+` 切段，某一整段相等才命中。这几个词做子串必然误伤（`key` → `monkey` / `keyword`，`sig` → `design` / `signal` / `assignment`，`auth` → `author`），分段后阿里云 `auth_key` → `["auth", "key"]` 仍然命中。
+
+取舍：`token` 留作子串意味着 `tokenizer=` 这类参数会被误脱敏；判断是媒体 / 下载 URL 里出现它的概率远低于漏掉一种 `*_token` 签名方案的代价。Akamai 的 `hdnts` 三层都不命中，本轮未加（原条目即标注为推断，没有实测样本）。
+
+测试：`tests/test_events.py` 新增两条参数化测试把两侧都钉住——24 个敏感键必须脱敏（同时校验 `redact_url` / `redact_text` / `create_event` 三条入口），18 个正常键必须原样保留（`monkey` / `keyword` / `keywords` / `author` / `authors` / `design` / `designation` / `signal` / `assignment` / `itag` / `expires` 等）。另加一条 `redact_text` 幂等测试，为 F1 的「边界脱敏 + 事件再脱敏」提供前提保证。
 
 ### F9 文档进度陈述过期 — ✅ 已核验，**部分已修（PR #97）**
 
@@ -96,7 +113,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | --- | --- | --- |
 | O1 | `semantic.py` 三处 12 行逐字相同的终态收口 + 两处问题分拣重复，抽 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper | **值得做**，半天；是 Phase 5 的轻量替代，能吃掉其大部分收益 |
 | O2 | policy 回退有 4 份、两派语义（`common.py` / `semantic_state.py` 回退顶层键，`workflow.py` / `translation.py` 回退默认值） | **值得做**，F2 正是这条结构隐患的现实案例；并入 R3.4，必须排在 Q7 之前 |
-| O3 | `translation_provider.py` 的 `resolve_provider` 不拒绝带 userinfo/query 的 base_url；实测 `user:pw@host` 的凭据经 `InvalidURL` 消息泄露（消息不含 scheme，`redact_text` 的 URL 正则不命中）且随 `config.workflow` 永久落盘 | **值得做**，几行；与 F1 同族，建议一起修 |
+| O3 | `translation_provider.py` 的 `resolve_provider` 不拒绝带 userinfo/query 的 base_url；实测 `user:pw@host` 的凭据经 `InvalidURL` 消息泄露（消息不含 scheme，`redact_text` 的 URL 正则不命中）且随 `config.workflow` 永久落盘 | **已修（本轮）**，见下方 O3 条目 |
 | O4 | `paths.py` 的覆盖保护只认已登记 artifact；纯音频 Job 执行 `burn --output <job.input 的路径>` 会被 `ffmpeg -y` 静默覆盖原始媒体 | **值得做**，几行；后果是用户数据丢失。保护集加入本地 `job.input` 与用户原始字幕路径 |
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已评估，决定并入 F6 那一轮**（2026-10-17 拍板）：断言 `plan_advance_steps(job, config) == ()` 并抛 `InternalError`（workflow 类别）后，`tests/test_workflow.py` 6 条测试 + 1 条测试的 3 个 subtest 变红，全部因为它们把 `run_translation` / `apply_subtitle_translation` / `burn_translated_job` / `valid_artifact_path` 打了桩，Job 状态从未真正推进却断言 `completed`——与 F6 的根因同族。守卫没有「不迁就测试」的替代口径（任何基于真实状态的终检都会撞上同一批桩），因此顺序定为：先按 F6 把这批桩改成构造真实产物状态，再落守卫。守卫实现本身是一行（`_current_artifacts` 之前断言 planner 为空，不空抛 `InternalError`），不必保留补丁，重写成本远低于那批测试的改造 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | 可做，几行；落在协议快照的已知盲区（烧录链路）内 |
@@ -105,6 +122,25 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | 值得做，分钟级 |
 | O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | 值得评估 |
 | O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | 几分钟 |
+
+### O3 `base_url` 带 userinfo 时凭据从入口漏出 — ○ 已实测，**已修（本轮）**
+
+复现确认（CPython 3.12.9，`urllib`，有代理与无代理两条路径结果一致）：
+
+```
+http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
+```
+
+这条消息**不带 scheme**，`events._URL_PATTERN`（要求 `https?://`）与 `_USERINFO_PATTERN`（要求 `scheme://`）都不命中，`redact_text` 原样返回——所以**即使修了 F1 也兜不住，必须在入口拒绝**。而 base_url 还会随 `job.config["workflow"]` 永久落盘。
+
+已修：`translation_provider.py` 新增 `_validate_base_url`，`resolve_provider` 在解析出 Base URL 之后、「配置是否齐全」判定**之前**调用它，发现 userinfo（`parsed.username` / `parsed.password` / netloc 里的 `@`）或 query 串即抛 `UserInputError`。错误消息只回显 `parsed.hostname`，绝不回显 netloc、用户名、密码或原始 base_url。
+
+两处刻意的取舍：
+
+- **校验排在 `missing` 判定之后**：走到那里才说明这条 base_url 真的要被用来发请求，此时带凭据或带 query 一律 fail closed。放在前面会让一条根本不会被使用的 base_url 打死 `--provider auto` 的降级路径，而 AGENTS 规定 auto 在配置不全时降级；配置不全时这条 base_url 既不发请求也不落盘（provider 身份要首批成功才写回 Job），凭据没有任何出口。有专门测试钉住这条。
+- **query 串一并拒绝**：它既可能携带签名凭据，又会被 `base_url.rstrip("/") + "/chat/completions"` 拼成无效端点（`https://host/v1?x=1/chat/completions`）。入口报错比留到请求时报 404 更清楚。Azure OpenAI 的 `?api-version=` 写法本来就在这条拼接下不可用，此改动只是把静默失败变成明确失败。
+
+测试：`tests/test_translation_provider.py` 新增 4 条——userinfo 在 `auto` / `openai-compatible` 两种 provider 下都被拒且消息不含凭据、query 串被拒、环境变量来源的 base_url 同样被校验、正常 base_url 仍能解析并保留 `rstrip("/")` 行为。
 
 ## 观察（危害低，可不处理）
 
@@ -137,7 +173,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 ## 建议处理顺序
 
 1. ~~**正确性剩余**：F2 + F3 + F4 + O5。~~ F2 / F3 / F4 已修（本轮）；O5 已实现但停在「7 处打桩测试要不要先改成真实状态」的决策上，见上表。
-2. **持久化脱敏收口**：F1 + F8 + O3。约束 5 在 job.json 层目前是空话，一个小 PR 能收口。
+2. ~~**持久化脱敏收口**：F1 + F8 + O3。~~ 三条均已修（本轮），约束 5 现在在 `job.json` 层成立（在 `set_stage` 边界统一脱敏）。AGENTS 约束 5 的措辞已同步。
 3. **N1 设计决策**：先定「确认是否绑定译文内容」，再动手。
 4. **烧录判定收敛与 fail-closed 补洞**：F6 + O5 + F7 + O7。**先改那 7 处打桩测试**（见 F6 条目），再落 F6 的真实状态测试与 O5 的终检守卫。
 5. 之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。

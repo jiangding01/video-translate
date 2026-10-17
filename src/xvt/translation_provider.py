@@ -11,6 +11,7 @@ from http.client import BadStatusLine, HTTPException, IncompleteRead, LineTooLon
 from ssl import SSLEOFError, SSLError, SSLSyscallError, SSLZeroReturnError
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from xvt.config import DEFAULT_TIMEOUT_SECONDS
@@ -73,6 +74,37 @@ class CompatibleProviderConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
 
+def _validate_base_url(base_url: str) -> None:
+    """拒绝带 userinfo 或 query 的 base URL，且错误消息里绝不回显凭据。
+
+    这条校验必须在入口做，脱敏兜不住它：实测
+    ``https://user:secretpw@api.example.com/v1`` 发请求时抛
+    ``http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'``
+    （有无代理两条路径一致）。该消息**不带 scheme**，``events`` 的 URL 正则要求
+    ``https?://``、userinfo 正则要求 ``scheme://``，两条都不命中，``redact_text``
+    原样返回；而 base_url 还会随 ``job.config["workflow"]`` 永久落盘。
+
+    query 串一并拒绝：它既可能携带签名凭据，又会被
+    ``base_url.rstrip("/") + "/chat/completions"`` 拼成无效端点。
+    """
+    try:
+        parsed = urlsplit(base_url)
+    except ValueError as error:  # pragma: no cover - urlsplit 对普通字符串极少抛错
+        raise UserInputError("translation base URL is not a valid URL") from error
+    # 只回显 hostname：它不是凭据，又足以让用户认出配错的是哪一条配置。
+    # 绝不回显 netloc / username / password / 原始 base_url。
+    location = parsed.hostname or "<unknown host>"
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise UserInputError(
+            "translation base URL must not embed a username or password "
+            f"(host {location}); put the credential in the API key environment variable instead"
+        )
+    if parsed.query:
+        raise UserInputError(
+            f"translation base URL must not carry a query string (host {location})"
+        )
+
+
 def resolve_provider(
     provider: str,
     *,
@@ -102,6 +134,12 @@ def resolve_provider(
             return "agent", None, f"missing {detail}"
         raise UserInputError(f"openai-compatible provider is missing {detail}")
 
+    # 形状校验排在「配置是否齐全」之后：走到这里才说明这条 base_url 真的要被用来发请求，
+    # 此时带凭据或带 query 一律 fail closed。放在前面会让一条根本不会被使用的 base_url
+    # 打死 `--provider auto` 的降级路径——AGENTS 明确规定 auto 在配置不全时降级 Agent 模式，
+    # 而配置不全时这条 base_url 既不发请求也不落盘（provider 身份要首批成功才写回 Job），
+    # 凭据没有任何出口。
+    _validate_base_url(resolved_base_url)
     return (
         "openai-compatible",
         CompatibleProviderConfig(

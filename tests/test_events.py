@@ -10,6 +10,8 @@ from xvt.events import (
     create_event,
     error_event_fields,
     job_event_fields,
+    redact_text,
+    redact_url,
 )
 
 _SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt"
@@ -323,6 +325,98 @@ class EventPayloadContractTest(unittest.TestCase):
             self.assertEqual(set(event.data["error"].keys()), {"category", "message"})
             self.assertNotIn("category", event.data, f"{event_type} 不应有顶层裸 category 字段")
             self.assertNotIn("message", event.data, f"{event_type} 不应有顶层裸 message 字段")
+
+    def test_signed_url_query_keys_are_redacted_across_providers(self) -> None:
+        """F8：签名参数名单从「精确匹配」扩成「精确键 + 子串/分段规则」。
+
+        旧名单只收了 AWS 三件套，GCS v4 的 `X-Goog-Signature` / `X-Goog-Credential`
+        与阿里云 `auth_key` 原样落进事件与 job.json。
+        """
+        sensitive_keys = (
+            "X-Goog-Signature",
+            "X-Goog-Credential",
+            "x-goog-signature",
+            "auth_key",
+            "X-Amz-Signature",
+            "X-Amz-Credential",
+            "X-Amz-Security-Token",
+            "q-signature",
+            "Signature",
+            "sig",
+            "key",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "csrf_token",
+            "api_key",
+            "apikey",
+            "OSSAccessKeyId",
+            "SecretAccessKey",
+            "x-secret",
+            "pwd",
+            "password",
+            "auth",
+            "Authorization",
+        )
+        for query_key in sensitive_keys:
+            with self.subTest(key=query_key):
+                url = f"https://cdn.example.com/v.mp4?{query_key}=LEAKVALUE&itag=22"
+                redacted = redact_url(url)
+
+                self.assertNotIn("LEAKVALUE", redacted)
+                self.assertIn("itag=22", redacted)
+                self.assertIn("redacted", redacted)
+                # 事件边界与自由文本边界必须共用同一判定。
+                self.assertNotIn("LEAKVALUE", redact_text(f"download failed: {url}"))
+                self.assertNotIn(
+                    "LEAKVALUE",
+                    create_event(EventType.COMMAND_FAILED, url=url).to_json(),
+                )
+
+    def test_benign_query_keys_are_not_redacted(self) -> None:
+        """子串规则的误伤边界：`key` / `sig` / `auth` 只在分段整词相等时命中。"""
+        benign_keys = (
+            "monkey",
+            "keyword",
+            "keywords",
+            "author",
+            "authors",
+            "design",
+            "designation",
+            "signal",
+            "assignment",
+            "id",
+            "itag",
+            "page",
+            "lang",
+            "expires",
+            "range",
+            "format",
+            "q",
+            "t",
+        )
+        for query_key in benign_keys:
+            with self.subTest(key=query_key):
+                url = f"https://cdn.example.com/v.mp4?{query_key}=plainvalue"
+                redacted = redact_url(url)
+
+                self.assertIn("plainvalue", redacted, f"{query_key} 被误伤脱敏")
+                self.assertNotIn("redacted", redacted)
+
+    def test_redact_text_is_idempotent(self) -> None:
+        """`set_stage` 在边界脱敏后，事件分支会对同一段文本再脱敏一次。"""
+        samples = (
+            "https://user:pw@host/v1?X-Goog-Signature=abc&token=t",
+            "Cookie: SID=xyz; HSID=abc",
+            "Authorization: Bearer sk-live-123",
+            "proxy socks5://user:pw@127.0.0.1:1080 failed",
+            "ffmpeg error at https://cdn.example.com/x.mp4?sig=deadbeef&Expires=1",
+            "plain text with no secrets",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                once = redact_text(sample)
+                self.assertEqual(once, redact_text(once))
 
     def test_no_bare_category_or_message_kwargs_in_create_event_calls(self) -> None:
         """AST 扫描全部生产模块：create_event(...) 调用不得直接传入裸
