@@ -406,7 +406,11 @@ class RecoveryTest(unittest.TestCase):
     def test_recovery_plan_retries_burn_after_media_qa_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            job = create_job("/tmp/input.mp4", root)
+            # 源媒体必须真实存在：缺失源媒体是另一类恢复分类（manual_fix），
+            # 用不存在的路径会把本例想测的那条原因盖掉。
+            media = root / "input.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), root)
             job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
             self._add_artifact(job, root, "source_cues")
             self._add_artifact(job, root, "translated_cues")
@@ -432,7 +436,11 @@ class RecoveryTest(unittest.TestCase):
     def test_recovery_plan_retries_burn_when_artifact_missing_after_media_qa_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            job = create_job("/tmp/input.mp4", root)
+            # 源媒体必须真实存在：缺失源媒体是另一类恢复分类（manual_fix），
+            # 用不存在的路径会把本例想测的那条原因盖掉。
+            media = root / "input.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), root)
             job.config["workflow"] = {"target_language": "zh-CN", "burn": True}
             self._add_artifact(job, root, "source_cues")
             self._add_artifact(job, root, "translated_cues")
@@ -459,7 +467,11 @@ class RecoveryTest(unittest.TestCase):
     def test_recovery_plan_retries_burn_when_fingerprint_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            job = create_job("/tmp/input.mp4", root)
+            # 源媒体必须真实存在：缺失源媒体是另一类恢复分类（manual_fix），
+            # 用不存在的路径会把本例想测的那条原因盖掉。
+            media = root / "input.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), root)
             job.config["workflow"] = {
                 "target_language": "zh-CN",
                 "burn": True,

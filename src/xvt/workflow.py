@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from xvt.config import (
@@ -246,25 +247,57 @@ class WorkflowResult:
     message: str | None = None
 
 
-def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
+def _burn_media_value(job: Job, config: WorkflowConfig) -> str:
+    """烧录所用媒体的来源值：持久化的 ``burn_media`` 优先，回退 Job 原始输入。"""
+
+    return str(config.burn_media or job.input)
+
+
+def _burn_media_is_remote(media_value: str) -> bool:
+    """媒体来源是否是远程 URL（本地路径与远程 URL 的身份口径不同）。"""
+
+    parsed = urlparse(media_value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+
+def _burn_media_identity(job: Job, config: WorkflowConfig) -> object | None:
+    """源媒体在烧录指纹里的身份；本地媒体不在原路径时返回 None。
+
+    本地媒体刻意用 ``{path, size, mtime_ns}`` 而不是内容 checksum：这是 ``status``
+    的成本边界（见 ``docs/RECOVERY.md``），不为每次查询读整个视频。元数据漂移带来的
+    「内容其实没变却判失效」由 ``_burn_fingerprint_satisfied`` 的内容 checksum 回退
+    兜住，不在这里改身份口径——改了会让全部存量 v2 proof 一次性失效。
+    """
+
+    media_value = _burn_media_value(job, config)
+    if _burn_media_is_remote(media_value):
+        return artifact_checksum_for(job, "source_video") or media_value
+    media_path = Path(media_value).expanduser()
+    if not media_path.is_file():
+        return None
+    stat = media_path.stat()
+    return {
+        "path": str(media_path.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _burn_fingerprint_for_media_identity(
+    job: Job,
+    config: WorkflowConfig,
+    media_identity: object,
+) -> str | None:
+    """按给定的源媒体身份算出烧录派生指纹（其余输入一律取当前 Job / config）。
+
+    指纹载荷的格式是全部存量 v2 proof 的比对基准，**不得改动**。把媒体身份抽成参数
+    只是为了让「用 proof 里登记的烧录时身份重算一次」成为可能：重算结果仍等于已登记
+    指纹，就证明指纹差异**只**来自媒体身份，译文 cue、字体与编码选项都没有漂移。
+    """
+
     translated_checksum = artifact_checksum_for(job, "translated_cues")
     if not translated_checksum:
         return None
-
-    media_value = config.burn_media or job.input
-    parsed = urlparse(str(media_value))
-    if parsed.scheme in {"http", "https"} and parsed.hostname:
-        media_identity: object = artifact_checksum_for(job, "source_video") or str(media_value)
-    else:
-        media_path = Path(str(media_value)).expanduser()
-        if not media_path.is_file():
-            return None
-        stat = media_path.stat()
-        media_identity = {
-            "path": str(media_path.resolve()),
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-        }
     payload = {
         "translated_cues_checksum": translated_checksum,
         "media": media_identity,
@@ -277,14 +310,54 @@ def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
     ).hexdigest()
 
 
+def _burn_fingerprint(job: Job, config: WorkflowConfig) -> str | None:
+    media_identity = _burn_media_identity(job, config)
+    if media_identity is None:
+        return None
+    return _burn_fingerprint_for_media_identity(job, config, media_identity)
+
+
 def _burn_source_media_checksum(job: Job, config: WorkflowConfig) -> str | None:
-    media_value = config.burn_media or job.input
-    parsed = urlparse(str(media_value))
-    if parsed.scheme in {"http", "https"} and parsed.hostname:
+    media_value = _burn_media_value(job, config)
+    if _burn_media_is_remote(media_value):
         media_path = valid_artifact_path(job, "source_video")
         return artifact_checksum_for(job, "source_video") if media_path is not None else None
-    media_path = Path(str(media_value)).expanduser()
+    media_path = Path(media_value).expanduser()
     return file_checksum(media_path) if media_path.is_file() else None
+
+
+def missing_burn_source_media(
+    job: Job,
+    config: WorkflowConfig,
+    *,
+    local_only: bool = False,
+) -> Path | None:
+    """烧录所需源媒体当前不在它应在的位置时返回该位置，否则返回 None。
+
+    只 ``stat``，**不哈希内容**：调用方（`status` 导航与 relink 的前置检查）要的是
+    「这个文件还在不在」，不是「内容对不对」。内容比对仍归
+    ``_burn_fingerprint_satisfied`` / ``_burn_proof_fingerprint_matches``。
+
+    ``local_only`` 是两个调用点刻意的差异：recovery 侧只认本地媒体，因为远程 Job
+    的下载产物缺失时 ``continue`` 能重新获取，那是真出口，不该归 ``manual_fix``；
+    relink 侧两种都点名，它对两者都已经 fail closed。远程 Job 从未登记过
+    ``source_video`` 时返回 None——没有可点名的位置，不猜。
+    """
+
+    media_value = _burn_media_value(job, config)
+    if _burn_media_is_remote(media_value):
+        if local_only:
+            return None
+        registered = next(
+            (artifact.path for artifact in job.artifacts if artifact.kind == "source_video"),
+            None,
+        )
+        if registered is None:
+            return None
+        remote_path = Path(registered).expanduser()
+        return None if remote_path.is_file() else remote_path
+    media_path = Path(media_value).expanduser()
+    return None if media_path.is_file() else media_path
 
 
 def _stored_burn_fingerprint(job: Job) -> str | None:
@@ -342,8 +415,20 @@ def media_qa_passed(job: Job) -> bool:
     return media_qa_failure(job) is None
 
 
-def _burn_proof(job: Job) -> dict[str, str] | None:
-    """读取 checksum 有效的 v2 烧录证明记录。"""
+#: v2 proof 里「烧录时源媒体身份」的键。**可选字段**：存量 v2 proof 没有它，照旧只
+#: 走快路径（fail closed，拿不到内容 checksum 回退），下一次重烧即补上。只对本地媒体
+#: 登记——远程媒体的身份本来就是内容 checksum，不含 mtime，不会假失效；顺带也不把
+#: 媒体 URL 再抄一份进产物。
+_BURN_PROOF_MEDIA_IDENTITY = "source_media_identity"
+
+
+def _burn_proof(job: Job) -> dict[str, Any] | None:
+    """读取 checksum 有效的 v2 烧录证明记录。
+
+    三个必需字段仍按原口径校验（缺任一即视作无 proof）；``source_media_identity``
+    是可选字段，形状不对就当它不存在，不因此否掉整份 proof——否则一份身份字段被改坏
+    的 proof 会连既有的快路径完成语义一起失效。
+    """
 
     path = valid_artifact_path(job, "burn_fingerprint")
     if path is None:
@@ -357,13 +442,74 @@ def _burn_proof(job: Job) -> dict[str, str] | None:
     fields = ("fingerprint", "burned_video_checksum", "source_media_checksum")
     if not all(isinstance(data.get(field), str) and data[field] for field in fields):
         return None
-    return {field: data[field] for field in fields}
+    proof: dict[str, Any] = {field: data[field] for field in fields}
+    identity = data.get(_BURN_PROOF_MEDIA_IDENTITY)
+    if _valid_burn_media_identity(identity):
+        proof[_BURN_PROOF_MEDIA_IDENTITY] = identity
+    return proof
+
+
+def _valid_burn_media_identity(identity: object) -> bool:
+    """proof 里的本地媒体身份是否形状完好（与 ``_burn_media_identity`` 同构）。"""
+
+    if not isinstance(identity, dict) or set(identity) != {"path", "size", "mtime_ns"}:
+        return False
+    # bool 是 int 的子类；JSON 里不会出现，但别让它混进指纹载荷。
+    return (
+        isinstance(identity["path"], str)
+        and bool(identity["path"])
+        and isinstance(identity["size"], int)
+        and not isinstance(identity["size"], bool)
+        and isinstance(identity["mtime_ns"], int)
+        and not isinstance(identity["mtime_ns"], bool)
+    )
+
+
+def _burn_fingerprint_satisfied(job: Job, config: WorkflowConfig) -> bool:
+    """当前烧录派生指纹是否仍然成立（烧录满足度与 proof 比对共用的**唯一**判定）。
+
+    **快路径**：已登记指纹与按 ``{path, size, mtime_ns}`` 现算的指纹逐字节相等。常见
+    情形走这里，零额外 IO，``status`` 的成本边界不变。
+
+    **内容 checksum 回退**：快路径判不匹配时，再查一次「源媒体内容是不是其实没变」。
+    不带 ``-p`` 的 ``cp``、不带 ``-a`` 的 ``rsync``、备份还原和一次 ``touch`` 都只动
+    文件元数据，此前它们会让一个内容上完全有效的完成态被判失效，代价是整段重编码。
+    回退只在这条**本来就要报失效**的分支上多哈希一次源媒体——那条分支的后果是重新
+    编码整部视频，一次哈希远比它便宜。
+
+    回退要求三条**全部**成立，否则照旧判失效（fail closed）：
+
+    1. 存在 checksum 有效的 v2 proof，且 proof 的 ``fingerprint`` 就是已登记那份
+       （legacy fingerprint 拿不到这条回退）；
+    2. proof 里登记了烧录时的源媒体身份，用它和**当前**其余输入重算出的指纹仍等于
+       已登记指纹——这一步证明差异**只**来自媒体身份。少了它，手改 ``job.json`` 换
+       字体或编码选项后 ``continue`` 会被误判成已完成，新设置永远烧不上去；
+    3. 源媒体当前内容 checksum 等于 proof 登记的那份内容 checksum。
+    """
+
+    stored_fingerprint = _stored_burn_fingerprint(job)
+    if stored_fingerprint is None:
+        return False
+    if _burn_fingerprint(job, config) == stored_fingerprint:
+        return True
+    proof = _burn_proof(job)
+    if proof is None or proof["fingerprint"] != stored_fingerprint:
+        return False
+    identity = proof.get(_BURN_PROOF_MEDIA_IDENTITY)
+    if identity is None:
+        return False
+    if _burn_fingerprint_for_media_identity(job, config, identity) != stored_fingerprint:
+        return False
+    source_media_checksum = _burn_source_media_checksum(job, config)
+    return source_media_checksum is not None and (
+        source_media_checksum == proof["source_media_checksum"]
+    )
 
 
 def _burn_proof_fingerprint_matches(
     job: Job,
     config: WorkflowConfig,
-    proof: dict[str, str],
+    proof: dict[str, Any],
     *,
     require_source_media: bool,
 ) -> bool:
@@ -374,16 +520,21 @@ def _burn_proof_fingerprint_matches(
     每次 status 都读一遍大文件；真正改写登记的 ``relink_burned_output`` 必须哈希并
     比对，否则源媒体被同 size+mtime 的内容替换时会放过一次应有的重烧。
 
+    指纹本身的判定复用 ``_burn_fingerprint_satisfied``（含内容 checksum 回退），
+    不在这里重造。回退路径自己已经哈希并比对过内容 checksum，因此那条分支不再为
+    ``require_source_media`` 重复算一次——两条路径合起来至多哈希源媒体一次。
+
     ``burned_video`` 的 checksum 比对**不在**这里：两个调用点对它的时机与报错文案
     不同（relink 要先确认候选文件存在、再把候选与登记值一起比，报「候选 checksum
     不匹配」），放进来只会逼出一个带标签的返回值。
     """
 
-    current_fingerprint = _burn_fingerprint(job, config)
-    if current_fingerprint is None or proof["fingerprint"] != current_fingerprint:
+    stored_fingerprint = _stored_burn_fingerprint(job)
+    if stored_fingerprint is None or proof["fingerprint"] != stored_fingerprint:
         return False
-    if _stored_burn_fingerprint(job) != current_fingerprint:
-        return False
+    if _burn_fingerprint(job, config) != stored_fingerprint:
+        # 走回退：它已经比对过源媒体内容 checksum，对两个调用点都够。
+        return _burn_fingerprint_satisfied(job, config)
     if not require_source_media:
         return True
     current_source_media_checksum = _burn_source_media_checksum(job, config)
@@ -440,7 +591,12 @@ def _record_burn_fingerprint(job_file: Path, *, event_sink: EventSink | None = N
         config = require_workflow_config(job)
     except ValueError:
         return
-    fingerprint = _burn_fingerprint(job, config)
+    media_identity = _burn_media_identity(job, config)
+    fingerprint = (
+        None
+        if media_identity is None
+        else _burn_fingerprint_for_media_identity(job, config, media_identity)
+    )
     source_media_checksum = _burn_source_media_checksum(job, config)
     burned_videos = [artifact for artifact in job.artifacts if artifact.kind == "burned_video"]
     if not fingerprint or not source_media_checksum or len(burned_videos) != 1:
@@ -451,19 +607,19 @@ def _record_burn_fingerprint(job_file: Path, *, event_sink: EventSink | None = N
     artifacts_directory = get_job_directory(job) / "artifacts"
     artifacts_directory.mkdir(parents=True, exist_ok=True)
     path = artifacts_directory / "burn-fingerprint.json"
+    document: dict[str, Any] = {
+        "version": 2,
+        "fingerprint": fingerprint,
+        "burned_video_checksum": burned_video.checksum,
+        "source_media_checksum": source_media_checksum,
+    }
+    # 烧录时的本地媒体身份是「指纹不匹配时的内容 checksum 回退」的授权依据：没有它就
+    # 无法证明指纹差异只来自文件元数据，手改字体/编码选项会被误判成「已完成」。
+    if _valid_burn_media_identity(media_identity):
+        document[_BURN_PROOF_MEDIA_IDENTITY] = media_identity
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "fingerprint": fingerprint,
-                "burned_video_checksum": burned_video.checksum,
-                "source_media_checksum": source_media_checksum,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     temporary.replace(path)
@@ -517,6 +673,14 @@ def relink_burned_output(
     proof = _burn_proof(job)
     if proof is None:
         raise UserInputError("burned video relink requires a checksum-valid v2 burn proof")
+    # 源媒体不在原路径时指纹根本算不出来（``_burn_fingerprint`` 返回 None），下面的
+    # 比对会一路落到「指纹过期」——那是错误归因：指纹没过期，是拿不到源媒体。先把
+    # 这一类分出来并点名缺失的路径。方向不变（本来就拒绝），只是说对了原因。
+    missing_media = missing_burn_source_media(job, config)
+    if missing_media is not None:
+        raise UserInputError(
+            f"burned video cannot be relinked while its source media is missing: {missing_media}"
+        )
     # 与 status 侧的唯一差异是这里必须哈希并比对源媒体内容：写入登记前 fail closed。
     if not _burn_proof_fingerprint_matches(job, config, proof, require_source_media=True):
         raise UserInputError("burned video cannot be relinked because its fingerprint is stale")
@@ -670,7 +834,7 @@ def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
         return False
     if not media_qa_passed(job):
         return False
-    if _stored_burn_fingerprint(job) != _burn_fingerprint(job, config):
+    if not _burn_fingerprint_satisfied(job, config):
         return False
     proof = _burn_proof(job)
     proof_path = valid_artifact_path(job, "burn_fingerprint")
