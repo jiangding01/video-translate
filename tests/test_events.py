@@ -418,6 +418,106 @@ class EventPayloadContractTest(unittest.TestCase):
                 once = redact_text(sample)
                 self.assertEqual(once, redact_text(once))
 
+    def test_non_http_userinfo_with_at_in_password_is_fully_redacted(self) -> None:
+        """非 http scheme 的 userinfo 必须吃到 authority 里的**最后**一个 `@`。
+
+        旧 `_USERINFO_PATTERN` 的字符类排除 `@`，只吃到第一个 `@`，密码里带 `@` 的
+        代理 URL 会漏出后半段（`socks5://user:p@ss@host` → `socks5://<redacted>@ss@host`）。
+        http/https 走 `redact_url` 的 `netloc.rsplit('@', 1)`（最后一个 `@`），因此一直正确；
+        两条分支必须给出同口径结果，且不能靠 scheme 白名单（下一个 scheme 又会漏）。
+        """
+        # name: (原文, 期望脱敏结果, 必须消失的密码片段)。期望值写全串而不是只查
+        # 子串：host / port / 尾随诊断文本必须原样保留，脱敏不等于抹掉排障信息。
+        cases = {
+            "socks5": (
+                "socks5://user:p@ss@proxy.example.com:1080 failed",
+                "socks5://<redacted>@proxy.example.com:1080 failed",
+                ("p@ss", "ss@proxy"),
+            ),
+            "socks5h_multi_at": (
+                "socks5h://user:a@b@c@proxy:1080",
+                "socks5h://<redacted>@proxy:1080",
+                ("a@b", "b@c", "c@proxy"),
+            ),
+            "socks4": (
+                "socks4://user:pw@rd@127.0.0.1:1080",
+                "socks4://<redacted>@127.0.0.1:1080",
+                ("pw@rd", "rd@127"),
+            ),
+            "ftp": (
+                "ftp://anon:se@cret@files.example.com/x",
+                "ftp://<redacted>@files.example.com/x",
+                ("se@cret", "cret@files"),
+            ),
+            "unknown_scheme": (
+                "weird+proto-1.0://u:a@b@host",
+                "weird+proto-1.0://<redacted>@host",
+                ("a@b", "b@host"),
+            ),
+            "no_username": (
+                "socks5://:pa@ss@proxy.example.com",
+                "socks5://<redacted>@proxy.example.com",
+                ("pa@ss", "ss@proxy"),
+            ),
+            "token_only": (
+                "socks5://tok@en@proxy.example.com",
+                "socks5://<redacted>@proxy.example.com",
+                ("tok@en", "en@proxy"),
+            ),
+            "http_keeps_working": (
+                "http://user:p@ss@proxy.example.com:8080 failed",
+                "http://<redacted>@proxy.example.com:8080 failed",
+                ("p@ss", "ss@proxy"),
+            ),
+            "https_keeps_working": (
+                "https://user:p@ss@proxy.example.com:8443/v1",
+                "https://<redacted>@proxy.example.com:8443/v1",
+                ("p@ss", "ss@proxy"),
+            ),
+        }
+        for name, (sample, expected, leaks) in cases.items():
+            with self.subTest(case=name):
+                redacted = redact_text(sample)
+
+                self.assertEqual(expected, redacted)
+                for leak in leaks:
+                    self.assertNotIn(leak, redacted, f"{name} 漏出 {leak!r}: {redacted!r}")
+                # 事件边界与自由文本边界共用同一判定。
+                self.assertNotIn(
+                    leaks[0],
+                    create_event(
+                        EventType.COMMAND_FAILED,
+                        **error_event_fields("dependency_or_process", sample),
+                    ).to_json(),
+                )
+                # 幂等：`set_stage` 脱敏后事件分支会再脱敏一次，两条出口必须一致。
+                self.assertEqual(redacted, redact_text(redacted))
+
+    def test_userinfo_redaction_does_not_touch_plain_at_signs(self) -> None:
+        """过度匹配边界：没有 `scheme://` 的 `@`，以及 authority 之外的 `@`，都不得被改写。
+
+        `@` 在日志里太常见（邮箱、ssh 串、装饰器、Python 仓库定位符），userinfo 规则
+        放宽到「吃到最后一个 `@`」之后必须由 authority 终止符（`/` `?` `#` 空白）兜住。
+        """
+        untouched = (
+            "contact foo@bar.com for access",
+            "git@github.com:org/repo.git",
+            "scp user@host:/tmp/a.srt .",
+            "@dataclass(frozen=True)",
+            "pip install xvt@git+https://example.com/x.git",
+            "see https://example.com/docs and mail foo@bar.com",
+            # authority 终止符：`?` 与 `#` 之后的 `@` 已不属于 userinfo。
+            "socks5://proxy.example.com:1080?next=foo@bar.com",
+            "socks5://proxy.example.com:1080#note@2",
+            "https://cdn.example.com/v.mp4#anchor@2",
+            "ffmpeg: Invalid data found at 0x40@frame 12",
+            "https://cdn.example.com/paths/a@2x.png",
+            "plain text with no secrets",
+        )
+        for sample in untouched:
+            with self.subTest(sample=sample):
+                self.assertEqual(sample, redact_text(sample))
+
     def test_no_bare_category_or_message_kwargs_in_create_event_calls(self) -> None:
         """AST 扫描全部生产模块：create_event(...) 调用不得直接传入裸
         category=/message= 关键字参数（必须通过 error_event_fields(...) 展开），

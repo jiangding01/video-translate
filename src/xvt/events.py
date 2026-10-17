@@ -112,7 +112,17 @@ _SENSITIVE_HEADER_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+")
 # 任意 scheme 的 URL userinfo：@ 之前的一切（user:pass、:pass、仅 token）都视为
 # 凭据整体脱敏；redact_url 只处理 http/https，这里兜底其余协议。
-_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+@")
+#
+# 字符类**必须允许 `@`**：密码里出现 `@` 是合法且常见的（`socks5://u:p@ss@host`），
+# 排除 `@` 会让匹配停在第一个 `@`，后半段密码原样留下（实测 socks5 泄漏）。改为
+# 贪婪匹配 + 回溯到 authority 里的**最后**一个 `@`，与 http/https 分支
+# （`redact_url` 的 `netloc.rsplit("@", 1)`）同口径——这是按 URL 语法而不是 scheme
+# 白名单判定的，因此对任意 scheme 都成立。
+#
+# 过度匹配由 RFC 3986 的 authority 终止符兜住：authority 止于首个 `/`、`?`、`#`，
+# 字符类排除这三者（外加空白），`@` 必须落在 authority 内才算 userinfo。
+# 没有 `scheme://` 前缀的 `@`（邮箱、`git@host:path`、装饰器）本就不被本规则触碰。
+_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#]+@")
 # 事件 data 中的敏感字典 key：值不做解析、整体替换。覆盖嵌套 Header 字典
 # （{"Cookie": ...}）与常见凭据字段名。
 _SENSITIVE_DATA_KEYS = {
