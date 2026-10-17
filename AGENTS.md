@@ -26,7 +26,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | --- | --- |
 | `src/xvt/cli.py` | 参数定义、命令路由、普通输出和 JSONL 终态 |
 | `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复；中断兜底与恢复分类见 [恢复与回填契约](docs/RECOVERY.md#批处理恢复分类与中断兜底) |
-| `src/xvt/workflow.py` | 端到端目标编排（Goals → `plan_advance_steps` → 执行）、`continue`、Agent 等待和烧录派生指纹；译文满足度含 SRT 与译文 QA 报告，缺渲染或 QA 报告时走 `complete_translated_outputs`；`plan_advance_steps` 在函数体最前判定局部重译等待（`await_cue_retranslation`），因为它会叠加在一个译文目标已满足的 Job 上；完整判定顺序见 [恢复与回填契约](docs/RECOVERY.md#端到端推进计划的判定顺序) |
+| `src/xvt/workflow.py` | 端到端目标编排（Goals → `plan_advance_steps` → 执行）、`continue`、Agent 等待和烧录派生指纹；译文满足度含 SRT 与译文 QA 报告，缺渲染或 QA 报告时走 `complete_translated_outputs`；`plan_advance_steps` 在函数体最前判定局部重译等待（`await_cue_retranslation`），因为它会叠加在一个译文目标已满足的 Job 上；完整判定顺序见 [恢复与回填契约](docs/RECOVERY.md#端到端推进计划的判定顺序)；`_advance_workflow` 在发 `workflow_completed` 前有 fail-closed 终检；媒体 QA 放行判定（`media_qa_failure` / `media_qa_passed`）与 v2 proof 指纹比对（`_burn_proof_fingerprint_matches`）各只有一份实现，烧录满足度、relink 资格、`relink_burned_output` 与 `recovery` 的原因文案一律复用，不得就地重造 |
 | `src/xvt/workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与读写边界 |
 | `src/xvt/checksums.py` | 文件内容 SHA-256 的唯一实现（零依赖叶子，供 recovery / candidate_qa / pipeline.common 共用） |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
@@ -122,6 +122,7 @@ uv build
 - 请求的行为已经实现，原子命令和端到端命令语义一致。
 - cue ID 和时间轴没有被翻译或渲染阶段改动。
 - Job、stage、artifact、checksum 和事件能够解释任务当前状态。
-- 失败路径不会误报 `cli_completed` 或 `workflow_completed`。
+- 失败路径不会误报 `cli_completed` 或 `workflow_completed`。`_advance_workflow` 在发 `workflow_completed` **之前**断言 `plan_advance_steps(job, config)` 为空，不为空按内部不一致抛 `InternalError`（fail closed，不得降级成警告）。
+- 「完成」必须对应一个真的完成了的 Job。断言 `status == "completed"` 的测试，其打桩只允许替掉真实的网络、模型与 FFmpeg 调用，**必须照真实运行落盘产物、登记 artifact 并推进 stage**；返回假路径、不碰 Job 的替身会让这条断言永远成立而什么都没验到（2026-10-17 的 F6 / O5 就是这么漏了两道媒体 QA 判定）。
 - 测试、Ruff lint 和 Ruff formatter 全部通过。
 - 对应文档已经同步，HANDOFF 中的进展和下一步仍然准确。

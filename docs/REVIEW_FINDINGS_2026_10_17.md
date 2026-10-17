@@ -75,7 +75,7 @@
 
 风险：以后给 `selected_kind` 加新分支只改一边，`continue` 与 `resume` 对「源是否满足」的判定分叉。修法：workflow 改为引用 pipeline（把源选择函数公有化 + re-export）。无测试桩阻碍。
 
-### F6 烧录满足度 3+1 份口径，且两道媒体 QA 条件零测试覆盖 — ○ 已复现，待修（**已与 O5 合并为同一轮**）
+### F6 烧录满足度 3+1 份口径，且两道媒体 QA 条件零测试覆盖 — ○ 已复现，**已修（本轮）**
 
 > **这一轮的第一步不是改生产代码，是改测试。** O5 的终检守卫撞红的 7 处与本条变异实证指出的是同一批桩、同一个根因：测试把 `run_translation` / `apply_subtitle_translation` / `burn_translated_job` / `valid_artifact_path` 替换成不推进 Job 的假实现，却断言 `result.status == "completed"`——**这批测试从来没有验证过「completed 对应一个真的完成了的 Job」**。待改清单（均在 `tests/test_workflow.py`）：`test_external_translation_skips_provider`、`test_automatic_translation_and_burn_run_in_order`、`test_continue_reuses_persisted_translation_policy`、`test_continue_defaults_translation_policy_for_old_jobs`、`test_continue_burns_after_agent_translation_was_applied`、`test_continue_retries_burn_when_media_qa_failed`、`test_atomic_burn_layout_failure_preserves_workflow_qa_and_recovery`（3 个 subtest）。改成构造真实产物状态后，F6 的「不打桩的真实状态测试」与 O5 的守卫可以一起落。
 
@@ -84,6 +84,26 @@
 放过的 bug：legacy Job 原子重烧后媒体 QA 失败，`continue` / `status` 判已完成（违反约束 4）。
 
 修法：先补一条不打桩的真实状态测试（两道条件各一个 subTest），再抽 `_media_qa_passed` 与 proof 比对 helper，三处保留各自刻意的差异（`status` 不哈希源媒体、relink 哈希）。工作量：半天级。
+
+**实际修法（本轮，F6 + O5 同一轮四阶段）**：
+
+- **阶段 A（先改测试，不改生产代码）**：上面点名的 7 处（含 1 处 3 个 subtest）桩全部改成「打桩也产生真实副作用」。新增三个共享 helper（`tests/test_workflow.py` 模块级）：`_write_source_leg_artifacts`（落 `source_cues` / `source_srt`，取代 `patch("xvt.workflow.valid_artifact_path")` 的整体伪装）、`_complete_translation_artifacts`（写 `translated-cues.json` + 真实 `save_subtitles` 两份 SRT + `check_subtitles` 真实 QA 报告，推进 TRANSLATE / SUBTITLE_QA / RENDER）、`_complete_burn_artifacts`（写成品 + `media-qa.json` pass，推进 BURN / MEDIA_QA）。带 burn 的 Job 改用**真实存在的本地媒体文件**作输入，`_record_burn_fingerprint` 因此走真实实现登记 v2 proof（`run_transcription` 的桩也补上「把 workflow 目标固化进 Job」这一真实副作用，否则 proof 登记会静默跳过）。**既有断言一字未改**（`translate.call_args` / `burn.assert_called_once` / 事件序列等全部保留）。阶段结束时用临时断言逐条验证 `plan_advance_steps(job, config) == ()`，验完删除——阶段 D 的守卫永久接管这件事。阶段 A 没有暴露任何生产代码问题。
+- **阶段 B**：新增 `test_burn_not_satisfied_when_media_qa_blocks_a_valid_burned_output`（不打桩，两个 subTest）。先断言基线满足（成品有效 + 指纹匹配 + 媒体 QA pass → `_burn_satisfied` 为真、计划为空），再分别只改 stage（FAILED，报告仍 pass）与只改报告（`status: failed`，stage 仍 succeeded），断言 `_burn_satisfied` 为假且计划给出 `burn`。变异自证：两道判定分别失效时对应 subtest 各自变红。
+- **阶段 C**：`workflow.py` 新增 `media_qa_failure(job) -> str | None`（标签 `stage` / `missing` / `unreadable` / `status`）与 `media_qa_passed(job)`，三处接入；relink 的四条历史报错文案由 `_RELINK_MEDIA_QA_MESSAGES` 按标签映射，措辞逐字保留。proof 比对抽出 `_burn_proof_fingerprint_matches(..., require_source_media=bool)`，由 relink 资格（False）与 `relink_burned_output`（True）共用。`recovery._burn_recovery_reason` 改为接收调用方算好的 `media_qa_blocker` 标签、只在 `"stage"` 上分叉，不再自己重写 stage 判定；它对报告侧三类失败继续沿用「成品缺失 / 指纹失效」文案（见下方「刻意差异」）。
+- **阶段 D（O5）**：`_advance_workflow` 在发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / 退出码 4），消息带上剩余步骤。阶段 A 做完后**零既有测试变红**。新增两条测试：注入真实不一致（烧录桩只写成品、不推进媒体 QA）→ 守卫触发且不发 `workflow_completed`；一致状态 → 照常完成。
+
+**真重复 vs 刻意差异**（阶段 C 的判定依据）：
+
+| 项 | 判定 |
+| --- | --- |
+| 媒体 QA 四步（stage succeeded → 报告 checksum 有效 → 可解析 → `status == "pass"`） | **真重复**，三处逐字相同，已收敛为 `media_qa_failure` |
+| 指纹比对（`proof["fingerprint"] == _burn_fingerprint` 且 `_stored_burn_fingerprint` 一致） | **真重复**（relink 资格 / relink 命令），已收敛为 `_burn_proof_fingerprint_matches` |
+| 是否哈希源媒体内容 | **刻意差异**，参数化保留：status 侧不读大文件，写入登记的 relink 必须比对 |
+| 成品有效 vs 成品已失效 | **刻意差异**：`_burn_satisfied` 要求有效，relink 资格恰恰要求已失效 |
+| 是否要求 `translated_cues` 有效 | **刻意差异**：relink 两处要求（没有译文 cue 的重新关联无意义），`_burn_satisfied` 不要求（译文满足度由 `_translation_satisfied` 单独判） |
+| legacy proof 容忍度 | **刻意差异**：`_burn_satisfied` 对「无 proof artifact / proof 文档不是 v2」的 legacy Job 只认指纹匹配并返回 True，relink 一律要求 checksum 有效的 v2 proof。因此 `_burn_satisfied` 不能复用 proof helper 的「proof 必须存在且匹配」口径 |
+| relink 的四条媒体 QA 报错文案 | **刻意差异**（UX），按标签映射保留逐字措辞 |
+| `recovery._burn_recovery_reason` 的文案排序 | **刻意差异**：它是文案排序而非放行判定。报告侧三类失败（`missing` / `unreadable` / `status`）继续走「成品缺失 / 指纹失效」文案——对用户更具体，且 `_burn_satisfied` 早已独立判这些状态为未完成，不存在误报完成。改这个排序是用户可见行为变更（`tests/test_recovery.py` 的两条测试钉住了现文案），不塞进纯重构阶段 |
 
 ### F7 人工修订预检的 error 级阻断无测试 — ○ 已复现，待修
 
@@ -115,7 +135,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O2 | policy 回退有 4 份、两派语义（`common.py` / `semantic_state.py` 回退顶层键，`workflow.py` / `translation.py` 回退默认值） | **值得做**，F2 正是这条结构隐患的现实案例；并入 R3.4，必须排在 Q7 之前 |
 | O3 | `translation_provider.py` 的 `resolve_provider` 不拒绝带 userinfo/query 的 base_url；实测 `user:pw@host` 的凭据经 `InvalidURL` 消息泄露（消息不含 scheme，`redact_text` 的 URL 正则不命中）且随 `config.workflow` 永久落盘 | **已修（本轮）**，见下方 O3 条目 |
 | O4 | `paths.py` 的覆盖保护只认已登记 artifact；纯音频 Job 执行 `burn --output <job.input 的路径>` 会被 `ffmpeg -y` 静默覆盖原始媒体 | **值得做**，几行；后果是用户数据丢失。保护集加入本地 `job.input` 与用户原始字幕路径 |
-| O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已评估，决定并入 F6 那一轮**（2026-10-17 拍板）：断言 `plan_advance_steps(job, config) == ()` 并抛 `InternalError`（workflow 类别）后，`tests/test_workflow.py` 6 条测试 + 1 条测试的 3 个 subtest 变红，全部因为它们把 `run_translation` / `apply_subtitle_translation` / `burn_translated_job` / `valid_artifact_path` 打了桩，Job 状态从未真正推进却断言 `completed`——与 F6 的根因同族。守卫没有「不迁就测试」的替代口径（任何基于真实状态的终检都会撞上同一批桩），因此顺序定为：先按 F6 把这批桩改成构造真实产物状态，再落守卫。守卫实现本身是一行（`_current_artifacts` 之前断言 planner 为空，不空抛 `InternalError`），不必保留补丁，重写成本远低于那批测试的改造 |
+| O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | 可做，几行；落在协议快照的已知盲区（烧录链路）内 |
 | O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | 各约半小时 |
 | O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | 部分值得做 |
@@ -172,10 +192,10 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 ## 建议处理顺序
 
-1. ~~**正确性剩余**：F2 + F3 + F4 + O5。~~ F2 / F3 / F4 已修（本轮）；O5 已实现但停在「7 处打桩测试要不要先改成真实状态」的决策上，见上表。
+1. ~~**正确性剩余**：F2 + F3 + F4 + O5。~~ F2 / F3 / F4 / O5 均已修（本轮）。
 2. ~~**持久化脱敏收口**：F1 + F8 + O3。~~ 三条均已修（本轮），约束 5 现在在 `job.json` 层成立（在 `set_stage` 边界统一脱敏）。AGENTS 约束 5 的措辞已同步。
 3. **N1 设计决策**：先定「确认是否绑定译文内容」，再动手。
-4. **烧录判定收敛与 fail-closed 补洞**：F6 + O5 + F7 + O7。**先改那 7 处打桩测试**（见 F6 条目），再落 F6 的真实状态测试与 O5 的终检守卫。
+4. **烧录判定收敛与 fail-closed 补洞**：~~F6 + O5~~ + F7 + O7。F6 / O5 已修（本轮，四阶段：改桩 → 真实状态测试 → 口径收敛 → 终检守卫），剩 F7（人工修订预检的 error 级阻断无测试）与 O7（三个守卫缺口）。
 5. 之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

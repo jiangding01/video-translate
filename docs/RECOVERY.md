@@ -68,6 +68,12 @@
 2. 在 `TRANSLATE` 等输入且 `translation_batches` checksum 有效时，早退为 `await_agent_translation`。这一早退**必须排在 `translated_cues` → `render` 之前**：新整轮请求不会失效旧译文，按 render 先判会把等待误报成「只差渲染」。
 3. `TRANSLATE` 等输入但 manifest 已 checksum 失效、且没有有效 `translated_cues` 时落到最后的兜底分支，给出 `translate`（导入译文 Job 给出 `import_translation`），**不报等待**。没有 manifest 就没有任何响应能回填这次等待，报等待会让 `status` 说等回填、`xvt apply` 被 manifest 校验拒绝、`continue` 只发一次 waiting，三方互指没有出口。`_ensure_translation` 的等待分支复述同一个条件，manifest 失效时落到 `run_translation` 重建批次；recovery 的原子分支对同一状态早已是 `retryable` + `translate`，三侧由此一致。
 
+### 宣告完成前的终检守卫
+
+`_advance_workflow` 在发 `workflow_completed` **之前**重新跑一次 `plan_advance_steps`，不为空就抛 `InternalError`（`category="workflow"`，退出码 4），消息列出剩余步骤。执行侧与 planner 对同一份 Job 状态给出相反结论属于内部不一致：`status` 会说还差一步而 `continue` 说已完成，`batch-continue` 更会把条目记成完成，用户不会再回来看它。守卫刻意 fail closed，不降级成警告。
+
+这条守卫同时是「`completed` 必须对应一个真的完成了的 Job」的常驻回归网：测试里打桩只允许替掉真实的网络、模型与 FFmpeg 调用，产物落盘、artifact 登记与 stage 推进必须照真实运行来，否则守卫会在断言 `completed` 之前先抛错。
+
 ### 翻译策略与批次大小的回退
 
 `xvt translate` / `xvt prepare-translation` 在端到端 Job 上未显式传入 `--glossary` / `--translation-style` / `--batch-size` 时，**逐字段**回退 `config.workflow` 的 `translation_policy` 与 `batch_size`（与 `base_url` / `model` 同口径，单点实现 `pipeline.translation._resolved_translation_inputs`）。不回退会让这两条命令产出不带术语的译文，而译文 QA 仍按 workflow 快照判 `glossary_violation`——术语死锁没有出口；策略与 `batch_size` 都进翻译指纹，漂移还会清零批次进度、全部批次重付一次翻译费。逐字段而不是整份替换：只给 `--glossary` 时风格仍沿用快照，只给 `--translation-style` 时术语表仍沿用快照。调用方直接传 `policy=`（workflow 执行路径）时原样采用。原子 Job（无 `config.workflow`）保持历史行为：顶层 `translation_policy` 由本次调用重写，翻译与 QA 用的是同一份策略，不存在同款死锁。
@@ -173,6 +179,12 @@
 ### 不具备资格的情形
 
 legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重新关联资格，按 `retryable` 恢复并由 `continue` 重烧。旧 Job 必须先 `continue` 重烧一次生成 v2 proof，不得宣称可直接 relink。
+
+### 媒体 QA 放行与 proof 比对的单点实现
+
+「媒体 QA 过了」只有一份实现 `workflow.media_qa_failure`（stage 必须 succeeded → 报告 checksum 有效 → 可解析 → `status == "pass"`，返回失败原因标签），烧录满足度、relink 资格、`relink_burned_output` 与 `recovery` 的烧录原因文案一律复用它，不得就地重造。v2 proof 的指纹比对同样单点实现 `_burn_proof_fingerprint_matches`，源媒体内容 checksum 是否参与比对由参数表达（status 侧不参与、relink 侧参与）。
+
+刻意保留的差异：`_burn_satisfied` 要求成品**有效**而 relink 资格要求成品**已失效**；`_burn_satisfied` 不要求 `translated_cues` 有效（译文满足度单独判），relink 两处要求；`_burn_satisfied` 对「无 proof artifact 或 proof 文档不是 v2」的 legacy Job 只认指纹匹配即判完成，relink 一律要求 checksum 有效的 v2 proof。
 
 ### status 的成本边界
 

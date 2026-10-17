@@ -18,7 +18,7 @@ from xvt.config import (
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TRANSLATION_STYLE,
 )
-from xvt.errors import UserInputError, XvtError
+from xvt.errors import InternalError, UserInputError, XvtError
 from xvt.events import EventSink, EventType, create_event, error_event_fields, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
@@ -54,6 +54,7 @@ from xvt.pipeline import (
 from xvt.recovery import (
     build_recovery_plan,
     file_checksum,
+    readonly_checksum_scope,
     subtitle_qa_failure_guidance,
     valid_artifact_path,
 )
@@ -323,6 +324,42 @@ def _stored_burn_fingerprint(job: Job) -> str | None:
     return None
 
 
+def media_qa_failure(job: Job) -> str | None:
+    """媒体 QA 放行判定的**唯一**实现；放行时返回 None，否则返回失败原因标签。
+
+    标签供调用方派生各自的用户文案，调用方不得就地重造这四步判定：
+
+    - ``"stage"``：``MEDIA_QA`` stage 不是 succeeded
+    - ``"missing"``：媒体 QA 报告缺失或 checksum 失效
+    - ``"unreadable"``：报告不可解析
+    - ``"status"``：报告判定不是 ``pass``
+
+    收敛前本文件的三处（relink 资格、``relink_burned_output``、``_burn_satisfied``）
+    各写一遍同样四步，``recovery._burn_recovery_reason`` 还只看 stage 构成第四种口径。
+    其中 ``_burn_satisfied`` 的 stage 与 status 两道判定长期零测试覆盖，放过了
+    「原子重烧后媒体 QA 失败却判已完成」（违反不可破坏约束第 4 条）。
+    """
+
+    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
+        return "stage"
+    report_path = valid_artifact_path(job, "media_qa")
+    if report_path is None:
+        return "missing"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return "unreadable"
+    if not isinstance(report, dict) or report.get("status") != "pass":
+        return "status"
+    return None
+
+
+def media_qa_passed(job: Job) -> bool:
+    """媒体 QA 是否放行（不关心失败原因）。"""
+
+    return media_qa_failure(job) is None
+
+
 def _burn_proof(job: Job) -> dict[str, str] | None:
     """读取 checksum 有效的 v2 烧录证明记录。"""
 
@@ -339,6 +376,39 @@ def _burn_proof(job: Job) -> dict[str, str] | None:
     if not all(isinstance(data.get(field), str) and data[field] for field in fields):
         return None
     return {field: data[field] for field in fields}
+
+
+def _burn_proof_fingerprint_matches(
+    job: Job,
+    config: WorkflowConfig,
+    proof: dict[str, str],
+    *,
+    require_source_media: bool,
+) -> bool:
+    """v2 proof 的指纹（可选含源媒体内容 checksum）是否与当前 Job 匹配。
+
+    ``require_source_media`` 是两个调用点**刻意**的差异，不是重复：
+    ``status`` 侧（``burned_output_relink_recovery_available``）不哈希源媒体，免得
+    每次 status 都读一遍大文件；真正改写登记的 ``relink_burned_output`` 必须哈希并
+    比对，否则源媒体被同 size+mtime 的内容替换时会放过一次应有的重烧。
+
+    ``burned_video`` 的 checksum 比对**不在**这里：两个调用点对它的时机与报错文案
+    不同（relink 要先确认候选文件存在、再把候选与登记值一起比，报「候选 checksum
+    不匹配」），放进来只会逼出一个带标签的返回值。
+    """
+
+    current_fingerprint = _burn_fingerprint(job, config)
+    if current_fingerprint is None or proof["fingerprint"] != current_fingerprint:
+        return False
+    if _stored_burn_fingerprint(job) != current_fingerprint:
+        return False
+    if not require_source_media:
+        return True
+    current_source_media_checksum = _burn_source_media_checksum(job, config)
+    return (
+        current_source_media_checksum is not None
+        and proof["source_media_checksum"] == current_source_media_checksum
+    )
 
 
 def burned_output_relink_recovery_available(
@@ -362,24 +432,15 @@ def burned_output_relink_recovery_available(
     burned_video = burned_videos[0]
     if not burned_video.checksum or burned_video_valid:
         return False
-    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
+    if not media_qa_passed(job):
         return False
-    media_qa_path = valid_artifact_path(job, "media_qa")
-    if media_qa_path is None or valid_artifact_path(job, "translated_cues") is None:
-        return False
-    try:
-        media_qa = json.loads(media_qa_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return False
-    if not isinstance(media_qa, dict) or media_qa.get("status") != "pass":
+    # translated_cues 是本处刻意多出来的条件：没有有效译文 cue 的成品重新关联没有意义。
+    if valid_artifact_path(job, "translated_cues") is None:
         return False
     proof = _burn_proof(job)
-    current_fingerprint = _burn_fingerprint(job, config)
     return bool(
         proof is not None
-        and current_fingerprint is not None
-        and proof["fingerprint"] == current_fingerprint
-        and _stored_burn_fingerprint(job) == current_fingerprint
+        and _burn_proof_fingerprint_matches(job, config, proof, require_source_media=False)
         and proof["burned_video_checksum"] == burned_video.checksum
     )
 
@@ -425,6 +486,16 @@ def _record_burn_fingerprint(job_file: Path) -> None:
     save_job(job)
 
 
+#: ``media_qa_failure`` 的失败标签 → relink 的用户报错文案。文案逐项保留历史措辞，
+#: 判定本身改由共享谓词给出（原先这里是三份媒体 QA 口径之一）。
+_RELINK_MEDIA_QA_MESSAGES = {
+    "stage": "burned video cannot be relinked before media QA passes",
+    "missing": "burned video cannot be relinked without a valid media QA report",
+    "unreadable": "burned video media QA report is unreadable",
+    "status": "burned video cannot be relinked unless media QA passed",
+}
+
+
 def relink_burned_output(
     job_file: str | Path,
     candidate: str | Path,
@@ -450,33 +521,17 @@ def relink_burned_output(
     burned_artifact = burned_artifacts[0]
     if not burned_artifact.checksum:
         raise UserInputError("job has no checksummed burned video to relink")
-    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
-        raise UserInputError("burned video cannot be relinked before media QA passes")
-
-    media_qa_path = valid_artifact_path(job, "media_qa")
-    if media_qa_path is None:
-        raise UserInputError("burned video cannot be relinked without a valid media QA report")
-    try:
-        media_qa = json.loads(media_qa_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise UserInputError("burned video media QA report is unreadable") from error
-    if not isinstance(media_qa, dict) or media_qa.get("status") != "pass":
-        raise UserInputError("burned video cannot be relinked unless media QA passed")
+    media_qa_failure_reason = media_qa_failure(job)
+    if media_qa_failure_reason is not None:
+        raise UserInputError(_RELINK_MEDIA_QA_MESSAGES[media_qa_failure_reason])
 
     if valid_artifact_path(job, "translated_cues") is None:
         raise UserInputError("burned video cannot be relinked without valid translated subtitles")
-    current_fingerprint = _burn_fingerprint(job, config)
-    current_source_media_checksum = _burn_source_media_checksum(job, config)
     proof = _burn_proof(job)
     if proof is None:
         raise UserInputError("burned video relink requires a checksum-valid v2 burn proof")
-    if (
-        current_fingerprint is None
-        or current_source_media_checksum is None
-        or proof["fingerprint"] != current_fingerprint
-        or proof["source_media_checksum"] != current_source_media_checksum
-        or _stored_burn_fingerprint(job) != current_fingerprint
-    ):
+    # 与 status 侧的唯一差异是这里必须哈希并比对源媒体内容：写入登记前 fail closed。
+    if not _burn_proof_fingerprint_matches(job, config, proof, require_source_media=True):
         raise UserInputError("burned video cannot be relinked because its fingerprint is stale")
 
     candidate_path = Path(candidate).expanduser()
@@ -613,21 +668,20 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
 
 
 def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
-    """烧录目标完成：成品 checksum 有效、媒体 QA 通过、派生指纹匹配。"""
+    """烧录目标完成：成品 checksum 有效、媒体 QA 通过、派生指纹匹配。
+
+    与 relink 两处的刻意差异：这里要求成品**有效**（relink 资格恰恰要求它已失效），
+    不要求 ``translated_cues`` 有效（译文满足度由 ``_translation_satisfied`` 单独判），
+    也不哈希源媒体内容。下面的 proof 分支同样刻意比 relink 宽松：没有 proof artifact
+    或 proof 文档不是 v2 的 legacy Job 只认指纹匹配，不能因为缺 v2 proof 就判未完成
+    （那会让所有 legacy Job 无条件重烧）。因此它不能复用
+    ``_burn_proof_fingerprint_matches`` 的「proof 必须存在且匹配」口径。
+    """
 
     burned_path = valid_artifact_path(job, "burned_video")
     if burned_path is None:
         return False
-    if job.stages[StageName.MEDIA_QA].status is not StageStatus.SUCCEEDED:
-        return False
-    media_qa_path = valid_artifact_path(job, "media_qa")
-    if media_qa_path is None:
-        return False
-    try:
-        media_qa = json.loads(media_qa_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        return False
-    if not isinstance(media_qa, dict) or media_qa.get("status") != "pass":
+    if not media_qa_passed(job):
         return False
     if _stored_burn_fingerprint(job) != _burn_fingerprint(job, config):
         return False
@@ -1178,7 +1232,22 @@ def _advance_workflow(
             )
         job = load_job(path)
 
-    artifacts = _current_artifacts(job)
+    # 终检守卫（fail closed）：执行侧自认为已完成，但 planner 还能列出步骤时，
+    # 说明两套判定对同一份 Job 状态给出了相反结论——这是内部不一致，不能发
+    # workflow_completed 后让 status / batch 以为任务结束（不可破坏约束第 4 条与
+    # 「失败路径不会误报 workflow_completed」）。刻意不降级成警告：误报完成会让
+    # 批处理把条目记成 done，用户再也不会回来看它。
+    #
+    # 与 _current_artifacts 共用一个只读 checksum 作用域：两者都会校验 burned_video，
+    # 不共用就要把成品（可能是 GB 级）哈希两遍。作用域内不写任何产物。
+    with readonly_checksum_scope():
+        remaining = plan_advance_steps(job, config)
+        if remaining:
+            raise InternalError(
+                "workflow reported completion while the planner still lists advance steps: "
+                + ", ".join(remaining)
+            )
+        artifacts = _current_artifacts(job)
     if event_sink:
         event_sink(
             create_event(
