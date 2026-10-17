@@ -614,6 +614,9 @@ class RecoveryTest(unittest.TestCase):
             job = create_job("/tmp/input.mp4", root)
             job.config["workflow"] = {"target_language": "zh-CN", "burn": False}
             self._add_artifact(job, root, "source_cues")
+            # 等待引导的前提是批次 manifest 有效；manifest 失效时按 F3 应给出可推进的
+            # translate，而不是描述一次没有任何响应能回填的等待。
+            self._add_artifact(job, root, "translation_batches")
             job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
             job_file = save_job(job)
 
@@ -1388,6 +1391,72 @@ class QaBlockedAgentWaitRecoveryTest(unittest.TestCase):
 
             self.assertEqual(plan.category, "manual_fix")
             self.assertIn("xvt retranslate-cues", plan.primary_command or "")
+
+
+class AtomicQaBlockedAgentWaitRecoveryTest(unittest.TestCase):
+    """F4：原子 Job 的 ``qa_blocked`` 也必须给在途 Agent 等待让路。
+
+    术语死锁后用户改跑 ``translate --provider agent``：``prepare_agent_translation`` 只置
+    ``TRANSLATE=awaiting_input``，不复位 ``SUBTITLE_QA``。按 qa_blocked 处理会继续推荐
+    ``retranslate-cues``，照做会盖掉刚写入的整轮 manifest。端到端分支已有同构让路。
+    """
+
+    def _job_file(self, root: Path, *, batches: bool) -> Path:
+        job = create_job("/tmp/input.mp4", root, {"target_language": "zh-CN"})
+        artifacts = root / "jobs" / job.id / "artifacts"
+        artifacts.mkdir(parents=True)
+
+        def register(kind: str, name: str, payload: object) -> None:
+            path = artifacts / name
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            job.artifacts.append(Artifact(kind, str(path), file_checksum(path)))
+
+        register("source_cues", "source-cues.json", [])
+        # 旧译文与旧 QA 报告刻意保留：等待期间它们对用户仍有价值。
+        register("translated_cues", "translated-cues.json", [])
+        register("subtitle_qa", "qa-source.json", {"status": "pass", "issues": []})
+        register(
+            "translated_subtitle_qa",
+            "qa-translated.json",
+            {
+                "status": "failed",
+                "issues": [
+                    {
+                        "code": "glossary_violation",
+                        "severity": "error",
+                        "cue_id": 1,
+                        "message": "glossary term 'widget' requires '小组件'",
+                    }
+                ],
+            },
+        )
+        if batches:
+            register("translation_batches", "translation-batches.json", {"batches": []})
+        job.stages[StageName.SUBTITLE_QA].status = StageStatus.FAILED
+        job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
+        return save_job(job)
+
+    def test_pending_full_round_wins_over_the_stale_qa_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job_file(Path(directory), batches=True)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertIn("apply-translation", plan.prerequisite_commands[0])
+        self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
+        self.assertNotIn("retranslate-cues", plan.primary_command or "")
+
+    def test_without_a_pending_request_the_qa_guidance_still_wins(self) -> None:
+        """护栏：等待态残留（批次 manifest 已经不在）不得被当成在途等待放行。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job_file(Path(directory), batches=False)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("xvt retranslate-cues", plan.primary_command or "")
 
 
 class AtomicTranslatedQaRebuildTest(unittest.TestCase):

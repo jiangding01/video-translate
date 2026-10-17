@@ -825,6 +825,19 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                 valid_artifacts=valid_artifacts,
                 plan=plan,
             )
+    if (
+        qa_blocked
+        and workflow is None
+        and job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+        and "translation_batches" in valid_artifacts
+    ):
+        # 原子 Job 上的同一条让路。``plan_advance_steps`` 是 workflow 专用，这里改用等价
+        # 条件：TRANSLATE 停在等待态且批次 manifest checksum 有效，说明用户已经改走
+        # `translate --provider agent` 开了新的整轮请求。继续按 qa_blocked 处理会推荐
+        # retranslate-cues，照做会盖掉刚写入的整轮 manifest。放行后由下面既有的原子等待
+        # 分支给出 apply-translation 引导；manifest 已经不在时（等待态残留）不放行，
+        # QA 引导照旧生效。
+        qa_blocked = False
     if qa_blocked:
         source_report_path = valid_artifacts.get("subtitle_qa")
         translated_report_path = valid_artifacts.get("translated_subtitle_qa")

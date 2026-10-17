@@ -313,7 +313,7 @@ xvt prepare-translation JOB_FILE --source-language LANG --target-language LANG
 - 位置参数：`job_file`。
 - 必填参数：`--source-language`、`--target-language`。
 - 策略：`--translation-quality`、`--batch-size`、`--glossary`、`--translation-style`。
-- 事件：`--events-jsonl`。
+- 策略回退：在端到端 Job（有持久化 `config.workflow`）上不传 `--glossary` / `--translation-style` / `--batch-size` 时，逐字段回退到 Job 已固化的术语表、风格与批次大小，与 `continue` / `status` 看到同一套策略；显式传入的字段以显式值为准。没有 `config.workflow` 的原子 Job 仍取各自默认值（风格 `faithful`、批次 `25`）。
 
 </details>
 
@@ -354,6 +354,7 @@ xvt translate JOB_FILE --target-language LANG [翻译参数] [--events-jsonl]
 - 位置参数：`job_file`；必填参数：`--target-language`。
 - 翻译：`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
 - 提供方身份：在端到端 Job（有持久化 `config.workflow`）上不传 `--base-url` / `--model` 时回退到 Job 已固化的值而不是环境变量，与 `continue` / `status` 看到同一套身份；显式传入则覆盖并在首个批次成功后写回 Job。API Key 仍只读环境变量。
+- 策略回退：`--glossary` / `--translation-style` / `--batch-size` 同样在端到端 Job 上逐字段回退 Job 固化值（不回退会让译文丢掉术语表，而译文 QA 仍按 Job 策略判 `glossary_violation`；策略与批次大小都进翻译指纹，漂移会清零批次进度并重付一次翻译费）。原子 Job 取各自默认值。
 - 事件：`--events-jsonl`。
 
 </details>

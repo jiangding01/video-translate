@@ -360,12 +360,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--source-language", required=True)
     prepare_parser.add_argument("--target-language", required=True)
     prepare_parser.add_argument("--translation-quality", choices=["standard", "polished"])
-    prepare_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    # 与 polish-translation 同口径：不给默认值，让「未显式指定」可被识别并回退到
+    # Job 固化的 workflow 策略与 batch_size（端到端 Job 上不回退会丢术语表）。
+    prepare_parser.add_argument("--batch-size", type=int)
     prepare_parser.add_argument("--glossary")
     prepare_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default=DEFAULT_TRANSLATION_STYLE,
     )
     prepare_parser.add_argument("--events-jsonl", action="store_true")
 
@@ -402,14 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument("--base-url")
     translate_parser.add_argument("--model")
     translate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
-    translate_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    # batch-size / translation-style 不给默认值：见 prepare-translation 上的同款说明。
+    translate_parser.add_argument("--batch-size", type=int)
     translate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
     translate_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     translate_parser.add_argument("--glossary")
     translate_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        default=DEFAULT_TRANSLATION_STYLE,
     )
     translate_parser.add_argument("--events-jsonl", action="store_true")
 
