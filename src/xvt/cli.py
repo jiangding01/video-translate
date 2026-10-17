@@ -139,7 +139,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("input")
     run_parser.add_argument("--output", required=True)
-    run_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
+    run_parser.add_argument(
+        "--engine",
+        choices=["mlx", "faster"],
+        default=DEFAULT_ENGINE,
+        help=(
+            "ASR engine; when the chosen backend is not installed XVT falls back to "
+            "the other one, emits a transcription_fallback event and records the "
+            "engine it actually used in the job config"
+        ),
+    )
     run_parser.add_argument("--language")
     run_parser.add_argument("--subtitles")
     run_parser.add_argument(
@@ -203,7 +212,16 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("input_directory")
     batch_parser.add_argument("--output", required=True)
     batch_parser.add_argument("--recursive", action="store_true")
-    batch_parser.add_argument("--engine", choices=["mlx", "faster"], default=DEFAULT_ENGINE)
+    batch_parser.add_argument(
+        "--engine",
+        choices=["mlx", "faster"],
+        default=DEFAULT_ENGINE,
+        help=(
+            "ASR engine; when the chosen backend is not installed XVT falls back to "
+            "the other one, emits a transcription_fallback event and records the "
+            "engine it actually used in the job config"
+        ),
+    )
     batch_parser.add_argument("--language")
     batch_parser.add_argument(
         "--source-strategy", choices=["auto", "subtitles", "asr"], default="auto"
@@ -865,6 +883,12 @@ class _HumanEventSink(_TrackedEventSink):
             self._render_preview(data)
         elif event.type == EventType.TRANSCRIPTION_PROGRESS:
             self._render_transcription(data)
+        elif event.type == EventType.TRANSCRIPTION_FALLBACK:
+            self._flush_pending_skips()
+            self._line(
+                f"[回退] ASR 引擎：{data.get('requested_engine')} → "
+                f"{data.get('effective_engine')}（{data.get('reason')}）"
+            )
         elif event.type == EventType.SOURCE_SELECTED:
             self._flush_pending_skips()
             selected = _SOURCE_SELECTION_LABELS.get(

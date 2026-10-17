@@ -83,7 +83,7 @@ xvt batch-continue BATCH.json
 | `--output PATH` | 输出目录或输出文件，具体含义由命令决定。`run`、`batch` 必填且表示输出目录；`doctor` 可用它检查目标目录；`preview`、`burn` 中表示媒体输出文件。 |
 | `--json` | 输出适合程序读取的单个 JSON 文档。 |
 | `--events-jsonl` | stdout 只输出 v1 JSONL 事件；人类可读进度不混入 stdout。 |
-| `--engine mlx\|faster` | ASR 引擎，默认 `mlx`。 |
+| `--engine mlx\|faster` | ASR 引擎，默认 `mlx`。选中的后端没有安装时回退到另一个：会打印 `[回退] ASR 引擎：…`、发出 `transcription_fallback` 事件，并把**实际生效的引擎**写回 `job.config.engine`（请求的引擎只留在该事件里）。 |
 | `--language LANG` | 源语言代码，例如 `en`。ASR 不传时自动检测；导入字幕通常应显式提供，未传时以 `auto` 保存。 |
 | `--subtitles PATH` | 显式提供源字幕；默认保留其 cue ID 和时间轴并跳过 ASR。 |
 | `--source-strategy auto\|subtitles\|asr` | 源字幕选择策略，默认 `auto`。`subtitles` 强制采用候选字幕，`asr` 强制语音转写；详见下方“源字幕选择速查”。 |
@@ -936,6 +936,13 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 | `preview.ass`、`preview.mp4` | 短片段预览字幕和视频 |
 | `qa.json`、`qa-translated.json` | 字幕 QA 报告 |
 | `burned.mp4` | 烧录视频 |
+
+**按 Job 登记表取产物，不要按固定文件名取。** 上表是典型命名，不是契约：产物的有效性只认 Job 登记表里的内容 checksum（`xvt status --json` 的 `recovery_plan.reusable_artifacts`、`job.json` 的 `artifacts[]`，`xvt verify` 逐项复核）。两类情况会让固定路径取到错误内容：
+
+- 源文修订（`apply-source-review-fixes`）把 `source_cues` / `source_srt` / `subtitle_qa` 重新指向 `source-reviewed-cues-<fp12>.json`、`source-reviewed-<fp12>.srt`、`source-review-qa-<fp12>.json`，而**带旧文本的 `artifacts/source.srt` 仍留在原地**。
+- `rebuild-source` / `resegment-translation` 失效下游后，`translated.srt`、`bilingual.srt`、`bilingual.ass`、`qa-translated.json` 会被移出登记表，但**文件本身仍以陈旧内容留在目录里**。
+
+这些残留文件是刻意保留的恢复证据，不会被自动删除。按固定路径读取产物的脚本请改读 Job 登记表，或先用 `xvt verify JOB` 确认。
 
 双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 固定为“译文一行 + 原文一行”。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的单行限制。
 

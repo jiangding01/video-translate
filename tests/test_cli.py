@@ -3843,6 +3843,28 @@ class HumanEventSinkTerminalSafetyTest(unittest.TestCase):
         self.assertEqual(_terminal_safe(once), once)
 
 
+class TranscriptionFallbackRenderingTest(unittest.TestCase):
+    """引擎回退必须在普通输出里看得见，否则用户只能靠对比产物才发现换了引擎。"""
+
+    def test_human_sink_reports_the_engine_fallback(self) -> None:
+        stream = StringIO()
+        sink = _HumanEventSink(stream=stream)
+
+        sink(
+            create_event(
+                EventType.TRANSCRIPTION_FALLBACK,
+                requested_engine="faster",
+                effective_engine="mlx",
+                reason="faster-whisper is not installed",
+            )
+        )
+
+        rendered = stream.getvalue()
+        self.assertIn("faster", rendered)
+        self.assertIn("mlx", rendered)
+        self.assertIn("not installed", rendered)
+
+
 class MissingJobFileTest(unittest.TestCase):
     """job.json / batch.json 路径打错是用户输入错误（2），不是依赖故障（3）。"""
 

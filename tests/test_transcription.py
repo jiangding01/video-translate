@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from xvt.qa import check_subtitles
 from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
 from xvt.transcribe import (
     TranscriptionError,
+    transcribe_audio,
     transcribe_faster,
     transcribe_mlx,
     words_from_faster_segments,
@@ -111,6 +113,50 @@ class TranscriptionTest(unittest.TestCase):
         progress = [event.data for event in events if event.type == "transcription_progress"]
         self.assertEqual(len(progress), 1)
         self.assertIsNone(progress[0]["percent"])
+
+    def test_engine_fallback_emits_a_visible_event(self) -> None:
+        """后端缺失导致的引擎回退必须留痕，不得静默换引擎。"""
+
+        events: list = []
+        transcript = Transcript(language="en", engine="mlx", words=(Word(" Hi", 0, 500, 0.9),))
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            audio.write_bytes(b"audio")
+            with (
+                patch(
+                    "xvt.transcribe.transcribe_faster",
+                    side_effect=TranscriptionError("faster-whisper is not installed"),
+                ),
+                patch("xvt.transcribe.transcribe_mlx", return_value=transcript),
+            ):
+                result = transcribe_audio(audio, engine="faster", event_sink=events.append)
+
+        self.assertEqual(result.engine, "mlx")
+        fallback = [event for event in events if event.type == "transcription_fallback"]
+        self.assertEqual(len(fallback), 1)
+        self.assertEqual(fallback[0].data["requested_engine"], "faster")
+        self.assertEqual(fallback[0].data["effective_engine"], "mlx")
+        self.assertIn("not installed", fallback[0].data["reason"])
+
+    def test_engine_failure_other_than_missing_backend_is_not_a_fallback(self) -> None:
+        events: list = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            audio.write_bytes(b"audio")
+            with (
+                patch(
+                    "xvt.transcribe.transcribe_faster",
+                    side_effect=TranscriptionError("model weights are corrupt"),
+                ),
+                patch("xvt.transcribe.transcribe_mlx") as mlx,
+            ):
+                with self.assertRaisesRegex(TranscriptionError, "model weights are corrupt"):
+                    transcribe_audio(audio, engine="faster", event_sink=events.append)
+
+        mlx.assert_not_called()
+        self.assertEqual([event for event in events if event.type == "transcription_fallback"], [])
 
     def test_segments_on_sentence_end_and_pause(self) -> None:
         transcript = Transcript(

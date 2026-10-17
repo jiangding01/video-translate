@@ -58,6 +58,7 @@ class EventType(StrEnum):
 
     # 转写
     TRANSCRIPTION_PROGRESS = "transcription_progress"
+    TRANSCRIPTION_FALLBACK = "transcription_fallback"
     REMOTE_SUBTITLES_SELECTED = "remote_subtitles_selected"
     SOURCE_SELECTED = "source_selected"
 

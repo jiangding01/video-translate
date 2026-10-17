@@ -6,14 +6,21 @@
 
 ### Changed
 
+- **`--engine` 的后端回退不再静默。** 请求的 ASR 后端没有安装时仍然回退到另一个引擎（直接失败会把只装了一种后端的用户卡住），但这次替换现在看得见：普通输出打一行 `[回退] ASR 引擎：faster → mlx（…）`，JSONL 事件流多一条 `transcription_fallback`（带 `requested_engine` / `effective_engine` / `reason`），**实际生效的引擎也会写回 `job.config.engine`**——此前 `config` 说 `faster`、`words.json` 与进度事件说 `mlx`，Job 自己的记录自相矛盾，而 `status` 完全看不出来。`job.config.engine` 是改写而不是新增字段：它的唯一用途是「下次用哪个引擎」（`resume` / `rebuild-source` 都从它取值），加第二个字段会立刻产生两份互相漂移的口径；用户原本请求的引擎留在 JSONL 事件里。后端缺失以外的转写失败照旧直接失败，不回退、不发事件。
+- **强制对齐置信度不足的 Job 不再被推荐一条注定失败的 `continue`。** `--align-subtitles` 的置信度门不过时，`status` 此前归 `retryable` 并给 `next: xvt continue`，而 `align_subtitles` 与 `allow_low_confidence_alignment` 已经固化进 `job.config`，`continue` 拿同一份字幕和同一份转写重跑对齐，每次都复现同一个退出码 2，`alternative_commands` 还是空的。现在这种状态归 `manual_fix`，首选命令是真正能推进的 `xvt rebuild-source JOB --strategy asr`。判定只看 Job 状态（媒体 Job、强制对齐、未放行低置信、登记的对齐置信度低于门限，且 `word_transcript` 与 `input_subtitles` 两份对齐输入都 checksum 有效），缺任一对齐输入时重跑可能得到不同结果，仍按既有的转写 checkpoint 恢复处理。批处理侧这类条目记为 `failed` 并保留恢复指令，不再每轮重试一次必然失败的命令。
 - **`polish-translation` 落到 Agent 等待时直接给出下一步命令。** 此前它只打印 `mode: agent` 和 manifest 路径，用户得再跑一次 `xvt status` 才知道要回填 `apply-polish-translation`——而 `run` / `continue` 的等待出口早就把命令拼好了。现在这条命令复用同一套恢复导航，等待态打印可直接复制执行的 `apply-polish-translation` 与 `continue`。非等待态（`reused` / API 模式）的输出一字未改，`--events-jsonl` 的事件流也不变。
 
 ### Fixed
 
+- **本地媒体的 ASR 失败不再被记到「导入源字幕」上。** 自适应源选择路径在调规范化音频 + 转写之前不推进自己的 `current_stage`，于是转写失败被写成 `import_subtitles=failed`（终端打「[失败] 导入源字幕」，而那次运行根本没导入任何字幕），`transcribe` 则永远停在 `running`。现在失败归属跟随内部的 stage 迁移：规范化音频失败记 `normalize_audio`，转写失败记 `transcribe`，`import_subtitles` 保持它真实的 `skipped` / `succeeded`，Job 里不再留下走不出去的 `running`。
+- **`resume` 复用已有的规范化音频时不再刷新该阶段的 `completed_at`。** 复用 checkpoint 不做任何工作，但此前仍无条件把 `normalize_audio` 重记一次成功：`started_at` 保持中断那一次、`completed_at` 变成 resume 时刻，区间横跨了一段什么都没做的时间，stage 时间戳再也不能用来算真实耗时。现在已经是 `succeeded` 的阶段原样保留时间戳；只有 checkpoint 有效而阶段没记成功时才补记，并清掉上一次中断留下的 `started_at`（与 `rebuild-source` 对同类阶段的处理同口径）。
 - **Agent 一次成型的 `polished` Job 上补跑润色，报错不再和恢复建议自相矛盾。** `task=translate_and_polish` 的 manifest 把初译与润色合在同一次回填里完成，这类 Job 从来不写 `translation-draft-cues.json`，所以 `xvt polish-translation` 对它结构上就不适用。此前它报「polished workflow has no valid translation draft checkpoint」，紧跟着的恢复建议却说「当前目标已完成，可以校验已有产物」，两句拼在一起读着互相打架，而真正的原因一句没说。现在这类 Job 的报错明确说明「润色在初译那一步就完成了，`polish-translation` 不适用」，并指向 `xvt status`；「草稿曾经存在但 checksum 失效」仍是原来那条「需要恢复草稿」的引导，两种情形不再共用一句话。退出码仍为 2，Job 不被这次拒绝改写。
 
 ### Documentation
 
+- README、`xvt run --help` / `xvt batch --help`、架构说明与事件契约补齐 `--engine` 的后端回退行为，此前四处都没有记载。
+- README 与架构说明写明**产物以 Job 登记表为准，不要按固定文件名取**：源文修订会把 `source_cues` / `source_srt` / `subtitle_qa` 重新指向 `source-reviewed-*` 命名的文件，`rebuild-source` / `resegment-translation` 会把下游产物移出登记表，两种情况下带旧内容的 `source.srt`、`translated.srt`、`bilingual.*`、`qa-translated.json` 都仍留在 `artifacts/` 下。这些残留是恢复证据，刻意不删除；按固定路径读取的脚本会拿到旧内容。
+- 恢复契约新增「强制对齐置信度不足的死循环出口」一节，写明判定条件与为什么缺任一对齐输入时不能断言必然失败。
 - README 的 Q5a 补跑一节明确排除 Agent `polished` Job：既不能用 `polish-translation` 补跑润色，也不存在「草稿失效需要恢复」这件事（要改译文走 `retranslate-cues` 或重跑一轮完整翻译）。
 - README 事件章节此前把 `workflow_planned` 写成端到端链路通用事件。实现上它**只有 `run` 首跑会发**，`continue` 只发带 `continuation=true` 的 `workflow_started`，剩余步骤由 `advance_steps` 给出。这是刻意设计，改的是文档措辞；`docs/EVENTS.md` 同步补注。
 

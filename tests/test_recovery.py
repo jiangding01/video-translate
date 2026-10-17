@@ -728,6 +728,103 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(plan.category, "retryable")
         self.assertIn("resume", plan.primary_command or "")
 
+    def _alignment_deadlock_job(self, root: Path, **config_overrides) -> Path:
+        """构造「强制对齐置信度不足」的断点态：转写 checkpoint 全在，只缺 source_cues。"""
+
+        config = {
+            "engine": "mlx",
+            "source_language": "ja",
+            "source_strategy": "auto",
+            "align_subtitles": True,
+            "minimum_alignment_confidence": 0.55,
+            "allow_low_confidence_alignment": False,
+            "workflow": {"target_language": "zh-CN", "burn": False},
+        }
+        config.update(config_overrides)
+        job = create_job("/tmp/input.mp4", root, config)
+        self._add_artifact(job, root, "media_info")
+        self._add_artifact(job, root, "normalized_audio")
+        self._add_artifact(job, root, "word_transcript")
+        self._add_artifact(job, root, "input_subtitles")
+        self._add_artifact(
+            job, root, "subtitle_alignment", json.dumps({"confidence": 0.231, "cues": []})
+        )
+        job.stages[StageName.ALIGN].status = StageStatus.FAILED
+        job.stages[
+            StageName.ALIGN
+        ].error = "subtitle alignment confidence is below the required threshold (0.231 < 0.550)"
+        return save_job(job)
+
+    def test_alignment_confidence_deadlock_does_not_recommend_a_doomed_continue(self) -> None:
+        """`continue` 在这个状态下必然再次失败，恢复计划必须给出真正的出口。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(self._alignment_deadlock_job(root))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("rebuild-source", plan.primary_command or "")
+        self.assertIn("--strategy asr", plan.primary_command or "")
+        commands = (plan.primary_command or "", *plan.alternative_commands)
+        self.assertFalse(
+            any(command.split()[1:2] == ["continue"] for command in commands),
+            f"注定失败的 continue 不得出现在恢复计划里: {commands}",
+        )
+        self.assertIn("置信度", plan.reason)
+
+    def test_alignment_deadlock_detection_requires_the_same_align_inputs(self) -> None:
+        """转写 checkpoint 失效时重跑可能得到不同置信度，不得断言「必然失败」。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._alignment_deadlock_job(root)
+            job = load_job(job_file)
+            job.artifacts = [
+                artifact for artifact in job.artifacts if artifact.kind != "word_transcript"
+            ]
+            save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
+    def test_low_confidence_alignment_allowed_job_is_still_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(
+                self._alignment_deadlock_job(root, allow_low_confidence_alignment=True)
+            )
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
+    def test_alignment_above_the_threshold_is_not_treated_as_a_deadlock(self) -> None:
+        """置信度达标时这条判定不生效。
+
+        强制对齐还有第二种失败（对齐后字幕 QA 出 error 级问题）同样会卡住 `continue`，
+        但那条路径不落盘 QA 报告，Job 状态证明不了「必然失败」，因此刻意不在这里断言——
+        本测试只钉住置信度门这一条判定的边界，不声称另一种失败已经有出口。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._alignment_deadlock_job(root)
+            job = load_job(job_file)
+            path = Path(
+                next(item.path for item in job.artifacts if item.kind == "subtitle_alignment")
+            )
+            path.write_text(json.dumps({"confidence": 0.9, "cues": []}), encoding="utf-8")
+            for artifact in job.artifacts:
+                if artifact.kind == "subtitle_alignment":
+                    artifact.checksum = file_checksum(path)
+            save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
     def test_recovery_plan_retries_early_remote_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = create_job(

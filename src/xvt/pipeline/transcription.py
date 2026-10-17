@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -283,6 +284,46 @@ def _normalize_audio(
     add_artifact(job, "normalized_audio", audio_path, event_sink)
 
 
+def _confirm_reused_stage(
+    job: Job,
+    stage: StageName,
+    event_sink: EventSink | None,
+) -> None:
+    """checkpoint 有效但 stage 还没记成功时补记一次成功。
+
+    已经是 SUCCEEDED 时**什么都不做**：复用 checkpoint 没有做任何工作，刷新
+    ``completed_at`` 会让 ``started_at`` → ``completed_at`` 跨过一段什么都没干的时间，
+    stage 时间戳就再也不能用来算真实耗时。补记时同时清掉上一次中断留下的 ``started_at``，
+    与 ``rebuild_source`` 对同类 stage 的处理同口径。
+    """
+
+    record = job.stages[stage]
+    if record.status is StageStatus.SUCCEEDED:
+        return
+    record.started_at = None
+    set_stage(job, stage, StageStatus.SUCCEEDED, event_sink)
+
+
+def _record_effective_engine(
+    job: Job,
+    requested_engine: str,
+    transcript: Transcript,
+) -> None:
+    """把实际生效的 ASR 引擎写回 ``job.config["engine"]``。
+
+    ``transcribe_audio`` 在只装了一种后端时会回退到另一种引擎，产物里的 ``engine``
+    因此可能与用户请求的不一致。``job.config["engine"]`` 的唯一用途是「下次要用哪个引擎」
+    （`resume` / `rebuild-source` 都从它取值），所以这里直接改写它而不另加字段——
+    另加「实际引擎」字段会立刻产生两份口径互相漂移。用户原本请求的引擎留在 JSONL 的
+    ``transcription_fallback`` 事件里，那条记录是持久的。
+    """
+
+    if transcript.engine == requested_engine:
+        return
+    job.config["engine"] = transcript.engine
+    save_job(job)
+
+
 def _normalize_audio_and_transcribe(
     job: Job,
     source: Path | None,
@@ -291,21 +332,42 @@ def _normalize_audio_and_transcribe(
     engine: str,
     language: str | None,
     event_sink: EventSink | None,
+    on_stage: Callable[[StageName], None] | None = None,
 ) -> Transcript:
+    """复用 checkpoint 或执行规范化音频 + 词级转写。
+
+    ``on_stage`` 是**失败归属的回传通道**：本函数自己迁移 NORMALIZE_AUDIO / TRANSCRIBE，
+    但不碰调用方的 ``current_stage``。调用方的 ``except`` 用 ``current_stage`` 决定把失败
+    记到哪个 stage，不回传就会把转写失败记到调用前的那个 stage（历史上是 IMPORT_SUBTITLES，
+    而那次运行根本没导入字幕），同时让 TRANSCRIBE 永远停在 running。
+    """
+
+    def enter(stage: StageName) -> None:
+        if on_stage is not None:
+            on_stage(stage)
+
     artifacts_directory = get_job_directory(job) / "artifacts"
     transcript_path = valid_artifact_path(job, "word_transcript")
     if transcript_path is not None:
+        # 这条早退不碰任何 stage：`rebuild_source` 会在复用 words 时刻意把
+        # NORMALIZE_AUDIO 记成 SKIPPED，补记成 SUCCEEDED 会抹掉那条真状态。
+        # 只回传失败归属，让 _load_transcript 的读盘失败记在 TRANSCRIBE 上。
+        enter(StageName.TRANSCRIBE)
         return _load_transcript(transcript_path)
 
     if source is None and valid_artifact_path(job, "normalized_audio") is None:
         raise RuntimeError("audio acquisition is required for transcription or alignment")
     audio_path = valid_artifact_path(job, "normalized_audio")
+    enter(StageName.NORMALIZE_AUDIO)
     if audio_path is None:
         set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.RUNNING, event_sink)
         audio_path = artifacts_directory / "audio.wav"
         _normalize_audio(job, source, audio_path, event_sink)
-    set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SUCCEEDED, event_sink)
+        set_stage(job, StageName.NORMALIZE_AUDIO, StageStatus.SUCCEEDED, event_sink)
+    else:
+        _confirm_reused_stage(job, StageName.NORMALIZE_AUDIO, event_sink)
 
+    enter(StageName.TRANSCRIBE)
     set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
     transcript = transcribe_audio(
         audio_path,
@@ -314,6 +376,7 @@ def _normalize_audio_and_transcribe(
         event_sink=event_sink,
         total_ms=media_info.duration_ms,
     )
+    _record_effective_engine(job, engine, transcript)
     transcript_path = artifacts_directory / "words.json"
     write_json(transcript_path, asdict(transcript))
     add_artifact(job, "word_transcript", transcript_path, event_sink)
@@ -397,6 +460,13 @@ def _process_adaptive_media(
     candidate_kind = candidate.kind if candidate else SourceCandidateKind.NONE
     imported_cues: list[Cue] | None = None
     evaluation: SourceCandidateEvaluation | None = None
+
+    def enter_stage(stage: StageName) -> None:
+        """跟随 ``_normalize_audio_and_transcribe`` 内部的 stage 迁移推进失败归属。"""
+
+        nonlocal current_stage
+        current_stage = stage
+
     try:
         if candidate is None:
             set_stage(job, StageName.IMPORT_SUBTITLES, StageStatus.SKIPPED, event_sink)
@@ -471,6 +541,7 @@ def _process_adaptive_media(
                 engine=engine,
                 language=language,
                 event_sink=event_sink,
+                on_stage=enter_stage,
             )
         else:
             for stage in (StageName.NORMALIZE_AUDIO, StageName.TRANSCRIBE):
@@ -685,6 +756,7 @@ def _process_acquired_media(
                 event_sink=event_sink,
                 total_ms=media_info.duration_ms,
             )
+            _record_effective_engine(job, engine, transcript)
             words_path = artifacts_directory / "words.json"
             write_json(words_path, asdict(transcript))
             add_artifact(job, "word_transcript", words_path, event_sink)
@@ -1628,13 +1700,15 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             raise ValueError("job has no valid resumable checkpoint; run the job again")
         set_stage(job, StageName.TRANSCRIBE, StageStatus.RUNNING, event_sink)
         language = job.config.get("source_language")
+        requested_engine = str(job.config.get("engine", DEFAULT_ENGINE))
         transcript = transcribe_audio(
             audio_path,
-            engine=job.config.get("engine", DEFAULT_ENGINE),
+            engine=requested_engine,
             language=None if language == "auto" else language,
             event_sink=event_sink,
             total_ms=media_info.duration_ms,
         )
+        _record_effective_engine(job, requested_engine, transcript)
         transcript_path = get_job_directory(job) / "artifacts" / "words.json"
         write_json(transcript_path, asdict(transcript))
         add_artifact(job, "word_transcript", transcript_path, event_sink)

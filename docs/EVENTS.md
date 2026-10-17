@@ -239,6 +239,15 @@ yt-dlp 下载进度（`download.py`）。
 | `elapsed_seconds` | float | 已耗时秒数 |
 | `eta_seconds` | float? | 预计剩余秒数 |
 
+### `transcription_fallback`
+请求的 ASR 后端没有安装时发出。回退本身保留（否则只装了一种后端的用户会被彻底卡住），但它改变了实际生效的引擎：`words.json` 与 `transcription_progress` 里的 `engine` 会是 `effective_engine`，`job.config["engine"]` 也会被改写成它，用户原本请求的引擎只留在本事件里。该事件不带 `job_id` / `job_file`：它由 `transcribe.py` 这个零 Job 依赖的叶子模块发出。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `requested_engine` | string | 用户请求的引擎（`mlx` 或 `faster`） |
+| `effective_engine` | string | 实际生效的引擎 |
+| `reason` | string | 回退原因（后端缺失的报错原文） |
+
 ### `remote_subtitles_selected`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
