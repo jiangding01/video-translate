@@ -269,6 +269,109 @@ class TranslationProviderTest(unittest.TestCase):
                 api_key_env="XVT_TRANSLATION_API_KEY",
             )
 
+    def test_base_url_with_userinfo_is_rejected_at_the_entry(self) -> None:
+        """O3：带 userinfo 的 base_url 必须在入口拒绝，脱敏兜不住它。
+
+        实测（CPython 3.12，有无代理两条路径一致）：
+        `https://user:secretpw@api.example.com/v1` 发请求时抛
+        `http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'`。
+        这条消息**不含 scheme**，`events._URL_PATTERN`（要求 `https?://`）与
+        `_USERINFO_PATTERN`（要求 `scheme://`）都不命中，`redact_text` 原样返回，
+        而 base_url 还会随 `job.config["workflow"]` 永久落盘。
+        """
+        # 显式给齐 API key，让失败只可能来自 base_url 形状校验，
+        # 而不是「配置不全」那条既有分支。
+        environment = {"XVT_TRANSLATION_API_KEY": "sk-test"}
+        for provider in ("auto", "openai-compatible"):
+            with (
+                self.subTest(provider=provider),
+                patch.dict(os.environ, environment, clear=True),
+            ):
+                with self.assertRaises(UserInputError) as raised:
+                    resolve_provider(
+                        provider,
+                        base_url="https://operator:secretpw@api.example.com/v1",
+                        model="m",
+                        api_key_env="XVT_TRANSLATION_API_KEY",
+                    )
+
+                message = str(raised.exception)
+                self.assertNotIn("secretpw", message)
+                self.assertNotIn("operator", message)
+                self.assertIn("api.example.com", message)
+
+    def test_base_url_with_query_string_is_rejected_at_the_entry(self) -> None:
+        # query 串既可能携带签名凭据，又会被 `base_url.rstrip("/") + "/chat/completions"`
+        # 拼成无效端点，入口直接拒绝比留到请求时报错更清楚。
+        with patch.dict(os.environ, {"XVT_TRANSLATION_API_KEY": "sk-test"}, clear=True):
+            with self.assertRaises(UserInputError) as raised:
+                resolve_provider(
+                    "openai-compatible",
+                    base_url="https://api.example.com/v1?api_key=secretkey",
+                    model="m",
+                    api_key_env="XVT_TRANSLATION_API_KEY",
+                )
+
+            message = str(raised.exception)
+            self.assertNotIn("secretkey", message)
+            self.assertIn("query", message)
+
+    def test_incomplete_auto_config_still_degrades_despite_a_bad_base_url(self) -> None:
+        """配置不全时 `auto` 仍降级 Agent 模式，不被一条根本用不到的 base_url 打死。
+
+        形状校验刻意排在「配置是否齐全」之后：走到校验才说明这条 base_url 真的要被用来
+        发请求。AGENTS 明确规定 `auto` 在配置不全时降级，而此时这条 base_url 既不发请求
+        也不落盘（provider 身份要首批成功才写回 Job），凭据没有任何出口。校验若挪回前面，
+        环境里留着的一条旧 base_url 就会把降级路径打死。
+        """
+
+        environment = {"XVT_TRANSLATION_BASE_URL": "https://operator:secretpw@api.example.com/v1"}
+        with patch.dict(os.environ, environment, clear=True):
+            mode, config, reason = resolve_provider(
+                "auto",
+                base_url=None,
+                model=None,
+                api_key_env="XVT_TRANSLATION_API_KEY",
+            )
+
+        self.assertEqual(mode, "agent")
+        self.assertIsNone(config)
+        self.assertIn("missing", reason or "")
+        # 降级原因里同样不能回显凭据。
+        self.assertNotIn("secretpw", reason or "")
+
+    def test_base_url_from_environment_is_validated_too(self) -> None:
+        environment = {
+            "XVT_TRANSLATION_BASE_URL": "https://operator:secretpw@api.example.com/v1",
+            "XVT_TRANSLATION_MODEL": "m",
+            "XVT_TRANSLATION_API_KEY": "sk-test",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            with self.assertRaises(UserInputError) as raised:
+                resolve_provider(
+                    "auto",
+                    base_url=None,
+                    model=None,
+                    api_key_env="XVT_TRANSLATION_API_KEY",
+                )
+
+            self.assertNotIn("secretpw", str(raised.exception))
+
+    def test_plain_base_url_still_resolves(self) -> None:
+        environment = {"XVT_TRANSLATION_API_KEY": "sk-test"}
+        with patch.dict(os.environ, environment, clear=True):
+            mode, config, reason = resolve_provider(
+                "openai-compatible",
+                base_url="https://api.example.com/v1/",
+                model="m",
+                api_key_env="XVT_TRANSLATION_API_KEY",
+            )
+
+        self.assertEqual(mode, "openai-compatible")
+        self.assertIsNone(reason)
+        assert config is not None
+        self.assertEqual(config.base_url, "https://api.example.com/v1")
+
     def test_incompatible_response_is_dependency_error(self) -> None:
         cue = Cue(1, 0, 1000, "Hello", source_language="en")
         batch = build_translation_batches([cue], source_language="en", target_language="zh-CN")[0]

@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Security
+
+- **`job.json` 里的失败原因现在和事件一样脱敏。** 此前 stage 失败原因直接写进 `job.json`，再被 `xvt status --json` 原样输出：yt-dlp / ffmpeg 的原始 stderr、下载 403 的 detail、翻译提供方 4xx 消息里的签名 URL、Cookie、代理凭据和 `base_url` 全是明文，而同一条错误在 JSONL 事件里已经是 `<redacted>`。脱敏改在 `set_stage` 这一个边界统一做，两条出口给出同一份文本。旧 Job 里已经落盘的明文不会被自动改写，确认里面有凭据时请删除对应 Job 目录或手工清理 `job.json`。
+- **签名 URL 的参数脱敏名单改为规则匹配，补齐非 AWS 云厂商。** 此前只精确匹配 AWS 的 `x-amz-*` 三件套，GCS v4 的 `X-Goog-Signature` / `X-Goog-Credential`、阿里云的 `auth_key`、腾讯的 `q-signature` 全部原样写进事件与 `job.json`。现在键名含 `signature` / `credential` / `token` / `secret` / `password` / `accesskey` / `apikey` 即脱敏，另对 `key` / `sig` / `auth` / `pwd` 按 `-`、`_`、`.` 分段整词匹配，避免误伤 `monkey`、`keyword`、`author`、`design`、`signal` 这类正常参数。
+- **`--base-url` 带用户名密码或 query 串时直接拒绝。** 此前 `https://user:pw@host/v1` 能通过入口校验并随 `job.config.workflow` 永久落盘，发请求时抛的 `nonnumeric port: 'pw@host'` 不带 scheme，脱敏规则够不着它。现在 `resolve_provider` 在确认这条 Base URL 真的会被用来发请求时拒绝它（Base URL、模型与 API Key 齐备的情形），报错只点名主机名、不回显凭据。配置不齐全时 `--provider auto` 仍按既有契约降级成 Agent 模式，那条 Base URL 既不发请求也不落盘。凭据请放进 API Key 环境变量。
+
 ### YouTube 下载画质修复
 
 - 显式 Cookie 的完整视频获取比较原访问与匿名访问，优先原音轨及更高分辨率，无 1080p 上限。固定格式 ID、临时隔离下载与 ffprobe 校验防止悄悄降为 360p；提取不完整或比较失败明确停止，发布拒绝覆盖现有文件。

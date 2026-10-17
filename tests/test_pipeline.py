@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.events import redact_text
 from xvt.job_store import create_job, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import interrupt_running_stage
@@ -350,6 +351,98 @@ class PipelineTest(unittest.TestCase):
                 load_job(job_file).stages[StageName.SUBTITLE_QA].status,
                 StageStatus.AWAITING_INPUT,
             )
+
+
+class StageErrorRedactionTest(unittest.TestCase):
+    """AGENTS 不可破坏约束 5：任何会持久化的错误文本都必须先脱敏。
+
+    `set_stage` 把失败原因写进 `job.json`，`status --json` 再原样输出。这条链路
+    不经过 `create_event`，所以必须在 `set_stage` 边界集中脱敏，而不是指望
+    18 个调用点各自自觉调用 `redact_text`。
+    """
+
+    # key 是场景名，value 是 (错误文本, 必须消失的明文片段)。
+    # 各条分别对应 process.py 的原始 stderr、download.py 的 403 detail、
+    # translation_provider.py 的 4xx 消息这三类真实来源。
+    _CASES = {
+        "signed_url": (
+            "yt-dlp failed: https://cdn.example.com/v.mp4?itag=22&sig=SIGLEAKVALUE",
+            "SIGLEAKVALUE",
+        ),
+        "cookie_header": (
+            "request headers: Cookie: SID=COOKIELEAKVALUE; theme=dark",
+            "COOKIELEAKVALUE",
+        ),
+        "proxy_userinfo": (
+            "proxy socks5://operator:PROXYLEAKVALUE@127.0.0.1:1080 refused the connection",
+            "PROXYLEAKVALUE",
+        ),
+        "bearer_token": (
+            "upstream echoed Authorization: Bearer sk-BEARERLEAKVALUE",
+            "BEARERLEAKVALUE",
+        ),
+        "provider_base_url": (
+            "translation provider returned HTTP 401 "
+            "(model=m, base_url=https://operator:URLLEAKVALUE@api.example.com/v1): denied",
+            "URLLEAKVALUE",
+        ),
+    }
+
+    def test_stage_error_is_redacted_before_it_reaches_job_json(self) -> None:
+        from xvt.pipeline.common import set_stage
+
+        for name, (message, secret) in self._CASES.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                job = create_job("/tmp/input.mp4", Path(directory))
+                job_file = save_job(job)
+                events: list[object] = []
+
+                set_stage(
+                    job,
+                    StageName.TRANSLATE,
+                    StageStatus.FAILED,
+                    events.append,
+                    error=message,
+                    error_category="dependency_or_process",
+                )
+
+                raw = Path(job_file).read_text(encoding="utf-8")
+                self.assertNotIn(secret, raw, f"{name}: job.json 落盘后仍含明文凭据")
+                self.assertIn("redacted", raw, f"{name}: job.json 没有脱敏标记")
+
+                persisted = load_job(job_file).stages[StageName.TRANSLATE].error
+                self.assertIsNotNone(persisted)
+                self.assertNotIn(secret, persisted or "")
+                # 事件与 job.json 必须给出同一份文本：事件分支会对已脱敏文本再脱敏，
+                # 两者不一致说明 redact_text 不幂等。
+                self.assertEqual(events[-1].data["error"]["message"], persisted)  # type: ignore[attr-defined]
+
+    def test_messages_compared_by_value_survive_redaction_unchanged(self) -> None:
+        """`set_stage` 在边界脱敏后，按**文本相等**识别 stage.error 的地方才仍然成立。
+
+        `pipeline/review.py` 的 `record.error != SUBTITLE_REVIEW_REQUIRED_MESSAGE`
+        就是这样一处：确认后收口过期阻断错误全靠这一句。脱敏若改写了这条常量，
+        收口会静默失效而没有任何测试直接指向脱敏。往这类常量里加 URL 或
+        `key=` 形态的片段之前，先让这条测试红。
+        """
+        from xvt.pipeline.common import SUBTITLE_REVIEW_REQUIRED_MESSAGE
+
+        self.assertEqual(
+            redact_text(SUBTITLE_REVIEW_REQUIRED_MESSAGE),
+            SUBTITLE_REVIEW_REQUIRED_MESSAGE,
+        )
+
+    def test_stage_error_cleared_on_success_stays_none(self) -> None:
+        from xvt.pipeline.common import set_stage
+
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job("/tmp/input.mp4", Path(directory))
+            job_file = save_job(job)
+
+            set_stage(job, StageName.TRANSLATE, StageStatus.FAILED, None, error="boom")
+            set_stage(job, StageName.TRANSLATE, StageStatus.SUCCEEDED, None)
+
+            self.assertIsNone(load_job(job_file).stages[StageName.TRANSLATE].error)
 
 
 class InterruptRunningStageTest(unittest.TestCase):
