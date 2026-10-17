@@ -211,7 +211,15 @@ def _recover_source_selection(
     )
 
 
-def _source_selection_matches(job: Job) -> bool:
+def source_selection_matches(job: Job) -> bool:
+    """源选择登记是否仍与当前 source_cues 一致：源腿满足度的**唯一**实现。
+
+    公有化原因（F5）：``workflow.py`` 曾逐字复制一份 ``_source_selection_satisfied``，
+    只差一个 helper 名。给 ``selected_kind`` 加新分支时只改一边，``continue`` 与
+    ``resume`` 对「源是否满足」的判定就会分叉。现在 workflow 经 ``xvt.pipeline``
+    引用本函数，跨模块使用的私有名按 R1.4 的先例公有化。
+    """
+
     path = valid_artifact_path(job, "source_selection")
     source_checksum = artifact_checksum_for(job, "source_cues")
     if path is None or source_checksum is None:
@@ -1499,7 +1507,7 @@ def _finish_resumed_source(
     cues_path = artifacts_directory / "source-cues.json"
     write_json(cues_path, [asdict(cue) for cue in cues])
     add_artifact(job, "source_cues", cues_path, event_sink)
-    if "source_strategy" in job.config and not _source_selection_matches(job):
+    if "source_strategy" in job.config and not source_selection_matches(job):
         candidate = _candidate_from_job(job)
         if candidate is not None and valid_artifact_path(job, "source_candidate_qa") is None:
             try:
@@ -1555,7 +1563,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
                 load_cues(cues_path),
                 event_sink=event_sink,
                 record_source_selection=(
-                    "source_strategy" in job.config and not _source_selection_matches(job)
+                    "source_strategy" in job.config and not source_selection_matches(job)
                 ),
             )
             if event_sink:

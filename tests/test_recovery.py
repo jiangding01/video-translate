@@ -101,6 +101,35 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["artifacts"][0]["message"], "artifact file is missing")
 
+    def test_verify_job_warns_on_artifact_without_checksum(self) -> None:
+        """没有登记 checksum 的 artifact 只记 warn，但**绝不**算有效产物。
+
+        O7c：这条分支此前零覆盖——把 ``warn`` 改成 ``pass`` 全量 915 条仍绿。
+        它同时是 ``valid_artifact_path`` 的判定来源，一旦退化成 ``pass``，一个从未
+        登记过内容 checksum 的文件就会被恢复链路当成有效产物复用，违反 AGENTS
+        不可破坏约束 9「产物有效性只认内容 checksum」。所以这里既钉住 verify 的
+        三元结果（warn 不升级为 fail、warning_count 计数），也钉住下游后果。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifact_path = root / "artifact.json"
+            artifact_path.write_text("{}", encoding="utf-8")
+            job.artifacts.append(Artifact("example", str(artifact_path), None))
+            job_file = save_job(job)
+
+            report = verify_job(job_file)
+            unchecked_is_valid = valid_artifact_path(job, "example") is not None
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["failed_count"], 0)
+        self.assertEqual(report["warning_count"], 1)
+        self.assertEqual(report["artifacts"][0]["status"], "warn")
+        self.assertEqual(report["artifacts"][0]["message"], "artifact has no checksum")
+        self.assertIsNone(report["artifacts"][0]["expected_checksum"])
+        self.assertFalse(unchecked_is_valid)
+
     def test_recovery_plan_uses_checksum_valid_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

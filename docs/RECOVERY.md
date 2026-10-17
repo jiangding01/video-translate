@@ -154,7 +154,7 @@
 
 局部重译现在是 `plan_advance_steps` 的一个正式等待步骤（`await_cue_retranslation` ∈ `AWAIT_STEPS`），但仍刻意不进 `_STEP_ROUTES`——`apply-cue-retranslation` 必须显式收 `--cue` 与 `--target-language`，而 `xvt apply` 的命令行里没有这两个参数、也不能从响应里安全地推出来。
 
-理由显式登记在 `cli._UNROUTABLE_AWAIT_STEPS`。**新增等待步骤必须在两张表（`_STEP_ROUTES` / `_UNROUTABLE_AWAIT_STEPS`）之一里表态**，守卫测试强制。
+理由显式登记在 `cli._UNROUTABLE_AWAIT_STEPS`。**新增等待步骤必须先登记进 `workflow.AWAIT_STEPS`，再在两张表（`_STEP_ROUTES` / `_UNROUTABLE_AWAIT_STEPS`）之一里表态**，两道都由守卫测试强制：`tests/test_workflow.py::AwaitStepsCoverageTest` 用 AST 比对 `plan_advance_steps` 实际产出的 `await_*` 与 `AWAIT_STEPS`（双向不许有差集），`tests/test_cli_command_tables.py` 管路由表。漏了第一道，`recovery` 的让路判定（`workflow_steps[0] in AWAIT_STEPS`）与 `xvt apply` 的路由会同时静默失效，两处都只是「不命中」、不报错。
 
 ## 烧录 proof 与成品重新关联资格
 

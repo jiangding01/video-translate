@@ -3,7 +3,7 @@ import io
 import json
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +11,7 @@ import test_pipeline_semantic as semantic_tests
 
 from xvt.cli import main
 from xvt.errors import UserInputError
-from xvt.job_store import load_job
+from xvt.job_store import load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Cue
 from xvt.pipeline import (
@@ -25,6 +25,8 @@ from xvt.pipeline.review import review_gate_satisfied
 from xvt.qa import SubtitleIssue, SubtitleQaReport, check_subtitles
 from xvt.recovery import file_checksum
 from xvt.render import AssStyleOptions
+from xvt.translate import GlossaryTerm, TranslationPolicy
+from xvt.workflow_config import get_workflow_config, set_workflow_config
 
 
 class RevisionPreflightTest(unittest.TestCase):
@@ -40,6 +42,46 @@ class RevisionPreflightTest(unittest.TestCase):
         payload = json.loads(response.read_text())
         payload["items"][0]["text"] = text
         response.write_text(json.dumps(payload), encoding="utf-8")
+        return job_file, response
+
+    def _glossary_response(self, root: Path, text: str):
+        """构造一个「术语表要求 Hello→你好、候选译文丢了译名」的 Job 与一份修订响应。
+
+        走的是真实 QA：术语表经 `translation_policy` 落进 workflow 快照，
+        `translation_qa_context` 把它读成 `required_terms`，由 `check_subtitles`
+        判出 `glossary_violation`（severity=error）。不打桩绕过判定。
+        """
+
+        job_file = semantic_tests.SemanticReviewPipelineTest()._job(root)
+        job = load_job(job_file)
+        set_workflow_config(
+            job,
+            replace(
+                get_workflow_config(job),
+                translation_policy=TranslationPolicy(terms=(GlossaryTerm("Hello", "你好"),)),
+            ),
+        )
+        artifact = next(item for item in job.artifacts if item.kind == "translation_polished_cues")
+        path = Path(artifact.path)
+        cues = [Cue(**item) for item in json.loads(path.read_text(encoding="utf-8"))]
+        cues[0] = replace(cues[0], target_text="哈啰。")
+        path.write_text(
+            json.dumps([asdict(cue) for cue in cues], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifact.checksum = file_checksum(path)
+        save_job(job)
+        with (
+            patch.dict("os.environ", {"TEST_TRANSLATION_API_KEY": "secret"}),
+            patch("xvt.pipeline.semantic.semantic_review_batch", return_value=()),
+        ):
+            run_translation_semantic_review(job_file)
+        response = translation_review_input_path(load_job(job_file))
+        assert response is not None
+        payload = json.loads(response.read_text())
+        item = next(entry for entry in payload["items"] if entry["id"] == 1)
+        item["text"] = text
+        response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return job_file, response
 
     def _snapshot(self, root: Path):
@@ -95,6 +137,62 @@ class RevisionPreflightTest(unittest.TestCase):
             with self.assertRaisesRegex(UserInputError, "no changes saved"):
                 apply_translation_review_fixes(job_file, response)
             self.assertEqual(before, self._snapshot(root))
+
+    def test_glossary_violation_blocks_preflight_and_formal_apply(self):
+        """error 级 QA 问题必须挡住 `apply --check` 与正式 apply（F7）。
+
+        此前预检只有「行宽」那一支有测试：把 `issue.severity == "error"` 整条删掉，
+        全量 915 条测试一条都不红。放过的 bug 是人工修订删掉术语表译名后
+        `apply --check` 报 `valid: true`、正式 apply 照样落盘——下游 QA 门虽然仍会
+        拦住烧录，但修订已经写进 Job，违反 AGENTS 不可破坏约束 4 的
+        「正式 apply 在写入前重复预检」。
+
+        这里刻意用一条**短**译文：它不触发任何行宽问题，所以唯一能让预检变红的
+        就是 error 级那一支。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, response = self._glossary_response(root, "哈啰，世界。")
+            before = self._snapshot(root)
+
+            result = preflight_translation_review_fixes(job_file, response)
+
+            self.assertFalse(result["valid"])
+            self.assertEqual(
+                [issue["code"] for issue in result["blockers"]], ["glossary_violation"]
+            )
+            self.assertEqual(result["blockers"][0]["severity"], "error")
+            self.assertEqual(result["blockers"][0]["cue_id"], 1)
+            # 不能是行宽那一支顺手挡下来的，否则这条测试证明不了 error 级分支还活着。
+            self.assertFalse(
+                any(
+                    issue["message"].startswith("target line width ")
+                    for issue in result["blockers"]
+                )
+            )
+            # 预检只读。
+            self.assertEqual(before, self._snapshot(root))
+
+            with self.assertRaisesRegex(UserInputError, "no changes saved"):
+                apply_translation_review_fixes(job_file, response)
+            self.assertEqual(before, self._snapshot(root))
+            self.assertNotIn(
+                "translation_reviewed_cues",
+                {artifact.kind for artifact in load_job(job_file).artifacts},
+            )
+
+    def test_glossary_compliant_revision_passes_preflight(self):
+        """对照组：补回术语译名后预检放行，证明阻断不是「凡术语表就一律挡」。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, response = self._glossary_response(root, "你好，世界。")
+
+            result = preflight_translation_review_fixes(job_file, response)
+
+            self.assertTrue(result["valid"], result["blockers"])
+            self.assertEqual(result["changed_ids"], [1])
 
     def test_cli_check_jsonl_no_locks_writes_or_provider_calls(self):
         with tempfile.TemporaryDirectory() as directory:

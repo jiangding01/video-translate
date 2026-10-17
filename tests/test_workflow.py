@@ -8,6 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import xvt.batch
+import xvt.pipeline.common
+import xvt.pipeline.transcription
 import xvt.workflow
 from xvt.errors import ExitCode, InternalError, UserInputError
 from xvt.events import EventType
@@ -2982,6 +2985,105 @@ class RelinkMediaQaMessageCoverageTest(unittest.TestCase):
 
         self.assertTrue(labels, "没有从 media_qa_failure 解析出任何标签，守卫会空转")
         self.assertEqual(labels, set(_RELINK_MEDIA_QA_MESSAGES))
+
+
+class WorkflowReusesPipelineHelpersTest(unittest.TestCase):
+    """`workflow.py` 只编排，不复制 pipeline 的判定实现（AGENTS「代码结构」）。
+
+    F5：这三个名字曾在 `workflow.py` 里各有一份逐字副本（`_source_selection_satisfied`
+    / `_artifact_checksum` / `_error_category`），只差一个 helper 名。给
+    `selected_kind` 加新分支时只改一边，`continue` 与 `resume` 对「源是否满足」的判定
+    就会分叉，而两边都绿。这里用对象身份把「workflow 用的就是 pipeline 那一份」钉死：
+    任何人重新在 workflow.py 里定义同名副本，`assertIs` 立刻失败。
+    """
+
+    def test_source_selection_predicate_is_the_pipeline_implementation(self) -> None:
+        self.assertIs(
+            xvt.workflow.source_selection_matches,
+            xvt.pipeline.transcription.source_selection_matches,
+        )
+
+    def test_artifact_checksum_helper_is_the_pipeline_implementation(self) -> None:
+        self.assertIs(
+            xvt.workflow.artifact_checksum_for,
+            xvt.pipeline.common.artifact_checksum_for,
+        )
+
+    def test_error_category_helper_is_the_pipeline_implementation(self) -> None:
+        self.assertIs(xvt.workflow.error_category, xvt.pipeline.common.error_category)
+
+    def test_batch_error_category_helper_is_the_pipeline_implementation(self) -> None:
+        """`batch.py` 曾有第四份同样的副本，一并钉住。
+
+        它和 workflow 的那三份是同一个气味：批处理自己算一遍 error category，
+        哪天 `common.error_category` 改了分类规则，批处理条目的 `error.category`
+        就会和 Job 事件里的对不上，而两边都绿。
+        """
+
+        self.assertIs(xvt.batch.error_category, xvt.pipeline.common.error_category)
+
+
+class AwaitStepsCoverageTest(unittest.TestCase):
+    """`AWAIT_STEPS` 必须与 `plan_advance_steps` 实际返回的等待步骤名一致。
+
+    O7a：`AWAIT_STEPS` 是手写集合，而步骤名散在 `plan_advance_steps` 的各条 return 里。
+    漏加一个新等待步骤，`recovery` 的让路判定（`workflow_steps[0] in AWAIT_STEPS`）与
+    统一 `xvt apply` 的路由会同时静默失效——两处都只是「不命中」，不报错。
+    这里用 ast 取 planner 各条 `return` 的字符串字面量（含元组里的）与 `steps.append`
+    的字面量，凡以 `await_` 开头的都必须在 `AWAIT_STEPS` 里；反向也核，避免清单里
+    留下再也不会出现的死条目。
+    """
+
+    @staticmethod
+    def _planner_await_step_names() -> set[str]:
+        source = Path(xvt.workflow.__file__).read_text(encoding="utf-8")
+        function = next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == "plan_advance_steps"
+        )
+        literals: set[str] = set()
+        for node in ast.walk(function):
+            # 步骤名只有两条出路：直接 return（可能包在元组/tuple() 里），或先 append
+            # 进 steps 再统一 return tuple(steps)。两条都收，免得改写形式就绕过守卫。
+            if isinstance(node, ast.Return) and node.value is not None:
+                sources: list[ast.AST] = [node.value]
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+            ):
+                sources = list(node.args)
+            else:
+                continue
+            for root in sources:
+                for child in ast.walk(root):
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                        literals.add(child.value)
+        return {name for name in literals if name.startswith("await_")}
+
+    def test_planner_await_steps_are_all_declared(self) -> None:
+        planner_steps = self._planner_await_step_names()
+
+        self.assertTrue(
+            planner_steps,
+            "没有从 plan_advance_steps 解析出任何 await_ 步骤名，守卫会空转",
+        )
+        undeclared = planner_steps - xvt.workflow.AWAIT_STEPS
+        self.assertEqual(
+            undeclared,
+            set(),
+            "plan_advance_steps 返回了未登记进 workflow.AWAIT_STEPS 的等待步骤："
+            f"{sorted(undeclared)}；recovery 的让路判定与 xvt apply 的路由都会静默失效",
+        )
+
+    def test_declared_await_steps_are_all_reachable(self) -> None:
+        stale = xvt.workflow.AWAIT_STEPS - self._planner_await_step_names()
+        self.assertEqual(
+            stale,
+            set(),
+            f"AWAIT_STEPS 里有 plan_advance_steps 已经不再返回的死条目：{sorted(stale)}",
+        )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from xvt.errors import JobLockedError, UserInputError, XvtError
 from xvt.events import Event, EventSink, EventType, create_event, error_event_fields
 from xvt.job_store import load_job, normalize_output_root, utc_now
 from xvt.locking import hold_batch_lock, hold_job_lock, lock_scope
+from xvt.pipeline import error_category
 from xvt.process import CommandCancelled, raise_if_cancelled
 from xvt.recovery import build_recovery_plan
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
@@ -262,10 +263,6 @@ def _item_event_sink(
     return sink
 
 
-def _error_category(error: Exception) -> str:
-    return getattr(error, "category", "workflow")
-
-
 def _mark_unfinished_item(
     batch_file: Path,
     batch: dict[str, Any],
@@ -451,7 +448,7 @@ def _process_item(
                 )
         raise
     except Exception as error:
-        category = _error_category(error)
+        category = error_category(error)
         sanitized = create_event(EventType.BATCH_ERROR, **error_event_fields(category, str(error)))
         item["status"] = "failed"
         item["error"] = sanitized.data["error"]["message"]
