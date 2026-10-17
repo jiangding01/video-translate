@@ -20,11 +20,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      # macOS 是本项目的主力开发平台：不装 ffmpeg 时真实烧录与预览的集成测试
+      # （tests/test_e2e.py、tests/test_burn.py）会跳过。
+      #
+      # 必须是 ffmpeg-full：homebrew 把 ffmpeg 拆成了两个 formula，精简的 `ffmpeg`
+      # 不带 --enable-libass，而烧录/预览靠 `-vf ass=filename=...` 送字幕，缺 libass
+      # 会直接报 "No such filter: 'ass'"。探测滤镜而不是探测可执行文件：精简版装着
+      # 也得换掉。
+      - name: Install ffmpeg with libass (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          if ffmpeg -hide_banner -filters 2>/dev/null | awk '{print $2}' | grep -qx ass; then
+            echo "ffmpeg already provides the ass filter"
+          else
+            brew install --quiet ffmpeg-full
+          fi
+
+      # 装完立刻断言能力到位。少了这一步，哪天 formula 又变精简，集成测试会退回
+      # 静默跳过，而 CI 照样全绿——那正是本轮要修掉的状态。
+      - name: Verify ffmpeg provides the ass filter
+        run: ffmpeg -hide_banner -filters | awk '{print $2}' | grep -qx ass
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -41,8 +65,9 @@ jobs:
       - name: Format check (ruff format)
         run: uv run --no-sync ruff format --check src tests
 
+      # -rs 让 skip 原因出现在日志摘要里：否则「集成测试被静默跳过」在 CI 上不可见。
       - name: Test (pytest)
-        run: uv run --no-sync pytest -q
+        run: uv run --no-sync pytest -q -rs
 
       - name: CLI smoke test
         run: uv run --no-sync xvt --help

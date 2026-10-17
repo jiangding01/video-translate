@@ -28,11 +28,13 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/batch.py` | 目录输入快照、串行 Job 编排、`batch.json` 原子持久化和批量恢复；中断兜底与恢复分类见 [恢复与回填契约](docs/RECOVERY.md#批处理恢复分类与中断兜底) |
 | `src/xvt/workflow.py` | 端到端目标编排（Goals → `plan_advance_steps` → 执行）、`continue`、Agent 等待和烧录派生指纹；译文满足度含 SRT 与译文 QA 报告，缺渲染或 QA 报告时走 `complete_translated_outputs`；`plan_advance_steps` 在函数体最前判定局部重译等待（`await_cue_retranslation`），因为它会叠加在一个译文目标已满足的 Job 上；完整判定顺序见 [恢复与回填契约](docs/RECOVERY.md#端到端推进计划的判定顺序)；`_advance_workflow` 在发 `workflow_completed` 前有 fail-closed 终检；媒体 QA 放行判定（`media_qa_failure` / `media_qa_passed`）与 v2 proof 指纹比对（`_burn_proof_fingerprint_matches`）各只有一份实现，烧录满足度、relink 资格、`relink_burned_output` 与 `recovery` 的原因文案一律复用，不得就地重造 |
 | `src/xvt/workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与读写边界 |
+| `src/xvt/config.py` | Workflow 默认值常量的单一事实来源（纯常量、零 xvt 依赖，CLI 默认值与持久化 config 的手写兜底都引用这里） |
 | `src/xvt/checksums.py` | 文件内容 SHA-256 的唯一实现（零依赖叶子，供 recovery / candidate_qa / pipeline.common 共用） |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
 | `src/xvt/artifacts.py` | artifact kind 枚举、派生依赖图与失效闭包 |
-| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账，并承载翻译策略回退的**唯一**实现 `resolved_translation_policy`：快照优先、顶层 `translation_policy` 兜底，翻译侧与译文 QA 侧必须同口径，否则术语死锁）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾，并承载 provider 批次循环与重试的唯一实现 `run_provider_batches` / `translate_batch_with_retries`）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`semantic_state`（语义复查只读状态查询：`semantic_review_target` 及其批次重算、报告解析与 checkpoint 读取；零依赖叶子，包内只依赖 `common`，供 review / revision / semantic 共用，不写盘不改 stage）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
+| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账，并承载翻译策略回退的**唯一**实现 `resolved_translation_policy`：快照优先、顶层 `translation_policy` 兜底，翻译侧与译文 QA 侧必须同口径，否则术语死锁）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾，并承载 provider 批次循环与重试的唯一实现 `run_provider_batches` / `translate_batch_with_retries`）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`semantic_state`（语义链路只读纯函数：`semantic_review_target` 及其批次重算与指纹、报告与 issue 的解析/校验/序列化、人工修订范围、repair checkpoint 读取；零副作用叶子，包内只依赖 `common`，供 review / revision / semantic 共用，不写盘不登记 artifact 不改 stage）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
+| `src/xvt/stages.py` | Stage 计划表：给定输入组合声明转写阶段跳过哪些 stage（先计划、后执行的单一事实来源） |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
 | `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |
 | `src/xvt/media.py` | ffprobe 媒体检查 |
@@ -44,11 +46,16 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/translation_provider.py` | OpenAI-compatible Chat Completions 调用 |
 | `src/xvt/qa.py` | 时间轴、文本完整性和显示宽度检查 |
 | `src/xvt/candidate_qa.py` | 候选译文 QA 判定，以及 QA message 中行宽/上限的**唯一**解析实现（`overflow_limits`，零依赖叶子，供 recovery / pipeline.revision 共用）；其它模块一律复用它，不得就地重造这条正则 |
+| `src/xvt/source_selection.py` | 源字幕候选的确定性 QA 与选择决策（`SourceStrategy` / `SourceCandidateKind` / `SourceSelectionAction`） |
 | `src/xvt/render.py` | 双语 ASS 样式和平台字体选择 |
 | `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
 | `src/xvt/paths.py` | 烧录/预览输出绝对路径与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact） |
 | `src/xvt/events.py` | JSONL 事件和通用 URL 脱敏 |
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
+| `src/xvt/errors.py` | `ExitCode` 枚举与 XVT 异常族（退出码语义的单一事实来源） |
+| `src/xvt/locking.py` | Job 目录与 batch 文件的 `flock` 独占执行锁（第二个进程立即以退出码 7 失败，锁序固定先 batch 后 job） |
+| `src/xvt/cancellation.py` | 进程级协作式取消：把 SIGINT/SIGTERM 统一为全局取消事件，供 `process.run_command` 与长循环的迭代检查点使用 |
+| `src/xvt/doctor.py` | `xvt doctor` 的本机运行时依赖探测（ffmpeg/ffprobe/yt-dlp、ffmpeg 滤镜与编码能力、ASR 后端、字幕字体、输出目录可写） |
 | `tests/` | 与源码模块对应的单元和流程测试；另有三类跨文件守卫：`test_pipeline_imports.py`（包内依赖方向）、`test_cli_command_tables.py`（CLI 命令表硬关系）、`test_subprocess_boundary.py`（不可破坏约束 6） |
 
 `workflow.py` 只负责编排，不应复制 `pipeline` 包的媒体或字幕算法；跨模块复用的判定一律把 pipeline 侧的私有名公有化并经 `pipeline/__init__` re-export，由 `tests/test_workflow.py::WorkflowReusesPipelineHelpersTest` 以对象身份钉住（当前为 `source_selection_matches` / `artifact_checksum_for` / `error_category`）。原子命令仍需可单独使用，端到端命令通过组合这些能力完成任务。`pipeline` 包内依赖方向保持无环：`common ← review ← {transcription, translation, burnin}`，`common ← semantic_state ← {review, revision}`，`retranslate` 依赖 `translation`，`semantic` 依赖 `translation` 与 `{review, revision, semantic_state}`，`resegment` 只依赖 `common`，`burnin` 依赖 `common` 与 `review`（烧录/预览与 workflow 共用同一 QA 放行谓词），`polish` 依赖 `translation`，`revision` 依赖 `common` 与 `semantic_state`；新增子模块时不得引入反向依赖，公共入口一律经 `__init__` re-export。**包内已无函数级 import 环**：所有包内依赖都是模块顶层 import，`tests/test_pipeline_imports.py` 同时守卫顶层依赖边白名单与「函数体内不得出现 `from xvt.pipeline.*`」，需要共享只读状态时把它下移到叶子模块，而不是用惰性 import 规避循环。
@@ -58,7 +65,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 默认用户路径是 **`run` → `status` → `continue`**（批处理为 `batch` / `batch-continue`）。`status` 输出 `recovery_plan` 与 `advance_steps`，与 `continue` 共用 `plan_advance_steps` 判定，是中断后的导航入口。
 
 - `xvt run` 创建新 Job。没有 `--target-language` 时停在源字幕；提供目标语言后继续翻译；同时提供 `--burn` 时继续烧录。停在 `awaiting_input` 时退出码默认为 0（Agent 协议的正常步骤），只有显式 `--fail-on-waiting` 才返回 10；该旗标不发 `cli_failed`、不改事件流，只改退出码。
-- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。等待项绝不由批处理自动推进，已登记烧录成品缺失时绝不自动重烧，一律停在 `awaiting_input` 等用户显式 `relink-burned-output` 或 `continue`。`--fail-on-waiting` 下有等待条目返回 10，有失败条目仍返回 6（**6 优先于 10**）。恢复分类、`degraded` 标注与各目标产物的去向详见 [恢复与回填契约](docs/RECOVERY.md#批处理恢复分类与中断兜底)。
+- `xvt batch` 固定本地目录输入清单并为每项创建独立 Job；`xvt batch-continue` 只按 `batch.json` 和各 Job 的恢复计划处理未完成项。等待项绝不由批处理自动推进：已登记烧录成品缺失**且具备重新关联资格**（checksum 有效的 v2 proof 等条件全部匹配）时绝不自动重烧，一律停在 `awaiting_input` 等用户显式 `relink-burned-output` 或 `continue`；不具备资格的（例如只有 legacy fingerprint 的旧 Job）按 `retryable` 分类，由批处理重烧。`--fail-on-waiting` 下有等待条目返回 10，有失败条目仍返回 6（**6 优先于 10**）。恢复分类、`degraded` 标注与各目标产物的去向详见 [恢复与回填契约](docs/RECOVERY.md#批处理恢复分类与中断兜底)。
 - `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。产物有效性判定与 `continue` 使用**同一套全量 checksum 校验**，只是同一次判定内对同一文件只哈希一次。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum。记忆化边界与元数据证伪/证实的界线详见 [恢复与回填契约](docs/RECOVERY.md#产物有效性校验与-checksum-记忆化)。
 - `xvt continue JOB` 读取 `job.config.workflow`（类型化为 `WorkflowConfig`），补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。等待态退出码同 `run`（默认 0，`--fail-on-waiting` 时 10）。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
@@ -100,6 +107,8 @@ uv run --no-sync ruff format --check src tests
 uv run --no-sync pytest -q
 uv run --no-sync xvt --help
 ```
+
+集成测试（`tests/test_e2e.py`、`tests/test_burn.py`）要求 ffmpeg **带 libass 的 `ass` 滤镜**——烧录与预览靠 `-vf ass=filename=...` 送字幕。homebrew 把 ffmpeg 拆成了两个 formula，精简的 `ffmpeg` 不带 `--enable-libass`，**本地与 CI 都要装 `ffmpeg-full`**；缺 libass 时这些测试会跳过并说明原因（`pytest -rs` 可见），不会伪装成通过。
 
 涉及本机运行时依赖时，再执行：
 

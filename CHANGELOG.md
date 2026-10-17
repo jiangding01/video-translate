@@ -144,6 +144,7 @@
 - 字幕 QA `needs_review` 经 `--acknowledge-subtitle-review` 确认后，`continue` 会把语义复核腿留在 `translate` stage 上的过期阻断错误收口为 `succeeded`，旧 Job 下次 `continue` 自动修正，不再出现 stage 显示 `failed` 而恢复计划显示 complete 的矛盾状态。收口要求 QA 门已放行、确认记录对当前源 cue 仍有效且译文 cue 与两份 SRT 均 checksum 有效，不会绕过 error 级 QA 问题。
 - 烧录恢复原因文案拆分：媒体 QA 已通过但烧录成品缺失或 checksum 已失效时，不再复用「烧录尚未通过媒体 QA」误导文案，改为提示成品已不在登记路径或内容已变化，避免与 `verify` 的 `artifact file is missing` 诊断矛盾；媒体 QA 未通过与指纹失效两种文案保持不变。
 - `needs_review` 恢复引导：`status` / recovery / `continue` 入口闸区分 review 与 error；review 给出 `xvt continue JOB --acknowledge-subtitle-review`，不再笼统要求「修字幕」。
+- `xvt status` 需要人工处理时给出的 `hint: re-check with xvt status … after repairs` 现在按 shell 规则转义路径。此前这一处手拼双引号（全仓唯一例外，恢复计划里的命令早已用 `shlex.quote`），Job 路径含单引号、`$` 或反斜杠时复制出来的命令是错的，甚至会触发变量展开。普通路径的输出只是去掉了那对多余的双引号。
 
 ### Changed
 

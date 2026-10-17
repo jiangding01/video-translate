@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ffmpeg_support import FFMPEG_REQUIREMENT, ffmpeg_can_render_ass
+
 from xvt.burn import (
     build_burn_command,
     burn_subtitles,
@@ -205,10 +207,7 @@ Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,HELLO
 """
 
 
-@unittest.skipUnless(
-    shutil.which("ffmpeg") and shutil.which("ffprobe"),
-    "FFmpeg integration tests require ffmpeg and ffprobe",
-)
+@unittest.skipUnless(ffmpeg_can_render_ass(), FFMPEG_REQUIREMENT)
 class BurnFilterPathSmokeTest(unittest.TestCase):
     """用真实 ffmpeg 确认特殊字符路径既能烧录成功，字幕也真的渲染上去。"""
 

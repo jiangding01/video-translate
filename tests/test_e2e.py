@@ -1,4 +1,3 @@
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -6,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pysubs2
+from ffmpeg_support import FFMPEG_REQUIREMENT, ffmpeg_can_render_ass
 
 from xvt.job_store import get_job_file, load_job
 from xvt.media import probe_media
@@ -18,10 +18,7 @@ from xvt.pipeline import (
 )
 
 
-@unittest.skipUnless(
-    shutil.which("ffmpeg") and shutil.which("ffprobe"),
-    "FFmpeg integration tests require ffmpeg and ffprobe",
-)
+@unittest.skipUnless(ffmpeg_can_render_ass(), FFMPEG_REQUIREMENT)
 class EndToEndTest(unittest.TestCase):
     def _create_video(self, path: Path) -> None:
         subprocess.run(
