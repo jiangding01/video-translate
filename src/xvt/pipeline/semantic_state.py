@@ -24,7 +24,7 @@ from typing import Any
 
 from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
 from xvt.models import Cue, Job
-from xvt.pipeline.common import checksum, load_cues
+from xvt.pipeline.common import checksum, load_cues, resolved_translation_policy
 from xvt.recovery import valid_artifact_path
 from xvt.translate import (
     SEMANTIC_GROUP_MAX_CUES,
@@ -35,7 +35,6 @@ from xvt.translate import (
     SemanticRepairBatch,
     SemanticReviewBatch,
     SemanticSuggestedItem,
-    TranslationPolicy,
     apply_semantic_repairs,
     build_semantic_groups,
     build_semantic_repair_batches,
@@ -48,18 +47,6 @@ from xvt.translation_provider import SEMANTIC_REVIEW_PROMPT_VERSION
 from xvt.workflow_config import WorkflowConfig, get_workflow_config
 
 HUMAN_REVISION_SCOPE_VERSION = 1
-
-
-def resolved_policy(job: Job, config: WorkflowConfig) -> TranslationPolicy:
-    """语义链构建侧与校验侧共用的 policy 回退。
-
-    workflow 配置没有快照 policy 时回退到 ``job.config["translation_policy"]``；
-    两侧口径必须一致，否则校验侧会与构建侧产出不同的批次/指纹，语义链永不收敛。
-    """
-
-    return config.translation_policy or translation_policy_from_dict(
-        job.config.get("translation_policy")
-    )
 
 
 def config_for_job(job: Job, config: WorkflowConfig | None) -> WorkflowConfig:
@@ -119,7 +106,7 @@ def build_review_batches(
         source_language=source_language(job, source),
         target_language=config.target_language,
         batch_size=config.batch_size,
-        policy=resolved_policy(job, config),
+        policy=resolved_translation_policy(job, config),
         review_cue_ids=review_cue_ids,
     )
 
@@ -402,7 +389,7 @@ def _repair_chain_satisfied(
             all_issues,
             source_language=source_language(job, source),
             target_language=config.target_language,
-            policy=resolved_policy(job, config),
+            policy=resolved_translation_policy(job, config),
         )
         repair_data = json.loads(repair_path.read_text(encoding="utf-8"))
         if repair_data.get("batches") != serialized_batches(repair_batches):

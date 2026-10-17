@@ -57,6 +57,11 @@
 
 ### Fixed
 
+- **翻译策略的回退口径收敛成一份，消除一类术语死锁。** 此前「翻译时用哪份术语表」和「译文 QA 按哪份术语表判」分属两派实现：翻译侧（`continue` / `run` 的推进路径，以及 `translation_progress` 能否零成本重建的判定）在 `job.config.workflow` 没有策略快照时回退**空策略**，译文 QA 侧回退 `job.config["translation_policy"]` 这个**顶层键**。两者分叉的 Job 真实存在——策略快照落地之前创建的 Job 解析出来快照就是空的，而在这类 Job 上跑过一次 `xvt translate --glossary G` 只会写顶层键、不回写快照。此后每次 `continue` 都会**不带术语**地翻译，再被译文 QA 按术语判 `glossary_violation` 而失败，重跑多少次都一样。现在两侧共用同一份回退（快照优先、顶层键兜底），翻译拿到的就是 QA 会要求的那一份。不影响快照里有策略的 Job，也不影响两边都没有策略的旧 Job（仍是默认 `faithful` 空术语表）。
+- **烧录 / 预览的输出路径不再能覆盖用户的原始输入文件。** 此前覆盖保护只认源媒体、`job.json` 和已登记 artifact；纯音频 Job 的 `xvt burn JOB --media video.mp4 --output <原始音频路径>` 里，原始音频既不是「源媒体」（那是 `--media` 给的视频）也不是已登记 artifact（`input_subtitles` 一类登记的是 Job 目录内的副本），于是会被 `ffmpeg -y` 静默覆盖，属于用户数据丢失。现在保护集加入 Job 记着的用户原始输入：本地 `job.input`、`--subtitles` 传入的源字幕、`--translation-subtitles` 传入的译文字幕；`job.input` 是 URL 时按远程输入跳过。报错文案相应改为 `… must not overwrite the source media, job file, an original input file, or an existing artifact`。
+
+- **`version=2` 烧录 proof 的登记现在发 `artifact_created` 事件。** 这份 proof 是 `relink-burned-output` 重新关联已移动成品的唯一授权凭据，此前只写进 `job.json`，在 JSONL 事件流里完全不可见，与「新增产物要同步持久化状态、checksum 和事件」的约定不一致。现在它和其它产物走同一条登记路径，事件类型与字段不变（`kind=burn_fingerprint`，带 `path`）。不新增事件类型，Job 内容与恢复判定均无变化；按事件类型过滤的消费端会多看到一条 `artifact_created`。
+
 - 端到端推进在宣告完成前增加 fail-closed 终检：`run` / `continue` 发 `workflow_completed` 之前断言恢复计划器（`plan_advance_steps`）已经没有任何剩余步骤，不为空就以内部错误（退出码 4）终止，错误消息带上计划器列出的步骤。此前执行侧与计划器对同一份 Job 状态可能给出相反结论——执行侧跑完一轮烧录就直接宣告完成，而计划器仍然列着 `burn`——这种不一致会让 `status` 说「还差一步」而 `continue` 说「已完成」，批处理更会把条目记成完成，用户再也不会回来看它。守卫刻意不降级成警告：误报完成比显式失败危险得多。正常完成路径不受影响；若在真实任务上撞到这个错误，请运行 `xvt status JOB` 查看剩余步骤并附带该 Job 反馈，这是程序侧不变量被破坏，不是用户输入问题。
 
 - 「媒体 QA 是否通过」的判定收敛为一份实现（原先烧录满足度、成品重新关联资格、`relink-burned-output` 与恢复原因文案各写一遍），并补上不打桩的真实状态回归：成品 checksum 有效、派生指纹匹配，但 `media_qa` stage 失败或报告判定不是 `pass` 时，烧录目标必须判未完成并给出 `burn`。这两道条件此前没有任何测试覆盖（唯一相邻的测试都先删掉了成品，判定在更早的一步就早退了），删掉它们全量测试仍然全绿。无用户可见行为变化。

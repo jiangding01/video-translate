@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from xvt.pipeline.burnin import burn_translated_job, preview_translated_job
 from xvt.pipeline.common import (
+    add_artifact,
     artifact_checksum_for,
     error_category,
     inspect_input,
     interrupt_running_stage,
     is_subtitle_input,
+    resolved_translation_policy,
 )
 from xvt.pipeline.polish import (
     agent_translation_polish_manifest_valid,
@@ -107,6 +109,7 @@ __all__ = [
     "TranslationRunResult",
     "acknowledge_subtitle_review",
     "acknowledge_translation_review",
+    "add_artifact",
     "agent_translation_polish_core_satisfied",
     "agent_translation_polish_manifest_valid",
     "agent_translation_polish_progress_ready",
@@ -138,6 +141,7 @@ __all__ = [
     "preflight_translation_review_fixes",
     "rebuild_source",
     "resegment_translation",
+    "resolved_translation_policy",
     "resume_job",
     "resume_remote_transcription",
     "cue_retranslation_request",

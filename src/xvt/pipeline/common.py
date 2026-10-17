@@ -34,7 +34,7 @@ from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Word
 from xvt.render import AssStyleOptions
 from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
 from xvt.translate import TranslationPolicy, translation_policy_from_dict
-from xvt.workflow_config import clear_burn_fingerprint, get_workflow_config
+from xvt.workflow_config import WorkflowConfig, clear_burn_fingerprint, get_workflow_config
 
 
 def inspect_input(input_value: str) -> dict[str, Any]:
@@ -78,14 +78,26 @@ def translation_qa_context(job: Job) -> dict[str, Any]:
     }
 
 
-def resolved_translation_policy(job: Job) -> TranslationPolicy:
-    """workflow 策略快照优先，顶层配置作为原子 Job 的回退。"""
-    config = get_workflow_config(job)
-    return (
-        config.translation_policy
-        if config and config.translation_policy is not None
-        else translation_policy_from_dict(job.config.get("translation_policy"))
-    )
+def resolved_translation_policy(
+    job: Job,
+    config: WorkflowConfig | None = None,
+) -> TranslationPolicy:
+    """翻译策略回退的**唯一**实现：workflow 快照优先，顶层 ``translation_policy`` 兜底。
+
+    翻译侧与译文 QA 侧必须共用这一份。两派口径曾并存（O2）：``workflow`` 与
+    ``translation_progress_rebuildable`` 缺快照时回退空 ``TranslationPolicy()``，
+    本函数与语义链回退顶层键。快照缺失而顶层键有术语的 Job（策略快照落地前创建的
+    老 Job 上跑过一次 ``xvt translate --glossary G``，它只写顶层键不回写快照）于是
+    翻译不带术语、译文 QA 按术语判 ``glossary_violation``，术语死锁没有出口。
+
+    ``config`` 由调用方显式给出时优先采用，用于「执行中的 workflow 配置尚未回到
+    磁盘」的推进路径；省略时从 Job 读回快照。顶层键的回退对两者一致。
+    """
+
+    resolved = config if config is not None else get_workflow_config(job)
+    if resolved is not None and resolved.translation_policy is not None:
+        return resolved.translation_policy
+    return translation_policy_from_dict(job.config.get("translation_policy"))
 
 
 def required_glossary_terms(job: Job) -> tuple[tuple[str, str], ...]:

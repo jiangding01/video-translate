@@ -155,16 +155,50 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | 编号 | 内容 | 判断 |
 | --- | --- | --- |
 | O1 | `semantic.py` 三处 12 行逐字相同的终态收口 + 两处问题分拣重复，抽 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper | **值得做**，半天；是 Phase 5 的轻量替代，能吃掉其大部分收益 |
-| O2 | policy 回退有 4 份、两派语义（`common.py` / `semantic_state.py` 回退顶层键，`workflow.py` / `translation.py` 回退默认值） | **值得做**，F2 正是这条结构隐患的现实案例；并入 R3.4，必须排在 Q7 之前 |
+| O2 | policy 回退有 4 份、两派语义（`common.py` / `semantic_state.py` 回退顶层键，`workflow.py` / `translation.py` 回退默认值） | **已修（本轮）**，并且**不是整洁问题**——已复现为真实可达的术语死锁，见下方 O2 条目 |
 | O3 | `translation_provider.py` 的 `resolve_provider` 不拒绝带 userinfo/query 的 base_url；实测 `user:pw@host` 的凭据经 `InvalidURL` 消息泄露（消息不含 scheme，`redact_text` 的 URL 正则不命中）且随 `config.workflow` 永久落盘 | **已修（本轮）**，见下方 O3 条目 |
-| O4 | `paths.py` 的覆盖保护只认已登记 artifact；纯音频 Job 执行 `burn --output <job.input 的路径>` 会被 `ffmpeg -y` 静默覆盖原始媒体 | **值得做**，几行；后果是用户数据丢失。保护集加入本地 `job.input` 与用户原始字幕路径 |
+| O4 | `paths.py` 的覆盖保护只认已登记 artifact；纯音频 Job 执行 `burn --output <job.input 的路径>` 会被 `ffmpeg -y` 静默覆盖原始媒体 | **已修（本轮）**，见下方 O4 条目 |
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
-| O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | 可做，几行；落在协议快照的已知盲区（烧录链路）内 |
+| O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | **已修（本轮）**，见下方 O6 条目 |
 | O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | **已修（本轮）**，见下方 O7 条目 |
 | O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | 部分值得做 |
 | O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | 值得做，分钟级 |
 | O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | 值得评估 |
 | O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | 几分钟 |
+
+### O2 policy 回退两派语义造成术语死锁 — ✅ 已复现，**已修（本轮）**
+
+**定性要改**：清单原本把它归为「可优化 / 结构隐患」，实测它是**可达的正确性 bug**，与 F2 同款的术语死锁，只是走另一条路径。
+
+可达路径（已构造 Job 复现，不是推断）：
+
+1. `WorkflowConfig.translation_policy` 是 `TranslationPolicy | None`，策略快照落地之前创建的 Job 解析出来就是 `None`，而 `workflow_config.py` 里**没有任何**把顶层键同步进快照的路径。
+2. 这类 Job 上跑一次 `xvt translate --glossary G`：`prepare_agent_translation` / `run_translation` 都只写 `job.config["translation_policy"] = resolved_policy.to_dict()`，快照仍是 `None`。
+3. 此后 `continue` → `_ensure_translation` → `workflow._translation_policy(config)` 回退 `TranslationPolicy()`，**译文不带术语**。
+4. 同一个 Job 的译文 QA 走 `common.resolved_translation_policy(job)` → `required_glossary_terms` → `translation_qa_context.required_terms` → `check_subtitles`，**按顶层键要求术语**，判 `glossary_violation`（severity 为 error，QA 直接 `failed`，连 `--acknowledge` 这条出口都没有）。
+
+红先证据：`tests/test_workflow.py::WorkflowTest::test_continue_translates_with_the_policy_the_qa_gate_requires` 在修复前失败于 `TranslationPolicy(style='faithful', terms=()) != TranslationPolicy(style='natural', terms=(GlossaryTerm('OpenAI','OpenAI'),))`，同一条测试里 QA 侧的 `required_glossary_terms` 断言则已经为真——两侧确实分叉。另独立验证 `check_subtitles(..., required_terms=(("OpenAI","OpenAI"),))` 对不含该术语的译文返回 `failed` / `glossary_violation`，死锁闭环成立。
+
+修法：**四份合成一份**，`common.resolved_translation_policy(job, config=None)` 是唯一实现（快照优先、顶层键兜底；`config` 显式给出时优先采用，省略时从 Job 读回）。
+
+- `workflow._translation_policy` 删除，两个调用点改为 `resolved_translation_policy(job, config)`。
+- `semantic_state.resolved_policy` 删除（语义等价：`or` 对恒真的 `TranslationPolicy` 对象等同于 `is not None`），`semantic.py` / `semantic_state.py` 共 6 个调用点改为共享实现。
+- `translation.translation_progress_rebuildable` 里的第四份（清单未点名，注释原文写着「与 `workflow._translation_policy` 同口径」）一并换掉：它重算 fingerprint 判断 checkpoint 能否零成本重建，口径一旦与执行侧漂移就会把可复用的 checkpoint 判成不可重建，整轮翻译白白重付一次 API 费用。
+- `translation._resolved_translation_inputs`（F2 加的）**刻意不合并**：它解决的是「CLI 显式参数 vs 快照」的逐字段合并，与「快照缺失时回退到哪里」不是同一件事。
+
+守卫：`WorkflowReusesPipelineHelpersTest::test_translation_policy_fallback_is_the_pipeline_implementation` 用对象身份钉住 workflow / translation / semantic / semantic_state 四处用的都是 `common` 那一份，并断言 `semantic_state.resolved_policy` 与 `workflow._translation_policy` 不得复活。
+
+### O4 覆盖保护不保护未登记的用户文件 — ✅ 已复现，**已修（本轮）**
+
+复现：构造 `job.input` 指向本地音频、`--media` 指向视频的 Job，`protected_job_paths(job, media, writing_kind="burned_video")` 只返回 `{video.mp4, job.json}`，原始音频不在其中，`assert_safe_output` 放行——`xvt burn JOB --media video.mp4 --output <原始音频>` 会让 `ffmpeg -y` 直接覆盖它。
+
+修法：`paths.py` 新增 `_user_input_paths(job)`，把 Job 记着的用户原始输入文件并入保护集——本地 `job.input`、`job.config["subtitles"]`（`--subtitles` 的原件）、`workflow.translation_subtitles`（`--translation-subtitles` 的原件）。URL 形式的 `job.input` 由 `_local_path` 按 `urlparse` 的 http/https 判定跳过（与 `_burn_fingerprint` 同口径）。这些路径**不**按 `writing_kind` 排除：它们从来不是本次写入的目标。错误文案补上 `an original input file`（原有的 `source media` / `existing artifact` 字样保留，既有断言未改）。烧录与预览共用 `protected_job_paths`，两条路径同时受益。
+
+### O6 v2 proof 登记不发事件 — **已修（本轮）**
+
+修法：`_record_burn_fingerprint` 增加可选 `event_sink`（`_ensure_burn` 透传 workflow 的 sink），写盘后的登记从「手工 `job.artifacts.append` + `save_job`」改为调用 `pipeline.common.add_artifact`——顺带把这处绕开共享登记实现的旁路也收掉，checksum、同 kind 去重、落盘与 `artifact_created` 事件全部复用同一份。不新增 `EventType`；`docs/EVENTS.md` 的 `artifact_created` 节补了一段说明 `kind=burn_fingerprint` 的来源与「原子 `xvt burn` 不签发、因此没有这条事件」。
+
+协议快照影响：**零 diff**。7 个场景全是纯字幕 Job（模块 docstring 即如此声明），不烧录，也不经过 `workflow._ensure_burn`；实跑 `tests/test_provider_protocol_snapshot.py` 确认 8 passed + 2 subtests。
 
 ### O3 `base_url` 带 userinfo 时凭据从入口漏出 — ○ 已实测，**已修（本轮）**
 
@@ -228,8 +262,8 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 3. **N1 设计决策**：先定「确认是否绑定译文内容」，再动手。
 4. ~~**烧录判定收敛与 fail-closed 补洞**：F6 + O5 + F7 + O7。~~ 四条均已修：F6 / O5（上一轮，四阶段：改桩 → 真实状态测试 → 口径收敛 → 终检守卫），F7 / O7（本轮，与 F5 同一批「守卫与去重」）。
 5. ~~**去重**：F5。~~ 已修（本轮）。
-6. 之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。
+6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
 
-**剩余未处理**：N1（需设计决策）、F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1 / O2 / O4 / O6 / O8 / O9 / O10 / O11，以及「观察」与「未验证」两节。
+**剩余未处理**：N1（需设计决策）、F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1 / O8 / O9 / O10 / O11，以及「观察」与「未验证」两节。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

@@ -24,6 +24,7 @@ from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
     REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
+    add_artifact,
     agent_semantic_review_waiting,
     agent_translation_polish_core_satisfied,
     agent_translation_polish_manifest_valid,
@@ -41,6 +42,7 @@ from xvt.pipeline import (
     error_category,
     finalize_acknowledged_subtitle_review,
     is_subtitle_input,
+    resolved_translation_policy,
     resume_job,
     resume_remote_transcription,
     run_transcription,
@@ -81,14 +83,6 @@ AWAIT_STEPS: frozenset[str] = frozenset(
         "await_cue_retranslation",
     }
 )
-
-
-def _translation_policy(config: WorkflowConfig) -> TranslationPolicy:
-    """缺失策略快照时与历史行为一致，回退为默认 TranslationPolicy。"""
-
-    if config.translation_policy is not None:
-        return config.translation_policy
-    return TranslationPolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,8 +403,13 @@ def burned_output_relink_recovery_available(
     )
 
 
-def _record_burn_fingerprint(job_file: Path) -> None:
-    """将派生指纹登记为 ``burn_fingerprint`` artifact，并清除历史 workflow 旁路字段。"""
+def _record_burn_fingerprint(job_file: Path, *, event_sink: EventSink | None = None) -> None:
+    """将派生指纹登记为 ``burn_fingerprint`` artifact，并清除历史 workflow 旁路字段。
+
+    登记走 ``add_artifact``，因此与其它产物一样发 ``artifact_created`` 事件
+    （AGENTS 不可破坏约束 7）：这份 v2 proof 是 ``relink-burned-output`` 的唯一
+    授权凭据，不能只存在于 ``job.json`` 而在事件流里不可见。
+    """
 
     job = load_job(job_file)
     try:
@@ -445,9 +444,9 @@ def _record_burn_fingerprint(job_file: Path) -> None:
     )
     temporary.replace(path)
     # 先清旧 artifact / workflow 旁路，再登记新文件，避免双写漂移。
+    # add_artifact 负责 checksum、同 kind 去重、save_job 与 artifact_created 事件。
     clear_burn_fingerprint(job)
-    job.artifacts.append(Artifact("burn_fingerprint", str(path), file_checksum(path)))
-    save_job(job)
+    add_artifact(job, "burn_fingerprint", path, event_sink)
 
 
 #: ``media_qa_failure`` 的失败标签 → relink 的用户报错文案。文案逐项保留历史措辞，
@@ -890,7 +889,7 @@ def _ensure_translation(
                     batch_size=config.batch_size,
                     max_retries=config.max_retries,
                     timeout_seconds=config.timeout_seconds,
-                    policy=_translation_policy(config),
+                    policy=resolved_translation_policy(job, config),
                     event_sink=event_sink,
                 )
                 if translation.mode == "agent":
@@ -999,7 +998,7 @@ def _ensure_translation(
         batch_size=config.batch_size,
         max_retries=config.max_retries,
         timeout_seconds=config.timeout_seconds,
-        policy=_translation_policy(config),
+        policy=resolved_translation_policy(job, config),
         event_sink=event_sink,
     )
     if translation.mode == "agent":
@@ -1034,7 +1033,7 @@ def _ensure_burn(
         persist_workflow_qa=True,
         event_sink=event_sink,
     )
-    _record_burn_fingerprint(path)
+    _record_burn_fingerprint(path, event_sink=event_sink)
 
 
 def _advance_workflow(

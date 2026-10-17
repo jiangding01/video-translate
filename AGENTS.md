@@ -31,7 +31,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/checksums.py` | 文件内容 SHA-256 的唯一实现（零依赖叶子，供 recovery / candidate_qa / pipeline.common 共用） |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
 | `src/xvt/artifacts.py` | artifact kind 枚举、派生依赖图与失效闭包 |
-| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾，并承载 provider 批次循环与重试的唯一实现 `run_provider_batches` / `translate_batch_with_retries`）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`semantic_state`（语义复查只读状态查询：`semantic_review_target` 及其批次重算、报告解析与 checkpoint 读取；零依赖叶子，包内只依赖 `common`，供 review / revision / semantic 共用，不写盘不改 stage）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
+| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账，并承载翻译策略回退的**唯一**实现 `resolved_translation_policy`：快照优先、顶层 `translation_policy` 兜底，翻译侧与译文 QA 侧必须同口径，否则术语死锁）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾，并承载 provider 批次循环与重试的唯一实现 `run_provider_batches` / `translate_batch_with_retries`）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`semantic_state`（语义复查只读状态查询：`semantic_review_target` 及其批次重算、报告解析与 checkpoint 读取；零依赖叶子，包内只依赖 `common`，供 review / revision / semantic 共用，不写盘不改 stage）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
 | `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |
@@ -46,7 +46,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/candidate_qa.py` | 候选译文 QA 判定，以及 QA message 中行宽/上限的**唯一**解析实现（`overflow_limits`，零依赖叶子，供 recovery / pipeline.revision 共用）；其它模块一律复用它，不得就地重造这条正则 |
 | `src/xvt/render.py` | 双语 ASS 样式和平台字体选择 |
 | `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
-| `src/xvt/paths.py` | 烧录/预览输出绝对路径与覆盖保护（源媒体、job 文件、已登记 artifact） |
+| `src/xvt/paths.py` | 烧录/预览输出绝对路径与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact） |
 | `src/xvt/events.py` | JSONL 事件和通用 URL 脱敏 |
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
 | `tests/` | 与源码模块对应的单元和流程测试；另有三类跨文件守卫：`test_pipeline_imports.py`（包内依赖方向）、`test_cli_command_tables.py`（CLI 命令表硬关系）、`test_subprocess_boundary.py`（不可破坏约束 6） |
