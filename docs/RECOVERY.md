@@ -95,6 +95,14 @@
 
 `SUBTITLE_QA` 停在 `failed` / `awaiting_input` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的 Agent 等待而复位。端到端 Job 先问 planner（首步是正式等待步骤就改走工作流恢复分支）；原子 Job 没有 planner，改用 planner 内部的同一份谓词 `workflow.agent_full_translation_waiting`（`TRANSLATE` 停在 `awaiting_input` 且 `translation_batches` checksum 有效）跳过 `qa_blocked`，由原子等待分支给出 `apply-translation` 引导。否则术语死锁后改跑 `translate --provider agent` 的用户会继续拿到 `retranslate-cues`，照做会盖掉刚写入的整轮 manifest。manifest 已经不在的等待态残留不放行，QA 引导照旧生效。
 
+### 强制对齐置信度不足的死循环出口
+
+`--align-subtitles` 与 `--allow-low-confidence-alignment` 都固化在 `job.config` 里，置信度门不过时 `ALIGN` 记 `failed`、`source_cues` 缺失，但转写 checkpoint 全在。此前这种 Job 落到「存在 checksum 有效的转写 checkpoint，可以从断点继续」，首选命令是 `continue`，`alternative_commands` 为空——而 `continue` 拿的是同一份 `input_subtitles` 与同一份 `word_transcript`，对齐是确定性的，每次都复现同一个退出码 2，用户没有任何出口。
+
+恢复计划现在在这个状态下归 `manual_fix`，首选命令是 `xvt rebuild-source JOB --strategy asr`（它把 `align_subtitles` 置为 `false` 并优先复用 checksum 有效的 words/audio checkpoint，是真正能推进的出口；另一条出口是重新运行 `run` 调整对齐选项）。判定只看 Job 状态，不猜异常：媒体 Job、`align_subtitles is True`、未放行低置信、`subtitle_alignment` checksum 有效且其 `confidence` 低于 `minimum_alignment_confidence`，并且 **`word_transcript` 与 `input_subtitles` 两份对齐输入都 checksum 有效**。缺任一输入时重跑可能得到不同置信度，不能断言「必然失败」，那种 Job 仍按既有的转写 checkpoint 恢复处理。批处理侧 `manual_fix` 记为 `failed` 并保留恢复指令，不再反复重试一条注定失败的 `continue`。
+
+**已知未覆盖的相邻情形**：`--align-subtitles` 还有第二种失败——对齐本身置信度达标，但对齐后的字幕 QA 出 error 级问题（报错点名「rerun without `--align-subtitles`」）。它同样让 `continue` 每次失败，但那条路径的 QA 报告不落盘，Job 状态里没有任何证据能证明「必然失败」，因此刻意不改它的分类（照 AGENTS 的口径：判不准就不动分类）。要给它出口得先把那次对齐后 QA 的结论登记成 artifact。
+
 ## 翻译提供方身份的固化
 
 ### 固化时机

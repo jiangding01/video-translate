@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 from xvt.candidate_qa import overflow_limits, translation_candidate_qa_issues
 from xvt.checksums import file_checksum as _hash_file
+from xvt.config import DEFAULT_MIN_ALIGNMENT_CONFIDENCE
 from xvt.job_store import get_job_file, load_job
 from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.workflow_config import (
@@ -456,6 +457,41 @@ def _source_can_be_rebuilt(job: Job, valid_artifacts: dict[str, Path]) -> bool:
     return Path(job.input).expanduser().is_file()
 
 
+def _alignment_confidence_deadlock(job: Job, valid_artifacts: dict[str, Path]) -> bool:
+    """强制对齐的置信度门是否已经把这个 Job 锁死在「continue 必然再次失败」上。
+
+    判定只看 Job 状态，不猜异常：``--align-subtitles`` 与置信度门都固化在 ``job.config``
+    里，重跑时拿的是同一份 ``input_subtitles`` 与同一份 ``word_transcript``，对齐是确定性的，
+    因此登记的置信度低于门限就意味着下一次 ``continue`` 会撞上同一个退出码 2。
+
+    两份对齐输入都必须是 checksum 有效的：缺了 ``word_transcript`` 时重跑会重新转写，
+    置信度可能不同，那种 Job 仍按既有的「从转写 checkpoint 继续」处理，不能被断言成必然失败。
+    """
+
+    if job.config.get("input_kind") == "subtitle":
+        return False
+    if job.config.get("align_subtitles") is not True:
+        return False
+    if job.config.get("allow_low_confidence_alignment", False):
+        return False
+    alignment_path = valid_artifacts.get("subtitle_alignment")
+    if alignment_path is None:
+        return False
+    if not {"word_transcript", "input_subtitles"} <= valid_artifacts.keys():
+        return False
+    minimum = job.config.get("minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE)
+    if isinstance(minimum, bool) or not isinstance(minimum, int | float):
+        return False
+    try:
+        alignment = json.loads(alignment_path.read_text(encoding="utf-8"))
+        confidence = alignment["confidence"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+        return False
+    if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+        return False
+    return float(confidence) < float(minimum)
+
+
 def _source_selection_is_asr(job: Job, valid_artifacts: dict[str, Path]) -> bool:
     selection_path = valid_artifacts.get("source_selection")
     source_cues_path = valid_artifacts.get("source_cues")
@@ -750,6 +786,17 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                     "--strategy",
                     "asr",
                 ),
+            )
+        if _alignment_confidence_deadlock(job, valid_artifacts):
+            # 必须排在下面两条 retryable 之前：对齐输入与门限都固化在 job.config 里，
+            # 重跑拿的是同一份字幕与同一份转写，`continue` / `resume` 只会复现同一个
+            # 退出码 2。此前这里给 retryable + continue，且 alternative 为空，用户照
+            # status 的提示反复重跑同一条注定失败的命令，没有任何出口。
+            return plan(
+                "manual_fix",
+                "强制对齐的置信度低于门限，重跑同一份字幕与转写只会得到同一个结果；"
+                "改用 ASR 重建源时间轴，或重新运行 run 调整对齐选项。",
+                primary_command=_job_command("rebuild-source", job_file, "--strategy", "asr"),
             )
         if subtitle_resumable:
             command = "continue" if workflow is not None else "resume"

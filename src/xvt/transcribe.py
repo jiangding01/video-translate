@@ -236,6 +236,32 @@ def transcribe_faster(
     )
 
 
+def _emit_engine_fallback(
+    event_sink: EventSink | None,
+    *,
+    requested_engine: str,
+    effective_engine: str,
+    reason: str,
+) -> None:
+    """只装了一种后端时的引擎回退必须留痕。
+
+    回退本身保留（直接失败会把只装了一种后端的用户彻底卡住），但它改变了实际生效的引擎，
+    产物里的 ``engine`` 会与用户请求的不一致。调用方负责把实际引擎写回 Job，这里只负责
+    让这次替换在事件流与普通输出里都看得见。
+    """
+
+    if event_sink is None:
+        return
+    event_sink(
+        create_event(
+            EventType.TRANSCRIPTION_FALLBACK,
+            requested_engine=requested_engine,
+            effective_engine=effective_engine,
+            reason=reason,
+        )
+    )
+
+
 def transcribe_audio(
     path: str | Path,
     *,
@@ -261,6 +287,12 @@ def transcribe_audio(
         except TranscriptionError as error:
             if "not installed" not in str(error):
                 raise
+            _emit_engine_fallback(
+                event_sink,
+                requested_engine="mlx",
+                effective_engine="faster",
+                reason=str(error),
+            )
             return transcribe_faster(
                 audio_path,
                 language,
@@ -280,6 +312,12 @@ def transcribe_audio(
         except TranscriptionError as error:
             if "not installed" not in str(error):
                 raise
+            _emit_engine_fallback(
+                event_sink,
+                requested_engine="faster",
+                effective_engine="mlx",
+                reason=str(error),
+            )
             return transcribe_mlx(
                 audio_path,
                 language,

@@ -297,6 +297,26 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 **O7c `checksum=None → warn` 分支无测试**。清单的说法**属实，已独立复验**：把 `recovery.verify_artifact` 的 `"warn"` 改成 `"pass"`，全量 915 条 + 235 subtests 仍然全绿。新增 `tests/test_recovery.py::RecoveryTest::test_verify_job_warns_on_artifact_without_checksum`，除了钉住 verify 的三元结果（`warn` 不升级为 `fail`、`warning_count == 1`、message 与 `expected_checksum: null`），还钉住**下游后果**：`valid_artifact_path` 对这种 artifact 必须返回 `None`。后者才是真正的风险面——`verify_artifact` 同时是 `valid_artifact_path` 的判定来源，一旦退化成 `pass`，一个从未登记过内容 checksum 的文件就会被恢复链路当成有效产物复用，违反不可破坏约束 9。
 
+## 2026-10-17 ASR 转写腿真实 E2E 验收发现（P 系列，与上面的 F/O 编号无关）
+
+来源：ASR 转写腿真实端到端验收，12 项通过（含离线跑通、`resume` checkpoint 复用 67 倍加速、与人工字幕 0.917 文本相似度的对照）。可信度一律为 **○ 已复现（真实运行实测）**，除特别注明外都是主干亲自跑出来的现象。
+
+**已修（本轮）**：
+
+- **P1 本地媒体的 ASR 失败被记到 `import_subtitles`，`transcribe` 停在 `running`** — ✅ 已核验，**已修**。`_process_adaptive_media` 调 `_normalize_audio_and_transcribe` 前不推进 `current_stage`，失败归属错挂。改为由 `on_stage` 回传内部 stage 迁移。
+- **P2 `--engine faster` 在 faster-whisper 未安装时静默回退 mlx** — **已修**。回退保留但新增 `transcription_fallback` 事件 + `[回退]` 普通输出，实际引擎写回 `job.config["engine"]`。
+- **P3 对齐置信度不足失败后 `status` 推荐的 `continue` 必然再次失败** — **已修**。新增 `recovery._alignment_confidence_deadlock`，该状态归 `manual_fix` + `rebuild-source --strategy asr`。这是「primary_command 在该状态下必然再次失败且无 alternative」这类缺陷的第 5 次（前四次：`qa_blocked` 让路、manifest 失效死局、原子分支让路、整轮等待被吞）。
+- **P6 源文修订后 `artifacts/source.srt` 仍以旧文本留在原地，全仓文档无一处提到 `source-reviewed-*` 命名** — **已修（文档）**。程序侧按 checksum 判定没问题，风险面是「按固定路径取文件的脚本拿到旧内容」。README 与架构说明写明产物以 Job 登记表为准；残留文件是恢复证据，刻意不删。
+- **P10 `resume` 未重跑 `normalize_audio` 却刷新了它的 `completed_at`** — **已修**。判定为疏漏（同函数复用 `word_transcript` 的早退路径完全不碰 stage；`rebuild_source` 对同类 stage 的刻意处理是「已 SUCCEEDED 就保留时间戳」）。
+
+**本轮刻意未修，写清现象与理由**：
+
+- **P4 `rebuild-source` 之后导入译文无法重映射，`continue` 死循环。** ASR 重建的新时间轴与导入译文的旧时间轴覆盖范围不同（本例由 P9 直接导致：ASR 漏掉开头 6s 旁白，重建后的时间轴少了那一段），译文回填找不到对应 cue，`continue` 每次都在同一步失败。**需要设计**：可行出口是换一份对齐新时间轴的译文或重跑 `translate`，但「什么条件下允许放弃导入译文」「放弃时如何不悄悄丢用户的译文」要先拍板，超出一轮修复的范围。它与 P3 同属「导航没有出口」，但 P3 能靠 Job 状态判定必然失败，P4 不能。
+- **P5 同一阶段先打 `[完成]` 再打 `[失败]`。** 纯显示问题：`_HumanEventSink._render_stage` 对 `stage_completed` 与 `stage_failed` 各自独立去重（`_last_failed_stage` 只压相邻重复的失败），同一 stage 先成功后失败时两行都会打出来。不影响 `job.json` 与事件流。未修是因为要先定「同一 stage 在一次运行里能否合法地先成功再失败」（恢复路径上确实可能），再决定是去重还是改文案。
+- **P7 `conservative` 预设产生跨词硬切**（切在「ど|んなに」「科学|的」）。机制是更长的停顿阈值先把多个词合并成超宽 cue，再按显示宽度硬切，切点落在字符数而非语义边界。属**分段算法质量**，要动 `segment.py` 的切分策略并补日文/中文的语义边界用例，是独立一项。
+- **P8 Whisper 尾部幻觉（「ご視聴」贴到媒体末尾）无 QA 门拦截。** 它会进翻译批次并出现在成品里。`segment.py` 已有「低置信重复尾部」的裁剪启发式（`test_does_not_trim_high_confidence_repetition` 钉住它不碰高置信重复），这条幻觉够不着它——**此处是读代码的推断，未对该素材逐条验证两个条件**。属**新增 QA 启发式**（例如「贴着媒体末尾、与正文无词级重叠、命中常见套话词表」），需要先收集足够样本避免误删真实结尾，否则会把合法结尾当幻觉删掉。
+- **P9 ASR 漏掉开头 6s 旁白。** 复现确认是**模型召回问题，不是 XVT 的缺陷**（同一段音频换参数仍漏）。登记在此只因为它直接导致了 P4：源时间轴缺头，导入译文就对不上。无修复动作，供排查 P4 时参照。
+
 ## 观察（危害低，可不处理）
 
 - 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——这是 R3.2 的低成本替代点（执行器改为按 `advance_steps[0]` 分派）。

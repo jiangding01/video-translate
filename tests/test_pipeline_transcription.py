@@ -232,6 +232,146 @@ class TranscriptionPipelineTest(unittest.TestCase):
             self.assertEqual(qa["status"], "needs_review")
             self.assertIn("line_too_wide", {issue["code"] for issue in qa["issues"]})
 
+    @staticmethod
+    def _silent_ffmpeg(args, **_kwargs):
+        Path(args[-1]).write_bytes(b"audio")
+        return CommandResult(tuple(args), 0, "", "")
+
+    @staticmethod
+    def _media_info(path: Path) -> MediaInfo:
+        return MediaInfo(str(path), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True)
+
+    def test_asr_failure_is_attributed_to_transcribe_not_import_subtitles(self) -> None:
+        """本地媒体转写失败必须记在 TRANSCRIBE 上，且不得留下 running 的 stage。
+
+        自适应源选择路径调 `_normalize_audio_and_transcribe` 前不推进外层 current_stage，
+        失败就会记到 IMPORT_SUBTITLES（本次运行根本没导入字幕），TRANSCRIBE 永远停在 running。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+
+            with (
+                patch(
+                    "xvt.pipeline.transcription.probe_media",
+                    return_value=self._media_info(media),
+                ),
+                patch("xvt.pipeline.transcription.run_command", side_effect=self._silent_ffmpeg),
+                patch(
+                    "xvt.pipeline.transcription.transcribe_audio",
+                    side_effect=RuntimeError("mlx-whisper model download failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "model download failed"):
+                    run_local_transcription(media, root, language="ja")
+
+            data = json.loads(next((root / "jobs").glob("*/job.json")).read_text())
+            self.assertEqual(data["stages"]["transcribe"]["status"], "failed")
+            self.assertEqual(
+                data["stages"]["transcribe"]["error"], "mlx-whisper model download failed"
+            )
+            self.assertEqual(data["stages"]["import_subtitles"]["status"], "skipped")
+            self.assertIsNone(data["stages"]["import_subtitles"]["error"])
+            self.assertNotIn("running", {record["status"] for record in data["stages"].values()})
+
+    def test_normalize_audio_failure_is_attributed_to_normalize_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+
+            with (
+                patch(
+                    "xvt.pipeline.transcription.probe_media",
+                    return_value=self._media_info(media),
+                ),
+                patch(
+                    "xvt.pipeline.transcription.run_command",
+                    side_effect=RuntimeError("ffmpeg exited with 1"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "ffmpeg exited with 1"):
+                    run_local_transcription(media, root, language="ja")
+
+            data = json.loads(next((root / "jobs").glob("*/job.json")).read_text())
+            self.assertEqual(data["stages"]["normalize_audio"]["status"], "failed")
+            self.assertEqual(data["stages"]["import_subtitles"]["status"], "skipped")
+            self.assertNotIn("running", {record["status"] for record in data["stages"].values()})
+
+    def test_engine_fallback_is_written_back_to_the_job_config(self) -> None:
+        """`--engine faster` 实际落到 mlx 时，Job 的 config 不得继续声称 faster。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            transcript = Transcript(
+                language="ja",
+                engine="mlx",
+                words=(Word("こんにちは。", 0, 1200, 0.9),),
+            )
+
+            with (
+                patch(
+                    "xvt.pipeline.transcription.probe_media",
+                    return_value=self._media_info(media),
+                ),
+                patch("xvt.pipeline.transcription.run_command", side_effect=self._silent_ffmpeg),
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                job = run_local_transcription(media, root, engine="faster", language="ja")
+
+            self.assertEqual(job.config["engine"], "mlx")
+            data = json.loads(get_job_file(job).read_text())
+            self.assertEqual(data["config"]["engine"], "mlx")
+            words = json.loads(
+                next(
+                    Path(item.path) for item in job.artifacts if item.kind == "word_transcript"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(words["engine"], "mlx")
+
+    def test_reused_audio_checkpoint_keeps_the_original_stage_timestamps(self) -> None:
+        """复用 normalized_audio checkpoint 不做任何事，不得刷新 completed_at。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            transcript = Transcript(
+                language="ja", engine="mlx", words=(Word("こんにちは。", 0, 1200, 0.9),)
+            )
+
+            with (
+                patch(
+                    "xvt.pipeline.transcription.probe_media",
+                    return_value=self._media_info(media),
+                ),
+                patch("xvt.pipeline.transcription.run_command", side_effect=self._silent_ffmpeg),
+                patch(
+                    "xvt.pipeline.transcription.transcribe_audio",
+                    side_effect=RuntimeError("interrupted"),
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_local_transcription(media, root, language="ja")
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            before = json.loads(job_file.read_text())["stages"]["normalize_audio"]
+            self.assertEqual(before["status"], "succeeded")
+
+            with (
+                patch("xvt.pipeline.transcription.run_command", side_effect=self._silent_ffmpeg),
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                resume_job(job_file)
+
+            after = json.loads(job_file.read_text())["stages"]["normalize_audio"]
+            self.assertEqual(after["started_at"], before["started_at"])
+            self.assertEqual(after["completed_at"], before["completed_at"])
+
     def test_resume_reuses_normalized_audio_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -65,7 +65,7 @@ flowchart LR
 | `pipeline/` | 业务主链包：`common` 共享记账、`review` QA 与人工确认、`revision` 人工译文修订、`transcription` 转写、恢复与显式源重建、`translation` 翻译与收尾、`polish` 可恢复润色、`semantic` 语义校对与一次修复、`retranslate` 局部重译、`resegment` 重分段、`burnin` 预览与烧录；`__init__` 仅 re-export 公共入口 |
 | `job_store.py` / `models.py` | 任务模型、原子持久化、schema 和 checksum |
 | `download.py` / `media.py` | yt-dlp 获取、ffprobe 媒体检查 |
-| `transcribe.py` | MLX Whisper、faster-whisper 引擎适配 |
+| `transcribe.py` | MLX Whisper、faster-whisper 引擎适配；后端缺失时的引擎回退与 `transcription_fallback` 留痕 |
 | `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠；提供可持久化的 ASR 分段预设 |
 | `subtitles.py` / `align.py` | 字幕读写（SRT/VTT 导出保留字面 `{}`）和已有字幕到 ASR 的顺序模糊对齐 |
 | `translate.py` / `translation_provider.py` | 确定性语义组、结构化术语表和翻译风格、按完整组装箱的翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填；默认 API 批次 25 个 cue、请求超时 180 秒 |
@@ -155,6 +155,10 @@ Job schema 仍为 v1；端到端目标作为可选 `config.workflow` 保存，�
 批处理在同一事件流中发送 `batch_started`、`batch_item_started`、逐项完成/等待/失败/中断事件以及 `batch_finished`。内部 Job 的原有 workflow、stage 和进度事件保持不变，因此未来界面既能显示批次总进度，也能显示当前 Job 的阶段细节。部分失败以非零退出码和 `batch_finished.status=partial_failure` 收口；存在失败或等待输入项时都不发送虚假的 `cli_completed`。
 
 `transcription_progress` 包含引擎、已处理/总毫秒数、经过时间和可选 ETA。faster-whisper 的分段生成器提供真实完成位置，因此发送 `determinate=true` 的百分比。MLX Whisper 的公开调用接口没有稳定进度回调，只发送 `determinate=false` 的启动和十秒心跳；词级时间戳通过验证后才发送最终 100%，空结果或异常不会伪造成成功。
+
+请求的 ASR 后端没有安装时，`transcribe_audio` 回退到另一个引擎（直接失败会把只装了一种后端的用户卡住），但回退必须可见：发出 `transcription_fallback` 事件（普通输出打 `[回退] ASR 引擎：…`），并由 pipeline 把**实际生效的引擎**写回 `job.config["engine"]`。改写而不另加「实际引擎」字段是刻意的——该键的唯一用途是「下次用哪个引擎」（`resume` / `rebuild-source` 都从它取值），加第二个字段会立刻产生两份互相漂移的口径；用户原本请求的引擎留在 JSONL 事件里。
+
+Job 登记表是产物有效性的唯一依据，**不要按固定文件名取产物**：源文修订会把 `source_cues` / `source_srt` / `subtitle_qa` 重新指向 `source-reviewed-*` 命名的文件，`rebuild-source` / `resegment-translation` 会把下游产物移出登记表，两种情况下带旧内容的 `source.srt`、`translated.srt`、`bilingual.*`、`qa-translated.json` 都**仍以陈旧内容留在 `artifacts/` 下**。这些残留是恢复证据，刻意不删除。
 
 事件协议版本、兼容性承诺以及全部 `EventType` 及其 `data` 字段契约见 [事件契约](EVENTS.md)。
 
