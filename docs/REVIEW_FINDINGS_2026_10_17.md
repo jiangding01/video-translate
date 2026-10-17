@@ -343,7 +343,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 - 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——这是 R3.2 的低成本替代点（执行器改为按 `advance_steps[0]` 分派）。
 - `recovery` ⇄ `pipeline` 的环实际还包含 `recovery` ⇄ `workflow`（9 处函数级 import）；`common.py` 里有一处已属多余的惰性 import 可顺手转顶层。
-- socks5 等非 http scheme 的 userinfo 密码含 `@` 时脱敏漏掉后半段（实测）。
+- ~~socks5 等非 http scheme 的 userinfo 密码含 `@` 时脱敏漏掉后半段（实测）。~~ **已修（2026-10-18）**：`_USERINFO_PATTERN` 的字符类此前排除 `@`，匹配停在第一个 `@`；现改为贪婪匹配 + 回溯到 authority 里的**最后**一个 `@`，与 http/https 分支（`redact_url` 的 `netloc.rsplit("@", 1)`）同口径。判定依据是 RFC 3986 的 authority 终止符（`/` `?` `#` 空白），不是 scheme 白名单，任意 scheme 一致成立；`?` / `#` 之后的 `@` 不再被误吞。`process.py` 的 `_redact_command` 对非 http scheme 确实没有自己的 userinfo 处理（`redact_url` 只认 http/https），但它的唯一出口是 `create_event`，由事件边界兜住，本轮一并补了守卫测试，未在调用点重复脱敏。
 - yt-dlp 的 `-o` 模板不转义 output root 里的 `%`（元数据展开可能写到 Job 目录外，事后检查只报错不清理）。
 - ~~`relink` 在源媒体缺失时误报 "fingerprint is stale"。~~ **已修（2026-10-18，B1）**，见上方 B 系列。
 - `repair_polish_draft` 的 `manual_fix` 没有给出可执行命令（依赖 F2 修复后补）。
@@ -356,7 +356,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 - 局部重译回填内容与原文逐字相同时，残留 manifest 可能造成一次误报等待。
 - `workflow.py` 注释里描述的「`target_language` 为 None 的补翻」路径疑似不可达。
-- yt-dlp 的 ProxyError 消息若带不含 scheme 的 `/videoplayback?sig=...`，脱敏可能不命中。
+- ~~yt-dlp 的 ProxyError 消息若带不含 scheme 的 `/videoplayback?sig=...`，脱敏可能不命中。~~ **○ 已实测证实（2026-10-18），未修。** `redact_text("unable to download video data: /videoplayback?sig=SECRETSIG123&id=abc")` 原样返回；`HTTPSConnectionPool(host='r1.googlevideo.com', port=443): /videoplayback?sig=SECRET&key=yt6` 与协议相对形式 `//host/videoplayback?sig=...` 同样不命中。根因与 O3 同类：`_URL_PATTERN` 要求 `https?://`，`_USERINFO_PATTERN` 要求 `scheme://`，不带 scheme 的路径+query 两条都够不着。**刻意未随本轮修**：要兜住它就得对「不含 scheme 的 `路径?query`」整体脱敏，而 `?k=v` 形状在 ffmpeg 滤镜串、yt-dlp 格式选择器和普通散文里都出现，误伤面远大于 userinfo 那条（userinfo 有 `scheme://` 这个强前缀做锚点，它没有）。危害面也低于 O3：签名 URL 的 `sig` 有短时效，且 yt-dlp 的常见失败消息带完整 scheme（那条已命中）。要修应单独立项，并先把「哪些真实消息会出现不带 scheme 的签名路径」取证齐全。
 
 ## 本次 review 的覆盖盲区
 

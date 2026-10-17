@@ -312,6 +312,46 @@ class ProcessTest(unittest.TestCase):
             self.assertNotIn(secret, serialized_nested)
         self.assertIn("redacted", serialized_nested)
 
+    def test_command_events_redact_non_http_userinfo_with_at_in_password(self) -> None:
+        """`_redact_command` 的 `redact_url` 只认 http/https，非 http scheme 的
+        userinfo 由 `create_event` 的事件边界兜住——密码含 `@` 时也必须兜干净。
+
+        两条真实路径都钉住：命令参数本身（不走 `_SENSITIVE_OPTIONS` 的 URL 形参数），
+        以及失败时 yt-dlp 回显到 stderr 的那条消息。
+        """
+        proxy = "socks5://user:p@ss@proxy.example.com:1080"
+
+        started: list[events.Event] = []
+        run_command([sys.executable, "-c", "pass", proxy], event_sink=started.append)
+        serialized_started = started[0].to_json()
+        self.assertEqual(started[0].type, "command_started")
+        self.assertNotIn("p@ss", serialized_started)
+        self.assertNotIn("ss@proxy", serialized_started)
+        self.assertIn("redacted", serialized_started)
+
+        failed: list[events.Event] = []
+        script = f"import sys; sys.stderr.write({proxy!r} + ' ProxyError'); sys.exit(1)"
+        with self.assertRaises(CommandError):
+            run_command([sys.executable, "-c", script], event_sink=failed.append)
+        serialized_failed = failed[-1].to_json()
+        self.assertEqual(failed[-1].type, "command_failed")
+        self.assertNotIn("p@ss", serialized_failed)
+        self.assertNotIn("ss@proxy", serialized_failed)
+        self.assertIn("ProxyError", serialized_failed)
+
+    def test_sensitive_option_values_stay_redacted_for_non_http_proxies(self) -> None:
+        """`--proxy` 这类敏感选项的取值整体替换，与 scheme 无关（回归守卫）。"""
+        captured: list[events.Event] = []
+        run_command(
+            [sys.executable, "-c", "pass", "--proxy", "socks5://user:p@ss@host:1080"],
+            event_sink=captured.append,
+        )
+
+        serialized = captured[0].to_json()
+        self.assertNotIn("p@ss", serialized)
+        self.assertNotIn("host:1080", serialized)
+        self.assertIn("redacted", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()
