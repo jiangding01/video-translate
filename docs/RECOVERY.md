@@ -16,7 +16,9 @@
 
 本文是 `status` / `continue` / `batch` / `batch-continue` / `xvt apply` / `relink-burned-output` 共用恢复语义的单一来源。判定顺序、产物有效性口径、回填路由和烧录 proof 资格都以这里为准，其它文档不得另立说法。
 
-原子 `burn` 与 `preview` 对所选媒体、字体执行只读布局 QA，不覆盖正式 `translated_subtitle_qa` 或更新字幕 QA stage；布局检查失败时在渲染与烧录前拒绝。本地替代媒体或字体导致布局失败时 Job 不变；远程媒体若在检查前下载，仍按原契约登记并持久化。临时媒体过短、画幅过窄或字体过宽不会污染原工作流的 QA，随后仍可按原目标 `continue`。只有 `run` / `continue` 按持久化目标执行烧录时，才保存布局报告并更新字幕 QA stage；新的 review 进入等待，error 仍失败。
+原子 `burn` 与 `preview` 对所选媒体、字体执行只读布局 QA，不覆盖正式 `translated_subtitle_qa` 或更新字幕 QA stage；布局检查失败时在渲染与烧录前拒绝。本地替代媒体或字体导致**布局失败**时 Job 不变（这条路径抛 `UserInputError`，`burn_translated_job` 的兜底刻意不把它记成 stage 失败）；远程媒体若在检查前下载，仍按原契约登记并持久化。临时媒体过短、画幅过窄或字体过宽不会污染原工作流的 QA，随后仍可按原目标 `continue`。只有 `run` / `continue` 按持久化目标执行烧录时，才保存布局报告并更新字幕 QA stage；新的 review 进入等待，error 仍失败。
+
+**「Job 不变」只覆盖布局 QA 这一类失败，不是「原子命令不写 stage」。** 原子 `burn` 成功时就会推进 `render` / `burn` / `media_qa` 三个 stage，因此布局 QA 之外的失败同样按 stage 记账：临时 `--media` 不存在、没有视频流，或 ffprobe 探测损坏文件失败时，`stages.render` 会被记成 `failed` 并写入错误文本（退出码 3 属 `dependency_or_process`）。这只影响 stage 展示，不影响恢复判定——产物齐全时 `status` 仍给出 `recovery: complete`、`verify` 全 PASS，下一次成功的 `burn` / `continue` 会把 stage 推回 `succeeded`。如实记录而不是承诺更强的口径。
 
 模块职责、artifact 依赖图与失效闭包见 [架构说明](ARCHITECTURE.md)；事件名与字段见 [事件说明](EVENTS.md)。
 
@@ -64,9 +66,18 @@
 
 ### 判定顺序
 
+**通则：在途等待优先于「已满足」。** 任何「某个产物/目标已满足」的判定都不得盖掉一次仍然挂得住的在途 Agent 等待。等待步骤与这道闸门的相对位置必须显式表态：要么写在 `_translation_satisfied` 判定**之前**早退，要么登记进 `workflow._SATISFIED_GATED_AWAIT_STEPS` 并写明理由（`tests/test_workflow.py::AwaitStepsCoverageTest` 用 AST 强制，两边对不上就红）。
+
 1. `plan_advance_steps` 在**函数体最前**判定局部重译等待（`await_cue_retranslation`）。理由：它会叠加在一个译文目标已满足的 Job 上，放在后面就会被「已满足」短路掉。
-2. 在 `TRANSLATE` 等输入且 `translation_batches` checksum 有效时，早退为 `await_agent_translation`。这一早退**必须排在 `translated_cues` → `render` 之前**：新整轮请求不会失效旧译文，按 render 先判会把等待误报成「只差渲染」。
-3. `TRANSLATE` 等输入但 manifest 已 checksum 失效、且没有有效 `translated_cues` 时落到最后的兜底分支，给出 `translate`（导入译文 Job 给出 `import_translation`），**不报等待**。没有 manifest 就没有任何响应能回填这次等待，报等待会让 `status` 说等回填、`xvt apply` 被 manifest 校验拒绝、`continue` 只发一次 waiting，三方互指没有出口。`_ensure_translation` 的等待分支复述同一个条件，manifest 失效时落到 `run_translation` 重建批次；recovery 的原子分支对同一状态早已是 `retryable` + `translate`，三侧由此一致。
+2. 紧接着、仍在 `_translation_satisfied` 之前，判定**整轮 Agent 翻译等待**：`agent_full_translation_waiting`（`TRANSLATE` 停在 `awaiting_input` 且 `translation_batches` checksum 有效）为真，且整轮 manifest 是最后登记的那份在途请求（`_full_translation_request_is_newest`，与 `cue_retranslation_batches` / `translation_polish_batches` / 三份语义报告按登记次序比较）时，早退为 `await_agent_translation`。理由与第 1 条完全同构：`await_agent_translation` 的其余 return 分支都埋在 `not _translation_satisfied` 里，旧译文仍有效时根本不会被求值，于是「按 `status` 的提示放弃重译、改跑一轮完整翻译」之后 `status` 报 complete、`continue` 报完成、`xvt apply` 又说 `not awaiting Agent input`，导航闭环断掉。登记次序这一条不能省：润色 manifest 与语义报告在译文被改写时不会被失效闭包带走，残留文件照样 checksum 有效，只看前两个条件会把它们的等待盖成整轮等待；反过来，用户在整轮等待之后又显式 `retranslate-cues` 时，重译请求更新，第 1 条照旧优先。
+3. 在 `TRANSLATE` 等输入且 `translation_batches` checksum 有效时，译文未满足的分支里同样早退为 `await_agent_translation`（与第 2 条共用单点谓词 `agent_full_translation_waiting`）。这一早退**必须排在 `translated_cues` → `render` 之前**：新整轮请求不会失效旧译文，按 render 先判会把等待误报成「只差渲染」。
+4. `TRANSLATE` 等输入但 manifest 已 checksum 失效、且没有有效 `translated_cues` 时落到最后的兜底分支，给出 `translate`（导入译文 Job 给出 `import_translation`），**不报等待**。没有 manifest 就没有任何响应能回填这次等待，报等待会让 `status` 说等回填、`xvt apply` 被 manifest 校验拒绝、`continue` 只发一次 waiting，三方互指没有出口。`_ensure_translation` 的等待分支复述同一个条件，manifest 失效时落到 `run_translation` 重建批次；recovery 的原子分支对同一状态早已是 `retryable` + `translate`，三侧由此一致。
+
+### 已知遗留：满足度之后才判的三类等待
+
+`await_agent_polish` / `await_agent_semantic_review` / `await_translation_review` 刻意只在「译文目标未满足」的分支里判定（登记在 `workflow._SATISFIED_GATED_AWAIT_STEPS`）。理由：它们的产物（polished cues、语义报告与人工确认）本身就是 polished 质量下译文满足度的组成部分，正常流程里「已满足」与「自己那次等待仍挂着」互斥。
+
+遗留情形：用户在一个**已满足**的 polished Job 上显式重开 `polish-translation` 或语义校对的 Agent 等待时，计划仍会是空的（`status` 报 complete）。它不是本轮修复的路径，也没有已知的 E2E 复现；真要修就按第 2 条同样补一条满足度之前的早退，并同步更新上面那张表态表。
 
 ### 宣告完成前的终检守卫
 
@@ -80,7 +91,7 @@
 
 ### 原子 Job 的 qa_blocked 让路
 
-`SUBTITLE_QA` 停在 `failed` / `awaiting_input` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的 Agent 等待而复位。端到端 Job 先问 planner（首步是正式等待步骤就改走工作流恢复分支）；原子 Job 没有 planner，改用等价条件：`TRANSLATE` 停在 `awaiting_input` 且 `translation_batches` checksum 有效时跳过 `qa_blocked`，由原子等待分支给出 `apply-translation` 引导。否则术语死锁后改跑 `translate --provider agent` 的用户会继续拿到 `retranslate-cues`，照做会盖掉刚写入的整轮 manifest。manifest 已经不在的等待态残留不放行，QA 引导照旧生效。
+`SUBTITLE_QA` 停在 `failed` / `awaiting_input` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的 Agent 等待而复位。端到端 Job 先问 planner（首步是正式等待步骤就改走工作流恢复分支）；原子 Job 没有 planner，改用 planner 内部的同一份谓词 `workflow.agent_full_translation_waiting`（`TRANSLATE` 停在 `awaiting_input` 且 `translation_batches` checksum 有效）跳过 `qa_blocked`，由原子等待分支给出 `apply-translation` 引导。否则术语死锁后改跑 `translate --provider agent` 的用户会继续拿到 `retranslate-cues`，照做会盖掉刚写入的整轮 manifest。manifest 已经不在的等待态残留不放行，QA 引导照旧生效。
 
 ## 翻译提供方身份的固化
 
