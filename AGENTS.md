@@ -108,6 +108,8 @@ uv run --no-sync pytest -q
 uv run --no-sync xvt --help
 ```
 
+集成测试（`tests/test_e2e.py`、`tests/test_burn.py`）要求 ffmpeg **带 libass 的 `ass` 滤镜**——烧录与预览靠 `-vf ass=filename=...` 送字幕。homebrew 把 ffmpeg 拆成了两个 formula，精简的 `ffmpeg` 不带 `--enable-libass`，**本地与 CI 都要装 `ffmpeg-full`**；缺 libass 时这些测试会跳过并说明原因（`pytest -rs` 可见），不会伪装成通过。
+
 涉及本机运行时依赖时，再执行：
 
 ```bash

@@ -197,15 +197,30 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 
 ### O10 macOS CI 不装 ffmpeg — **已修（本轮）**
 
-影响面摸清后才改：
+**首次改法在 CI 上失败，根因与最终改法记录在此**（这条的教训比修复本身值钱）。
 
-- 全仓 ffmpeg 门控只有两处 `@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), ...)`：`tests/test_e2e.py::EndToEndTest`（3 条）与 `tests/test_burn.py::BurnFilterPathSmokeTest`（1 条 + 4 个 subtest）。没有独立的字体门控（字体与布局测量路径由未门控的测试覆盖，在 macOS CI 上本来就在跑）。
-- 本机（macOS，homebrew ffmpeg）`pytest -q -rs` 的 skip 数是 **0**，这 4 条一直在真实跑并通过；单独再跑一次为 `4 passed, 4 subtests passed`。
-- 这 4 条都显式传 `hardware_encoding=False`，走 libx264 而不是 `h264_videotoolbox`，不依赖 runner 的硬件编码能力；用到的 `libx264` / `aac` / `ass` 滤镜 homebrew 的 ffmpeg bottle 全都带。判断在 CI 装上 ffmpeg 后变红的风险低。
+第一版只给 macOS 加了 `brew install --quiet ffmpeg`，安全性论证是「本机 macOS 上这 4 条一直在真实跑并通过」。**这个论证是错的**：它只验了「`ffmpeg` 存在且测试通过」，没有比对装的是哪个 formula。
 
-改法：`.github/workflows/ci.yml` 的 Linux 步骤改名为 `Install ffmpeg (Linux)`，新增 `Install ffmpeg (macOS)`（`brew install --quiet ffmpeg`，带 `HOMEBREW_NO_AUTO_UPDATE` / `HOMEBREW_NO_INSTALL_CLEANUP`）。pytest 步骤加 `-rs`，让 skip 原因出现在 CI 日志摘要里（这是「无人看 skip 数」的最低成本解，没有为它改复杂 workflow）。
+实际 CI 失败 6 条，报 `No such filter: 'ass'`。对照两边的 `ffmpeg -version` 才看清：
 
-代价：macOS job 多一次 `brew install ffmpeg`（分钟级，取决于 bottle 下载）。
+| | formula | prefix | `--enable-libass` |
+| --- | --- | --- | --- |
+| 本机 | **`ffmpeg-full`** | `Cellar/ffmpeg-full/9.0.2` | **有** |
+| CI | **`ffmpeg`** | `Cellar/ffmpeg/9.0.2_1` | **没有** |
+
+homebrew 把 ffmpeg 拆成了两个 formula，精简的 `ffmpeg` 不带 libass，而烧录与预览靠 `-vf ass=filename=...` 把字幕送进 filtergraph。
+
+**最终改法有两处，缺一不可：**
+
+1. **门控改成检查能力而不是检查可执行文件**。新增 `tests/ffmpeg_support.py::ffmpeg_can_render_ass()`：`ffmpeg`/`ffprobe` 都在，**且** `ffmpeg -filters` 里有整词 `ass`（按字段比对，避免 `assrender` 之类同前缀误判），结果按进程缓存。两处 `skipUnless` 改用它，跳过原因直接写明「homebrew users need the ffmpeg-full formula」。
+   这一条独立于 CI 也该做：原门控把前置条件写错了，任何装了精简 ffmpeg 的用户跑测试都不是跳过，而是崩在 filtergraph 上。已用假 ffmpeg（有可执行文件、无 `ass` 滤镜）实测：4 条正确跳过并给出可操作原因。
+2. **CI 装 `ffmpeg-full`**，并在装完**立刻断言滤镜到位**（`ffmpeg -filters | awk '{print $2}' | grep -qx ass`）。断言步骤刻意不加 `if`，Linux 与 macOS 都跑——少了它，哪天 formula 又变精简，集成测试会退回静默跳过而 CI 照样全绿，正是本条要修掉的状态。
+
+pytest 步骤加 `-rs`，让 skip 原因出现在日志摘要里（「无人看 skip 数」的最低成本解）。
+
+代价：macOS job 多一次 `brew install ffmpeg-full`（比精简版重，分钟级）；探测到滤镜已可用时跳过安装。
+
+**可复用的教训**：「本机能过所以 CI 能过」只有在两边装的是同一个东西时才成立。验证跨平台依赖时要比对的是**能力**（滤镜/编解码器是否存在），不是**存在性**（可执行文件在不在）。
 
 ### O11 `shlex.quote` 的最后一处例外 — **已修（本轮）**
 

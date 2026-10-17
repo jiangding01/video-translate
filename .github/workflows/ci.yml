@@ -27,15 +27,28 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       # macOS 是本项目的主力开发平台：不装 ffmpeg 时真实烧录与预览的集成测试
-      # （tests/test_e2e.py、tests/test_burn.py 的 skipUnless 门）会静默跳过。
-      - name: Install ffmpeg (macOS)
+      # （tests/test_e2e.py、tests/test_burn.py）会跳过。
+      #
+      # 必须是 ffmpeg-full：homebrew 把 ffmpeg 拆成了两个 formula，精简的 `ffmpeg`
+      # 不带 --enable-libass，而烧录/预览靠 `-vf ass=filename=...` 送字幕，缺 libass
+      # 会直接报 "No such filter: 'ass'"。探测滤镜而不是探测可执行文件：精简版装着
+      # 也得换掉。
+      - name: Install ffmpeg with libass (macOS)
         if: runner.os == 'macOS'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        # 先探测再装：GitHub 的 macOS 镜像将来自带 ffmpeg 时这步直接跳过，
-        # 不白花几分钟重装一个重量级 formula。装不上要红——静默跳过正是本次要修的。
-        run: command -v ffmpeg >/dev/null || brew install --quiet ffmpeg
+        run: |
+          if ffmpeg -hide_banner -filters 2>/dev/null | awk '{print $2}' | grep -qx ass; then
+            echo "ffmpeg already provides the ass filter"
+          else
+            brew install --quiet ffmpeg-full
+          fi
+
+      # 装完立刻断言能力到位。少了这一步，哪天 formula 又变精简，集成测试会退回
+      # 静默跳过，而 CI 照样全绿——那正是本轮要修掉的状态。
+      - name: Verify ffmpeg provides the ass filter
+        run: ffmpeg -hide_banner -filters | awk '{print $2}' | grep -qx ass
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
