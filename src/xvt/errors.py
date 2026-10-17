@@ -10,7 +10,7 @@ class ExitCode(IntEnum):
     WORKFLOW_ERROR = 4  # 内部工作流不变量被破坏，属于程序侧问题
     VERIFY_FAILED = 5  # verify 校验未通过，artifact checksum 不一致
     PARTIAL_FAILURE = 6  # 批处理整体完成但存在失败条目
-    LOCKED = 7  # 目标 Job 或 batch 已被占用（本 PR 仅定义，P4c 落地并发锁时使用）
+    LOCKED = 7  # 目标 Job 或 batch 已被另一进程占用（由 locking.py 的 flock 独占锁抛出）
     # 命令按设计停在 awaiting_input。**只有显式 --fail-on-waiting 才会返回**，
     # 且不代表失败：不发 cli_failed，Job 状态与事件流与不加旗标时完全一致。
     # 选 10 是为了避开 bash 保留区（126/127/128+n）与已用的 0/2-7，8/9 留白给失败类。
