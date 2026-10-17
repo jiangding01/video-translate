@@ -1773,14 +1773,21 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             not job.config.get("allow_low_confidence_alignment", False)
             and alignment.confidence < minimum_confidence
         ):
+            # 文案与 `_process_adaptive_media` 的同一失败对齐：那一侧经外层 except
+            # 边界写出带实测值与阈值的完整句，这里也必须给出数值，否则同一种失败在
+            # `job.json` 与 `status --json` 里有两种详细程度。
+            message = (
+                "subtitle alignment confidence is below the required threshold "
+                f"({alignment.confidence:.3f} < {minimum_confidence:.3f})"
+            )
             set_stage(
                 job,
                 StageName.ALIGN,
                 StageStatus.FAILED,
                 event_sink,
-                error="subtitle alignment confidence is below the required threshold",
+                error=message,
             )
-            raise ValueError("subtitle alignment confidence is below the required threshold")
+            raise ValueError(message)
         set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
         cues = list(alignment.cues)
     else:
