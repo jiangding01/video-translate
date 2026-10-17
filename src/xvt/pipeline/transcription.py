@@ -1552,6 +1552,29 @@ def _finish_resumed_source(
     media_info: MediaInfo,
     event_sink: EventSink | None,
 ) -> Job:
+    """登记恢复出的 source cues，补齐源选择登记，再跑源字幕 QA 与源 SRT 渲染。
+
+    QA 段与渲染段的失败归属由局部 ``current_stage`` + 一个 ``except`` 承担，写法与
+    同文件的姐妹终结函数 ``_finish_subtitle_job`` 同构：这里调用的
+    ``_run_source_subtitle_qa`` / ``_render_source_srt`` 各自只覆盖一个 stage，
+    调用方自己就知道当前在哪一段，不需要 ``_normalize_audio_and_transcribe`` 那套
+    ``on_stage`` 回传——那个回传存在的唯一理由是被调函数在内部跨了两个 stage
+    （NORMALIZE_AUDIO → TRANSCRIBE），调用方无法得知它停在哪一个。
+
+    刻意**不**在 ``except`` 里「扫 stages 找状态为 RUNNING 的那个」：恢复路径上可能
+    留着上一次中断遗留的 RUNNING，那样会把本次失败错挂到它身上。
+
+    ``except`` 里的 FAILED 判断不可省：``_run_source_subtitle_qa`` 在 QA 报告整体
+    ``failed`` 时经 ``complete_qa_stage`` 自己把 SUBTITLE_QA 记成 FAILED 并抛
+    ``RuntimeError``，无条件改写会把那条具体的 QA 原因换成通用异常文本。而 QA 不放行
+    并返回 False（``needs_review`` → AWAITING_INPUT）是正常业务分支，``complete_qa_stage``
+    已自行记账，这里按原样早退、不当异常处理。
+
+    source cues 落盘与源选择补登记刻意留在 ``try`` **之外**：``resume`` 到达这里时
+    SEGMENT / ALIGN 都已记成功，这段写盘不属于任何正在跑的 stage，硬塞给 SUBTITLE_QA
+    就是另一种错归属。它失败时不会留下 RUNNING 的 stage，异常照常上抛由 CLI 记账。
+    """
+
     artifacts_directory = get_job_directory(job) / "artifacts"
     cues_path = artifacts_directory / "source-cues.json"
     write_json(cues_path, [asdict(cue) for cue in cues])
@@ -1589,12 +1612,27 @@ def _finish_resumed_source(
             _record_candidate_qa(job, evaluation, event_sink)
         _recover_source_selection(job, cues, event_sink)
 
-    if not _run_source_subtitle_qa(
-        job, cues, artifacts_directory, media_info=media_info, event_sink=event_sink
-    ):
-        return job
+    current_stage = StageName.SUBTITLE_QA
+    try:
+        if not _run_source_subtitle_qa(
+            job, cues, artifacts_directory, media_info=media_info, event_sink=event_sink
+        ):
+            return job
 
-    _render_source_srt(job, cues, artifacts_directory, event_sink)
+        current_stage = StageName.RENDER
+        _render_source_srt(job, cues, artifacts_directory, event_sink)
+    except Exception as error:
+        if job.stages[current_stage].status is not StageStatus.FAILED:
+            set_stage(
+                job,
+                current_stage,
+                StageStatus.FAILED,
+                event_sink,
+                error=str(error),
+                error_category=error_category(error),
+            )
+        raise
+
     if event_sink:
         event_sink(
             create_event(EventType.JOB_RESUMED, **job_event_fields(job.id, get_job_file(job)))
@@ -1735,14 +1773,21 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
             not job.config.get("allow_low_confidence_alignment", False)
             and alignment.confidence < minimum_confidence
         ):
+            # 文案与 `_process_adaptive_media` 的同一失败对齐：那一侧经外层 except
+            # 边界写出带实测值与阈值的完整句，这里也必须给出数值，否则同一种失败在
+            # `job.json` 与 `status --json` 里有两种详细程度。
+            message = (
+                "subtitle alignment confidence is below the required threshold "
+                f"({alignment.confidence:.3f} < {minimum_confidence:.3f})"
+            )
             set_stage(
                 job,
                 StageName.ALIGN,
                 StageStatus.FAILED,
                 event_sink,
-                error="subtitle alignment confidence is below the required threshold",
+                error=message,
             )
-            raise ValueError("subtitle alignment confidence is below the required threshold")
+            raise ValueError(message)
         set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
         cues = list(alignment.cues)
     else:

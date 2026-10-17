@@ -10,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.align import AlignmentResult
 from xvt.download import RemoteMediaInfo
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
@@ -447,6 +448,171 @@ class TranscriptionPipelineTest(unittest.TestCase):
 
             transcribe.assert_not_called()
             self.assertEqual(resumed.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
+
+    def test_resume_records_source_render_failure_on_the_render_stage(self) -> None:
+        """渲染段的非 QA 异常必须落到 render 上，且不污染已通过的 subtitle_qa。
+
+        走 `resume_job` 的 source_cues 复用入口（`_finish_resumed_source` 的第一个
+        调用点）。缺这条归属时 render 永久停在 running，`job.json` 里没有任何失败
+        记录，违反「Job 能解释当前状态」。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            cues_path = artifacts / "source-cues.json"
+            cues_path.write_text(json.dumps([asdict(Cue(1, 0, 1000, "Hello"))]), encoding="utf-8")
+            media_path = artifacts / "media.json"
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("source_cues", str(cues_path), file_checksum(cues_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+
+            with patch(
+                "xvt.pipeline.transcription.save_subtitles",
+                side_effect=OSError("[Errno 28] No space left on device"),
+            ):
+                with self.assertRaisesRegex(OSError, "No space left on device"):
+                    resume_job(job_file)
+
+            reloaded = load_job(job_file)
+            render = reloaded.stages[StageName.RENDER]
+            self.assertEqual(render.status, StageStatus.FAILED)
+            self.assertEqual(render.error, "[Errno 28] No space left on device")
+            self.assertEqual(reloaded.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+            self.assertIsNone(reloaded.stages[StageName.SUBTITLE_QA].error)
+
+    def test_resume_records_source_qa_segment_failure_on_the_qa_stage(self) -> None:
+        """QA 段的非 QA 异常必须落到 subtitle_qa 上，而不是留下 running。
+
+        走 `resume_job` 的词级转写 → 分段入口（`_finish_resumed_source` 的第二个
+        调用点）。`_run_source_subtitle_qa` 在 `set_stage(SUBTITLE_QA, RUNNING)`
+        之后才跑 `check_subtitles` / 写盘 / 登记 artifact，这中间任何非 QA 异常
+        （磁盘满、权限错、测量崩溃）都属于这一段。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root, {"engine": "mlx", "source_language": "en"})
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            audio_path = artifacts / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            media_path = artifacts / "media.json"
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("normalized_audio", str(audio_path), file_checksum(audio_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                ]
+            )
+            job_file = save_job(job)
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+
+            with (
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+                patch(
+                    "xvt.pipeline.transcription.check_subtitles",
+                    side_effect=OSError("[Errno 13] Permission denied"),
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "Permission denied"):
+                    resume_job(job_file)
+
+            reloaded = load_job(job_file)
+            qa_stage = reloaded.stages[StageName.SUBTITLE_QA]
+            self.assertEqual(qa_stage.status, StageStatus.FAILED)
+            self.assertEqual(qa_stage.error, "[Errno 13] Permission denied")
+            self.assertEqual(reloaded.stages[StageName.SEGMENT].status, StageStatus.SUCCEEDED)
+            self.assertEqual(reloaded.stages[StageName.RENDER].status, StageStatus.PENDING)
+
+    def test_resume_alignment_confidence_failure_reports_the_measured_numbers(self) -> None:
+        """resume 侧置信度门的 error 必须和自适应路径一样带上实测值与阈值。
+
+        自适应路径（`_process_adaptive_media`）的同一失败经外层 except 边界写出
+        `"... threshold (0.000 < 0.550)"`；resume 自己这份只写了不带数值的前半句，
+        于是同一种失败在 `job.json` 与 `status --json` 里有两种详细程度。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job(
+                "/tmp/input.mp4",
+                root,
+                {
+                    "engine": "mlx",
+                    "source_language": "en",
+                    "align_subtitles": True,
+                    "minimum_alignment_confidence": 0.55,
+                },
+            )
+            artifacts = root / "jobs" / job.id / "artifacts"
+            artifacts.mkdir()
+            audio_path = artifacts / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            subtitles_path = artifacts / "input.srt"
+            subtitles_path.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello.\n", encoding="utf-8"
+            )
+            media_path = artifacts / "media.json"
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            media_path.write_text(json.dumps(asdict(media_info)), encoding="utf-8")
+            job.artifacts.extend(
+                [
+                    Artifact("normalized_audio", str(audio_path), file_checksum(audio_path)),
+                    Artifact("media_info", str(media_path), file_checksum(media_path)),
+                    Artifact("input_subtitles", str(subtitles_path), file_checksum(subtitles_path)),
+                ]
+            )
+            job_file = save_job(job)
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello.", 1000, 1800, 0.9),),
+            )
+            alignment = AlignmentResult(
+                cues=(Cue(1, 1000, 2000, "Hello."),),
+                matches=(),
+                offset_ms=0.0,
+                scale=1.0,
+                confidence=0.231,
+                warnings=(),
+            )
+
+            with (
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+                patch(
+                    "xvt.pipeline.transcription.align_source_cues",
+                    return_value=alignment,
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "below the required threshold"):
+                    resume_job(job_file)
+
+            align_stage = load_job(job_file).stages[StageName.ALIGN]
+            self.assertEqual(align_stage.status, StageStatus.FAILED)
+            self.assertEqual(
+                align_stage.error,
+                "subtitle alignment confidence is below the required threshold (0.231 < 0.550)",
+            )
 
     def test_resume_persists_failed_stage_for_unknown_segmentation_preset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
