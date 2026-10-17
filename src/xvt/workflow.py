@@ -84,6 +84,30 @@ AWAIT_STEPS: frozenset[str] = frozenset(
     }
 )
 
+# 「在途等待优先」的表态表。本仓库已经四次踩同一类缺陷：一个真实的在途等待被某个
+# 「已满足」判定盖掉（qa_blocked、F3 manifest 失效死局、F4 原子分支让路、整轮 Agent
+# 翻译等待）。收敛手段是让判定顺序变成必须表态的事情：
+#
+# - 不在本集合里的等待步骤，必须由 ``plan_advance_steps`` 在 ``_translation_satisfied``
+#   判定**之前**早退给出（目前是 ``await_cue_retranslation`` 与
+#   ``await_agent_translation``），这样它们不会被「译文目标已满足」短路成空计划。
+# - 本集合里的等待步骤刻意只在「译文目标未满足」的分支里判定，理由见下面各条注释。
+#
+# 新增等待步骤时必须二选一：要么写一条满足度判定之前的早退，要么登记进本集合并说明
+# 理由。``tests/test_workflow.py::AwaitStepsCoverageTest`` 用 AST 强制这件事。
+_SATISFIED_GATED_AWAIT_STEPS: frozenset[str] = frozenset(
+    {
+        # 润色与语义校对的产物（polished cues、语义报告与确认）本身就是 polished 质量下
+        # 译文满足度的组成部分，正常流程里「满足」与「自己那次等待仍挂着」互斥，因此
+        # 放在满足度之后判定不会丢等待。已知遗留：用户在一个已满足的 polished Job 上
+        # 显式重开 polish-translation / 语义校对的 Agent 等待时，计划仍会是空的
+        # （见 docs/RECOVERY.md「端到端推进计划的判定顺序」）。
+        "await_agent_polish",
+        "await_agent_semantic_review",
+        "await_translation_review",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class WorkflowOptions:
@@ -668,13 +692,64 @@ def _burn_satisfied(job: Job, config: WorkflowConfig) -> bool:
     return burned_artifact.checksum == proof["burned_video_checksum"]
 
 
+def agent_full_translation_waiting(job: Job) -> bool:
+    """整轮 Agent 翻译是否真的停在一次仍挂得住的等待上。
+
+    两条件：``TRANSLATE`` 停在 ``AWAITING_INPUT``，且 ``translation_batches``
+    checksum 有效。manifest 失效时刻意判否——没有 manifest 就没有任何响应能回填这次
+    等待，报等待会让 ``status`` 说等回填、``xvt apply`` 被 manifest 校验拒绝、
+    ``continue`` 只发一次 waiting，三方互指没有出口（见
+    ``docs/RECOVERY.md`` 的「端到端推进计划的判定顺序」第 3 条）。
+
+    单点实现：``plan_advance_steps`` 的两处分支（满足度之前的早退与满足度之内的既有
+    分支）与 ``recovery`` 原子 Job 的 ``qa_blocked`` 让路都以这里为准，新增调用点不要
+    就地重造这两个条件。
+    """
+
+    return (
+        job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+        and valid_artifact_path(job, "translation_batches") is not None
+    )
+
+
+# 被一次新的整轮翻译请求取代的在途请求/报告。整轮 manifest 登记更晚即「整轮更新」。
+_SUPERSEDED_BY_FULL_TRANSLATION: tuple[str, ...] = (
+    "cue_retranslation_batches",
+    "translation_polish_batches",
+    "translation_semantic_qa",
+    "translation_semantic_qa_reviewed",
+    "translation_semantic_qa_final",
+)
+
+
+def _full_translation_request_is_newest(job: Job) -> bool:
+    """整轮 ``translation_batches`` 是否是最后登记的那份在途请求。
+
+    ``add_artifact`` 先按 kind 去重再追加，因此 ``job.artifacts`` 的相对次序就是各
+    kind 最后一次登记的先后（与 ``pipeline.retranslate._newer_full_translation_request``
+    同一个判据，方向相反）。用它把「整轮等待」与润色 / 语义 / 局部重译的等待分开：
+    这三类的 manifest 与报告在译文被改写时不会被失效闭包带走，残留文件照样 checksum
+    有效，只看「stage 在等输入 + 整轮 manifest 有效」会把它们的等待盖成整轮等待。
+    """
+
+    kinds = [artifact.kind for artifact in job.artifacts]
+    try:
+        index = kinds.index("translation_batches")
+    except ValueError:
+        return False
+    return all(
+        kind not in kinds or kinds.index(kind) < index for kind in _SUPERSEDED_BY_FULL_TRANSLATION
+    )
+
+
 def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
     """根据当前 Job 与持久化目标，列出仍需执行的推进步骤。
 
     返回值为有序步骤名：
     - ``await_cue_retranslation``：局部重译已进入 Agent 等待（可能叠加在一个端到端目标
       已经满足的 Job 上），调用方应停止并提示回填，不得按已完成处理
-    - ``await_agent_translation``：已进入 Agent 等待，调用方应停止并提示回填
+    - ``await_agent_translation``：整轮翻译已进入 Agent 等待（同样可能叠加在一个译文目标
+      已经满足的 Job 上），调用方应停止并提示回填
     - ``await_agent_polish``：润色已进入 Agent 等待，调用方应停止并提示回填
     - ``import_translation`` / ``translate``：补齐译文 cue
     - ``polish``：从有效 draft 继续润色
@@ -693,8 +768,23 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
         return ("await_cue_retranslation",)
 
     goals = workflow_goals(config)
+    # 同一条理由对整轮 Agent 翻译等待完全成立，所以必须对称处理：下面
+    # await_agent_translation 的全部 return 分支都埋在 `not _translation_satisfied`
+    # 里，旧译文仍有效时它们根本不会被求值——用户照 status 的提示放弃重译、改跑一轮
+    # 完整翻译（`xvt translate JOB --target-language LANG`）之后，status 报 complete、
+    # continue 报完成、`xvt apply` 又说「not awaiting Agent input」，导航闭环断掉。
+    # 满足度只算一次：_translation_satisfied 会哈希四到五个产物，重复调用会在没有
+    # 只读记忆化作用域的 continue 路径上翻倍。
+    translation_satisfied = goals.needs_translation and _translation_satisfied(job, config)
+    if (
+        translation_satisfied
+        and agent_full_translation_waiting(job)
+        and _full_translation_request_is_newest(job)
+    ):
+        return ("await_agent_translation",)
+
     steps: list[str] = []
-    if goals.needs_translation and not _translation_satisfied(job, config):
+    if goals.needs_translation and not translation_satisfied:
         draft_path = valid_artifact_path(job, "translation_draft_cues")
         if config.translation_quality == "polished":
             polished_ready = translation_polish_satisfied(
@@ -746,10 +836,7 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
             ):
                 return ("await_agent_polish",)
             steps.append("polish")
-        elif (
-            job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
-            and valid_artifact_path(job, "translation_batches") is not None
-        ):
+        elif agent_full_translation_waiting(job):
             # 必须排在下面的 translated_cues→render 之前：prepare_agent_translation 写出
             # 新的整轮请求时只把 TRANSLATE 置成 awaiting_input，不会失效旧译文（等待期间
             # 旧译文对用户仍有价值）。按 render 先判就会把「等 Agent 回填整轮译文」误报成

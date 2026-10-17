@@ -2752,6 +2752,110 @@ class CueRetranslationWaitingTest(unittest.TestCase):
             self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
 
 
+class FullRoundAgentTranslationWaitTest(unittest.TestCase):
+    """整轮 Agent 翻译等待叠加在「译文目标已满足」的 Job 上时必须对三侧可见。
+
+    与 ``await_cue_retranslation`` 同构的一类缺陷：``_translation_satisfied`` 为真会
+    把一次真实的在途等待短路成空计划，于是 ``status`` 报 complete、``continue`` 报
+    完成、``xvt apply`` 又说「job is not awaiting Agent input」，导航闭环断掉。
+
+    夹具与 ``CueRetranslationWaitingTest`` 共用（显式引用而不是继承，避免把那边的
+    用例在本类里重跑一遍）。
+    """
+
+    _translated_job = CueRetranslationWaitingTest._translated_job
+    _request_retranslation = CueRetranslationWaitingTest._request_retranslation
+
+    def _start_full_round(self, job_file: Path) -> Path:
+        """等价于用户执行 ``xvt translate JOB --target-language zh-CN --provider agent``。"""
+
+        return prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+            await_input=True,
+        )
+
+    def test_full_round_wait_is_visible_on_a_satisfied_job(self) -> None:
+        """译文目标已满足的 Job 上新开一轮整轮等待：planner / status / continue 三侧一致。"""
+
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertEqual(plan_advance_steps(job, config), ())
+
+            manifest_path = self._start_full_round(job_file)
+
+            job = load_job(job_file)
+            # 前提：旧译文刻意保留（等待期间对用户仍有价值），所以译文目标仍然「已满足」。
+            self.assertIsNotNone(valid_artifact_path(job, "translated_cues"))
+            self.assertIsNotNone(valid_artifact_path(job, "translated_subtitle_qa"))
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
+            self.assertEqual(plan_advance_steps(job, config), ("await_agent_translation",))
+
+            plan = build_recovery_plan(job_file)
+            result = continue_workflow(job_file, event_sink=events.append)
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertEqual(plan.advance_steps, ("await_agent_translation",))
+        self.assertIn("xvt apply ", plan.prerequisite_commands[0])
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertIn(manifest_path, result.artifacts)
+        types = [event.type for event in events]
+        self.assertEqual(types.count(EventType.WORKFLOW_WAITING.value), 1)
+        self.assertNotIn(EventType.WORKFLOW_COMPLETED.value, types)
+
+    def test_full_round_supersedes_a_pending_cue_retranslation(self) -> None:
+        """E2E 复现路径：按 status 的提示用整轮翻译取代重译，不得两头落空。"""
+
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            self._request_retranslation(job_file)
+            self.assertTrue(cue_retranslation_waiting(load_job(job_file)))
+
+            manifest_path = self._start_full_round(job_file)
+
+            job = load_job(job_file)
+            # prepare_agent_translation 把重译 manifest 移出登记，整轮请求成为唯一在途等待。
+            self.assertIsNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertFalse(cue_retranslation_waiting(job))
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("await_agent_translation",),
+            )
+
+            plan = build_recovery_plan(job_file)
+            result = continue_workflow(job_file, event_sink=events.append)
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertEqual(plan.advance_steps, ("await_agent_translation",))
+        self.assertNotIn("retranslate-cues", " ".join(plan.prerequisite_commands))
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertIn(manifest_path, result.artifacts)
+        self.assertNotIn(EventType.WORKFLOW_COMPLETED.value, [event.type for event in events])
+
+    def test_a_newer_cue_retranslation_request_still_wins(self) -> None:
+        """护栏：重译请求登记更晚时仍由 await_cue_retranslation 接住，不被整轮等待顶掉。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._translated_job(root)
+            self._start_full_round(job_file)
+            self._request_retranslation(job_file)
+
+            job = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(job, "translation_batches"))
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("await_cue_retranslation",),
+            )
+
+
 class QaBlockedAgentWaitTest(unittest.TestCase):
     """SUBTITLE_QA 停在 failed 时，仍然挂着的 Agent 等待必须压过那段旧的 QA 引导。
 
@@ -3220,6 +3324,79 @@ class AwaitStepsCoverageTest(unittest.TestCase):
             stale,
             set(),
             f"AWAIT_STEPS 里有 plan_advance_steps 已经不再返回的死条目：{sorted(stale)}",
+        )
+
+    @staticmethod
+    def _await_literals(node: ast.AST, *, skip: ast.AST | None = None) -> set[str]:
+        """收集子树里出现的 ``await_*`` 步骤名；``skip`` 指向的子树整体跳过。"""
+
+        literals: set[str] = set()
+        stack: list[ast.AST] = [node]
+        while stack:
+            current = stack.pop()
+            if current is skip:
+                continue
+            sources: list[ast.AST] = []
+            if isinstance(current, ast.Return) and current.value is not None:
+                sources = [current.value]
+            elif (
+                isinstance(current, ast.Call)
+                and isinstance(current.func, ast.Attribute)
+                and current.func.attr == "append"
+            ):
+                sources = list(current.args)
+            for root in sources:
+                for child in ast.walk(root):
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                        if child.value.startswith("await_"):
+                            literals.add(child.value)
+            stack.extend(ast.iter_child_nodes(current))
+        return literals
+
+    def test_await_steps_state_their_position_against_the_satisfied_gate(self) -> None:
+        """每个等待步骤都必须就「会不会被『译文目标已满足』盖掉」表态。
+
+        这是同一类缺陷的第四次之后加的收敛网：``_translation_satisfied`` 为真时，埋在
+        `not translation_satisfied` 分支里的等待 return 根本不会被求值，planner 返回空
+        计划，status / continue / batch-continue 一起报完成。要么写一条满足度判定之前的
+        早退，要么登记进 ``workflow._SATISFIED_GATED_AWAIT_STEPS`` 并说明理由。
+        """
+
+        source = Path(xvt.workflow.__file__).read_text(encoding="utf-8")
+        function = next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == "plan_advance_steps"
+        )
+        gate = next(
+            (
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.If)
+                and "not translation_satisfied" in ast.unparse(node.test)
+            ),
+            None,
+        )
+        self.assertIsNotNone(
+            gate,
+            "没在 plan_advance_steps 里找到 `not translation_satisfied` 这道满足度闸门，"
+            "守卫会空转；改写闸门形式时请同步本守卫",
+        )
+        assert gate is not None
+        early = self._await_literals(function, skip=gate)
+        gated = self._await_literals(gate) - early
+
+        self.assertEqual(
+            gated,
+            set(xvt.workflow._SATISFIED_GATED_AWAIT_STEPS),
+            "只在「译文目标未满足」分支里给出的等待步骤必须与 "
+            "workflow._SATISFIED_GATED_AWAIT_STEPS 完全一致："
+            f"未表态的 {sorted(gated - xvt.workflow._SATISFIED_GATED_AWAIT_STEPS)}，"
+            f"已不再被闸门挡住的 {sorted(xvt.workflow._SATISFIED_GATED_AWAIT_STEPS - gated)}",
+        )
+        self.assertTrue(
+            early,
+            "满足度判定之前一条早退都没有，整轮/局部等待会重新被『已满足』短路",
         )
 
 

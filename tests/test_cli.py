@@ -950,6 +950,68 @@ class CliTest(unittest.TestCase):
                 {artifact.kind for artifact in load_job(job_file).artifacts},
             )
 
+    def test_apply_routes_a_full_round_response_on_a_satisfied_job(self) -> None:
+        """回归修复：译文目标已满足的 Job 上新开的整轮等待必须能被统一 apply 路由。
+
+        旧行为里 ``plan_advance_steps`` 因 ``_translation_satisfied`` 为真返回空计划，
+        统一入口只能报「response file has no task field, and the job is not awaiting
+        Agent input」，而 ``status`` 同时宣布已完成——用户只剩下自己猜
+        ``apply-translation`` 这一条路。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+                encoding="utf-8",
+            )
+            job = run_subtitle_transcription(source, root, language="en")
+            job_file = get_job_file(job)
+            set_workflow_config(
+                job,
+                WorkflowConfig(target_language="zh-CN", provider="agent", batch_size=1),
+            )
+            save_job(job)
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                await_input=False,
+            )
+            apply_agent_translation(
+                job_file,
+                self._write_response(directory, {"items": [{"id": 1, "text": "译文一"}]}),
+                target_language="zh-CN",
+            )
+            # 用户按 status 的提示放弃重译、改跑一轮完整翻译。
+            retranslate_cues(
+                job_file,
+                cue_ids=(1,),
+                target_language="zh-CN",
+                provider="agent",
+            )
+            prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                await_input=True,
+            )
+            full_response = root / "full-response.json"
+            full_response.write_text(
+                json.dumps({"items": [{"id": 1, "text": "整轮新译文"}]}),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(StringIO()):
+                return_code = main(["apply", str(job_file), str(full_response)])
+
+            self.assertEqual(return_code, 0)
+            translated = valid_artifact_path(load_job(job_file), "translated_cues")
+            self.assertIsNotNone(translated)
+            assert translated is not None
+            self.assertIn("整轮新译文", translated.read_text(encoding="utf-8"))
+
     def test_apply_reports_the_invoked_command_name_in_events(self) -> None:
         """成功与失败必须报同一个子命令名，且是用户实际执行的 `apply`。"""
         paths = (Path("/tmp/revision.json"),)
