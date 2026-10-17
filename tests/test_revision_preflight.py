@@ -13,7 +13,7 @@ from xvt.cli import main
 from xvt.errors import UserInputError
 from xvt.job_store import load_job, save_job
 from xvt.media import MediaInfo
-from xvt.models import Cue
+from xvt.models import Artifact, Cue
 from xvt.pipeline import (
     apply_translation_review_fixes,
     preflight_translation_review_fixes,
@@ -21,12 +21,27 @@ from xvt.pipeline import (
     translation_review_input_path,
 )
 from xvt.pipeline.burnin import _check_render_layout
+from xvt.pipeline.common import write_json
 from xvt.pipeline.review import review_gate_satisfied
 from xvt.qa import SubtitleIssue, SubtitleQaReport, check_subtitles
 from xvt.recovery import file_checksum
 from xvt.render import AssStyleOptions
 from xvt.translate import GlossaryTerm, TranslationPolicy
 from xvt.workflow_config import get_workflow_config, set_workflow_config
+
+
+def _bind_acknowledgment_to_report(job, report: dict) -> dict:
+    """把一份译文 QA 报告登记为 artifact，返回指向它的确认记录字段。
+
+    真实确认通道总是把 `report_kind` / `report_checksum` 一起落盘并与之比对，
+    手搓确认记录必须绑定「用户当时看到的那份报告」，否则对任何报告都无效。
+    """
+    source = next(item for item in job.artifacts if item.kind == "source_cues")
+    path = Path(source.path).with_name("qa-translated.json")
+    write_json(path, report)
+    checksum = file_checksum(path)
+    job.artifacts.append(Artifact("translated_subtitle_qa", str(path), checksum))
+    return {"report_kind": "translated_subtitle_qa", "report_checksum": checksum}
 
 
 class RevisionPreflightTest(unittest.TestCase):
@@ -233,11 +248,6 @@ class RevisionPreflightTest(unittest.TestCase):
             job_file, _ = self._response(root, "你好。")
             job = load_job(job_file)
             source = next(a for a in job.artifacts if a.kind == "source_cues")
-            job.config["subtitle_review_acknowledgment"] = {
-                "source_cues_checksum": source.checksum,
-                "acknowledged_issues": [["bilingual_overflow_risk", 1]],
-                "layout": {"video_width": 640, "target_font": "A"},
-            }
             report = {
                 "status": "needs_review",
                 "issues": [
@@ -247,6 +257,12 @@ class RevisionPreflightTest(unittest.TestCase):
                         "cue_id": 1,
                     }
                 ],
+                "layout": {"video_width": 640, "target_font": "A"},
+            }
+            job.config["subtitle_review_acknowledgment"] = {
+                **_bind_acknowledgment_to_report(job, report),
+                "source_cues_checksum": source.checksum,
+                "acknowledged_issues": [["bilingual_overflow_risk", 1]],
                 "layout": {"video_width": 640, "target_font": "A"},
             }
             self.assertTrue(review_gate_satisfied(job, report))
@@ -260,17 +276,18 @@ class RevisionPreflightTest(unittest.TestCase):
             job = load_job(job_file)
             source = next(a for a in job.artifacts if a.kind == "source_cues")
             layout = {"video_width": 640, "target_font": "A"}
-            job.config["subtitle_review_acknowledgment"] = {
-                "source_cues_checksum": source.checksum,
-                "acknowledged_issues": [["bilingual_overflow_risk", 1]],
-                "layout": layout,
-            }
             report = SubtitleQaReport(
                 "needs_review",
                 1,
                 (SubtitleIssue("bilingual_overflow_risk", "review", 1, "target line width"),),
                 layout=layout,
             )
+            job.config["subtitle_review_acknowledgment"] = {
+                **_bind_acknowledgment_to_report(job, asdict(report)),
+                "source_cues_checksum": source.checksum,
+                "acknowledged_issues": [["bilingual_overflow_risk", 1]],
+                "layout": layout,
+            }
             info = MediaInfo("video.mp4", 2000, 1, "mp4", 640, 360, 30, "h264", "aac", True, True)
             before = self._snapshot(root)
             with patch("xvt.pipeline.burnin.check_subtitles", return_value=report):
@@ -311,6 +328,7 @@ class RevisionPreflightTest(unittest.TestCase):
             self.assertEqual(second.status, "needs_review")
             source = next(a for a in job.artifacts if a.kind == "source_cues")
             job.config["subtitle_review_acknowledgment"] = {
+                **_bind_acknowledgment_to_report(job, json.loads(json.dumps(asdict(first)))),
                 "source_cues_checksum": source.checksum,
                 "acknowledged_issues": [["bilingual_overflow_risk", 1]],
                 "layout": first.layout,

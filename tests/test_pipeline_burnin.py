@@ -35,14 +35,19 @@ def _register_translated_qa(
 
 
 def _acknowledge_review_issues(job, artifacts: Path, issues: list[list]) -> None:
-    """写入一条对当前 source_cues 有效的人工确认记录（不改写 QA 报告 status）。"""
+    """写入一条对当前 source_cues 与已登记译文 QA 报告都有效的人工确认记录。
+
+    不改写 QA 报告 status；`report_checksum` 必须指向该 Job 实际登记的那份报告，
+    否则（与真实确认通道一样）这条记录对当前报告无效。
+    """
     source_cues = artifacts / "source-cues.json"
     source_cues.write_text(json.dumps([asdict(Cue(1, 0, 1000, "Hello"))]), encoding="utf-8")
     checksum = file_checksum(source_cues)
     job.artifacts.append(Artifact("source_cues", str(source_cues), checksum))
+    report = next(artifact for artifact in job.artifacts if artifact.kind == _QA_KIND)
     job.config["subtitle_review_acknowledgment"] = {
         "report_kind": _QA_KIND,
-        "report_checksum": None,
+        "report_checksum": report.checksum,
         "source_cues_checksum": checksum,
         "acknowledged_issues": issues,
         "acknowledged_at": "2026-01-01T00:00:00+00:00",

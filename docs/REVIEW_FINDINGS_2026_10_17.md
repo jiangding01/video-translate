@@ -22,13 +22,21 @@
 
 ## 应修
 
-### N1 `subtitle_review_acknowledgment` 代签放行 — ○ 已复现，待决策
+### N1 `subtitle_review_acknowledgment` 代签放行 — ✅ 已核验，**已修（本轮）**
 
 人工确认的有效性只绑定 `source_cues` 的 checksum 与「问题族 + cue id」（`pipeline/review.py` 的 `acknowledged_review_issues` / `review_gate_satisfied`），**不绑定译文内容**。用户为 v1 确认过 cue 1 的超宽后，一条完全不同、同样在 cue 1 超宽的 v2 译文会被旧确认自动代签放行，用户从未看过它。四条译文回填路径（agent / import / retranslate / semantic 收尾）同样暴露。
 
 佐证：`pipeline/revision.py` 与 `pipeline/semantic.py` 在改写 cue 时都显式 `job.config.pop("subtitle_review_acknowledgment", None)`，说明「只绑 source checksum 不够」在那两处已被意识到，而 `invalidate_rendered_artifacts` 没做。
 
-最小修法是在 `invalidate_rendered_artifacts` 里一并 pop，但会改变「acknowledge 之后 continue」的现有体验（确认会被紧随其后的回填清掉），需要先确认既有用例是否仍成立。**这是本清单里唯一需要先做设计决策再动手的条目。**
+设计决策的结论不是「在 `invalidate_rendered_artifacts` 里一并 pop」——那会改变「acknowledge 之后 continue」的现有体验。实际修法更小：**确认记录里早就存着 `report_kind` 与 `report_checksum`**（`acknowledge_subtitle_review` 自确认通道引入时的 commit `d361828` 起就一直落盘），只是 `acknowledged_review_issues` 从来没读过它们。本轮把校验侧补齐即可，落盘格式零改动，真实 Job 的存量确认记录照常有效。
+
+已修：`pipeline/review.py` 的 `acknowledged_review_issues` 在比对 `source_cues_checksum` 之后，再要求 `report_kind` 落在 `{"translated_subtitle_qa", "subtitle_qa"}` 内、且 `record["report_checksum"]` 等于当前登记的同类报告 checksum。报告缺失时 `artifact_checksum_for` 返回 `None`，因此显式排除 `None`——否则一条写着 `report_checksum: null` 的伪造记录会因「两边都是 `None`」相等而蒙混过关。四条译文回填路径（agent / import / retranslate / semantic 收尾）共用这一个判定，一处补齐全部收口。
+
+不误伤「确认 → continue」：QA 报告是确定性的（只含 status / cue_count / issues / layout，无时间戳），同输入重算逐字节相同，`continue` 重建报告后 checksum 不变。
+
+**已知性质（可接受代价）**：绑的是报告的**字节** checksum，不是语义等价。将来改动 `pipeline.common.write_json` 的序列化写法（缩进、分隔符、`ensure_ascii`）会让全部存量确认一次性失效，用户需要重新确认一次。方向是 fail-closed（宁可多问一次，不可少问一次），因此接受；真要改写法时在 Changelog 里提示即可。
+
+测试：`tests/test_pipeline.py::PipelineTest::test_acknowledgment_does_not_sign_off_a_different_translation` 直接钉住本条——同一 Job、同一 cue、同一个 review 问题码（`bilingual_overflow_risk`，cue 1），只换译文内容，断言旧确认失效且新报告不放行；`::test_acknowledgment_rejects_unregistered_report` 覆盖 `report_checksum: null` 的伪造记录。两条都做过红先验证（临时去掉校验即复现修复前的代签行为）。同轮修掉 5 处手搓 fixture 缺这两个字段的问题，以及 `tests/test_workflow.py` 的 helper 用紧凑 JSON 写 QA 报告、与生产 `write_json` 的缩进 JSON 字节不一致——后者让 `test_continue_rebuilt_qa_keeps_stored_review_acknowledgment` 此前即使在生产路径上会失效也照样绿。
 
 ### F1 `stage.error` 裸写进 `job.json`，绕过脱敏 — ✅ 已核验，**已修（本轮）**
 
@@ -321,11 +329,11 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 1. ~~**正确性剩余**：F2 + F3 + F4 + O5。~~ F2 / F3 / F4 / O5 均已修（本轮）。
 2. ~~**持久化脱敏收口**：F1 + F8 + O3。~~ 三条均已修（本轮），约束 5 现在在 `job.json` 层成立（在 `set_stage` 边界统一脱敏）。AGENTS 约束 5 的措辞已同步。
-3. **N1 设计决策**：先定「确认是否绑定译文内容」，再动手。
+3. ~~**N1 设计决策**：先定「确认是否绑定译文内容」，再动手。~~ 已定并已修（本轮）：确认绑定译文内容，载体是记录里早就落盘、只是没被读过的 `report_kind` / `report_checksum`。
 4. ~~**烧录判定收敛与 fail-closed 补洞**：F6 + O5 + F7 + O7。~~ 四条均已修：F6 / O5（上一轮，四阶段：改桩 → 真实状态测试 → 口径收敛 → 终检守卫），F7 / O7（本轮，与 F5 同一批「守卫与去重」）。
 5. ~~**去重**：F5。~~ 已修（本轮）。
 6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
 
-**剩余未处理**：N1（需设计决策）、F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」与「未验证」两节。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。
+**剩余未处理**：F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」与「未验证」两节。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

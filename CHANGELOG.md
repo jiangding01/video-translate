@@ -6,6 +6,8 @@
 
 ### Security
 
+- **字幕 QA 的人工确认不再代签你没看过的新译文。** 此前确认记录只绑定源字幕 checksum：你为某一版译文确认过「cue 3 行宽超限」之后，只要源字幕没变，一条内容完全不同、恰好同样在 cue 3 超宽的新译文就会被这条旧确认自动放行，四条译文回填路径（`continue`、`apply-*` 系列、预览、烧录）都受影响。现在确认同时绑定它被给出时你看到的那份 QA 报告，译文一变报告 checksum 就变，旧确认自动失效，需要重新查看报告并再次 `--acknowledge-subtitle-review`。源字幕不变、译文也不变时确认照常复用，不会要求重复确认。
+
 - **`job.json` 里的失败原因现在和事件一样脱敏。** 此前 stage 失败原因直接写进 `job.json`，再被 `xvt status --json` 原样输出：yt-dlp / ffmpeg 的原始 stderr、下载 403 的 detail、翻译提供方 4xx 消息里的签名 URL、Cookie、代理凭据和 `base_url` 全是明文，而同一条错误在 JSONL 事件里已经是 `<redacted>`。脱敏改在 `set_stage` 这一个边界统一做，两条出口给出同一份文本。旧 Job 里已经落盘的明文不会被自动改写，确认里面有凭据时请删除对应 Job 目录或手工清理 `job.json`。
 - **签名 URL 的参数脱敏名单改为规则匹配，补齐非 AWS 云厂商。** 此前只精确匹配 AWS 的 `x-amz-*` 三件套，GCS v4 的 `X-Goog-Signature` / `X-Goog-Credential`、阿里云的 `auth_key`、腾讯的 `q-signature` 全部原样写进事件与 `job.json`。现在键名含 `signature` / `credential` / `token` / `secret` / `password` / `accesskey` / `apikey` 即脱敏，另对 `key` / `sig` / `auth` / `pwd` 按 `-`、`_`、`.` 分段整词匹配，避免误伤 `monkey`、`keyword`、`author`、`design`、`signal` 这类正常参数。
 - **`--base-url` 带用户名密码或 query 串时直接拒绝。** 此前 `https://user:pw@host/v1` 能通过入口校验并随 `job.config.workflow` 永久落盘，发请求时抛的 `nonnumeric port: 'pw@host'` 不带 scheme，脱敏规则够不着它。现在 `resolve_provider` 在确认这条 Base URL 真的会被用来发请求时拒绝它（Base URL、模型与 API Key 齐备的情形），报错只点名主机名、不回显凭据。配置不齐全时 `--provider auto` 仍按既有契约降级成 Agent 模式，那条 Base URL 既不发请求也不落盘。凭据请放进 API Key 环境变量。

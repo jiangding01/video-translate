@@ -12,7 +12,7 @@
 
 `xvt apply JOB REVIEW --check` 和 `xvt apply-translation-review-fixes JOB REVIEW --check` 仅检查人工译文 JSON/SRT，不写 Job、artifact、事件日志或锁文件，不调用模型。返回 `translation_review_preflight`，包括 `valid`、`changed_ids`、`blockers` 和完整 `qa`；无效退出 2。统一入口仅允许译文修订路由使用该旗标，拒绝与 `--continue` 合用。正式提交重新执行相同检查，译文超宽或 error 未解决时不保存、不失效旧产物。
 
-已知画幅时，候选及最终译文 QA 按实际 ASS 样式测量可见宽度；建议字数超限但能容纳的降为 warning。测量失败保留原阻断规则。报告可包含 `layout`（画幅、样式、宽度和可用宽度），subtitle acknowledgment 绑定相同布局；旧无 layout 的确认仅匹配旧无 layout 的报告。换画幅、字体或测量结果后需重新判断，不能用旧确认放行新布局。恢复/status 仍严格只读，旧候选报告在实际推进时重算；烧录重查实际媒体与字体，新的 review 返回 workflow 等待态，不宣告完成。预览不改写正式 QA。
+已知画幅时，候选及最终译文 QA 按实际 ASS 样式测量可见宽度；建议字数超限但能容纳的降为 warning。测量失败保留原阻断规则。报告可包含 `layout`（画幅、样式、宽度和可用宽度），subtitle acknowledgment 绑定相同布局；旧无 layout 的确认仅匹配旧无 layout 的报告。确认同时绑定被确认那份报告的 checksum（`report_kind` + `report_checksum`），译文变化后报告 checksum 随之变化、旧确认自动失效；QA 报告是确定性的，`continue` 零成本重算出的同内容报告逐字节相同，不会误伤「确认 → continue」。换画幅、字体或测量结果后需重新判断，不能用旧确认放行新布局。恢复/status 仍严格只读，旧候选报告在实际推进时重算；烧录重查实际媒体与字体，新的 review 返回 workflow 等待态，不宣告完成。预览不改写正式 QA。
 
 本文是 `status` / `continue` / `batch` / `batch-continue` / `xvt apply` / `relink-burned-output` 共用恢复语义的单一来源。判定顺序、产物有效性口径、回填路由和烧录 proof 资格都以这里为准，其它文档不得另立说法。
 
