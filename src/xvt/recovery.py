@@ -1109,6 +1109,7 @@ def _recovery_for_workflow(
     from xvt.workflow import (
         burned_output_relink_recovery_available,
         media_qa_failure,
+        missing_burn_source_media,
         plan_advance_steps,
     )
 
@@ -1231,7 +1232,29 @@ def _recovery_for_workflow(
     # ``_finalize_candidate`` —— 它发现 translated_cues 与最终候选不一致就会改写它，
     # 指纹随即失效、relink 白做。因此 polished 额外要求「候选已落到 translated_cues」
     # （``semantic_review_satisfied``），此时 render 只补渲染产物，与 standard 同构。
-    relink_reachable = "burn" in steps and set(steps) <= {"render", "burn"}
+    # 源媒体不在登记路径时 render 与 burn 都会以「video file does not exist」失败
+    # （两步都要读实际媒体文件），于是 primary_command 还推荐 continue 就是推荐一条
+    # **必然再次失败**的命令，而 alternative_commands 是空的——用户没有任何出口。
+    # 这是本仓库第 6 次同类缺陷，归 manual_fix 并点名那个路径。
+    # 唯一的出口是文件系统动作：把源媒体放回原路径。刻意**不**推荐
+    # `xvt burn JOB --media NEW`——它虽然能产出合格成品，但没有任何命令能把持久化的
+    # 源媒体路径指到新位置，Job 会继续停在这里，等于把用户引进另一个死角。
+    # 判定范围刻意收窄到「计划只剩 render / burn」：还有 translate 等步骤时 continue
+    # 仍能真正推进那些步骤，不该拦。``local_only`` 同理：远程 Job 的下载产物缺失时
+    # continue 能重新获取媒体，那是真出口，不归 manual_fix。
+    burn_is_the_rest = "burn" in steps and set(steps) <= {"render", "burn"}
+    if burn_is_the_rest:
+        missing_media = missing_burn_source_media(job, workflow, local_only=True)
+        if missing_media is not None:
+            return plan(
+                "manual_fix",
+                f"源媒体不在登记路径 {missing_media}，重烧需要它；"
+                "把该文件放回原路径后再运行 continue。",
+                primary_command=None,
+                advance_steps=steps,
+            )
+
+    relink_reachable = burn_is_the_rest
     if relink_reachable and workflow.translation_quality == "polished":
         relink_reachable = semantic_review_satisfied(job)
     if relink_reachable and burned_output_relink_recovery_available(

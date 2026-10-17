@@ -327,16 +327,29 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 - **P8 Whisper 尾部幻觉（「ご視聴」贴到媒体末尾）无 QA 门拦截。** 它会进翻译批次并出现在成品里。`segment.py` 已有「低置信重复尾部」的裁剪启发式（`test_does_not_trim_high_confidence_repetition` 钉住它不碰高置信重复），这条幻觉够不着它——**此处是读代码的推断，未对该素材逐条验证两个条件**。属**新增 QA 启发式**（例如「贴着媒体末尾、与正文无词级重叠、命中常见套话词表」），需要先收集足够样本避免误删真实结尾，否则会把合法结尾当幻觉删掉。
 - **P9 ASR 漏掉开头 6s 旁白。** 复现确认是**模型召回问题，不是 XVT 的缺陷**（同一段音频换参数仍漏）。登记在此只因为它直接导致了 P4：源时间轴缺头，导入译文就对不上。无修复动作，供排查 P4 时参照。
 
+## 2026-10-18 烧录派生指纹与源媒体缺失导航（B 系列，与上面的 F/O/P 编号无关）
+
+来源：一个由真实 `xvt run` + `xvt apply --continue` 跑出来的已完成烧录 Job（纯字幕输入 + Agent 回填，零网络零 API）上的逐步实测。三条互相关联：同一个「源媒体身份」口径既把有效的完成态判成失效（B3），又在它真的缺失时给出错误归因（B1）和一条必然失败的导航（B2）。
+
+- **B3 烧录指纹用 mtime 把一个内容上完全有效的完成态判失效** — ○ 已复现（真实 Job 实测），**已修（本轮）**。对一个 `recovery: complete` 的 Job 只跑 `touch media/sample.mp4`：内容 checksum、size、路径全部不变，只有 `mtime_ns` 变了，`status` 立刻翻成 `retryable - 烧录派生指纹已失效` + `steps: burn`，即要求**整段重编码**。`_burn_fingerprint` 的本地分支把媒体身份取成 `{path, size, mtime_ns}`，于是不带 `-p` 的 `cp`、不带 `-a` 的 `rsync`、备份还原和一次 `touch` 都会触发。这**不是**下面「一处已知例外」记的那条：那条记的是反方向（同 size+mtime 的**不同**文件被错误地**证实**为有效），还把 `touch` 当特性推荐。约束 9 要求元数据「只能证伪、不得证实」，但这里元数据证伪的是一个内容上有效的完成态，代价是重编码一部可能是长片的视频。
+  修法：**指纹算法与载荷格式零改动**（改了会让全部存量 v2 proof 一次性失效），加的是「快路径判不匹配之后的第二道判定」`_burn_fingerprint_satisfied`——快路径仍是 mtime 指纹（常见情形零额外 IO，`status` 的成本边界不变），只在本来就要报失效的分支上多哈希一次源媒体。回退要求三条全部成立，否则照旧判失效：checksum 有效的 v2 proof 且其指纹就是已登记那份；**proof 里登记的烧录时媒体身份重算出的指纹仍等于已登记指纹**；源媒体当前内容 checksum 等于 proof 登记的那份。
+  第二条是本轮最关键的设计抉择，**不能省**：只比对 `source_media_checksum`（最初的方案）会把「手改 `job.json` 换字体 / `hardware_encoding` 后指纹漂移」也一并放过——实测它会打红两条既有的 fail-closed 断言（`test_recovery_retries_burn_when_v2_proof_fingerprint_is_stale` 与 `test_relink_burned_output_rejects_unverified_candidates_without_mutation` 的 `fingerprint` subTest，两者都是用 `hardware_encoding` 漂移来模拟「指纹过期」的）。为此在 v2 proof 文档里新增**可选**字段 `source_media_identity`（只对本地媒体登记）。**代价如实记录**：存量 v2 proof 没有这个字段，对它们回退不生效（仍按旧行为重烧），下一次由 `run` / `continue` 完成的烧录即补上。
+- **B1 `relink` 把「源媒体不在原路径」误报成「指纹过期」** — ○ 已复现，**已修（本轮）**。原先登记在下方「观察」里。链路：`_burn_fingerprint` 在 `not media_path.is_file()` 时 `return None` → proof 比对第一步即 `False` → 统一报 `burned video cannot be relinked because its fingerprint is stale`。实测同一份 proof、同一个候选文件，唯一变量是源媒体在不在原路径：在场时退出码 0「已重新关联烧录成品」，缺失时退出码 2 报 stale。修法是在报 stale **之前**加一道前置检查 `missing_burn_source_media`（只 `stat`、不哈希），点名缺失的那个路径；**判定本身没有重造**，媒体 QA 放行与 proof 指纹比对仍各只有一份实现，fail-closed 方向不变（本来就拒绝）。
+- **B2 源媒体缺失时 `status` 推荐一条必然失败的 `continue`，且无 alternative** — ○ 已复现，**已修（本轮）**。源媒体移走后 `recovery_plan` 是 `retryable` / `primary_command=xvt continue JOB` / `alternative_commands=[]` / `advance_steps=["burn"]`，而 `continue` 退出码 2 报 `video file does not exist: <path>`（render 与 burn 都要读实际媒体），失败后自荐的恢复命令又是同一条 `continue`，`status` 导航零变化。这是「`primary_command` 在该状态下必然再次失败且无 alternative」这类缺陷的**第 6 次**（前五次：`qa_blocked` 让路、manifest 失效死局、原子分支让路、整轮等待被吞、对齐置信度死局）。`recovery.py` 此前对源媒体零判定（`grep "source media\|source_video\|burn_media"` 零命中）。
+  修法：计划只剩 `render` / `burn` 且**本地**源媒体不在登记路径时归 `manual_fix`，`reason` 点名那个路径，`primary_command=None`（`repair_polish_draft` 已有同样用法）。**刻意不推荐 `xvt burn JOB --media NEW`**：它虽然能产出合格成品，但没有任何命令能把持久化的源媒体路径指到新位置，Job 会继续停在这里，等于把用户引进另一个死角；唯一出口是文件系统动作。`local_only` 也是刻意的：远程 Job 的下载产物缺失时 `continue` 能重新获取，那是真出口，不归 `manual_fix`。
+  **相邻未纳入**：「没有任何命令能重指源媒体路径」是独立的待决策项（要不要给 `continue` 加 `--media`），本轮不加新 CLI 参数。计划里还有 `translate` 等步骤时也不拦——那些步骤 `continue` 能真正推进。
+
 ## 观察（危害低，可不处理）
 
 - 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——这是 R3.2 的低成本替代点（执行器改为按 `advance_steps[0]` 分派）。
 - `recovery` ⇄ `pipeline` 的环实际还包含 `recovery` ⇄ `workflow`（9 处函数级 import）；`common.py` 里有一处已属多余的惰性 import 可顺手转顶层。
 - socks5 等非 http scheme 的 userinfo 密码含 `@` 时脱敏漏掉后半段（实测）。
 - yt-dlp 的 `-o` 模板不转义 output root 里的 `%`（元数据展开可能写到 Job 目录外，事后检查只报错不清理）。
-- `relink` 在源媒体缺失时误报 "fingerprint is stale"。
+- ~~`relink` 在源媒体缺失时误报 "fingerprint is stale"。~~ **已修（2026-10-18，B1）**，见上方 B 系列。
 - `repair_polish_draft` 的 `manual_fix` 没有给出可执行命令（依赖 F2 修复后补）。
 - **○ 已复现（polished 真实 E2E 验收）：`xvt apply JOB RESPONSE --continue` 在一条命令内把译文 QA 与渲染做了两遍。** 语义收尾先产出一次完整的译文 QA + 渲染产物，紧接着的 `continue` 腿又从同一份 cue 重算一次，结果逐字相同、Job 状态正确，纯属重复做功（纯字幕 Job 上只是几十毫秒，长片 + 已知画幅的 libass 行宽测量会明显变贵）。**本轮刻意未修**：要动语义收尾与 `continue` 腿的衔接（谁负责渲染、谁只负责推进），风险大于收益，需要单独立项并补「收尾产物被 `continue` 复用而不重算」的测试。
 - `translation.py` 的 `agent_translation_polish_*` 与 `polish.py` 的同名前缀谓词含义相反，建议改名 `agent_translate_and_polish_*`。
+- **`tests/test_doctor.py::DoctorTest::test_ffmpeg_capability_timeout_kills_grandchild_process_group` 是 flaky。** 2026-10-18 全量跑时偶发变红，单独重跑与再次全量都通过。它依赖子进程组 kill 与 timeout 的真实时序，机器负载高时会抖。未定位，登记以免下次有人把它当成真实回归。
 - README 用法块漏了 `--fail-on-waiting`。
 
 ## 未验证（△ 低置信，动手前先复现）

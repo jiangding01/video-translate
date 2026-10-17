@@ -1,3 +1,5 @@
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,13 +11,16 @@ from ffmpeg_support import FFMPEG_REQUIREMENT, ffmpeg_can_render_ass
 
 from xvt.job_store import get_job_file, load_job
 from xvt.media import probe_media
-from xvt.models import Transcript, Word
+from xvt.models import StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
     apply_subtitle_translation,
     burn_translated_job,
     preview_translated_job,
     run_local_transcription,
 )
+from xvt.recovery import build_recovery_plan, file_checksum
+from xvt.workflow import WorkflowOptions, plan_advance_steps, run_workflow
+from xvt.workflow_config import require_workflow_config
 
 
 @unittest.skipUnless(ffmpeg_can_render_ass(), FFMPEG_REQUIREMENT)
@@ -80,6 +85,68 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(info.video_codec, "h264")
             self.assertEqual(info.audio_codec, "aac")
             self.assertLessEqual(abs(info.duration_ms - 2000), 500)
+
+    def test_touching_source_media_keeps_a_really_burned_job_complete(self) -> None:
+        """真实 Job 路径：``run`` 跑完烧录后，只动源媒体 mtime 不得要求整段重编码。
+
+        这条刻意不打桩（零网络、零模型：源字幕与译文都由用户提供，FFmpeg 真跑），
+        产物真的落盘、artifact 真的登记、stage 真的推进、v2 proof 真的由工作流签发，
+        否则「touch 后仍判完成」这条性质在生产路径上并没有被验到。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            self._create_video(media)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            result = run_workflow(
+                WorkflowOptions(
+                    input=str(media),
+                    output=root / "work",
+                    subtitles=source,
+                    translation_subtitles=translated,
+                    target_language="zh-CN",
+                    burn=True,
+                    hardware_encoding=False,
+                )
+            )
+
+            self.assertEqual(result.status, "completed")
+            job_file = result.job_file
+            job = load_job(job_file)
+            self.assertIs(job.stages[StageName.BURN].status, StageStatus.SUCCEEDED)
+            self.assertIs(job.stages[StageName.MEDIA_QA].status, StageStatus.SUCCEEDED)
+            proof_path = Path(
+                next(item.path for item in job.artifacts if item.kind == "burn_fingerprint")
+            )
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            self.assertEqual(proof["version"], 2)
+            self.assertEqual(proof["source_media_checksum"], file_checksum(media))
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+
+            before = media.stat()
+            os.utime(media, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+            self.assertNotEqual(media.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(file_checksum(media), proof["source_media_checksum"])
+
+            job = load_job(job_file)
+            self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "complete")
+            self.assertEqual(plan.advance_steps, ())
+            # 回退的授权依据就在这份 proof 里：没有烧录时的媒体身份就证明不了
+            # 「指纹差异只来自文件元数据」。
+            self.assertEqual(proof["source_media_identity"]["path"], str(media.resolve()))
 
     def test_real_audio_normalization_with_mocked_asr_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

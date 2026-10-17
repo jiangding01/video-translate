@@ -153,7 +153,36 @@
 - 命中需要外部写入者精确伪造 size 与 mtime（`cp -p` / `rsync -a` 只在**同一份内容**上保留 mtime，不构成命中）。
 - 源媒体是用户自己的输入文件，不是 Job 登记的产物；它的 checksum 从未被登记过，没有可比对的基线。
 - v2 proof 里存有实际源媒体内容 checksum，`relink-burned-output` 写入前会重算并比对，这条路径不受影响。
-- 需要确证时，用户可以显式 `xvt burn` / `continue` 重烧，或先 `touch` 源媒体让指纹失效。
+- 需要确证时，用户可以显式 `xvt burn` / `continue` 重烧。
+
+**不要再把 `touch` 源媒体当作「让指纹失效」的手段**（本文此前如此推荐，已不成立）：元数据漂移现在走下面的内容 checksum 回退，内容没变就不判失效。要强制重烧请直接运行 `xvt burn JOB` / `xvt continue JOB`。
+
+### 指纹不匹配时的源媒体内容 checksum 回退
+
+上面那条「只能证伪、不得证实」的通则有一个反方向的坑：元数据证伪的可能是一个**内容上完全有效**的完成态。只 `touch` 一次源媒体（内容 checksum、size、路径全不变）就会让 `status` 从 `complete` 翻成 `retryable - 烧录派生指纹已失效`，代价是整段重编码；不带 `-p` 的 `cp`、不带 `-a` 的 `rsync` 和备份还原同样触发。
+
+因此指纹判定现在是两段式，单点实现 `workflow._burn_fingerprint_satisfied`（烧录满足度与 v2 proof 比对共用）：
+
+- **快路径**：已登记指纹与现算的 `{path, size, mtime_ns}` 指纹相等即放行。常见情形走这里，**零额外 IO，`status` 的成本边界不变**（下文那条承诺继续成立）。
+- **回退**：快路径判不匹配时才执行，要求三条**全部**成立，否则照旧判失效（fail closed）：
+  1. 存在 checksum 有效的 v2 proof，且其 `fingerprint` 就是已登记那份（legacy fingerprint 拿不到这条回退）；
+  2. proof 里登记的烧录时源媒体身份（`source_media_identity`）与**当前**其余指纹输入重算出的指纹仍等于已登记指纹——这一步证明指纹差异**只**来自媒体身份；
+  3. 源媒体当前内容 checksum 等于 proof 登记的那份内容 checksum。
+
+为什么这不破坏成本边界：回退只发生在**本来就要报「失效」**的那条分支上，而那条分支的后果是重新编码整部视频，一次哈希远比它便宜；快路径命中时一次额外的读都没有。
+
+为什么第 2 条不能省：没有它，「手改 `job.json` 里的 `target_font` / `source_font` / `hardware_encoding` 后指纹漂移」会被内容 checksum 一起放过，`continue` 报「已完成」而新设置永远烧不上去。指纹的另一项输入 `translated_cues_checksum` 不需要单独判：`burn_fingerprint` 在 `artifacts.DERIVES_FROM` 里是 `burned_video` 的下游（而它派生自 `translated_cues`），改写译文的各条路径还会显式 `clear_burn_fingerprint`，proof 登记随即消失，第 1 条就不成立。媒体 `path` 漂移无害：换到另一份**内容相同**的媒体上，烧录结果本来就一致。
+
+**已知边界**：`source_media_identity` 是本次新增的**可选**字段，只对本地媒体登记（远程媒体的身份本就是内容 checksum，不含 mtime，不会假失效）。存量 v2 proof 没有它，回退对那些 Job 不生效（仍按旧行为重烧一次），下一次由 `run` / `continue` 完成的烧录即补上。proof 文档的三个必需字段口径未变，存量 proof 的既有完成语义与 relink 资格一律不受影响。
+
+### 源媒体不在登记路径时的导航与报错
+
+源媒体不在登记路径时 `render` 与 `burn` 都会以 `video file does not exist: <path>` 失败（两步都要读实际媒体文件）。因此：
+
+- **`status` / `continue` 的恢复分类**：计划只剩 `render` / `burn` 且**本地**源媒体不在登记路径时归 `manual_fix`，`reason` 点名那个路径，`primary_command` 为 `None`——不推荐一条必然再次失败的 `continue`。唯一出口是文件系统动作：把源媒体放回原路径后再 `continue`。刻意**不**推荐 `xvt burn JOB --media NEW`：它能产出合格成品，但没有任何命令能把持久化的源媒体路径指到新位置，Job 会继续停在同一状态。
+- **远程 Job 刻意例外**：下载产物缺失时 `continue` 能重新获取媒体，那是真出口，仍按 `retryable` 处理。
+- **计划里还有 `translate` 等步骤时不拦**：那些步骤 `continue` 能真正推进。
+- **`relink` 的报错**：源媒体不在原路径时报「source media is missing: `<path>`」而不是「fingerprint is stale」——指纹并没有过期，是算不出来。方向不变（两者都拒绝），只是说对了原因。
 
 ## `xvt apply` 统一回填路由
 
@@ -210,7 +239,7 @@
 
 ### 不具备资格的情形
 
-legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重新关联资格，按 `retryable` 恢复并由 `continue` 重烧。旧 Job 必须先 `continue` 重烧一次生成 v2 proof，不得宣称可直接 relink。
+legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重新关联资格，按 `retryable` 恢复并由 `continue` 重烧。旧 Job 必须先 `continue` 重烧一次生成 v2 proof，不得宣称可直接 relink。源媒体不在原路径属另一类，报错与导航见「源媒体不在登记路径时的导航与报错」。
 
 ### 媒体 QA 放行与 proof 比对的单点实现
 
@@ -220,6 +249,6 @@ legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重�
 
 ### status 的成本边界
 
-普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；内容 checksum 只在烧录落证和 relink 校验时计算。
+普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；内容 checksum 只在烧录落证、relink 校验，以及**指纹快路径已判不匹配**后的回退判定（见「指纹不匹配时的源媒体内容 checksum 回退」）时计算。后者不削弱这条边界：快路径命中时一次额外的读都没有，而快路径不命中的那条分支本来就要整段重编码。
 
 `xvt status JOB` 对缺失的已登记烧录成品只做静态资格判断，不额外计算源媒体内容 checksum；符合资格时归类为 `awaiting_input`，优先给出 `relink-burned-output`，并列出显式 `continue` 重烧作为备选。

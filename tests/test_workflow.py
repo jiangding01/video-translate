@@ -53,6 +53,7 @@ from xvt.workflow import (
     _translation_review_waiting_reason,
     burned_output_relink_recovery_available,
     continue_workflow,
+    missing_burn_source_media,
     plan_advance_steps,
     planned_run_steps,
     relink_burned_output,
@@ -1880,6 +1881,14 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
                     "fingerprint": stored,
                     "burned_video_checksum": file_checksum(burned),
                     "source_media_checksum": file_checksum(media),
+                    # 本地源媒体在烧录时刻的身份。指纹不匹配时用它重算一次指纹，证明
+                    # 差异只来自媒体身份（而不是字体/编码选项漂移），这是内容 checksum
+                    # 回退的前提。远程媒体不登记：它在指纹里的身份本就是内容 checksum。
+                    "source_media_identity": {
+                        "path": str(media.resolve()),
+                        "size": media.stat().st_size,
+                        "mtime_ns": media.stat().st_mtime_ns,
+                    },
                 },
             )
 
@@ -2154,6 +2163,129 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
         self.assertIn("continue", plan.primary_command or "")
         self.assertNotIn("relink-burned-output", plan.primary_command or "")
         self.assertEqual(plan.advance_steps, ("burn",))
+
+    def test_source_media_touch_keeps_the_burn_complete(self) -> None:
+        """只动源媒体 mtime（内容、size、路径都没变）不得把完成态判失效。
+
+        此前 ``_burn_fingerprint`` 的本地分支把媒体身份取成 ``{path, size, mtime_ns}``，
+        于是一次 ``touch``、不带 ``-p`` 的 ``cp``、不带 ``-a`` 的 ``rsync`` 和备份还原
+        都会让 ``status`` 从 complete 翻成 retryable，代价是整段重编码。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            media = root / "video.mp4"
+            before = media.stat()
+            os.utime(media, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+
+            self.assertNotEqual(media.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(media.stat().st_size, before.st_size)
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertTrue(_burn_satisfied(job, config))
+            self.assertEqual(plan_advance_steps(job, config), ())
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+
+    def test_touch_fallback_requires_the_recorded_media_identity(self) -> None:
+        """没有登记烧录时媒体身份的存量 v2 proof 拿不到回退：照旧判失效（fail closed）。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            job = load_job(job_file)
+            proof_path = Path(
+                next(item.path for item in job.artifacts if item.kind == "burn_fingerprint")
+            )
+            document = json.loads(proof_path.read_text(encoding="utf-8"))
+            self.assertIn("source_media_identity", document)
+            document.pop("source_media_identity")
+            proof_path.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            job.artifacts = [
+                Artifact(item.kind, item.path, file_checksum(proof_path))
+                if item.kind == "burn_fingerprint"
+                else item
+                for item in job.artifacts
+            ]
+            save_job(job)
+            media = root / "video.mp4"
+            stat = media.stat()
+            os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertFalse(_burn_satisfied(job, config))
+            self.assertEqual(plan_advance_steps(job, config), ("burn",))
+
+    def test_touch_fallback_refuses_changed_source_media_content(self) -> None:
+        """源媒体内容真的变了（size 相同也不行）：回退必须照旧判失效并要求重烧。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            media = root / "video.mp4"
+            size = media.stat().st_size
+            media.write_bytes(b"other")
+            self.assertEqual(media.stat().st_size, size)
+
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertFalse(_burn_satisfied(job, config))
+            self.assertEqual(plan_advance_steps(job, config), ("burn",))
+            self.assertEqual(build_recovery_plan(job_file).category, "retryable")
+
+    def test_relink_names_missing_source_media_instead_of_a_stale_fingerprint(self) -> None:
+        """源媒体不在原路径时 relink 必须点名那个路径，而不是归因成「指纹过期」。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, candidate = self._relinkable_job(root)
+            media = root / "video.mp4"
+            burned.unlink()
+            media.unlink()
+            before = job_file.read_bytes()
+
+            with self.assertRaises(UserInputError) as caught:
+                relink_burned_output(job_file, candidate)
+
+            message = str(caught.exception)
+            self.assertIn("source media is missing", message)
+            self.assertIn(str(media), message)
+            self.assertNotIn("stale", message)
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_recovery_needs_manual_fix_when_source_media_is_missing(self) -> None:
+        """源媒体不在登记路径时 render / burn 都必然失败，不得再推荐 continue。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            media = root / "video.mp4"
+            media.unlink()
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertIsNone(plan.primary_command)
+            self.assertEqual(plan.alternative_commands, ())
+            self.assertIn(str(media), plan.reason)
+            self.assertEqual(plan.advance_steps, ("burn",))
+
+    def test_missing_burn_source_media_skips_remote_jobs_when_local_only(self) -> None:
+        """``local_only`` 的刻意差异：远程 Job 的下载产物缺失时 continue 能重新获取。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded = root / "downloaded.mp4"
+            job = create_job("https://example.com/watch?v=abc", root)
+            job.artifacts.append(Artifact("source_video", str(downloaded), "deadbeef"))
+            config = WorkflowConfig.from_dict({"target_language": "zh-CN", "burn": True})
+
+            self.assertEqual(missing_burn_source_media(job, config), downloaded)
+            self.assertIsNone(missing_burn_source_media(job, config, local_only=True))
 
     def test_relink_burned_output_rejects_replaced_burned_checksum_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
