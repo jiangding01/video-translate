@@ -2042,7 +2042,14 @@ class WorkflowPlannerTest(unittest.TestCase):
             )
             job.stages[StageName.TRANSLATE].status = StageStatus.AWAITING_INPUT
             save_job(job)
-            with patch("xvt.workflow.valid_artifact_path", return_value=None):
+            # 批次 manifest 必须有效，这次等待才真的在途（manifest 失效时 planner 按 F3
+            # 给出可推进的 translate；本测试要守的是「等待步骤不追加 burn」）。
+            with patch(
+                "xvt.workflow.valid_artifact_path",
+                side_effect=lambda _job, kind: (
+                    Path("/tmp/translation-batches.json") if kind == "translation_batches" else None
+                ),
+            ):
                 self.assertEqual(
                     plan_advance_steps(job, WorkflowConfig(target_language="zh-CN", burn=True)),
                     ("await_agent_translation",),
@@ -2667,6 +2674,66 @@ class BilingualAssDeliverableTest(unittest.TestCase):
                 any(artifact.kind == "bilingual_ass" for artifact in job.artifacts),
             )
             self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
+
+
+class StaleAgentManifestPlanTest(unittest.TestCase):
+    """F3：批次 manifest 失效时，端到端 Job 必须拿到可推进的出口而不是死等。
+
+    manifest 无效 + 没有译文 cue + ``TRANSLATE`` 停在 ``awaiting_input`` 时，planner 的兜底
+    分支旧实现照样返回 ``await_agent_translation``：``status`` 说等回填，``apply`` 被 manifest
+    校验拒绝，``continue`` 只发 waiting，三条命令互指，用户没有出口。``recovery`` 的原子分支
+    对同一状态早已给出 retryable + ``translate``，planner 必须同口径。
+    """
+
+    def _job_file(self, root: Path) -> Path:
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        set_workflow_config(job, WorkflowConfig(target_language="zh-CN"))
+        job_file = save_job(job)
+        manifest_path = prepare_agent_translation(
+            job_file,
+            source_language="en",
+            target_language="zh-CN",
+        )
+        # 登记仍在、内容已变：checksum 失效，任何响应都回填不进这次等待。
+        manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+        job = load_job(job_file)
+        self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.AWAITING_INPUT)
+        self.assertIsNone(valid_artifact_path(job, "translation_batches"))
+        return job_file
+
+    def test_planner_and_status_ask_for_a_rebuild_instead_of_a_dead_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job_file(Path(directory))
+            job = load_job(job_file)
+
+            steps = plan_advance_steps(job, require_workflow_config(job))
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(steps, ("translate",))
+        self.assertEqual(plan.advance_steps, ("translate",))
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
+    def test_continue_rebuilds_the_manifest_so_the_wait_has_an_exit(self) -> None:
+        events: list = []
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job_file(Path(directory))
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("XVT_TRANSLATION_API_KEY", None)
+                result = continue_workflow(job_file, event_sink=events.append)
+            job = load_job(job_file)
+            # 必须在 tempdir 仍存在时判定：有效性只认内容 checksum，要真的读文件。
+            manifest_valid = valid_artifact_path(job, "translation_batches") is not None
+            steps = plan_advance_steps(job, require_workflow_config(job))
+
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertTrue(manifest_valid)
+        self.assertEqual(steps, ("await_agent_translation",))
 
 
 if __name__ == "__main__":

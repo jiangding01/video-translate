@@ -742,9 +742,11 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
             return ("await_agent_translation",)
         elif valid_artifact_path(job, "translated_cues") is not None:
             steps.append("render")
-        elif job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
-            return ("await_agent_translation",)
         else:
+            # 这里会接住「TRANSLATE 停在 awaiting_input 但批次 manifest 已失效」的等待态残留：
+            # 上面那条等待分支要求 manifest 有效，没有 manifest 时任何响应都回填不进这次等待，
+            # 报等待就成了 status 说等回填 / apply 被 manifest 校验拒绝 / continue 只发 waiting
+            # 的三方互指死局。与 recovery 的原子分支同口径，给出重建批次的可推进步骤。
             steps.append("import_translation" if config.translation_subtitles else "translate")
     if goals.needs_burn and not _burn_satisfied(job, config):
         steps.append("burn")
@@ -943,7 +945,12 @@ def _ensure_translation(
         complete_translated_outputs(path, event_sink=event_sink)
         return None
 
-    if job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT:
+    # 与 planner 的等待分支同口径：manifest 已失效时这次等待没有任何可回填的响应，
+    # 必须落到下面的 run_translation 重建批次，否则 continue 只会反复发 waiting。
+    if (
+        job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT
+        and valid_artifact_path(job, "translation_batches") is not None
+    ):
         return _emit_waiting(
             job=job,
             path=path,

@@ -1133,6 +1133,147 @@ class TranslationPipelineTest(unittest.TestCase):
         self.assertTrue(rebuildable)
         self.assertFalse(drifted)
 
+    def _policy_workflow_job_file(self, root: Path, *, batch_size: int) -> Path:
+        """端到端 Job：workflow 固化了术语表策略与 batch_size（等价于 run --glossary）。"""
+
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nwidget one.\n\n"
+            "2\n00:00:01,000 --> 00:00:02,000\nwidget two.\n\n"
+            "3\n00:00:02,000 --> 00:00:03,000\nwidget three.\n",
+            encoding="utf-8",
+        )
+        job = run_subtitle_transcription(source, root, language="en")
+        set_workflow_config(
+            job,
+            WorkflowConfig(
+                target_language="zh-CN",
+                batch_size=batch_size,
+                translation_policy=TranslationPolicy(
+                    style="concise",
+                    terms=(GlossaryTerm("widget", "小组件"),),
+                ),
+            ),
+        )
+        return save_job(job)
+
+    def test_prepare_translation_falls_back_to_persisted_policy_and_batch_size(self) -> None:
+        # F2：端到端 Job 上不带 --glossary 的 translate / prepare-translation 必须沿用 Job
+        # 固化的策略与 batch_size。否则译文不带术语，而译文 QA 仍按 workflow policy 判
+        # glossary_violation，术语死锁没有出口。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._policy_workflow_job_file(root, batch_size=2)
+
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            manifest["policy"],
+            TranslationPolicy(
+                style="concise",
+                terms=(GlossaryTerm("widget", "小组件"),),
+            ).to_dict(),
+        )
+        # batch_size=2 + 3 条 cue → 2 个批次；不回退时按 DEFAULT_BATCH_SIZE 只会有 1 个。
+        self.assertEqual(len(manifest["batches"]), 2)
+
+    def test_explicit_glossary_and_style_override_the_persisted_policy(self) -> None:
+        # 护栏：显式传入的 glossary / style / batch_size 以调用方为准，不被快照覆盖。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._policy_workflow_job_file(root, batch_size=2)
+            glossary = root / "glossary.json"
+            glossary.write_text(
+                json.dumps({"terms": [{"source": "widget", "target": "挂件"}]}),
+                encoding="utf-8",
+            )
+
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                glossary=glossary,
+                translation_style="natural",
+                batch_size=50,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            manifest["policy"],
+            TranslationPolicy(
+                style="natural",
+                terms=(GlossaryTerm("widget", "挂件"),),
+            ).to_dict(),
+        )
+        self.assertEqual(len(manifest["batches"]), 1)
+
+    def test_explicit_glossary_keeps_the_persisted_style(self) -> None:
+        # 逐字段回退：只覆盖术语表时，风格仍沿用 Job 快照，不回落到默认 faithful。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._policy_workflow_job_file(root, batch_size=2)
+            glossary = root / "glossary.json"
+            glossary.write_text(
+                json.dumps({"terms": [{"source": "widget", "target": "挂件"}]}),
+                encoding="utf-8",
+            )
+
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                glossary=glossary,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["policy"]["style"], "concise")
+
+    def test_explicit_style_keeps_the_persisted_glossary_terms(self) -> None:
+        # 逐字段回退的另一半：只覆盖风格时术语表不得凭空消失（否则同样进死锁）。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._policy_workflow_job_file(root, batch_size=2)
+
+            manifest_path = prepare_agent_translation(
+                job_file,
+                source_language="en",
+                target_language="zh-CN",
+                translation_style="natural",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["policy"]["style"], "natural")
+        self.assertEqual(
+            manifest["policy"]["terms"],
+            [{"source": "widget", "target": "小组件"}],
+        )
+
+    def test_run_translation_fingerprint_matches_the_persisted_policy(self) -> None:
+        # F2 的成本面：translate 用 CLI 现算策略、continue / status 用 Job 快照时指纹分叉，
+        # 已完成的批次进度被判为不可复用，全部批次重付一次翻译费。
+        def provider(batch, _config, *, correction=None, **_kwargs):
+            return {item.id: "小组件。" for item in batch.items}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._policy_workflow_job_file(root, batch_size=2)
+            with (
+                patch.dict(os.environ, self._PROVIDER_ENV, clear=False),
+                patch("xvt.pipeline.translation.translate_batch", side_effect=provider),
+            ):
+                run_translation(job_file, target_language="zh-CN")
+                job = load_job(job_file)
+                workflow = get_workflow_config(job)
+                assert workflow is not None
+                rebuildable = translation_progress_rebuildable(job, workflow)
+
+        self.assertTrue(rebuildable)
+
     def test_agent_fallback_does_not_persist_provider_config(self) -> None:
         # 降级为 Agent 模式（缺 API key）时 base_url / model 保持 null，
         # 否则下次 continue 会被半套配置误导。

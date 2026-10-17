@@ -66,6 +66,15 @@
 
 1. `plan_advance_steps` 在**函数体最前**判定局部重译等待（`await_cue_retranslation`）。理由：它会叠加在一个译文目标已满足的 Job 上，放在后面就会被「已满足」短路掉。
 2. 在 `TRANSLATE` 等输入且 `translation_batches` checksum 有效时，早退为 `await_agent_translation`。这一早退**必须排在 `translated_cues` → `render` 之前**：新整轮请求不会失效旧译文，按 render 先判会把等待误报成「只差渲染」。
+3. `TRANSLATE` 等输入但 manifest 已 checksum 失效、且没有有效 `translated_cues` 时落到最后的兜底分支，给出 `translate`（导入译文 Job 给出 `import_translation`），**不报等待**。没有 manifest 就没有任何响应能回填这次等待，报等待会让 `status` 说等回填、`xvt apply` 被 manifest 校验拒绝、`continue` 只发一次 waiting，三方互指没有出口。`_ensure_translation` 的等待分支复述同一个条件，manifest 失效时落到 `run_translation` 重建批次；recovery 的原子分支对同一状态早已是 `retryable` + `translate`，三侧由此一致。
+
+### 翻译策略与批次大小的回退
+
+`xvt translate` / `xvt prepare-translation` 在端到端 Job 上未显式传入 `--glossary` / `--translation-style` / `--batch-size` 时，**逐字段**回退 `config.workflow` 的 `translation_policy` 与 `batch_size`（与 `base_url` / `model` 同口径，单点实现 `pipeline.translation._resolved_translation_inputs`）。不回退会让这两条命令产出不带术语的译文，而译文 QA 仍按 workflow 快照判 `glossary_violation`——术语死锁没有出口；策略与 `batch_size` 都进翻译指纹，漂移还会清零批次进度、全部批次重付一次翻译费。逐字段而不是整份替换：只给 `--glossary` 时风格仍沿用快照，只给 `--translation-style` 时术语表仍沿用快照。调用方直接传 `policy=`（workflow 执行路径）时原样采用。原子 Job（无 `config.workflow`）保持历史行为：顶层 `translation_policy` 由本次调用重写，翻译与 QA 用的是同一份策略，不存在同款死锁。
+
+### 原子 Job 的 qa_blocked 让路
+
+`SUBTITLE_QA` 停在 `failed` / `awaiting_input` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的 Agent 等待而复位。端到端 Job 先问 planner（首步是正式等待步骤就改走工作流恢复分支）；原子 Job 没有 planner，改用等价条件：`TRANSLATE` 停在 `awaiting_input` 且 `translation_batches` checksum 有效时跳过 `qa_blocked`，由原子等待分支给出 `apply-translation` 引导。否则术语死锁后改跑 `translate --provider agent` 的用户会继续拿到 `retranslate-cues`，照做会盖掉刚写入的整轮 manifest。manifest 已经不在的等待态残留不放行，QA 引导照旧生效。
 
 ## 翻译提供方身份的固化
 

@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from xvt.artifacts import ArtifactKind, downstream_of
-from xvt.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS
+from xvt.config import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TRANSLATION_STYLE,
+)
 from xvt.errors import UserInputError, XvtError
 from xvt.events import EventSink, EventType, create_event, job_event_fields
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
@@ -954,15 +959,56 @@ def _render_translated_outputs(
     return tuple(paths)
 
 
+def _resolved_translation_inputs(
+    workflow: WorkflowConfig | None,
+    *,
+    policy: TranslationPolicy | None,
+    glossary: str | Path | None,
+    translation_style: str | None,
+    batch_size: int | None,
+) -> tuple[TranslationPolicy, int]:
+    """解析本次翻译生效的策略与批次大小：显式参数优先，其余回退 Job 固化的 workflow 快照。
+
+    与同文件里 base_url / model 的回退同口径：端到端 Job 上 ``xvt translate``
+    （恢复计划里「放弃重译」的推荐命令）如果按 CLI 默认值现算策略，译文就不带术语，
+    而译文 QA 仍按 ``workflow.translation_policy`` 判 ``glossary_violation``——术语死锁
+    没有出口。策略与 batch_size 都进翻译指纹，漂移还会清零批次进度，全部批次重付一次
+    翻译费。
+
+    逐字段回退而不是整份替换：只传 ``--glossary`` 时风格仍沿用快照，只传
+    ``--translation-style`` 时术语表仍沿用快照，显式值永远压过快照。
+    ``policy`` 由调用方直接给出时（workflow 执行路径）原样采用。
+    原子 Job（``workflow is None``）保持历史行为：顶层 ``translation_policy``
+    会被本次调用重写，QA 与翻译用的是同一份策略，不存在同款死锁。
+    """
+
+    snapshot = workflow.translation_policy if workflow is not None else None
+    resolved_batch_size = batch_size
+    if resolved_batch_size is None:
+        resolved_batch_size = workflow.batch_size if workflow is not None else DEFAULT_BATCH_SIZE
+    if policy is not None:
+        return policy, resolved_batch_size
+    if glossary is None and translation_style is None and snapshot is not None:
+        return snapshot, resolved_batch_size
+    style = translation_style
+    if style is None:
+        style = snapshot.style if snapshot is not None else DEFAULT_TRANSLATION_STYLE
+    # load_translation_policy 负责 style 白名单校验与术语表解析。
+    resolved = load_translation_policy(glossary, style=style)
+    if glossary is None and snapshot is not None:
+        resolved = replace(resolved, terms=snapshot.terms)
+    return resolved, resolved_batch_size
+
+
 def prepare_agent_translation(
     job_file: str | Path,
     *,
     source_language: str,
     target_language: str,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
-    translation_style: str = "faithful",
+    translation_style: str | None = None,
     translation_quality: str | None = None,
     await_input: bool = True,
     event_sink: EventSink | None = None,
@@ -979,7 +1025,13 @@ def prepare_agent_translation(
         raise ValueError(message)
     if workflow is None and job.config.get("target_language") not in {None, target_language}:
         raise ValueError("target language must match the persisted atomic job goal")
-    resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
+    resolved_policy, batch_size = _resolved_translation_inputs(
+        workflow,
+        policy=policy,
+        glossary=glossary,
+        translation_style=translation_style,
+        batch_size=batch_size,
+    )
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise ValueError("translation requires checksum-valid source_cues")
@@ -1103,12 +1155,12 @@ def run_translation(
     base_url: str | None = None,
     model: str | None = None,
     api_key_env: str = "XVT_TRANSLATION_API_KEY",
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     policy: TranslationPolicy | None = None,
     glossary: str | Path | None = None,
-    translation_style: str = "faithful",
+    translation_style: str | None = None,
     translation_quality: str | None = None,
     event_sink: EventSink | None = None,
 ) -> TranslationRunResult:
@@ -1128,7 +1180,13 @@ def run_translation(
         raise ValueError(message)
     if workflow is None and job.config.get("target_language") not in {None, target_language}:
         raise ValueError("target language must match the persisted atomic job goal")
-    resolved_policy = policy or load_translation_policy(glossary, style=translation_style)
+    resolved_policy, batch_size = _resolved_translation_inputs(
+        workflow,
+        policy=policy,
+        glossary=glossary,
+        translation_style=translation_style,
+        batch_size=batch_size,
+    )
     source_path = valid_artifact_path(job, "source_cues")
     if source_path is None:
         raise ValueError("translation requires checksum-valid source_cues")
