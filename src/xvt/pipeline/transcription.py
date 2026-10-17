@@ -821,32 +821,21 @@ def run_local_transcription(
             error_category=error_category(error),
         )
         raise
-    if "source_strategy" in job.config:
-        candidate = (
-            AcquiredSubtitleCandidate(Path(subtitles).expanduser(), SourceCandidateKind.USER)
-            if subtitles
-            else None
-        )
-        return _process_adaptive_media(
-            job,
-            source,
-            media_info,
-            engine=engine,
-            language=language,
-            candidate=candidate,
-            align_subtitles=align_subtitles,
-            minimum_alignment_confidence=minimum_alignment_confidence,
-            allow_low_confidence_alignment=allow_low_confidence_alignment,
-            event_sink=event_sink,
-            emit_job_completed=emit_job_completed,
-        )
-    return _process_acquired_media(
+    # 本函数自己用上面的字面量 config 创建 Job，`source_strategy` 必然在 `job.config` 里，
+    # 因此不存在走 `_process_acquired_media` 旧路径的首跑分支（旧 Job 只经
+    # `resume_remote_transcription` 进入，那里仍保留键缺失的判定）。
+    candidate = (
+        AcquiredSubtitleCandidate(Path(subtitles).expanduser(), SourceCandidateKind.USER)
+        if subtitles
+        else None
+    )
+    return _process_adaptive_media(
         job,
         source,
         media_info,
         engine=engine,
         language=language,
-        subtitles=subtitles,
+        candidate=candidate,
         align_subtitles=align_subtitles,
         minimum_alignment_confidence=minimum_alignment_confidence,
         allow_low_confidence_alignment=allow_low_confidence_alignment,
@@ -1059,27 +1048,15 @@ def run_remote_transcription(
             error_category=error_category(error),
         )
         raise
-    if "source_strategy" in job.config:
-        return _process_adaptive_media(
-            job,
-            source,
-            media_info,
-            engine=engine,
-            language=language,
-            candidate=candidate,
-            align_subtitles=align_subtitles,
-            minimum_alignment_confidence=minimum_alignment_confidence,
-            allow_low_confidence_alignment=allow_low_confidence_alignment,
-            event_sink=event_sink,
-            emit_job_completed=emit_job_completed,
-        )
-    return _process_acquired_media(
+    # 同 run_local_transcription：Job 由本函数创建，`source_strategy` 必然已写入 config，
+    # 旧 Job 只会从 resume_remote_transcription 进入，那条路径保留键缺失的判定。
+    return _process_adaptive_media(
         job,
         source,
         media_info,
         engine=engine,
         language=language,
-        subtitles=candidate.path if candidate else None,
+        candidate=candidate,
         align_subtitles=align_subtitles,
         minimum_alignment_confidence=minimum_alignment_confidence,
         allow_low_confidence_alignment=allow_low_confidence_alignment,

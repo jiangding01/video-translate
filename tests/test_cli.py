@@ -2051,6 +2051,44 @@ class CliTest(unittest.TestCase):
         self.assertIn("input: /tmp/review.json", rendered)
         self.assertIn("next: xvt continue /tmp/job.json", rendered)
 
+    def test_status_hint_shell_quotes_job_paths_with_special_characters(self) -> None:
+        """手工回看提示里的路径必须 shlex.quote：带单引号的路径手拼双引号会复制出错。"""
+
+        output = StringIO()
+        plan = SimpleNamespace(
+            category="manual_fix",
+            reason="需要人工处理",
+            advance_steps=(),
+            report_paths=(),
+            input_paths=(),
+            prerequisite_commands=(),
+            primary_command=None,
+            alternative_commands=(),
+            to_dict=dict,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Tom's $HOME videos"
+            root.mkdir()
+            job = create_job("/tmp/input.mp4", root)
+            job_file = save_job(job)
+            with (
+                patch("xvt.cli.build_recovery_plan", return_value=plan),
+                redirect_stdout(output),
+            ):
+                return_code = main(["status", str(job_file)])
+
+        self.assertEqual(return_code, 0)
+        rendered = output.getvalue()
+        quoted = shlex.quote(str(job_file))
+        self.assertIn(f"hint: re-check with xvt status {quoted} after repairs", rendered)
+        # 旧的手拼双引号形态在同一条路径上是错的，不允许回潮。
+        self.assertNotIn(f'xvt status "{job_file}"', rendered)
+        hint = next(line for line in rendered.splitlines() if line.startswith("hint: "))
+        self.assertEqual(
+            shlex.split(hint.removeprefix("hint: re-check with ")),
+            ["xvt", "status", str(job_file), "after", "repairs"],
+        )
+
     def test_unrelated_unknown_arguments_keep_the_native_argparse_error(self) -> None:
         error_output = StringIO()
         with redirect_stderr(error_output), self.assertRaises(SystemExit) as raised:

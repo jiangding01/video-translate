@@ -161,10 +161,57 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | **已修（本轮）**，见下方 O6 条目 |
 | O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | **已修（本轮）**，见下方 O7 条目 |
-| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | 部分值得做 |
-| O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | 值得做，分钟级 |
-| O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | 值得评估 |
-| O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | 几分钟 |
+| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**，副本部分核实属实但不动，见下方 O8 条目 |
+| O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | **已修（本轮）**，四处逐条核实后改，见下方 O9 条目 |
+| O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | **已修（本轮）**，见下方 O10 条目 |
+| O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | **已修（本轮）**，见下方 O11 条目 |
+
+### O8 首跑不可达分支 — ✅ 已核验，**死码部分已修（本轮）**
+
+死码判断依据（逐条核过，不是照抄清单）：
+
+- `run_local_transcription`（原 :824）与 `run_remote_transcription`（原 :1062）**都在同一个函数体内用字面量 config 创建 Job**，字典里固定写着 `"source_strategy": source_strategy`（参数有默认值 `"auto"`，永不为 `None`），`create_job` 只做 `dict(config or {})`、不剔除任何键。所以 `if "source_strategy" in job.config` 在这两处恒真。
+- **旧 Job 走不到这两处**：它们只创建新 Job，从不 `load_job`。旧 Job（创建时还没有 `source_strategy` 键的那批）唯一会撞上同款判定并分流到 `_process_acquired_media` 的入口是 `resume_remote_transcription`（修改后 :1338），那里的 `job` 来自 `load_job`，键确实可能缺失——**该处的判定原样保留**。同文件另外 5 处 `"source_strategy" in job.config` 也都在 `load_job` 之后，一并未动。
+- `_process_acquired_media` 本身不是死函数，删掉两处恒假分支后它仍由 `resume_remote_transcription` 调用，因此函数保留。
+
+改法：删掉两个恒真 `if` 与其后不可达的 `return _process_acquired_media(...)`，并在原地留注释写明「Job 由本函数创建所以键必然存在，旧 Job 只从 resume 入口进」。零行为变化，未新增测试（没有可观测的行为差异可断言），全量测试零变红。
+
+**「对齐/分段规则 3–4 份副本且已漂移」核实属实，本轮不动**（结构性重构，超出可优化范围）。定位与漂移内容：
+
+| 位置 | 函数 | 置信度门 | 对齐后 QA error 门 | 失败行为 |
+| --- | --- | --- | --- | --- |
+| `pipeline/transcription.py:488` 起（函数 `_process_adaptive_media`，:375） | 主路径 | 有（参数来源：函数入参） | **有** | 自动回落 ASR 分段，`selection_reason` 区分 `alignment_below_threshold` / `alignment_post_qa_failed` |
+| 同文件 :696 起（函数 `_process_acquired_media`，:621） | legacy 路径，O8 修完后只由 `resume_remote_transcription` 到达 | 有（参数来源：函数入参） | **无** | 抛 `ValueError` |
+| 同文件 :1653 起（函数 `resume_job`，:1533） | resume 路径 | 有（参数来源：`job.config` 现读） | **无** | `set_stage(FAILED)` 后抛 `ValueError`，错误文案不带数值 |
+
+分段侧的 `segment_transcript(transcript, segmentation_config_for_preset(str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))), media_duration_ms=...)` 全文出现 5 次（`segmentation_config_for_preset` 的调用点在 :537、:561、:717、:1679、:1734）。两类副本都值得单独立项：对齐门的「QA error 是否参与」这条差异是真实的语义漂移，不是刻意差异的书面记录。
+
+### O9 四处文档措辞 — **已修（本轮）**
+
+逐条核实后改，以代码实况为准：
+
+1. **AGENTS 批处理句**（属实）。`recovery.py:1192` 的 relink 导航要 `burned_output_relink_recovery_available` 为真，而该谓词（`workflow.py:372`）要求 `_burn_proof(job)` 非空且是 checksum 有效的 v2 proof；legacy proof 的 Job 在这里返回 `False`，落到后面的 `retryable` + `continue`，**批处理会自动重烧**。AGENTS 的「已登记烧录成品缺失时绝不自动重烧」因此比实现绝对，已改为「缺失**且具备重新关联资格**时绝不自动重烧；不具备资格的（例如只有 legacy fingerprint 的旧 Job）按 `retryable` 由批处理重烧」，与 `docs/RECOVERY.md#批处理恢复分类与中断兜底` 已有的措辞对齐。
+2. **RECOVERY.md 的元数据口径**（属实）。本地源媒体在 `_burn_fingerprint`（`workflow.py:225`）里的身份是 `{path, size, mtime_ns}`，而该指纹是 `_burn_satisfied` 的放行条件之一，v2 proof 分支也只比对 `burned_video_checksum`、不回查源媒体内容——所以 size+mtime 在这里**确实起了证实作用**。原句「`_burn_fingerprint` 的 size+mtime 只参与身份指纹，不承担有效性判定」已删，换成一节「一处已知例外」，写明命中条件、为什么接受（源媒体不是登记产物、没有 checksum 基线；`relink` 写入前仍重算内容 checksum）以及用户的确证手段。原来的通则改为更准确的「所有**已登记 artifact** 的有效性只认内容 checksum」。
+3. **模块表漏列**（属实，恰好 7 个）。`ls src/xvt/*.py` 对账后补齐 `config` / `stages` / `source_selection` / `errors` / `locking` / `cancellation` / `doctor`（`__init__.py` 不列）。
+4. **`semantic_state` 描述**（属实）。该模块现在有 17 个顶层函数，除报告解析外还有批次重算与指纹、issue 的校验/去重/序列化、人工修订范围、Agent 结果解析、repair checkpoint 读取——「只读状态查询」偏窄，已改为「语义链路只读纯函数」并列出实际内容。
+
+### O10 macOS CI 不装 ffmpeg — **已修（本轮）**
+
+影响面摸清后才改：
+
+- 全仓 ffmpeg 门控只有两处 `@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), ...)`：`tests/test_e2e.py::EndToEndTest`（3 条）与 `tests/test_burn.py::BurnFilterPathSmokeTest`（1 条 + 4 个 subtest）。没有独立的字体门控（字体与布局测量路径由未门控的测试覆盖，在 macOS CI 上本来就在跑）。
+- 本机（macOS，homebrew ffmpeg）`pytest -q -rs` 的 skip 数是 **0**，这 4 条一直在真实跑并通过；单独再跑一次为 `4 passed, 4 subtests passed`。
+- 这 4 条都显式传 `hardware_encoding=False`，走 libx264 而不是 `h264_videotoolbox`，不依赖 runner 的硬件编码能力；用到的 `libx264` / `aac` / `ass` 滤镜 homebrew 的 ffmpeg bottle 全都带。判断在 CI 装上 ffmpeg 后变红的风险低。
+
+改法：`.github/workflows/ci.yml` 的 Linux 步骤改名为 `Install ffmpeg (Linux)`，新增 `Install ffmpeg (macOS)`（`brew install --quiet ffmpeg`，带 `HOMEBREW_NO_AUTO_UPDATE` / `HOMEBREW_NO_INSTALL_CLEANUP`）。pytest 步骤加 `-rs`，让 skip 原因出现在 CI 日志摘要里（这是「无人看 skip 数」的最低成本解，没有为它改复杂 workflow）。
+
+代价：macOS job 多一次 `brew install ffmpeg`（分钟级，取决于 bottle 下载）。
+
+### O11 `shlex.quote` 的最后一处例外 — **已修（本轮）**
+
+`cli.py` 的 `_cmd_status` 手拼双引号（`xvt status "{arguments.job_file}"`）是全仓唯一例外，路径带单引号、空格、`$` 或反斜杠时这条提示复制出来就不对，`$` 还会在 shell 里展开。改为 `shlex.quote`，与同文件其它 14 处同口径。
+
+新增 `tests/test_cli.py::CliTest::test_status_hint_shell_quotes_job_paths_with_special_characters`：输出根命名为 `Tom's $HOME videos`，除比对期望串外还用 `shlex.split` 反解析该行，断言解析回来的第三个 token 逐字等于真实 job 路径（只比对字符串的话，换一种同样错误的转义仍可能蒙混）。另断言旧的手拼双引号形态不得回潮。红先自证：还原旧写法后该测试变红。
 
 ### O2 policy 回退两派语义造成术语死锁 — ✅ 已复现，**已修（本轮）**
 
@@ -264,6 +311,6 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 5. ~~**去重**：F5。~~ 已修（本轮）。
 6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
 
-**剩余未处理**：N1（需设计决策）、F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1 / O8 / O9 / O10 / O11，以及「观察」与「未验证」两节。
+**剩余未处理**：N1（需设计决策）、F9 剩余的 `ROADMAP.md` / `errors.py` 注释、O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」与「未验证」两节。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

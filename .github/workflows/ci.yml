@@ -20,11 +20,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      # macOS 是本项目的主力开发平台：不装 ffmpeg 时真实烧录与预览的集成测试
+      # （tests/test_e2e.py、tests/test_burn.py 的 skipUnless 门）会静默跳过。
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        # 先探测再装：GitHub 的 macOS 镜像将来自带 ffmpeg 时这步直接跳过，
+        # 不白花几分钟重装一个重量级 formula。装不上要红——静默跳过正是本次要修的。
+        run: command -v ffmpeg >/dev/null || brew install --quiet ffmpeg
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -41,8 +52,9 @@ jobs:
       - name: Format check (ruff format)
         run: uv run --no-sync ruff format --check src tests
 
+      # -rs 让 skip 原因出现在日志摘要里：否则「集成测试被静默跳过」在 CI 上不可见。
       - name: Test (pytest)
-        run: uv run --no-sync pytest -q
+        run: uv run --no-sync pytest -q -rs
 
       - name: CLI smoke test
         run: uv run --no-sync xvt --help

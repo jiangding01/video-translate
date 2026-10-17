@@ -1485,7 +1485,10 @@ def _cmd_status(arguments: argparse.Namespace) -> int:
             _print_safe(line)
         if not plan.primary_command and plan.category in {"manual_fix", "awaiting_input"}:
             # 仅在需要人工处理后回看导航时提示；complete/unrecoverable 不刷多余 hint。
-            _print_safe(f'hint: re-check with xvt status "{arguments.job_file}" after repairs')
+            # 与恢复计划里的命令同口径用 shlex.quote：手拼双引号对带单引号、空格或
+            # `$` 的路径会给出复制出来就不对的命令。
+            quoted_job_file = shlex.quote(str(arguments.job_file))
+            _print_safe(f"hint: re-check with xvt status {quoted_job_file} after repairs")
     return 0
 
 

@@ -121,7 +121,18 @@
 既有成例同此界线：
 
 - `add_artifact` 写后立即哈希登记。
-- `_burn_fingerprint` 的 size+mtime 只参与身份指纹，不承担有效性判定。
+- 所有**已登记 artifact** 的有效性（`verify_artifact` / `valid_artifact_path`）只认内容 checksum，元数据不参与。
+
+### 一处已知例外：烧录派生指纹里的源媒体身份
+
+本地源媒体在 `_burn_fingerprint` 里的身份是 `{path, size, mtime_ns}`，不是内容 checksum（刻意如此：`status` 不为每次查询哈希整个视频文件，见下文「status 的成本边界」）。该指纹又是 `_burn_satisfied` 的放行条件之一，所以这里的 size+mtime **确实起了「证实」作用**：把源媒体换成一个 size 与 mtime 都相同的不同文件，`_burn_satisfied` 仍判烧录已完成，不触发重烧。
+
+如实记录而不是承诺更强的口径。接受它的理由：
+
+- 命中需要外部写入者精确伪造 size 与 mtime（`cp -p` / `rsync -a` 只在**同一份内容**上保留 mtime，不构成命中）。
+- 源媒体是用户自己的输入文件，不是 Job 登记的产物；它的 checksum 从未被登记过，没有可比对的基线。
+- v2 proof 里存有实际源媒体内容 checksum，`relink-burned-output` 写入前会重算并比对，这条路径不受影响。
+- 需要确证时，用户可以显式 `xvt burn` / `continue` 重烧，或先 `touch` 源媒体让指纹失效。
 
 ## `xvt apply` 统一回填路由
 
