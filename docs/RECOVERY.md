@@ -81,6 +81,23 @@
 
 相邻但**不同**的一种情形已经有出口：Agent `task=translate_and_polish` 的一次成型 Job 结构上就没有 `translation-draft-cues.json`，`polish-translation` 对它根本开不起来——`pipeline.polish._prepare_draft` 复用 `agent_translation_polish_started` 识别这类 Job，以退出码 2 明确拒绝并说明「润色在初译那一步就完成了」，不再和「当前目标已完成」的恢复建议拼成一句自相矛盾的话。「draft 曾存在但 checksum 失效」仍走原来那条「需要恢复原始译文草稿」的引导，两种情形不共用文案。
 
+### `repair_polish_draft` 的恢复出口
+
+`repair_polish_draft` 先问 `translation_progress_rebuildable`（status 与 continue 共用的单点谓词）：checkpoint 覆盖全部批次且 fingerprint 一致时归 `retryable`，首选 `continue`，零 API 成本重建草稿。不可零成本重建时归 `manual_fix`，诊断文案仍是 `REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE`（与 `continue` 抛出的那句逐字相同），其后按 Job 里**有没有 checksum 有效的译文字幕**分成两种导航：
+
+- **有** checksum 有效的 `translated_srt`（且目标语言已持久化）：首选命令是 `xvt import-translation JOB <那条字幕的确切路径> --target-language LANG`。诊断文案自己说的「重新导入原始译文草稿」就是它——polished Job 上 `import-translation` 经 `finalize_translation` 的 draft 分支，把回填结果写成 `translation-draft-cues.json` 并重新登记 `translation_draft_cues`，计划随即从 `repair_polish_draft` 回到 `polish`。代价必须在 `reason` 里讲明：这份字幕会被登记为导入译文，现有译文与语义校对结论一并失效，润色腿要重跑（openai-compatible 模式下是真实 API 成本）。
+- **没有**：保持 `primary_command=None`，但 `reason` 点名那个缺失或内容已变化的草稿文件的绝对路径。此前这里只有一句 `hint: re-check with xvt status ... after repairs`，既没有命令也没有路径，对用户是纯死路。
+
+两种情形的 `alternative_commands` 都是 `xvt translate JOB --target-language LANG --provider <持久化 provider>`（整轮重译 + 重润色，成本更高）。`continue`（在这个状态下退出码 4）与 `polish-translation`（退出码 2）**不放进任何推荐位**。
+
+只认 checksum 有效的 artifact 是刻意的（约束 9）：`pipeline.polish._reset_for_polish` 只是把下游产物**移出登记**，`artifacts/translated.srt` 之类的物理文件往往还在原地，但没有登记就没有可比对的基线，照「通常还在」推荐等于再给一条可能指向不存在文件的命令。kind 选 `translated_srt` 而不是 `bilingual_srt`：前者是纯译文、cue ID 与时间轴和 `source_cues` 一一对应，后者掺着原文，导入回去会污染译文文本。
+
+### 一次成型 `translate_and_polish` 不留草稿记录
+
+`complete_agent_polished_outputs`（一次成型路径的唯一收尾点）在收尾时把 `translation_draft_cues` 登记移出 `job.artifacts`。这条路径结构上从不写 `translation-draft-cues.json`：初译与润色在同一次回填里完成，`translation_polished_cues` 派生自 `source_cues` 与那份响应。此前某一轮 Q5a 润色留下的草稿登记会一路挂到 `completed`，于是 `status` 报 `complete` 并推荐 `xvt verify`，而 `verify` 必然以 `artifact file is missing` 失败——「Job、artifact、checksum 能解释当前状态」不成立，推荐的也是一条注定失败的命令。
+
+摘记录沿用既有的「按 kind 过滤 `job.artifacts`」失效机制，只摘这一条，**不**走 `downstream_of(TRANSLATION_DRAFT_CUES)`（那个闭包含刚刚产出的 `translation_polished_cues`）。不影响恢复依据：planner 的 polished 腿对一次成型 Job 只看 manifest 与响应（`agent_translation_polish_core_satisfied` / `agent_translation_polish_started`），`polish-translation` 本来就以 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE` 拒绝这类 Job，`translation_progress` 等 checkpoint 记录原样保留；物理文件不删，只是不再登记为本 Job 的产物。
+
 ### 宣告完成前的终检守卫
 
 `_advance_workflow` 在发 `workflow_completed` **之前**重新跑一次 `plan_advance_steps`，不为空就抛 `InternalError`（`category="workflow"`，退出码 4），消息列出剩余步骤。执行侧与 planner 对同一份 Job 状态给出相反结论属于内部不一致：`status` 会说还差一步而 `continue` 说已完成，`batch-continue` 更会把条目记成完成，用户不会再回来看它。守卫刻意 fail closed，不降级成警告。

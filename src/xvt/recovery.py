@@ -1088,6 +1088,97 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
     )
 
 
+def _repair_polish_draft_manual_fix(
+    job: Job,
+    *,
+    job_file: Path,
+    workflow: WorkflowConfig,
+    valid_artifacts: dict[str, Path],
+    plan: Callable[..., RecoveryPlan],
+    steps: tuple[str, ...],
+    diagnosis: str,
+) -> RecoveryPlan:
+    """``repair_polish_draft`` 无法零成本重建时的 manual_fix 导航。
+
+    ``diagnosis`` 是 status 与 continue 共用的那句诊断（``REPAIR_POLISH_DRAFT_
+    MANUAL_FIX_MESSAGE``），两边逐字一致；本函数只在它后面接一句**导航**。
+
+    那句诊断自己说的「请重新导入……原始译文草稿」就是 ``import-translation``：
+    polished Job 上它经 ``finalize_translation`` 的 draft 分支，把回填结果写成
+    ``translation-draft-cues.json`` 并重新登记 ``translation_draft_cues``，于是
+    planner 从 ``repair_polish_draft`` 回到 ``polish``。此前这条出口存在但恢复
+    计划没接上：``primary_command=None`` 且 ``alternative_commands`` 为空，人类
+    可读输出只剩一句「after repairs 再看 status」，既没命令也没路径。
+
+    **只认 checksum 有效的 ``translated_srt``**（约束 9：产物有效性只认内容
+    checksum）。``_reset_for_polish`` 只是把下游产物**移出登记**，物理文件往往
+    还躺在 artifacts 目录里——照「通常还在」去推荐，就是再推荐一条可能指向不
+    存在文件的命令。没有有效字幕时宁可不给 ``primary_command``，只把那个缺失或
+    已变化的草稿文件点名出来，让用户知道要放回哪个文件。
+
+    ``translated_srt`` 是对的那个 kind：它是用户可见的**纯译文**字幕，cue ID 与
+    时间轴和 ``source_cues`` 一一对应（``_translation_satisfied`` 也拿它当译文
+    交付物之一）；``bilingual_srt`` 掺着原文，导入回去会污染译文文本。
+
+    ``alternative_commands`` 固定给整轮重译，并在 reason 里讲明它连初译一起重做
+    ——openai-compatible 模式下那是真实 API 成本。``continue``（退出码 4）与
+    ``polish-translation``（退出码 2）在这个状态下必然失败，任何推荐位都不放。
+    """
+
+    target_language = workflow.target_language
+    alternatives: tuple[str, ...] = ()
+    if target_language:
+        alternatives = (
+            _job_command(
+                "translate",
+                job_file,
+                "--target-language",
+                shlex.quote(target_language),
+                "--provider",
+                shlex.quote(workflow.provider),
+            ),
+        )
+
+    translated_srt = valid_artifacts.get("translated_srt")
+    if translated_srt is not None and target_language:
+        return plan(
+            "manual_fix",
+            f"{diagnosis}"
+            "Job 内仍有 checksum 有效的译文字幕，可以把它重新导入为译文草稿；"
+            "该命令会把这份字幕登记为导入译文，并失效现有译文与语义校对结论，"
+            "润色腿要重跑（openai-compatible 模式下是真实 API 成本）。"
+            "备选的整轮重译会连初译一起重做，成本更高。",
+            primary_command=_job_command(
+                "import-translation",
+                job_file,
+                shlex.quote(str(translated_srt)),
+                "--target-language",
+                shlex.quote(target_language),
+            ),
+            alternative_commands=alternatives,
+            advance_steps=steps,
+        )
+
+    draft = next(
+        (artifact for artifact in job.artifacts if artifact.kind == "translation_draft_cues"),
+        None,
+    )
+    missing = (
+        f"缺失或内容已变化的草稿文件是 {draft.path}，把它放回原处后重新运行 xvt status；"
+        if draft is not None
+        else ""
+    )
+    return plan(
+        "manual_fix",
+        f"{diagnosis}"
+        f"Job 内没有 checksum 有效的译文字幕可以重新导入；{missing}"
+        "备选是整轮重译，它会重新调用翻译提供方并重跑润色腿。",
+        primary_command=None,
+        alternative_commands=alternatives,
+        advance_steps=steps,
+    )
+
+
 def _recovery_for_workflow(
     job: Job,
     *,
@@ -1214,11 +1305,14 @@ def _recovery_for_workflow(
                 primary_command=_job_command("continue", job_file),
                 advance_steps=steps,
             )
-        return plan(
-            "manual_fix",
-            REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
-            primary_command=None,
-            advance_steps=steps,
+        return _repair_polish_draft_manual_fix(
+            job,
+            job_file=job_file,
+            workflow=workflow,
+            valid_artifacts=valid_artifacts,
+            plan=plan,
+            steps=steps,
+            diagnosis=REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
         )
 
     # 不能只看 ``steps[0]``：译文 QA 报告单独失效时计划会变成 ("render", "burn")，
