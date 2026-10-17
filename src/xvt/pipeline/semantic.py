@@ -23,6 +23,7 @@ from xvt.pipeline.common import (
     invalidate_rendered_artifacts,
     load_cues,
     load_user_response_json,
+    resolved_translation_policy,
     set_stage,
     translation_qa_context,
     write_json,
@@ -38,7 +39,6 @@ from xvt.pipeline.semantic_state import (
     human_revision_scope,
     load_repair_checkpoint,
     report_status,
-    resolved_policy,
     semantic_review_target,
     serialized_batches,
     serialized_issues,
@@ -151,7 +151,7 @@ def _fingerprint(
         "base_url": base_url,
         "model": model,
         "batch_size": config.batch_size,
-        "policy": resolved_policy(job, config).to_dict(),
+        "policy": resolved_translation_policy(job, config).to_dict(),
         "phase": phase,
         "prompt_version": (
             SEMANTIC_REPAIR_PROMPT_VERSION if phase == "repair" else SEMANTIC_REVIEW_PROMPT_VERSION
@@ -421,7 +421,7 @@ def _run_repair_phase(
         issues,
         source_language=source_language(job, source),
         target_language=config.target_language,
-        policy=resolved_policy(job, config),
+        policy=resolved_translation_policy(job, config),
     )
     fingerprint = _fingerprint(
         job,
@@ -959,7 +959,7 @@ def apply_agent_semantic_review(
             initial_issues,
             source_language=source_language(job, source),
             target_language=resolved.target_language,
-            policy=resolved_policy(job, resolved),
+            policy=resolved_translation_policy(job, resolved),
         )
         repair_raw = response.get("repair_results")
         if not isinstance(repair_raw, list):
@@ -991,7 +991,7 @@ def apply_agent_semantic_review(
             source_language=source_language(job, source),
             target_language=resolved.target_language,
             batch_size=resolved.batch_size,
-            policy=resolved_policy(job, resolved),
+            policy=resolved_translation_policy(job, resolved),
         )
         final_results = agent_results("final_results", response.get("final_results"), final_batches)
         final_issues = _merge_issues(

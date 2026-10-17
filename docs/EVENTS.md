@@ -120,6 +120,10 @@ stage 状态迁移（`pipeline/common.py`），由 `StageStatus → EventType` �
 | `kind` | string | 产物类型 |
 | `path` | string | 产物路径 |
 
+`run` / `continue` 按持久化目标完成烧录后登记的 `version=2` burn proof 也走这条事件
+（`kind=burn_fingerprint`）。它是 `relink-burned-output` 重新关联已移动成品的唯一授权凭据，
+因此与其它产物一样在事件流里可见；高级原子 `xvt burn` 不签发该 proof，也就没有这条事件。
+
 ### `artifact_invalidated`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |

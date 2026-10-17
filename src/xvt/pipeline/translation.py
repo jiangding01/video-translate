@@ -471,10 +471,10 @@ def translation_progress_rebuildable(job: Job, config: WorkflowConfig) -> bool:
     if provider_config is None:
         # Agent 模式没有确定性的零成本重建路径。
         return False
-    # 与 workflow._translation_policy 同口径，保证 fingerprint 与实际执行一致。
-    policy = (
-        config.translation_policy if config.translation_policy is not None else TranslationPolicy()
-    )
+    # 与 workflow 执行侧同口径（两边都走 resolved_translation_policy），
+    # 保证这里重算的 fingerprint 与实际执行用的策略一致；口径一漂移，
+    # checkpoint 会被误判为不可重建，整轮翻译白白重付一次 API 费用。
+    policy = resolved_translation_policy(job, config)
     try:
         cues = load_cues(source_path)
         if not cues:

@@ -1,13 +1,15 @@
 """用户输出路径安全：绝对路径要求与覆盖保护。
 
-烧录 / 预览允许写到 Job 目录之外，但不得覆盖源媒体、job.json，
-以及除「正在写入的同 kind」以外的已登记 artifact（含 hardlink / samefile）。
+烧录 / 预览允许写到 Job 目录之外，但不得覆盖源媒体、job.json、Job 记着的
+用户原始输入文件（本地 ``job.input`` 与用户传入的字幕），以及除「正在写入的
+同 kind」以外的已登记 artifact（含 hardlink / samefile）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from urllib.parse import urlparse
 
 from xvt.errors import UserInputError
 from xvt.job_store import get_job_file
@@ -38,6 +40,41 @@ def paths_collide(left: Path, right: Path) -> bool:
     return False
 
 
+def _local_path(value: object) -> Path | None:
+    """把 Job 里记着的输入值解析为本地路径；URL 与空值返回 None。"""
+
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        return None
+    return Path(value).expanduser()
+
+
+def _user_input_paths(job: Job) -> Iterator[Path]:
+    """Job 登记过的、位于 Job 目录之外的用户原始输入文件。
+
+    这些文件既不是 ``media_path``，也不是已登记 artifact——``input_subtitles``
+    之类登记的是 Job 目录内的副本，原件始终在用户自己的目录里。纯音频 Job 的
+    ``xvt burn JOB --media video.mp4 --output <job.input 的路径>`` 会让
+    ``ffmpeg -y`` 直接覆盖原始音频，属于用户数据丢失，必须在入口拦住。
+    """
+
+    local_input = _local_path(job.input)
+    if local_input is not None:
+        yield local_input
+    # 用户传入的源字幕（run/transcribe 的 --subtitles）。
+    subtitles = _local_path(job.config.get("subtitles"))
+    if subtitles is not None:
+        yield subtitles
+    # 用户传入的译文字幕（run 的 --translation-subtitles，固化在 workflow 快照里）。
+    workflow = job.config.get("workflow")
+    if isinstance(workflow, dict):
+        translation_subtitles = _local_path(workflow.get("translation_subtitles"))
+        if translation_subtitles is not None:
+            yield translation_subtitles
+
+
 def protected_job_paths(
     job: Job,
     media_path: Path,
@@ -48,11 +85,13 @@ def protected_job_paths(
     """构造不得被输出覆盖的路径集合。
 
     ``writing_kind`` 对应的已登记 artifact 被排除，以支持同 kind 重写
-    （重烧 ``burned_video``、重预览 ``preview_video``）。
+    （重烧 ``burned_video``、重预览 ``preview_video``）。用户原始输入文件
+    **不**按 ``writing_kind`` 排除：它们从来不是本次写入的目标。
     """
     return [
         media_path,
         get_job_file(job),
+        *_user_input_paths(job),
         *extra,
         *(
             Path(artifact.path).expanduser()
@@ -72,5 +111,6 @@ def assert_safe_output(
     for protected_path in protected:
         if paths_collide(output, protected_path):
             raise UserInputError(
-                f"{label} must not overwrite the source media, job file, or an existing artifact"
+                f"{label} must not overwrite the source media, job file, "
+                "an original input file, or an existing artifact"
             )

@@ -71,7 +71,7 @@ flowchart LR
 | `translate.py` / `translation_provider.py` | 确定性语义组、结构化术语表和翻译风格、按完整组装箱的翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填；默认 API 批次 25 个 cue、请求超时 180 秒 |
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
 | `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式（cue 文本的字面 `{}` 转义为 libass `\{` `\}`）、分辨率自适应码率与安全的 FFmpeg 参数构造（filtergraph 路径两层转义） |
-| `paths.py` | 用户烧录/预览输出绝对路径校验与覆盖保护（源媒体、job 文件、已登记 artifact） |
+| `paths.py` | 用户烧录/预览输出绝对路径校验与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact） |
 | `events.py` / `process.py` | 结构化事件、敏感命令参数脱敏与流式外部进程执行 |
 | `recovery.py` | artifact checksum 校验、`RecoveryPlan`（含 `advance_steps`）、与 `plan_advance_steps` 对齐的恢复建议 |
 

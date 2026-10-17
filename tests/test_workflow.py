@@ -10,7 +10,10 @@ from unittest.mock import patch
 
 import xvt.batch
 import xvt.pipeline.common
+import xvt.pipeline.semantic
+import xvt.pipeline.semantic_state
 import xvt.pipeline.transcription
+import xvt.pipeline.translation
 import xvt.workflow
 from xvt.errors import ExitCode, InternalError, UserInputError
 from xvt.events import EventType
@@ -34,7 +37,7 @@ from xvt.pipeline import (
     source_review_input_path,
     translation_review_input_path,
 )
-from xvt.pipeline.common import load_cues
+from xvt.pipeline.common import load_cues, required_glossary_terms
 from xvt.process import CommandResult
 from xvt.qa import check_subtitles
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path, verify_job
@@ -873,6 +876,59 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertEqual(translate.call_args.kwargs["policy"], TranslationPolicy())
 
+    def test_continue_translates_with_the_policy_the_qa_gate_requires(self) -> None:
+        """O2：快照缺 policy、顶层键有术语时，翻译侧与译文 QA 侧必须拿到同一份策略。
+
+        这种 Job 真实可达：``WorkflowConfig.translation_policy`` 对策略快照落地之前
+        创建的 Job 解析为 ``None``，而在这类 Job 上跑一次
+        ``xvt translate --glossary G``（``prepare_agent_translation`` /
+        ``run_translation`` 都会 ``job.config["translation_policy"] = ...``）只写顶层键，
+        不回写快照。此前 ``continue`` 的翻译侧回退空 ``TranslationPolicy()``、译文 QA 侧
+        （``required_glossary_terms`` → ``translation_qa_context``）回退顶层键，于是译文
+        永远不带术语却永远被判 ``glossary_violation``——与 F2 同款的术语死锁。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            job = create_job(
+                "/tmp/video.mp4",
+                directory,
+                {
+                    # 老 Job 的形状：workflow 快照里根本没有 translation_policy 这个键。
+                    "workflow": {"target_language": "zh-CN", "burn": False},
+                    # xvt translate --glossary G 留下的顶层键。
+                    "translation_policy": {
+                        "style": "natural",
+                        "terms": [{"source": "OpenAI", "target": "OpenAI"}],
+                    },
+                },
+            )
+            job_file = save_job(job)
+            _write_source_leg_artifacts(job_file)
+            self.assertIsNone(
+                require_workflow_config(load_job(job_file)).translation_policy,
+                "前提：快照确实没有策略，否则这条测试没有在测死锁",
+            )
+            # QA 侧的要求（check_subtitles 的 required_terms 就从这里来）。
+            self.assertEqual(
+                required_glossary_terms(load_job(job_file)),
+                (("OpenAI", "OpenAI"),),
+            )
+
+            with patch(
+                "xvt.workflow.run_translation",
+                side_effect=lambda job_file, **_kwargs: TranslationRunResult(
+                    "openai-compatible", _complete_translation_artifacts(job_file)
+                ),
+            ) as translate:
+                result = continue_workflow(job_file)
+
+            self.assertEqual(result.status, "completed")
+            # 翻译侧必须收到 QA 侧会要求的同一份策略，风格也一并沿用顶层键。
+            self.assertEqual(
+                translate.call_args.kwargs["policy"],
+                TranslationPolicy(style="natural", terms=(GlossaryTerm("OpenAI", "OpenAI"),)),
+            )
+
     def test_continue_burns_after_agent_translation_was_applied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             media = Path(directory) / "video.mp4"
@@ -994,6 +1050,58 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         burn.assert_not_called()
+
+    def test_burn_proof_registration_emits_artifact_created_event(self) -> None:
+        """O6：v2 proof 的登记必须进 JSONL 事件流（AGENTS 不可破坏约束 7）。
+
+        这份 proof 是 ``relink-burned-output`` 的唯一授权凭据，此前
+        ``_record_burn_fingerprint`` 直接 ``job.artifacts.append`` + ``save_job``，
+        绕开 ``add_artifact``，于是 Job 里多出一个决定授权资格的 artifact，
+        而事件流里完全看不到它是什么时候、指向哪个文件登记的。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "video.mp4"
+            media.write_bytes(b"media")
+            job = create_job(
+                str(media),
+                directory,
+                {"workflow": {"target_language": "zh-CN", "burn": True}},
+            )
+            job_file = save_job(job)
+            _write_source_leg_artifacts(job_file)
+            _complete_translation_artifacts(job_file)
+            burned_path = root / "burned.mp4"
+            events = []
+
+            with patch(
+                "xvt.workflow.burn_translated_job",
+                side_effect=lambda job_file, **_kwargs: _complete_burn_artifacts(
+                    job_file, burned_path
+                ),
+            ):
+                result = continue_workflow(job_file, event_sink=events.append)
+
+            self.assertEqual(result.status, "completed")
+            registered = next(
+                artifact
+                for artifact in load_job(job_file).artifacts
+                if artifact.kind == "burn_fingerprint"
+            )
+            proof_events = [
+                event
+                for event in events
+                if event.type == EventType.ARTIFACT_CREATED
+                and event.data.get("kind") == "burn_fingerprint"
+            ]
+            self.assertEqual(len(proof_events), 1)
+            self.assertEqual(proof_events[0].data["path"], registered.path)
+            self.assertEqual(proof_events[0].data["job_id"], job.id)
+            self.assertEqual(proof_events[0].data["job_file"], str(job_file))
+            # 事件必须排在 workflow_completed 之前：收尾宣告时 proof 已经可见。
+            self.assertLess(events.index(proof_events[0]), len(events) - 1)
+            self.assertEqual(events[-1].type, EventType.WORKFLOW_COMPLETED)
 
     def test_continue_retries_burn_when_media_qa_failed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3021,6 +3129,37 @@ class WorkflowReusesPipelineHelpersTest(unittest.TestCase):
         """
 
         self.assertIs(xvt.batch.error_category, xvt.pipeline.common.error_category)
+
+    def test_translation_policy_fallback_is_the_pipeline_implementation(self) -> None:
+        """O2：policy 回退曾有四份、两派语义，翻译侧与 QA 侧能各走各的。
+
+        `workflow._translation_policy` / `translation.translation_progress_rebuildable`
+        缺快照时回退**空策略**，`common.resolved_translation_policy` /
+        `semantic_state.resolved_policy` 回退**顶层键**。快照缺失而顶层键有术语的 Job
+        上，翻译不带术语、QA 按术语判 `glossary_violation`，术语死锁没有出口。
+        四份已收敛成 `common.resolved_translation_policy` 一份，这里用对象身份钉住；
+        任何人再在 workflow / translation / semantic 里定义一份同名副本都会立刻变红。
+        """
+
+        self.assertIs(
+            xvt.workflow.resolved_translation_policy,
+            xvt.pipeline.common.resolved_translation_policy,
+        )
+        self.assertIs(
+            xvt.pipeline.translation.resolved_translation_policy,
+            xvt.pipeline.common.resolved_translation_policy,
+        )
+        self.assertIs(
+            xvt.pipeline.semantic.resolved_translation_policy,
+            xvt.pipeline.common.resolved_translation_policy,
+        )
+        self.assertIs(
+            xvt.pipeline.semantic_state.resolved_translation_policy,
+            xvt.pipeline.common.resolved_translation_policy,
+        )
+        # `semantic_state.resolved_policy` 是被吃掉的那第三份，不许复活。
+        self.assertFalse(hasattr(xvt.pipeline.semantic_state, "resolved_policy"))
+        self.assertFalse(hasattr(xvt.workflow, "_translation_policy"))
 
 
 class AwaitStepsCoverageTest(unittest.TestCase):
