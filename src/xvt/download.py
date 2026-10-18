@@ -22,6 +22,25 @@ CommandRunner = Callable[..., CommandResult]
 VIDEO_FORMAT_SELECTOR = "bv*+ba/b"
 
 
+def _source_output_template(root: Path) -> str:
+    """把 Job 目录拼成 yt-dlp 的 ``-o`` 值，目录部分里的字面量 ``%`` 一律转义成 ``%%``。
+
+    yt-dlp 对 ``-o`` 的值整体套用输出模板，**目录部分不例外**。实测
+    （yt-dlp 2026.08.19，离线 ``--load-info-json ... --skip-download --print filename``）：
+
+    * ``-o '/Users/x/My %(title)s videos/source.%(ext)s'``
+      → ``/Users/x/My PWNED TITLE videos/source.mp4``
+    * ``-o '/Users/x/%(id)s/source.%(ext)s'`` → ``/Users/x/abc123/source.mp4``
+    * ``-o '/Users/x/100%% done/source.%(ext)s'`` → ``/Users/x/100% done/source.mp4``
+
+    也就是说 ``--output`` 落在名字带 ``%(...)s`` 的目录下时，产物会被写到 Job 目录之外
+    （下载完成后的越界检查只报错，不会把写出去的文件收回来）。只转义 root，
+    ``source.%(ext)s`` 是真模板，必须原样留给 yt-dlp。
+    """
+
+    return str(Path(str(root).replace("%", "%%")) / "source.%(ext)s")
+
+
 @dataclass(frozen=True, slots=True)
 class VideoSelection:
     video_id: str
@@ -381,7 +400,7 @@ def download_remote_subtitles(
         "--convert-subs",
         "srt",
         "-o",
-        str(root / "source.%(ext)s"),
+        _source_output_template(root),
     ]
     if anonymous:
         command.append("--ignore-config")
@@ -438,7 +457,7 @@ def download_remote_media(
         "--print",
         "after_move:filepath",
         "-o",
-        str(root / "source.%(ext)s"),
+        _source_output_template(root),
     ]
     if event_sink:
         command.extend(
