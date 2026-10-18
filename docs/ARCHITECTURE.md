@@ -180,7 +180,7 @@ Job 登记表是产物有效性的唯一依据，**不要按固定文件名取�
 - YouTube 显式字幕请求在浏览器 Cookie 查询缺少匹配人工字幕时补做一次匿名查询；仅接受同一视频的匹配人工字幕。查询与字幕下载均忽略 yt-dlp 本机配置、保留显式代理，媒体下载沿用原访问参数。`remote_info.subtitles_anonymous` 记录字幕访问方式，更新后重新登记 checksum；补查失败阻断 inspect，不静默进入 ASR。
 - 已有有效下载字幕或用户源字幕时不补查、不替换来源元信息，避免恢复时把旧自动字幕误分类为人工字幕。
 - Q2 选择报告损坏或缺失但 source cues 仍有效时，只从既有 cue provenance 与校验通过的候选/对齐 artifact 重建审计报告，不重新选择或改写时间轴；原因记为 `selection_artifact_recovered`。
-- Q3 已完成既有媒体 Job 的显式 ASR 源重建；它不改变端到端目标或翻译策略，保留输入译文以重新映射，且不把重建隐式塞入 `continue`。
+- Q3 已完成既有媒体 Job 的显式 ASR 源重建；它不改变端到端目标或翻译策略，保留输入译文副本，且不把重建隐式塞入 `continue`。**保留不等于还能用**：这份副本能否套回新的源时间轴，由 `status` / `continue` / `rebuild-source` 收尾共用的只读谓词 `pipeline.common.pending_translation_import_blocker` 当场判定；套不回时归 `manual_fix` 并给出「换一份对齐新时间轴的译文」与「显式放弃后重新翻译」两条出口，详见[恢复与回填契约](RECOVERY.md)。
 - Q4 已完成：翻译以确定性语义组为上下文，按完整组装箱，模型只返回既有 cue ID 的文本；规则版本和 prompt 版本进入恢复边界。
 - Q5 已完成：已有工作流译文可显式补跑润色，新 Job 可选择 `standard|polished`，API 支持 draft -> polish 恢复，Agent 支持一次翻译+润色回填。润色、语义校对和一次定向修复均不得修改 cue 数量、顺序和时间码。
 - 新增到端到端质量链的草稿、润色、语义校对和修复模型调用都逐批保存 checkpoint；语义问题与确定性 QA 问题使用独立报告和人工确认通道。现有高级命令 `retranslate-cues` 暂不承诺逐批恢复。
