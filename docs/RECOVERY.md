@@ -14,7 +14,7 @@
 
 已知画幅时，候选及最终译文 QA 按实际 ASS 样式测量可见宽度；建议字数超限但能容纳的降为 warning。测量失败保留原阻断规则。报告可包含 `layout`（画幅、样式、宽度和可用宽度），subtitle acknowledgment 绑定相同布局；旧无 layout 的确认仅匹配旧无 layout 的报告。确认同时绑定被确认那份报告的 checksum（`report_kind` + `report_checksum`），译文变化后报告 checksum 随之变化、旧确认自动失效；QA 报告是确定性的，`continue` 零成本重算出的同内容报告逐字节相同，不会误伤「确认 → continue」。换画幅、字体或测量结果后需重新判断，不能用旧确认放行新布局。恢复/status 仍严格只读，旧候选报告在实际推进时重算；烧录重查实际媒体与字体，新的 review 返回 workflow 等待态，不宣告完成。预览不改写正式 QA。
 
-本文是 `status` / `continue` / `batch` / `batch-continue` / `xvt apply` / `relink-burned-output` 共用恢复语义的单一来源。判定顺序、产物有效性口径、回填路由和烧录 proof 资格都以这里为准，其它文档不得另立说法。
+本文是 `status` / `continue` / `batch` / `batch-continue` / `xvt apply` / `relink-burned-output` / `relink-source-media` 共用恢复语义的单一来源。判定顺序、产物有效性口径、回填路由和烧录 proof 资格都以这里为准，其它文档不得另立说法。
 
 原子 `burn` 与 `preview` 对所选媒体、字体执行只读布局 QA，不覆盖正式 `translated_subtitle_qa` 或更新字幕 QA stage；布局检查失败时在渲染与烧录前拒绝。本地替代媒体或字体导致**布局失败**时 Job 不变（这条路径抛 `UserInputError`，`burn_translated_job` 的兜底刻意不把它记成 stage 失败）；远程媒体若在检查前下载，仍按原契约登记并持久化。临时媒体过短、画幅过窄或字体过宽不会污染原工作流的 QA，随后仍可按原目标 `continue`。只有 `run` / `continue` 按持久化目标执行烧录时，才保存布局报告并更新字幕 QA stage；新的 review 进入等待，error 仍失败。
 
@@ -196,10 +196,38 @@
 
 源媒体不在登记路径时 `render` 与 `burn` 都会以 `video file does not exist: <path>` 失败（两步都要读实际媒体文件）。因此：
 
-- **`status` / `continue` 的恢复分类**：计划只剩 `render` / `burn` 且**本地**源媒体不在登记路径时归 `manual_fix`，`reason` 点名那个路径，`primary_command` 为 `None`——不推荐一条必然再次失败的 `continue`。唯一出口是文件系统动作：把源媒体放回原路径后再 `continue`。刻意**不**推荐 `xvt burn JOB --media NEW`：它能产出合格成品，但没有任何命令能把持久化的源媒体路径指到新位置，Job 会继续停在同一状态。
+- **`status` / `continue` 的恢复分类**：计划只剩 `render` / `burn` 且**本地**源媒体不在登记路径时归 `manual_fix`，`reason` 点名那个路径，`primary_command` 为 `None`——不推荐一条必然再次失败的 `continue`。导航给出的出口是文件系统动作：把源媒体放回原路径后再 `continue`（媒体是永久搬家时另有 `relink-source-media`，见下）。刻意**不**推荐 `xvt burn JOB --media NEW`：它能产出合格成品，但不改持久化的源媒体路径，Job 会继续停在同一状态。
 - **远程 Job 刻意例外**：下载产物缺失时 `continue` 能重新获取媒体，那是真出口，仍按 `retryable` 处理。
 - **计划里还有 `translate` 等步骤时不拦**：那些步骤 `continue` 能真正推进。
 - **`relink` 的报错**：源媒体不在原路径时报「source media is missing: `<path>`」而不是「fingerprint is stale」——指纹并没有过期，是算不出来。方向不变（两者都拒绝），只是说对了原因。
+
+**媒体是永久搬家（而不是临时不在）时**，出口是下一节的 `xvt relink-source-media`，它把持久化路径指到新位置。**恢复导航目前还没有接入它**：上面那条 `manual_fix` 的 `reason` 仍只说「把该文件放回原路径后再运行 continue」，`primary_command` 仍是 `None`。如实记录：这是已知的导航缺口，接入 `recovery` 是下一批的事。
+
+## 源媒体搬家后的路径重指
+
+`xvt relink-source-media JOB NEW_MEDIA_PATH`（advanced）是把持久化的烧录源媒体路径指到新位置的唯一入口。
+
+**它不是新的状态机行为，是给一个已经正确的行为配一个入口。** 上一节的内容 checksum 回退本来就处理得了「媒体搬家」：路径变了、内容没变时，回退的三条件仍然全部成立（proof 里的烧录时身份重算出的指纹不变，源媒体当前内容 checksum 不变），指纹照旧判成立、Job 零重烧回到 `complete`。此前缺的只是一个受支持的方式去改那个路径——只能手改 `job.json`。
+
+### 放行条件（全部满足才写入）
+
+- Job 身份匹配、有持久化 workflow 目标且 `burn` 为真。
+- 媒体不是远程 URL（见下）。
+- 存在 checksum 有效的 `version=2` burn proof。没有它就没有可比对的基线，证明不了是同一份媒体；legacy fingerprint 不给这条出口，与 `relink-burned-output` 同口径。
+- 候选文件存在且是文件，其内容 checksum 等于 proof 登记的 `source_media_checksum`。
+
+任一条不满足以退出码 2 拒绝，Job 一个字节都不改。
+
+### 写入面与事件
+
+只写 `config.workflow.burn_media` 一个字段。不重烧、不碰 artifact 登记、不改 stage，因此**刻意不发 artifact 事件**——`relink-burned-output` 发 `artifact_invalidated` / `artifact_created` 是因为它真的改写了 `burned_video` 的登记路径，这条命令借用那两个事件会谎报产物变动。改动落在 `job.json`（恢复依据本身），JSONL 模式下由 `cli_completed` 的 `media` 字段带出新路径。候选已经是当前生效媒体时直接返回，不写盘。
+
+### 刻意的边界
+
+- **不要求源媒体「当前确实缺失」**：指到另一份内容相同的副本同样安全（烧录结果本来就一致），多一道状态判定只会多一条没必要的拒绝路径。
+- **`burn_media` 原本为 `None` 的 Job 照写**（媒体来自 `job.input` 的常见情形）。代价如实记录：`_burn_media_value` 是 `config.burn_media or job.input`，写入后 `burn_media` 覆盖 `job.input` 成为烧录与 QA 的媒体来源。可观察到的差异有两处，都只在后续**重跑翻译链路**时出现：`pipeline.common.translation_qa_context` 对有 `burn_media` 的 Job 改为 `probe_media(burn_media)`（而不是读 `media_info` artifact），因此布局 QA 多一次 ffprobe，且媒体若再次移走会直接探测失败而不是回落到 `media_info`；`paths.py` 的覆盖保护里，`job.input` 一直在 `_user_input_paths` 中无条件受保护，而 `burn_media` 只在它是本次烧录/预览实际使用的媒体时经 `media_path` 受保护（这一条与 `run --burn-media` 的既有行为一致，不是本命令引入的）。
+- **存量 v2 proof（缺可选字段 `source_media_identity`）仍放行**：授权依据是 v2 的必需字段 `source_media_checksum`，匹配即证明是同一份媒体，写入是正确的。零重烧是回退判定的性质、不是本命令的承诺——缺身份字段时回退拿不到授权，Job 落到 `burn` 重烧一次（新 proof 随即补上该字段）。拒绝它才是把用户推回手改 `job.json` 的死角。
+- **远程 Job 不支持**：媒体是 Job 内登记的下载产物（`source_video`），它在指纹里的身份本就是内容 checksum、不含路径，「搬家」这个概念不适用；把 `burn_media` 指到一个本地路径还会把媒体身份从「内容 checksum」口径换成 `{path, size, mtime_ns}` 口径，指纹必然漂移、反而逼出一次重烧。下载产物自身缺失时 `continue` 能重新获取，那是真出口。
 
 ## `xvt apply` 统一回填路由
 

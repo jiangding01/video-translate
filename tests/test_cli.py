@@ -1741,6 +1741,59 @@ class CliTest(unittest.TestCase):
         self.assertEqual(events[-1]["data"]["command"], "relink-burned-output")
         self.assertEqual(events[-1]["data"]["artifacts"], [str(candidate.resolve())])
 
+    def test_relink_source_media_dispatches_and_prints_path(self) -> None:
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = Path(directory) / "job.json"
+            job_file.write_text("{}", encoding="utf-8")
+            moved = Path(directory) / "newhome.mp4"
+            moved.write_bytes(b"video")
+            with (
+                patch(
+                    "xvt.cli.relink_source_media",
+                    return_value=moved.resolve(),
+                ) as relink,
+                redirect_stdout(output),
+            ):
+                return_code = main(["relink-source-media", str(job_file), str(moved)])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(relink.call_args.args, (str(job_file), str(moved)))
+        self.assertIn(str(moved.resolve()), output.getvalue())
+
+    def test_relink_source_media_jsonl_reports_cli_completion_only(self) -> None:
+        """重指路径不改 artifact 登记，因此刻意**不发** artifact 事件，只有 CLI 终态。
+
+        ``relink-burned-output`` 发 ``artifact_invalidated`` / ``artifact_created``
+        是因为它真的改写了 ``burned_video`` 的登记路径；这条命令只改
+        ``config.workflow.burn_media``，借用 artifact 事件会谎报产物变动。
+        """
+
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = Path(directory) / "job.json"
+            job_file.write_text("{}", encoding="utf-8")
+            moved = Path(directory) / "newhome.mp4"
+            moved.write_bytes(b"video")
+            with (
+                patch("xvt.cli.relink_source_media", return_value=moved.resolve()),
+                redirect_stdout(output),
+            ):
+                return_code = main(
+                    [
+                        "relink-source-media",
+                        str(job_file),
+                        str(moved),
+                        "--events-jsonl",
+                    ]
+                )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(return_code, 0)
+        self.assertEqual([event["type"] for event in events], ["cli_completed"])
+        self.assertEqual(events[-1]["data"]["command"], "relink-source-media")
+        self.assertEqual(events[-1]["data"]["media"], str(moved.resolve()))
+
     def test_resume_prints_job_file(self) -> None:
         output = StringIO()
         with tempfile.TemporaryDirectory() as directory:

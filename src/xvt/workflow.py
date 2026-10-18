@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -71,6 +71,7 @@ from xvt.workflow_config import (
     clear_burn_fingerprint,
     get_workflow_config,
     require_workflow_config,
+    set_workflow_config,
 )
 
 # plan_advance_steps 可能返回的全部 Agent 等待步骤名。CLI 的回填路由表以此为准
@@ -725,6 +726,77 @@ def relink_burned_output(
             )
         )
     return candidate_path
+
+
+def relink_source_media(job_file: str | Path, media: str | Path) -> Path:
+    """把持久化的烧录源媒体路径指到一份**内容完全相同**的现存文件（源媒体搬家）。
+
+    为什么需要它：源媒体永久换位置（路径变了、内容没变）之后，状态机本来就处理得了
+    这件事——``_burn_fingerprint_satisfied`` 的内容 checksum 回退在「差异只来自媒体
+    身份、内容 checksum 仍等于 proof 登记那份」时照旧判指纹成立，于是 Job 零重烧回到
+    完成。缺的只是一个受支持的方式去改那个路径：此前唯一的办法是手改 ``job.json``
+    （``recovery`` 的 manual_fix 文案因此只能说「把该文件放回原路径」）。
+
+    与 ``relink_burned_output`` 的同与不同：
+
+    - **同**：fail closed，只认内容 checksum。新文件的内容 checksum 必须等于 v2 proof
+      登记的 ``source_media_checksum``；没有 checksum 有效的 v2 proof 就没有可比对的
+      基线，证明不了是同一份媒体，一律拒绝（legacy fingerprint 不给这条出口）。
+      任一校验不过时 Job 一个字节都不改。
+    - **不同**：这里只写 ``config.workflow.burn_media`` 一个字段。不重烧、不碰 artifact
+      登记、不改 stage，因此**不发 artifact 事件**——借用 ``artifact_invalidated`` /
+      ``artifact_created`` 会谎报产物变动。改动落在 ``job.json``（恢复依据本身），
+      JSONL 模式下由 CLI 的 ``cli_completed`` 带出新路径。
+
+    刻意不要求源媒体「当前确实缺失」：指到另一份内容相同的副本同样安全（烧录结果本来
+    就一致），多一道状态判定只会多一条没有必要的拒绝路径。
+
+    存量 v2 proof（没有可选的 ``source_media_identity``）同样放行：授权依据是 v2 的
+    **必需**字段 ``source_media_checksum``，匹配即证明是同一份媒体，写入是正确的。
+    零重烧是回退判定的性质而不是本命令的承诺——缺身份字段时回退拿不到授权，Job 落到
+    ``burn`` 重烧一次（新 proof 随即补上身份字段），那仍然是用户能真正推进的出口。
+
+    远程 Job 不支持：媒体是 Job 内登记的下载产物（``source_video``），它在指纹里的身份
+    本就是内容 checksum，不含路径；"搬家" 这个概念不适用，而把 ``burn_media`` 指到一个
+    本地路径还会把媒体身份从「内容 checksum」口径换成「``{path, size, mtime_ns}``」
+    口径，指纹必然漂移、反而逼出一次重烧。下载产物自身缺失时 ``continue`` 能重新获取。
+    """
+
+    requested_job_file = Path(job_file).expanduser().resolve()
+    job = load_job(requested_job_file)
+    if requested_job_file != get_job_file(job).resolve():
+        raise UserInputError("job file path does not match the Job's persisted identity")
+    try:
+        config = require_workflow_config(job)
+    except ValueError as error:
+        raise UserInputError("job has no persisted burned-video workflow goal") from error
+    if not config.burn:
+        raise UserInputError("job has no persisted burned-video goal")
+    if _burn_media_is_remote(_burn_media_value(job, config)):
+        raise UserInputError(
+            "source media relink does not apply to a remote media job; its media is a "
+            "download registered inside the Job, not a path on your filesystem"
+        )
+    proof = _burn_proof(job)
+    if proof is None:
+        raise UserInputError("source media relink requires a checksum-valid v2 burn proof")
+
+    media_path = Path(media).expanduser()
+    if media_path.is_dir():
+        raise UserInputError(f"source media candidate is not a file: {media_path}")
+    if not media_path.is_file():
+        raise UserInputError(f"source media candidate does not exist: {media_path}")
+    media_path = media_path.resolve()
+    if file_checksum(media_path) != proof["source_media_checksum"]:
+        raise UserInputError(
+            "source media candidate checksum does not match the burn proof's source media"
+        )
+    if media_path == Path(_burn_media_value(job, config)).expanduser().resolve():
+        return media_path
+
+    set_workflow_config(job, replace(config, burn_media=str(media_path)))
+    save_job(job)
+    return media_path
 
 
 def _current_artifacts(
