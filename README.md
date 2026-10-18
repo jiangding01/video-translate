@@ -646,7 +646,7 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
 
 完成后，任务目录会包含 `job.json`、`artifacts/source-cues.json` 和 `artifacts/source.srt`。
 
-`--segmentation-preset conservative` 使用更长的停顿和时长阈值，适合更完整的句子；默认 `balanced` 保持既有分段；`compact` 使用更短的阈值，适合需要更频繁换行的短视频。预设仅作用于 ASR 分段：直接导入源字幕会保留原时间轴；`--align-subtitles` 跳过分段预设，并仅在用户明确请求时按 ASR 对齐修正时间轴。
+`--segmentation-preset conservative` 使用更长的停顿和时长阈值，适合更完整的句子；默认 `balanced` 保持既有分段；`compact` 使用更短的阈值，适合需要更频繁换行的短视频。三个预设都遵守中日文的行首行尾禁则（禁則処理）：cue 不会以闭合括号、句读、小字假名、长音符或叠字记号开头，也不会以起始括号结尾。禁则只管**排版**，不保证切在词的边界上——日文逐字转写下仍可能切在一个词的中间。预设仅作用于 ASR 分段：直接导入源字幕会保留原时间轴；`--align-subtitles` 跳过分段预设，并仅在用户明确请求时按 ASR 对齐修正时间轴。
 
 已有源字幕时可跳过 ASR，并保留其时间轴：
 

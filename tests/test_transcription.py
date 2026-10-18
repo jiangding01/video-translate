@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,10 +8,13 @@ from unittest.mock import patch
 from xvt.models import Cue, Transcript, Word
 from xvt.qa import check_subtitles
 from xvt.segment import (
+    NO_LINE_END,
+    NO_LINE_START,
     TRAILING_ZERO_DURATION_WARNING_PREFIX,
     SegmentationConfig,
     segment_transcript,
     segmentation_config_for_preset,
+    split_cue_by_parts,
 )
 from xvt.transcribe import (
     TranscriptionError,
@@ -448,6 +452,176 @@ class TranscriptionTest(unittest.TestCase):
         cues = segment_transcript(transcript, media_duration_ms=1050)
 
         self.assertEqual(cues[0].end_ms, 1050)
+
+
+class LineBreakProhibitionTest(unittest.TestCase):
+    """禁則処理 (kinsoku shori) coverage for the width splitter.
+
+    ``_partition_words`` cuts between ASR words, and mlx-whisper emits Japanese
+    one character per "word", so in practice every character boundary is a
+    candidate cut. Without a line-break rule the optimiser is free to open a
+    line with a closing bracket, a small kana, an iteration mark or the
+    prolonged sound mark. Every ``max_characters`` below is a setting that
+    actually reproduced the violation before the rule existed.
+    """
+
+    @staticmethod
+    def _per_character(text: str, language: str, *, step: int = 200) -> Transcript:
+        return Transcript(
+            language=language,
+            engine="mlx",
+            words=tuple(
+                Word(character, index * step, index * step + step, 0.9)
+                for index, character in enumerate(text)
+            ),
+        )
+
+    def _assert_line_breaks_are_legal(self, cues: list[Cue], joined: str) -> None:
+        texts = [cue.source_text for cue in cues]
+        self.assertGreater(len(texts), 1)
+        self.assertEqual("".join(texts), joined)
+        self.assertTrue(all(texts))
+        heads = [text.lstrip()[0] for text in texts if text.strip()]
+        tails = [text.rstrip()[-1] for text in texts if text.strip()]
+        self.assertEqual([head for head in heads if head in NO_LINE_START], [])
+        self.assertEqual([tail for tail in tails if tail in NO_LINE_END], [])
+
+    def _segment(self, text: str, language: str, max_characters: int) -> list[Cue]:
+        return segment_transcript(
+            self._per_character(text, language),
+            SegmentationConfig(max_characters=max_characters),
+        )
+
+    def test_japanese_small_kana_never_starts_a_cue(self) -> None:
+        # Previously split as "…なるはずだとき" | "っと思っているはずだ".
+        text = "今日はもっと素敵な一日になるはずだときっと思っているはずだ"
+
+        self._assert_line_breaks_are_legal(self._segment(text, "ja", 26), text)
+
+    def test_prolonged_sound_mark_never_starts_a_cue(self) -> None:
+        # Previously split as "ピリットとコーヒ" | "ーとデータベース".
+        text = "ザヒューマンスピリットとコーヒーとデータベースとサーバールーム"
+
+        self._assert_line_breaks_are_legal(self._segment(text, "ja", 20), text)
+
+    def test_iteration_mark_never_starts_a_cue(self) -> None:
+        # Previously split as "色々な国々の様々な人" | "々によって少々変わった".
+        text = "人々の日々の暮らしは色々な国々の様々な人々によって少々変わった"
+
+        self._assert_line_breaks_are_legal(self._segment(text, "ja", 24), text)
+
+    def test_closing_bracket_never_starts_a_cue(self) -> None:
+        # Previously split as "彼は人々に「ようこそ" | "」と言って静かに笑っ".
+        text = "彼は人々に「ようこそ」と言って静かに笑ったそして帰っていった。"
+
+        self._assert_line_breaks_are_legal(self._segment(text, "ja", 24), text)
+
+    def test_opening_bracket_never_ends_a_cue(self) -> None:
+        # Previously split as "た声で「" | "来月の予定" and "は未定です" | "」と静かに".
+        text = "担当者が落ち着いた声で「来月の予定は未定です」と静かに答えました"
+
+        self._assert_line_breaks_are_legal(self._segment(text, "ja", 10), text)
+
+    def test_chinese_punctuation_never_starts_or_ends_a_cue(self) -> None:
+        # Previously split as "这个方案（第二版" | "）已经通过了评审，".
+        text = "这个方案（第二版）已经通过了评审，下周一就可以正式对外发布了。"
+
+        self._assert_line_breaks_are_legal(self._segment(text, "zh-CN", 20), text)
+
+    def test_real_katakana_run_no_longer_breaks_before_the_prolonged_sound_mark(self) -> None:
+        """Replay of a real mlx-whisper slice; provenance is in the fixture's ``comment``."""
+
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "asr-words-ja-katakana-run.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        transcript = Transcript(
+            language=fixture["language"],
+            engine=fixture["engine"],
+            words=tuple(
+                Word(entry["text"], entry["start_ms"], entry["end_ms"], entry["probability"])
+                for entry in fixture["words"]
+            ),
+        )
+
+        cues = segment_transcript(transcript, SegmentationConfig(max_characters=16))
+
+        # Previously split as "松田アップリフティングザヒュ" | "ーマンスピリット".
+        self._assert_line_breaks_are_legal(cues, "松田アップリフティングザヒューマンスピリット")
+        self.assertEqual([cue.source_text for cue in cues if cue.source_text.startswith("ー")], [])
+
+    def test_sentence_end_cut_defers_past_a_closing_bracket(self) -> None:
+        """A cue boundary has three producers; the sentence-end one obeys the rule too.
+
+        ``。`` + ``」`` is the single most ordinary kinsoku violation in Japanese:
+        the main loop flushes on ``。`` and the next cue would open with ``」``.
+        """
+
+        text = "彼は静かにそうだ。」と答えてからゆっくり立ち上がって部屋を出た"
+        cues = segment_transcript(
+            self._per_character(text, "ja"),
+            SegmentationConfig(max_duration_ms=10**9, pause_ms=10**9, max_characters=30),
+        )
+
+        self._assert_line_breaks_are_legal(cues, text)
+
+    def test_duration_forced_cut_defers_past_prohibited_punctuation(self) -> None:
+        """Previously split as "…一早就出发" | "，”然后转身离开了房"."""
+
+        text = "他轻声说：“我们明天一早就出发，”然后转身离开了房间再也没有回头看一眼"
+        cues = segment_transcript(
+            self._per_character(text, "zh-CN", step=400),
+            SegmentationConfig(max_duration_ms=4000, pause_ms=10**9, max_characters=30),
+        )
+
+        self._assert_line_breaks_are_legal(cues, text)
+
+    def test_rule_holds_when_a_cue_splits_into_many_parts(self) -> None:
+        """The penalty must outweigh width imbalance even across many chunks."""
+
+        text = (
+            "あいうえおかきくけこさしすせそたちつてと" * 2 + "もっと" + "なにぬねのはひふへほ" * 2
+        )
+
+        cues = segment_transcript(
+            self._per_character(text, "ja"),
+            SegmentationConfig(max_characters=6, max_duration_ms=10**9, pause_ms=10**9),
+        )
+
+        self.assertGreater(len(cues), 10)
+        self._assert_line_breaks_are_legal(cues, text)
+
+    def test_still_splits_when_every_position_is_prohibited(self) -> None:
+        """The rule is a penalty, not a veto: a degenerate line must still split."""
+
+        cues = self._segment("ー" * 20, "ja", 8)
+
+        self.assertGreater(len(cues), 1)
+        self.assertTrue(all(cue.source_text for cue in cues))
+        self.assertEqual("".join(cue.source_text for cue in cues), "ー" * 20)
+
+    def test_legal_break_points_are_still_used(self) -> None:
+        """Reverse guard: the rule must not stop an ordinary, legal split."""
+
+        text = "我们需要保留每个字幕的含义，但是也要保证每行都清晰。"
+        cues = segment_transcript(
+            self._per_character(text, "zh-CN", step=300),
+            SegmentationConfig(max_characters=28),
+        )
+
+        self.assertEqual(
+            [cue.source_text for cue in cues],
+            ["我们需要保留每个字幕的含义，", "但是也要保证每行都清晰。"],
+        )
+
+    def test_split_cue_by_parts_also_respects_the_rule(self) -> None:
+        text = "今日はもっと素敵な一日になるはずだときっと思っているはずだ"
+        cue = self._segment(text, "ja", 100)[0]
+
+        parts = split_cue_by_parts(cue, 3)
+
+        self._assert_line_breaks_are_legal(parts, text)
 
 
 if __name__ == "__main__":

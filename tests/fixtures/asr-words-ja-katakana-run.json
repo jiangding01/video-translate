@@ -1,0 +1,126 @@
+{
+  "comment": "19 mlx-whisper word timestamps lifted verbatim from a real 4-minute Japanese ASR run (words.json sha256 3021c236630249f9..., 515 words, engine mlx). Slice [476:495] = the katakana run 松田アップリフティングザヒューマンスピリット. Start timestamps are rebased to 0; relative timings and probabilities are unchanged. Before the kinsoku guard, segmenting this slice at max_characters=16 produced ティングザヒュ | ーマンスピリット, i.e. a line starting with the prolonged sound mark ー.",
+  "source_words_sha256": "3021c236630249f93be9a645fb356a79bb92d88ad0e5149d5257ac3a97292a8c",
+  "source_slice": [
+    476,
+    495
+  ],
+  "language": "ja",
+  "engine": "mlx",
+  "words": [
+    {
+      "text": "松",
+      "start_ms": 0,
+      "end_ms": 340,
+      "probability": 0.708984
+    },
+    {
+      "text": "田",
+      "start_ms": 340,
+      "end_ms": 540,
+      "probability": 0.99707
+    },
+    {
+      "text": "ア",
+      "start_ms": 540,
+      "end_ms": 1340,
+      "probability": 0.708008
+    },
+    {
+      "text": "ップ",
+      "start_ms": 1340,
+      "end_ms": 1540,
+      "probability": 0.998047
+    },
+    {
+      "text": "リ",
+      "start_ms": 1540,
+      "end_ms": 1680,
+      "probability": 0.99707
+    },
+    {
+      "text": "フ",
+      "start_ms": 1680,
+      "end_ms": 1820,
+      "probability": 0.983398
+    },
+    {
+      "text": "テ",
+      "start_ms": 1820,
+      "end_ms": 1940,
+      "probability": 0.995117
+    },
+    {
+      "text": "ィ",
+      "start_ms": 1940,
+      "end_ms": 2000,
+      "probability": 1.0
+    },
+    {
+      "text": "ング",
+      "start_ms": 2000,
+      "end_ms": 2060,
+      "probability": 0.999023
+    },
+    {
+      "text": "ザ",
+      "start_ms": 2060,
+      "end_ms": 2220,
+      "probability": 0.836914
+    },
+    {
+      "text": "ヒ",
+      "start_ms": 2220,
+      "end_ms": 2420,
+      "probability": 0.571777
+    },
+    {
+      "text": "ュ",
+      "start_ms": 2420,
+      "end_ms": 2540,
+      "probability": 0.999512
+    },
+    {
+      "text": "ー",
+      "start_ms": 2540,
+      "end_ms": 2580,
+      "probability": 1.0
+    },
+    {
+      "text": "マ",
+      "start_ms": 2580,
+      "end_ms": 2680,
+      "probability": 1.0
+    },
+    {
+      "text": "ン",
+      "start_ms": 2680,
+      "end_ms": 2720,
+      "probability": 1.0
+    },
+    {
+      "text": "ス",
+      "start_ms": 2720,
+      "end_ms": 2880,
+      "probability": 0.999512
+    },
+    {
+      "text": "ピ",
+      "start_ms": 2880,
+      "end_ms": 2960,
+      "probability": 0.99707
+    },
+    {
+      "text": "リ",
+      "start_ms": 2960,
+      "end_ms": 3060,
+      "probability": 0.999023
+    },
+    {
+      "text": "ット",
+      "start_ms": 3060,
+      "end_ms": 3240,
+      "probability": 0.993164
+    }
+  ]
+}
