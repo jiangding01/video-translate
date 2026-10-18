@@ -1330,9 +1330,12 @@ def _recovery_for_workflow(
     # （两步都要读实际媒体文件），于是 primary_command 还推荐 continue 就是推荐一条
     # **必然再次失败**的命令，而 alternative_commands 是空的——用户没有任何出口。
     # 这是本仓库第 6 次同类缺陷，归 manual_fix 并点名那个路径。
-    # 唯一的出口是文件系统动作：把源媒体放回原路径。刻意**不**推荐
-    # `xvt burn JOB --media NEW`——它虽然能产出合格成品，但没有任何命令能把持久化的
-    # 源媒体路径指到新位置，Job 会继续停在这里，等于把用户引进另一个死角。
+    # 出口有两条：把源媒体放回原路径，或者（媒体是永久搬家时）用
+    # `xvt relink-source-media JOB NEW_PATH` 把持久化路径指过去——它只认与 v2 proof
+    # 登记的 source_media_checksum 相同的文件，匹配时零重烧回到完成。
+    # **本分支的文案尚未接入后者，这是已知缺口**（下一批补）。
+    # 刻意**不**推荐 `xvt burn JOB --media NEW`：它虽然能产出合格成品，却不改持久化
+    # 路径，Job 会继续停在这里，等于把用户引进另一个死角。
     # 判定范围刻意收窄到「计划只剩 render / burn」：还有 translate 等步骤时 continue
     # 仍能真正推进那些步骤，不该拦。``local_only`` 同理：远程 Job 的下载产物缺失时
     # continue 能重新获取媒体，那是真出口，不归 manual_fix。
