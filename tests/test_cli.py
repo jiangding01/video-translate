@@ -4057,6 +4057,91 @@ class HumanEventSinkTerminalSafetyTest(unittest.TestCase):
         self.assertEqual(_terminal_safe(once), once)
 
 
+class StageLineSelfConsistencyTest(unittest.TestCase):
+    """stage 的收尾行必须和它的 `[进行中]` 行说同一件事，矛盾的两行要自解释。
+
+    实测依据（2026-10-18，真实 `xvt` 命令）：`detail` 只挂在 RUNNING 事件上，
+    `stage_completed` / `stage_failed` 不带，于是 `[进行中] 检查源字幕` 的收尾行
+    退化成泛称 `[完成] 检查字幕`；`xvt batch` 又把一个 sink 跨多个 Job 复用，
+    同名泛称标签就能在一次运行里先 `[完成]` 后 `[失败]`。
+    """
+
+    def _sink(self) -> tuple[_HumanEventSink, StringIO]:
+        stream = StringIO()
+        return _HumanEventSink(stream=stream), stream
+
+    def test_stage_completion_keeps_the_qualifier_of_its_started_line(self) -> None:
+        sink, stream = self._sink()
+
+        for stage, detail, status, event_type in (
+            ("subtitle_qa", "source", "running", EventType.STAGE_STARTED),
+            ("subtitle_qa", None, "succeeded", EventType.STAGE_COMPLETED),
+            ("render", "source", "running", EventType.STAGE_STARTED),
+            ("render", None, "succeeded", EventType.STAGE_COMPLETED),
+        ):
+            payload: dict[str, object] = {"stage": stage, "status": status, "job_id": "job-a"}
+            if detail is not None:
+                payload["detail"] = detail
+            sink(create_event(event_type, **payload))
+
+        rendered = stream.getvalue()
+        self.assertIn("[完成] 检查源字幕", rendered)
+        self.assertIn("[完成] 生成源字幕文件", rendered)
+        self.assertNotIn("[完成] 检查字幕", rendered)
+        self.assertNotIn("[完成] 生成字幕文件", rendered)
+
+    def test_failure_after_completion_of_the_same_job_stage_is_marked_as_a_reentry(self) -> None:
+        sink, stream = self._sink()
+
+        for event_type, status, detail in (
+            (EventType.STAGE_STARTED, "running", "translated"),
+            (EventType.STAGE_COMPLETED, "succeeded", None),
+            (EventType.STAGE_STARTED, "running", "translated"),
+            (EventType.STAGE_FAILED, "failed", None),
+        ):
+            payload: dict[str, object] = {
+                "stage": "subtitle_qa",
+                "status": status,
+                "job_id": "job-a",
+            }
+            if detail is not None:
+                payload["detail"] = detail
+            sink(create_event(event_type, **payload))
+
+        rendered = stream.getvalue()
+        # 两行都是真话，一行都不许压掉。
+        self.assertIn("[完成] 检查译文字幕", rendered)
+        failures = [line for line in rendered.splitlines() if line.startswith("[失败]")]
+        self.assertEqual(len(failures), 1)
+        self.assertIn("检查译文字幕", failures[0])
+        self.assertIn("重新进入", failures[0])
+
+    def test_failure_of_another_batch_job_is_not_marked_as_a_reentry(self) -> None:
+        """批处理一个 sink 跨多个 Job：同名标签先完成后失败是两个 Job，不是重新进入。"""
+
+        sink, stream = self._sink()
+
+        for job_id, event_type, status in (
+            ("job-a", EventType.STAGE_STARTED, "running"),
+            ("job-a", EventType.STAGE_COMPLETED, "succeeded"),
+            ("job-b", EventType.STAGE_STARTED, "running"),
+            ("job-b", EventType.STAGE_FAILED, "failed"),
+        ):
+            payload: dict[str, object] = {
+                "stage": "subtitle_qa",
+                "status": status,
+                "job_id": job_id,
+            }
+            if event_type is EventType.STAGE_STARTED:
+                payload["detail"] = "source"
+            sink(create_event(event_type, **payload))
+
+        rendered = stream.getvalue()
+        self.assertIn("[完成] 检查源字幕", rendered)
+        self.assertIn("[失败] 检查源字幕", rendered)
+        self.assertNotIn("重新进入", rendered)
+
+
 class TranscriptionFallbackRenderingTest(unittest.TestCase):
     """引擎回退必须在普通输出里看得见，否则用户只能靠对比产物才发现换了引擎。"""
 
