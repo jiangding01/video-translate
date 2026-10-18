@@ -384,6 +384,22 @@ def _normalize_audio_and_transcribe(
     return transcript
 
 
+def _translated_leg_blocks_subtitle_qa(job: Job) -> bool:
+    """``SUBTITLE_QA`` 此刻是不是被译文腿的未决阻断占着。
+
+    判据与 ``recovery.subtitle_qa_failure_guidance`` 同口径：stage 停在 FAILED /
+    AWAITING_INPUT，且译文 QA 报告仍 checksum 有效——那条报告就是 guidance 会拿去
+    解释阻断、并据此给出 ``continue --acknowledge-subtitle-review`` 的那一份。
+    译文报告已失效时不算（``recovery`` 侧由 ``_translated_qa_needs_rebuild`` 同样让路），
+    源腿照常记账。
+    """
+
+    return (
+        job.stages[StageName.SUBTITLE_QA].status in {StageStatus.FAILED, StageStatus.AWAITING_INPUT}
+        and valid_artifact_path(job, "translated_subtitle_qa") is not None
+    )
+
+
 def _run_source_subtitle_qa(
     job: Job,
     cues: list[Cue],
@@ -396,14 +412,21 @@ def _run_source_subtitle_qa(
 
     只覆盖 SUBTITLE_QA 一段。调用方仍要在调用前把自己的 current_stage 置为
     StageName.SUBTITLE_QA —— 失败归属留在调用方，渲染段的失败才不会被记到 QA 上。
+
+    译文腿正占着这个 stage 的阻断时（见 ``_translated_leg_blocks_subtitle_qa``），本函数
+    照常重算并重新登记源侧的 ``qa.json``，但不改 stage：产物是真话，stage 的真实状态
+    此刻属于更靠后、尚未解决的译文复核。此时连 RUNNING 也不写——写了就得有终态来收，
+    而放行分支恰恰不写终态。
     """
-    set_stage(
-        job,
-        StageName.SUBTITLE_QA,
-        StageStatus.RUNNING,
-        event_sink,
-        extras={"detail": "source"},
-    )
+    preserve_blocking_stage = _translated_leg_blocks_subtitle_qa(job)
+    if not preserve_blocking_stage:
+        set_stage(
+            job,
+            StageName.SUBTITLE_QA,
+            StageStatus.RUNNING,
+            event_sink,
+            extras={"detail": "source"},
+        )
     report = check_subtitles(
         cues,
         media_duration_ms=media_info.duration_ms if media_info is not None else None,
@@ -413,7 +436,12 @@ def _run_source_subtitle_qa(
     qa_path = artifacts_directory / "qa.json"
     write_json(qa_path, asdict(report))
     add_artifact(job, "subtitle_qa", qa_path, event_sink)
-    return complete_qa_stage(job, report, event_sink)
+    return complete_qa_stage(
+        job,
+        report,
+        event_sink,
+        preserve_blocking_stage=preserve_blocking_stage,
+    )
 
 
 def _render_source_srt(
