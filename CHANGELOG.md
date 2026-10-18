@@ -6,6 +6,8 @@
 
 ### Added
 
+- **ASR 丢弃尾部零时长词时留痕。** Whisper 偶尔在音频末尾吐出一个 `start_ms == end_ms` 的词——2026-10-17 的真实素材里，515 个词中恰好一个，正是那条「ご視聴ありがとうございました」尾部幻觉的后半截（p=0.999）。`segment_transcript` 必须丢掉它（零时长词构不成 cue），但此前丢得**无声无息**：`source-cues.json` 里不留任何痕迹，`words.json` 虽然还留着原始词，却没有任何东西指出那里有异常。现在丢弃**尾部**零时长词时，末条 cue 的 `warnings` 会多一条以 `dropped zero-duration trailing ASR words before segmentation` 开头的记录，带词数、首尾毫秒、最大 probability 与被丢弃的文本。**这只是证据，不是门**：`check_subtitles` 不读它（与同文件的「重叠位移」「最小时长」两条 warning 同属纯留痕），**QA 的 `status` 与 `issues` 一字不变**，cue 的数量、ID、时间轴和文本也一字不变——用 2026-10-17 的真实素材回放核对过，52 条 cue 除这一条 warning 外与已登记的 `source-cues.json` 逐字相同，QA 仍是 `pass` / 零 issue。**只覆盖尾部**：转写中段的零时长词成因与量级都不同，这里不替它表态。**不发新事件、不新增 artifact**，因此协议快照零 diff。用户导入的字幕不经 `segment_transcript`，这条留痕够不着它们。动机是让「Whisper 尾部幻觉」这个待决策项（`docs/REVIEW_FINDINGS_2026_10_17.md` 的 P8）将来有样本可采：**那条信号此前在事后无法观测，不留痕就无从采样**；是否要据此加 QA 门仍未拍板，前置条件见 P8。
+
 - **`xvt relink-source-media JOB NEW_MEDIA_PATH`（advanced）：源媒体永久搬家后，把持久化的烧录源媒体路径指到新位置。** 这不是新的状态机行为——「指纹不匹配时的源媒体内容 checksum 回退」本来就处理得了「路径变了、内容没变」，Job 会零重烧回到 `complete`；缺的只是一个受支持的方式去改那个路径（此前唯一办法是手改 `job.json`，`status` 的 `manual_fix` 文案也只能说「把该文件放回原路径」）。命令 fail closed，只认内容 checksum：新文件的 SHA-256 必须等于 checksum 有效的 `version=2` burn proof 登记的 `source_media_checksum`，没有 v2 proof 一律拒绝（没有基线就证明不了是同一份媒体，legacy fingerprint 不给这条出口，与 `relink-burned-output` 同口径）。成功时只写 `config.workflow.burn_media` 一个字段：不重烧、不碰 artifact 登记、不改 stage，因此**不发 artifact 事件**（借用 `artifact_invalidated` / `artifact_created` 会谎报产物变动），`--events-jsonl` 只输出 `cli_completed`，新路径在它的 `media` 字段里；失败时 Job 一个字节都不改。远程 Job 不支持（媒体是 Job 内登记的下载产物，「搬家」不适用，且会把媒体身份口径从内容 checksum 换成元数据、反而逼出一次重烧）。存量 v2 proof（缺可选字段 `source_media_identity`）仍会被接受并写入新路径，但指纹回退拿不到授权，`status` 会要求重烧一次——零重烧是回退判定的性质，不是本命令的承诺。恢复导航已经接入这条命令，见下方 Changed。
 
 ### Changed

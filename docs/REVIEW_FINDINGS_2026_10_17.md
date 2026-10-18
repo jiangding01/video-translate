@@ -338,7 +338,33 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
   同一个 Job 的同一条标签再打 `[失败]` 时**两行都保留**（压掉一行是隐瞒信息），只给失败行加
   「重新进入后失败，前面那行 [完成] 仍然成立」。键带 `job_id`：批处理跨 Job 的同名标签不是重新进入，不加这个标注。
 - **P7 `conservative` 预设产生跨词硬切**（切在「ど|んなに」「科学|的」）。机制是更长的停顿阈值先把多个词合并成超宽 cue，再按显示宽度硬切，切点落在字符数而非语义边界。属**分段算法质量**，要动 `segment.py` 的切分策略并补日文/中文的语义边界用例，是独立一项。
-- **P8 Whisper 尾部幻觉（「ご視聴」贴到媒体末尾）无 QA 门拦截。** 它会进翻译批次并出现在成品里。`segment.py` 已有「低置信重复尾部」的裁剪启发式（`test_does_not_trim_high_confidence_repetition` 钉住它不碰高置信重复），这条幻觉够不着它——**此处是读代码的推断，未对该素材逐条验证两个条件**。属**新增 QA 启发式**（例如「贴着媒体末尾、与正文无词级重叠、命中常见套话词表」），需要先收集足够样本避免误删真实结尾，否则会把合法结尾当幻觉删掉。
+- **P8 Whisper 尾部幻觉（「ご視聴」贴到媒体末尾）无 QA 门拦截。** ○ 症状已 100% 坐实，**本轮刻意未实现启发式，只固化结论 + 做掉一个前置条件（见末尾「已做」）**。2026-10-18 用真实素材做了一轮纯调查，结论是**现在不该做**。
+
+  **症状（逐条实测，Job `…/asr/base/jobs/20261017T150835Z-454ce3ec/`）**：cue 52「ご視聴」242020–245180ms，词级 `ご` p=0.758 / `視` p=0.979 / `聴` p=1.000，`text_confidence` 0.91227（52 条里第 3 低，更低的两条都是合法内容）。源字幕 QA 与译文 QA **都是 `{"status":"pass","issues":[]}`**；它进了 `translation-batches.json`，也进了 `bilingual.srt`（译作「感谢观看」）。确定性 QA 在这条上零阻力。
+
+  **① 原条目对既有启发式的归因写错了，这里更正。** `src/xvt/segment.py:169-211` 的 `_trim_trailing_hallucination` 是一个**纯重复检测器**：它先按末词的规范化 token 往前数连续游程，`:182-183` 的 `if repeat_count < config.hallucination_repeat_words: return words, False` 就早退了。这条幻觉的末词是 `ありがとうございました`，前一个词是 `聴`，**游程长度为 1**，所以函数在第一个闸门就返回，`:186-191` 的置信度闸门（`low_confidence_repeat`）与 `:192-196` 的 `pathological_timestamps` **从未被执行到**。原条目写的「`test_does_not_trim_high_confidence_repetition` 钉住它不碰高置信重复，这条幻觉够不着它」方向对、归因错：不是置信度太高够不着，是**压根不构成重复**。原条目那句「此处是读代码的推断，未对该素材逐条验证两个条件」也就此作废——现已逐条验证，结果是两个条件都没有参与判定。
+
+  **② 样本量是 n=1，负样本 0 个——这是本条目最硬的约束。** `asr/` 下 10 个 Job 的 `words.json` **sha256 全部相同**（`3021c236630249f9`），包括那个 `faster` Job（它是 P2 静默回退的产物：`config.engine=faster`，而 `words.json` 里 `engine=mlx`）。也就是说这 10 个 Job 是同一段音频的同一份转写，有效样本**只有一支视频**。语料里**没有任何一支真的以口头致谢结尾的视频**，因此任何候选信号的**误伤率在数学上无法估计**——不是「还没算」，是没有可算的数据。
+
+  **③ 原条目提的三个候选信号，逐条量下来都不成立**：
+
+  - 「**贴着媒体末尾**」——在 QA 层这是循环论证。`segment.py:265-285` 的 `_normalize_boundaries` 本来就把每条 cue 的 end 钳到 `media_duration_ms`，所以「末条 cue 贴着媒体末尾」是钳出来的必然结果，不是证据。退回词级看：末词真实 end 距媒体末尾仅 40ms，但这个条件近乎**全判阳性**（任何讲完话的视频末条都贴底）。
+  - 「**与正文无词级重叠**」——在本样本上精确命中 1/52，看起来很漂亮，但强度来自**日文逐字分词**（515 个词几乎全是单字）。换成英文整词，"Thanks for watching" 里的 "for" 必然与正文重叠 → **必然漏报**。这个信号的判别力是语言和分词粒度的函数，不是幻觉的函数。
+  - 「**套话词表**」——两重问题。实现上：要匹配的文本在 cue 里**已经被截断成「ご視聴」**（致谢的后半截是被丢弃的零时长词，见 ④），词表根本匹配不上完整套话。原理上：按构造无法区分「模型幻觉出的致谢」与「讲者真的说了致谢」，而后者是最常见的视频结尾之一。
+
+  **④ 唯一量出来干净的信号不是原条目提的那个，而是零时长尾 token。** 被丢弃的 `ありがとうございました` 在 `words.json` 里是 `245140 → 245140`（**零时长**）、p=0.999。515 个词里零时长词**恰好 1 个，就是它**，零误报。它的价值在于量的是**解码器产物**（时间戳退化）而不是**内容**，所以原理上不会把「讲者真说的致谢」误判成幻觉。但现状够不着它：`pathological_timestamps` 把零时长比例和 `repeat_count >= 8` **捆死**，重复不够长就不看时间戳；就算放开这个捆绑，`:200-210` 的回溯循环也会在 `聴`（正时长、p=1.0）处 `break`，仍然删不掉整条 cue。
+
+  **⑤ 就算判出来了，现在也没有地方让它去——这是不做成 `error` 的决定性理由。** 全仓**没有任何受支持的命令能删掉一条 cue**：`apply-source-review-fixes` 拒绝空文本，`resegment` 只拆不删，`rebuild-source --strategy asr` 复用同一份 words 会重跑出同一条。把它做成 QA `error` 等于「推荐一条没有出口的状态」，那将是这类缺陷的**第 7 次**（前六次见 P3 与 B2 的计数）。
+
+  **开工的前置条件（三条都满足再动手，缺一条就不是「谨慎」而是没有依据）**：
+
+  1. **语料**：10–15 份真实 ASR 转写，覆盖 ja / zh / en，其中**至少 3–5 份负样本**——真的以口头致谢收尾的视频。没有负样本就量不出误伤率，n=1 的「零误报」是巧合不是证据。
+  2. **先拍板「cue 能不能被删、经由哪条命令」**。在这件事定下来之前，形态只能是 advisory（`review` 级，人看了自己处理），**`error` 形态不在选项里**（见 ⑤）。
+  3. **确认零时长尾 token 的签名在 faster-whisper 上也复现**。目前**一份 faster-whisper 样本都没有**（那个 `faster` Job 实际是 mlx 产物）；若这是 mlx-whisper 特有的解码器行为，这条信号就只对一半用户成立。
+
+  **形态建议（将来真要做时）**：**`review` 级 + provenance 闸门**，只对 `provenance in {"asr", "asr_resegmented"}` 生效。先例是 `qa.py:291-302` 的 `low_timing_confidence`（同一处判定按 provenance 分 `warning` / `review` 两档）。闸门**不可省**：`check_subtitles` 是全仓 **8 个调用点**共用的同一个函数（`source_selection.py:104`、`pipeline/transcription.py:407` 与 `:565`、`pipeline/burnin.py:121`、`pipeline/semantic.py:97`、`pipeline/revision.py:336` 与 `:911`、`pipeline/translation.py:896`），**其中包含用户导入字幕的候选 QA**（`source_selection.py:104`），而用户字幕上一句「ご視聴ありがとうございました」是完全合法的内容，不该被任何启发式碰。**不做自动裁剪**：裁剪会改变 cue 数量与时间轴（约束 1），且在 n=1、0 负样本的证据下，误删合法结尾的代价远高于漏报一条幻觉。
+
+  **已做（2026-10-18，前置条件 1 的前提）**：前置条件 1 要收集样本，而当时**那条最干净的信号在事后根本看不到**——`segment.py:296` 的 `words = [word for word in words if word.end_ms > word.start_ms]` 把零时长尾词**静默丢弃**，`source-cues.json` 里不留任何痕迹（`words.json` 虽然还留着原始词，但没有任何东西指出那里有异常，采样的人不知道该去看）。现已补上留痕：`segment_transcript` 在丢弃**尾部**零时长词时，往末条 cue 的 `warnings` 追加一条以 `TRAILING_ZERO_DURATION_WARNING_PREFIX`（`"dropped zero-duration trailing ASR words before segmentation"`）开头的记录，带词数、首尾毫秒、最大 probability 与被丢弃的文本。它**只是证据，不是门**：`check_subtitles` 不读它（与同文件的 `OVERLAP_SHIFT_WARNING` / `MINIMUM_DURATION_WARNING` 同属纯留痕），QA 结论一字不变——用真实素材回放核对过，52 条 cue 除新增的这一条 warning 外与已登记的 `source-cues.json` **逐字相同**，QA 仍是 `pass` / 零 issue。详见 CHANGELOG 的 Added 条目。
 - **P9 ASR 漏掉开头 6s 旁白。** 复现确认是**模型召回问题，不是 XVT 的缺陷**（同一段音频换参数仍漏）。登记在此只因为它直接导致了 P4：源时间轴缺头，导入译文就对不上。无修复动作，供排查 P4 时参照。
 
 ## 2026-10-18 烧录派生指纹与源媒体缺失导航（B 系列，与上面的 F/O/P 编号无关）
