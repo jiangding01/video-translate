@@ -137,16 +137,34 @@
 
 分类是 `manual_fix` 而不是 `awaiting_input`：这不是「等一份可回填的输入」，而且 `batch` 把 `manual_fix` 归入「绝不自动推进」并记 `failed`，`batch-continue` 因此不再每轮重撞同一个失败（此前这类条目是 `retryable`）。
 
-两条出口都实测走得通，但不等价：
+三条出口都实测走得通，但不等价（顺序即推荐位顺序：首选 + 两条 `alternative_commands`）：
 
 - **首选 `xvt import-translation JOB TRANSLATED_SUBTITLE --target-language LANG`。** 导入一份对齐当前源 cue 的译文后 Job 走到 `completed`、`verify` 全项 PASS；而且 `add_artifact` 按 kind 去重，这一次导入会**顶掉**那份错位的 `input_translation_subtitles` 登记——死局本身被拆掉。字幕路径是占位符：哪一份译文对齐了新时间轴只有用户知道，导航不猜（与 `relink-source-media` 的 `NEW_MEDIA_PATH` 同款写法）。
-- **备选 `xvt translate JOB --target-language LANG --provider <持久化 provider>`。** 同样能走到 `completed`，但它**只是绕过**：错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，再跑一次 `rebuild-source` 会在同一处复发。`reason` 里必须讲明这一点（openai-compatible 模式下它还是真实 API 成本）。
+- **备选一 `xvt drop-imported-translation JOB`。** 不打算再用这份译文时的诚实出口：两处来源一起清、带完整失效闭包，随后 `continue` 走常规重新翻译。它不需要目标语言，因此在 `alternative_commands` 里不受 `target_language` 守卫约束。详见下一节。
+- **备选二 `xvt translate JOB --target-language LANG --provider <持久化 provider>`。** 同样能走到 `completed`，但它**只是绕过**：错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，再跑一次 `rebuild-source` 会在同一处复发（上面那条命令存在的理由）。`reason` 里必须讲明这一点（openai-compatible 模式下它还是真实 API 成本）。
 
 `continue` 在这个状态下必然再次失败，**任何推荐位都不放**。`xvt resegment-translation` 也不是出口：它换的是源 cue 的切分，解决不了「这份译文对不上」；持久化了 `workflow.translation_subtitles` 的 Job 上它还有一道配置级闸门（`resegment.py`），恒以退出码 2 拒绝。
 
 `continue` 抛出的异常类型刻意保持 `ValueError`（今天这条路径就是 `map_subtitle_translations` 的 `ValueError` 一路冒到 CLI，退出码 2），提前失败只是把同一句话说得更清楚，不顺手改调用方看得见的异常契约。`rebuild-source` 收尾同样复用 `build_recovery_plan` 的命令，不在调用点自己拼：重建完成后当场告诉用户这条路已经断了，别让他们再跑一次注定失败的 `continue` 才发现。
 
-**显式放弃这份导入译文**（双源同时清、带 `downstream_of(INPUT_TRANSLATION_SUBTITLES)` 失效闭包的 `drop-imported-translation`）不在本轮范围内；本节只做「让状态能解释自己 + 给出已存在的出口」。
+### 第三条出口：显式放弃这份导入译文
+
+`xvt drop-imported-translation JOB`（advanced）是「不再用这份译文」的出口，排在 `alternative_commands` 的**第一位**（整轮重译退到第二位）。它不新增能力，是把一条既有的**隐式旁路**诚实化：今天直接跑原子 `xvt translate` 也能走到 `completed`——那条命令不看导入分支、直接改写 `translated_cues`，之后 `_ensure_translation` 在导入分支**之前**就按译文有效满足返回——但错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，实测再跑一次 `rebuild-source` 原地复发同一个死循环，而且 Job 的持久化目标仍写着「用导入译文」，解释不了自己的产物从哪来。
+
+两条纪律，缺一条这条命令就是空话：
+
+- **双源同时清。** 只摘 artifact 登记不行：`_ensure_translation` 的 `retained_translation or config.translation_subtitles` 会从持久化目标把它捡回来。只清 config 也不行：`plan_advance_steps` 会改口说 `translate`（那一步只看 `config.translation_subtitles`），而执行侧仍旧重新套用 Job 内那份副本。
+- **必须带失效闭包。** 健康导入 Job 上只摘登记的话，`translated_cues` 仍然 checksum 有效，`_ensure_translation` 更早的一道早退直接判满足，产物**仍然来自被放弃的译文**——drop 等于没做。照 `resegment` 的纪律：`downstream_of(INPUT_TRANSLATION_SUBTITLES)`（21 个 kind）+ 这条登记自身 + stage 复位（`translate` / `subtitle_qa` / `render` / `burn` / `media_qa`）+ `clear_burn_fingerprint`。
+
+刻意**不**并入 `translation_candidate_qa` 与 `translation_review_revision`（`resegment` 把它们显式并入）：那里的理由是重分段丢弃了 cue id、报告永久作废，而这里源 cue 一个字节都没动。两者都以内容 checksum 绑定在被放弃的那份候选上（`candidate_qa.translation_candidate_qa_issues` 比对 `candidate_cues_checksum`，`semantic_state.human_revision_scope` 先要求 `translation_reviewed_cues` 仍是当前候选），候选失效后它们自行判否；读它们的两条恢复分支又都在 `await_translation_review` 之内，而那个等待步骤要求候选有效。候选 QA 报告会在下一次候选产生时按原路径重写。
+
+其余刻意边界：
+
+- **保留文件，不删字节。** 导入译文是 `shutil.copy2` 进 Job 的副本（`artifacts/input-translation.srt`），摘登记不丢数据；用户原始文件更不碰。留痕按约束 7 走两层：每个被失效的 artifact 一条 `artifact_invalidated`，外加一条 `translation_import_dropped` 记下 kind、被放弃副本的路径与内容 checksum、被清掉的 `translation_subtitles` 与失效 kind 清单。路径进事件不违反约束 5（禁的是凭据与内容，路径不是），文本仍走 `create_event` 的统一脱敏。
+- **两处来源都没有时以退出码 2 拒绝**，不静默成功：这条命令的全部作用就是移除某样东西，没得移时报成功会让用户以为自己改对了 Job。代价如实记：它因此**不是幂等的**，连跑两次第二次失败。
+- **原子 Job（无 `config.workflow`）支持**，那里只有 artifact 一个来源，之后用 `xvt translate` 重新翻译。drop 之后 `revision.source_review_supported` 与 `resegment` 的「config 或 artifact」双源闸门会从拒绝**翻转成放行**——这是正确的（Job 确实不再复用任何导入译文），语义由 `tests/test_drop_imported_translation.py` 钉住。重分段在译文重新产出之前仍会以「缺 `translated_cues`」拒绝，只是拒绝的理由换成了真正的那一个。
+- **放弃不等于完成。** 命令收尾复用 `build_recovery_plan` 打印下一步（不在调用点自己拼命令）：`--provider auto` 且当前终端没有 API 配置时，随后的 `continue` 会落到 Agent 模式停在 `awaiting_input`，输出必须让用户看出「下一步是重新翻译」而不是「已经好了」。
+- **覆盖保护集随之收缩。** `paths.py` 的 `_user_input_paths` 把 `config.workflow.translation_subtitles` 算作受保护的用户原始输入；清掉它之后那份文件退出保护集，Job 内那份副本也因为不再登记而退出 artifact 保护。这是正确的——Job 确实不再把它们当输入——但如实记下来：此后 `burn` / `preview` 的 `--output` 指向那两个路径不会再被拦住。`job.input` 与 `config["subtitles"]` 的保护不受影响。
 
 ## 翻译提供方身份的固化
 

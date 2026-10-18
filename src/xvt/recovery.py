@@ -1448,6 +1448,10 @@ def _pending_translation_import_manual_fix(
     - 首选 ``import-translation``：导入一份对齐当前源 cue 的译文后 Job 走到
       ``completed``，而且 ``add_artifact`` 按 kind 去重，这一次导入会**顶掉**那份
       错位的 ``input_translation_subtitles`` 登记——死局本身被拆掉。
+    - 备选 ``drop-imported-translation``：用户不打算再用这份译文时的**诚实**出口。
+      它把两处来源一起清掉（Job 内副本的登记 + 持久化目标里的
+      ``translation_subtitles``，文件都保留）并带走整个失效闭包，随后 ``continue``
+      按常规路径重新翻译。排在整轮重译之前，因为它拆掉了复发的地雷。
     - 备选整轮重译：同样能走到 ``completed``，但它**只是绕过**。错位的
       ``input_translation_subtitles`` 与 ``config.workflow.translation_subtitles``
       原样留着，再跑一次 ``rebuild-source`` 会在同一处复发，所以代价必须讲明。
@@ -1466,7 +1470,8 @@ def _pending_translation_import_manual_fix(
     # 两者都必须带 --target-language，少了它推荐出去就是一条跑不通的命令。
     target_language = workflow.target_language
     primary: str | None = None
-    alternatives: tuple[str, ...] = ()
+    # 放弃这份译文不需要知道目标语言，所以它不在下面的 target_language 守卫里。
+    alternatives: tuple[str, ...] = (_job_command("drop-imported-translation", job_file),)
     if target_language:
         primary = _job_command(
             "import-translation",
@@ -1476,6 +1481,7 @@ def _pending_translation_import_manual_fix(
             shlex.quote(target_language),
         )
         alternatives = (
+            *alternatives,
             _job_command(
                 "translate",
                 job_file,
@@ -1490,9 +1496,10 @@ def _pending_translation_import_manual_fix(
         f"{diagnosis}"
         "导入一份对齐当前源 cue 时间轴的译文字幕即可继续，"
         "这次导入会按 kind 顶掉 Job 里那份错位的导入译文登记，死局随之拆除。"
-        "备选的整轮重译也能跑完，但它只是绕过：错位的导入译文副本与持久化目标里的"
-        " translation_subtitles 原样留着，下一次 rebuild-source 会在同一处复发"
-        "（openai-compatible 模式下它还是真实 API 成本）。",
+        "不打算再用这份译文时，drop-imported-translation 会同时清掉 Job 内副本的登记与"
+        "持久化目标里的 translation_subtitles（两份文件都保留），之后由 continue 重新翻译。"
+        "直接整轮重译也能跑完，但它只是绕过：两处来源原样留着，下一次 rebuild-source "
+        "会在同一处复发（openai-compatible 模式下它还是真实 API 成本）。",
         primary_command=primary,
         alternative_commands=alternatives,
         advance_steps=steps,

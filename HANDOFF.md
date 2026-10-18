@@ -2,6 +2,22 @@
 
 更新时间：2026-10-18
 
+2026-10-18 **P4 阶段 3：`xvt drop-imported-translation`——显式放弃导入译文，P4 三阶段至此全部完成**（分支 `codex/drop-imported-translation`，未合并、未开 PR）。
+
+**它不是新能力，是把一条既有的隐式旁路诚实化。** 今天「放弃导入译文」唯一的办法是跑原子 `xvt translate`：那条命令不看导入分支、直接改写 `translated_cues`，之后 `_ensure_translation` 在导入分支**之前**就按译文有效满足返回，实测能走到 `completed`。但那只是绕过——错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，**实测再跑一次 `rebuild-source` 原地复发同一个死循环**，而且 Job 的持久化目标仍写着「用导入译文」，解释不了自己的产物从哪来。
+
+**两条纪律，缺一条这个命令就是空话。** ①**双源同时清**：只摘 artifact 登记会被 `_ensure_translation` 的 `retained_translation or config.translation_subtitles` 从持久化目标捡回来；只清 config 则 `plan_advance_steps` 改口说 `translate`（那一步只看 `config.translation_subtitles`）而执行侧仍旧套用 Job 内副本。②**必须带失效闭包**：健康导入 Job 上只摘登记的话 `translated_cues` 仍 checksum 有效，`_ensure_translation` 更早的一道早退直接判满足，产物还是来自被放弃的译文。闭包照 `resegment` 的纪律：`downstream_of(INPUT_TRANSLATION_SUBTITLES)`（实跑 21 个 kind）+ 这条登记自身 + 五个 stage 复位 + `clear_burn_fingerprint`。
+
+**刻意不并入 `translation_candidate_qa` / `translation_review_revision`**（`resegment` 把它们显式并入）：那里的理由是重分段丢弃了 cue id、报告永久作废；这里源 cue 一个字节没动，两者都以内容 checksum 绑定在被放弃的候选上（`candidate_qa_issues` 比 `candidate_cues_checksum`，`human_revision_scope` 先要求 `translation_reviewed_cues` 仍是当前候选），候选失效后自行判否，而读它们的两条恢复分支都在 `await_translation_review` 之内、该等待步骤要求候选有效。
+
+**四个判断题的结论**：①没有导入译文的 Job 上**拒绝**（退出码 2），代价是不幂等、连跑两次第二次失败——但这个命令的全部作用就是移除某样东西，报成功会让用户以为改对了 Job。②`workflow=None` 的原子导入 Job **支持**（那里只有 artifact 一源），drop 之后 `revision.source_review_supported` 与 `resegment` 的双源闸门从拒绝翻转成放行，这是正确的，语义已由测试钉住。③输出明说「放弃不等于完成」，收尾复用 `build_recovery_plan` 打印下一步，不在调用点自己拼命令；`--provider auto` 缺 API 配置时随后的 `continue` 停在 Agent 等待。④**进 `alternative_commands` 的第一位**，整轮重译退到第二位：drop 拆掉复发地雷而重译只是绕过，把后者放进导航却不给前者就是把那条「只是绕过」的话说完又不给解法。
+
+**已知代价（如实记）**：清掉 `config.workflow.translation_subtitles` 之后，那份用户原始译文文件退出 `paths.py` 的烧录/预览覆盖保护集，Job 内副本也因不再登记而退出 artifact 保护。这是正确的（Job 确实不再把它们当输入），但此后 `burn` / `preview` 的 `--output` 指向那两个路径不会被拦住；`job.input` 与 `config["subtitles"]` 的保护不受影响。
+
+测试 1006 → 1015（新增 9 条，全部在新文件 `tests/test_drop_imported_translation.py`；子测试 263 不变），**既有断言零改动**，协议快照零 diff。其中三条是本阶段的硬要求：①**端到端自证**（真实 CLI 造 P4 状态 → drop → 断言两处来源都清了、下游都失效了 → 打桩 provider 后 `continue` 走到 `completed`、`verify` 全 PASS）；②**「drop 不是空话」守卫**（健康导入 Job 上 drop 之后 `translated_cues` 必须失效、`continue` 不得直接判满足完成，而是落到 Agent 等待）；③**与旁路的对照**（同一套真实 CLI 跑两遍：原子 `translate` 绕过后再 `rebuild-source` 一次回到 `manual_fix`，drop 之后同样的第二遍是可推进的 `retryable`——这条把「只是绕过 vs 真的拆掉」钉成了可执行断言，也是文档里那句「实测复发」的出处）。
+
+**遗留**：无阻塞项。新命令未进 `xvt apply` 的路由表（它不收响应文件，与 `import-translation` 同理不纳入统一回填路由）。
+
 2026-10-18 **P4 阶段 2：`status` 正在推荐一条必然失败的命令——已修**（分支 `codex/import-translation-recovery-exit`，未合并、未开 PR）。真实复现：媒体 Job 导入译文 → `rebuild-source --strategy asr` 之后，`status --json` 给 `category=retryable` / `advance_steps=["import_translation"]` / `primary_command=xvt continue …` / `alternative_commands=[]`，而那条 `continue` 逐字输出「任务失败：translated cue 1 has insufficient source timeline overlap」，紧跟着的恢复建议又是同一条 `continue`，退出码 2；连跑两次 stderr 逐字相同，`diff -r` 整个 Job 目录只有 `.xvt.lock` 的 PID 变了。**导航零变化，用户没有出口**——本仓库第 7 次同类缺陷。
 
 **只改 `continue` 的错误处理无效**：`recovery` 严格只读、从 artifact + config 纯推导，不感知运行期异常；而这条失败发生在 `set_stage(RUNNING)` **之前**，Job 一个字节都不改，下次 `status` 照旧给同样的结论。判定因此进了 `build_recovery_plan`，范式照搬 [强制对齐置信度不足的死循环出口](docs/RECOVERY.md#强制对齐置信度不足的死循环出口)。
@@ -16,7 +32,7 @@
 
 **中途打红 9 条既有测试，全部回退了自己的改动而不是改断言**：8 条是我在 `cli.py` 里新加的 helper 与既有 `_print_recovery_navigation` **同名**（后定义的覆盖前者），改为给既有那份加两个带默认值的方言参数；1 条是 `tests/test_rebuild_source.py::test_continue_refuses_retained_translation_that_misses_the_rebuilt_timeline` 断言 `ValueError`，我原本抛了 `UserInputError`——改回 `ValueError`（那本来就是这条路径今天的异常契约，退出码不变）。
 
-**遗留（阶段 3，未做）**：`xvt drop-imported-translation`（显式放弃、双源同时清、带 `downstream_of(INPUT_TRANSLATION_SUBTITLES)` 失效闭包）仍待立项——本阶段刻意不新增 CLI 命令，只做「让状态能解释自己 + 给出已经存在的出口」。
+~~**遗留（阶段 3，未做）**：`xvt drop-imported-translation`……~~ 已由下面最上方的阶段 3 做掉。
 
 2026-10-18 **P4 阶段 1：等长盲映射会把错位译文静默烧进成品——已修**（分支 `codex/strict-order-overlap-guard`，未合并、未开 PR）。`translate.map_subtitle_translations` 在「源 cue 数 == 译文 cue 数」时按顺序硬配、一次重叠都不量，还把 `confidence` 写死 `1.0`。这不只是预检函数：`pipeline/translation.apply_subtitle_translation` 用的就是它，映射结果直接落盘成译文；而译文**文本**错位不触碰时间轴、文本完整性、显示宽度任何一项确定性 QA，一路进 `bilingual.srt` 并烧进成品。**P4 的不等长路径是吵闹的失败，等长路径是安静的错误**，后者危险得多。
 

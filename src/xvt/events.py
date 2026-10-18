@@ -67,6 +67,7 @@ class EventType(StrEnum):
     TRANSLATION_FALLBACK = "translation_fallback"
     TRANSLATION_PROGRESS_RESET = "translation_progress_reset"
     TRANSLATION_RESEGMENTED = "translation_resegmented"
+    TRANSLATION_IMPORT_DROPPED = "translation_import_dropped"
     TRANSLATION_BATCH_STARTED = "translation_batch_started"
     TRANSLATION_BATCH_RETRYING = "translation_batch_retrying"
     TRANSLATION_BATCH_COMPLETED = "translation_batch_completed"

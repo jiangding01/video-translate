@@ -95,6 +95,14 @@ Before starting, run `uv run --no-sync xvt doctor`. Use `uv run --no-sync xvt ..
 
    This deliberately keeps the source cue timing and uses only the imported translated text. Different cue counts are accepted only when timeline overlap completely covers the source cues. Report mapping failures and the `translation-mapping.json` artifact instead of hand-editing a guessed mapping.
 
+   After `rebuild-source --strategy asr` the stored translation may no longer map onto the new timeline; `status` then reports `manual_fix` with three exits. Follow its ordering: import a translation aligned to the current source cues (preferred), or, when the user no longer wants that translation at all, run
+
+   ```bash
+   uv run --no-sync xvt drop-imported-translation "/path/to/job.json"
+   ```
+
+   That clears both sources (the in-Job copy's registration and the persisted `translation_subtitles`), invalidates every downstream artifact, and keeps both files on disk; the Job is **not** finished afterwards — `continue` re-translates from scratch and may stop at an Agent wait. Do not reach for a plain `xvt translate` round to "drop" it: that only bypasses the problem and the same dead end returns after the next `rebuild-source`.
+
    To polish an existing checksum-valid translation on an end-to-end Job, run:
 
    ```bash
