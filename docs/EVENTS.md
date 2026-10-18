@@ -312,6 +312,21 @@ yt-dlp 下载进度（`download.py`）。
 | `resegmented_cue_count` | int | 重新分段后 cue 数量 |
 | `report_path` | string | 重分段报告路径 |
 
+### `translation_import_dropped`
+
+`xvt drop-imported-translation` 显式放弃导入译文时发出，紧跟在被失效 artifact 的 `artifact_invalidated` 之后。只记录「放弃了哪一份」，不删除任何文件。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `job_id` | string | Job ID |
+| `job_file` | string | Job 文件路径 |
+| `kind` | string | 被放弃的 artifact kind，恒为 `input_translation_subtitles` |
+| `path` | string? | Job 内被放弃副本的路径；该登记原本就不存在时为 `null`（文件保留在原处） |
+| `checksum` | string? | 该副本此刻的内容 SHA-256；文件已不在时为 `null` |
+| `registered_checksum` | string? | Job 原先登记的 checksum；与上一字段不等即说明文件在登记后被改过 |
+| `translation_subtitles` | string? | 被清掉的 `config.workflow.translation_subtitles`；原本为空或原子 Job 时为 `null` |
+| `invalidated_kinds` | string[] | 本次移出登记的全部 artifact kind（已排序） |
+
 ### `translation_batch_started`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |

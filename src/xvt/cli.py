@@ -47,6 +47,7 @@ from xvt.pipeline import (
     burn_translated_job,
     complete_acknowledged_semantic_review,
     cue_retranslation_waiting,
+    drop_imported_translation,
     inspect_input,
     interrupt_running_stage,
     pending_translation_import_blocker,
@@ -415,6 +416,13 @@ def build_parser() -> argparse.ArgumentParser:
     import_translation_parser.add_argument("subtitle_file")
     import_translation_parser.add_argument("--target-language", required=True)
     import_translation_parser.add_argument("--events-jsonl", action="store_true")
+
+    drop_imported_translation_parser = subparsers.add_parser(
+        "drop-imported-translation",
+        help="[advanced] Abandon the imported translation and return to provider translation",
+    )
+    drop_imported_translation_parser.add_argument("job_file")
+    drop_imported_translation_parser.add_argument("--events-jsonl", action="store_true")
 
     translate_parser = subparsers.add_parser(
         "translate",
@@ -1764,6 +1772,38 @@ def _cmd_import_translation(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_drop_imported_translation(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = drop_imported_translation(arguments.job_file, event_sink=event_sink)
+    if arguments.events_jsonl:
+        # 本命令只移除登记与持久化目标，不产出任何文件；被放弃的来源与失效清单都
+        # 已经由 artifact_invalidated / translation_import_dropped 带出。
+        _complete(
+            arguments,
+            job_file=str(Path(arguments.job_file).expanduser().resolve()),
+            artifacts=[],
+        )
+        return 0
+    if result.retained_path is not None:
+        _print_safe(f"已放弃 Job 内的导入译文副本: {result.retained_path}（文件保留在原处）")
+    if result.translation_subtitles:
+        _print_safe(f"已清除持久化目标中的译文字幕: {result.translation_subtitles}")
+    # 计数说「移出登记」而不是「失效产物」：这一项里也含被放弃的导入译文本身，
+    # 而且文件一个字节都没删，说成「失效 N 项产物」既重复了上面那行又讲重了。
+    _print_safe(
+        f"已移出 {len(result.invalidated_kinds)} 项 artifact 登记"
+        "（含被放弃的导入译文本身）。Job 尚未完成：译文需要重新产出。"
+    )
+    # 「放弃」不等于「完成」：下一步是重新翻译，`--provider auto` 缺 API 配置时会停在
+    # Agent 等待。导航一律由 build_recovery_plan 单点拼装，不在这里自己拼命令。
+    _print_recovery_navigation(
+        arguments.job_file,
+        labels=_ZH_RECOVERY_LABELS,
+        reason_prefix="下一步：",
+    )
+    return 0
+
+
 def _cmd_translate(arguments: argparse.Namespace) -> int:
     event_sink = _event_sink(arguments)
     result = run_translation(
@@ -2374,6 +2414,7 @@ _COMMAND_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "prepare-translation": _cmd_prepare_translation,
     "apply-translation": _cmd_apply_translation,
     "import-translation": _cmd_import_translation,
+    "drop-imported-translation": _cmd_drop_imported_translation,
     "translate": _cmd_translate,
     "polish-translation": _cmd_polish_translation,
     "apply-polish-translation": _cmd_apply_polish_translation,
@@ -2420,6 +2461,7 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "prepare-translation",
         "apply-translation",
         "import-translation",
+        "drop-imported-translation",
         "retranslate-cues",
         "apply-cue-retranslation",
         "resegment-translation",

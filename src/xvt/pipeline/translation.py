@@ -1555,3 +1555,147 @@ def apply_subtitle_translation(
     return finalize_translation(
         job, translated, event_sink, invalidate=invalidate_rendered_artifacts
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DroppedTranslationImport:
+    """``drop_imported_translation`` 的结果：被放弃的两个来源与被失效的产物。"""
+
+    retained_path: Path | None
+    retained_checksum: str | None
+    registered_checksum: str | None
+    translation_subtitles: str | None
+    invalidated_kinds: tuple[str, ...]
+
+
+# 放弃导入译文时要一并移出登记的 artifact：依赖图里 input_translation_subtitles 的
+# 全部下游（21 个 kind：translation_mapping / translated_cues / translated_srt /
+# bilingual_* / 整条 polished 与语义链路 / preview_* / burned_video / media_qa /
+# burn_fingerprint），外加这条登记自身。
+#
+# 刻意**不**并入 `translation_candidate_qa` 与 `translation_review_revision`
+# （`resegment` 把它们显式并入，那里的理由是重分段丢弃了 cue id，报告永久作废）：
+# 这里源 cue 一个字节都没动，两者都以内容 checksum 绑定在被放弃的那份候选上
+# （`candidate_qa.translation_candidate_qa_issues` 比 `candidate_cues_checksum`，
+# `semantic_state.human_revision_scope` 先要求 `translation_reviewed_cues` 仍是
+# 当前候选），候选失效后它们自行判否；读它们的两条恢复分支又都在
+# `await_translation_review` 之内，而那个等待步骤要求候选有效。报告文件会在下一次
+# 候选产生时按原路径重写。
+_DROPPED_TRANSLATION_IMPORT_KINDS = downstream_of(ArtifactKind.INPUT_TRANSLATION_SUBTITLES) | {
+    ArtifactKind.INPUT_TRANSLATION_SUBTITLES
+}
+
+
+def drop_imported_translation(
+    job_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> DroppedTranslationImport:
+    """显式放弃导入译文，让 Job 回到「用翻译提供方重新翻译」的常规路径。
+
+    **这不是新能力，是把一条既有的隐式旁路诚实化。** 今天用户也能在导入译文 Job 上
+    直接跑原子 ``xvt translate``：它不看导入分支、直接改写 ``translated_cues``，之后
+    ``_ensure_translation`` 在导入分支**之前**就按译文有效满足返回，Job 照样走到
+    ``completed``。但那只是绕过——错位的 ``input_translation_subtitles`` 与
+    ``config.workflow.translation_subtitles`` 原样留着，再跑一次 ``rebuild-source``
+    会在同一处复发同一个死循环，而且 Job 的持久化目标仍写着「用导入译文」，解释不了
+    自己当前的产物从哪来。
+
+    两条纪律，缺一条这个命令就是空话：
+
+    - **双源同时清。** 只摘 artifact 登记不行：``_ensure_translation`` 的
+      ``retained_translation or config.translation_subtitles`` 会从持久化目标里把它
+      捡回来。只清 config 也不行：``plan_advance_steps`` 会改口说 ``translate``，而
+      执行侧仍旧重新套用 Job 内那份副本。
+    - **必须带失效闭包。** 健康导入 Job 上只摘登记的话，``translated_cues`` 仍然
+      checksum 有效，``_ensure_translation`` 更早的一道早退直接判满足，产物仍然来自
+      被放弃的译文。照 ``resegment`` 的纪律：失效闭包 + stage 复位 +
+      ``clear_burn_fingerprint``。
+
+    **保留文件，不删字节**：导入的译文是 ``shutil.copy2`` 进 Job 的副本，摘登记不丢
+    数据；用户原始文件更不碰。被放弃的 kind、路径与内容 checksum 进 JSONL 事件
+    （约束 7 的留痕；路径不是凭据，不违反约束 5）。
+
+    原子 Job（没有 ``config.workflow``）同样支持：那里只有 artifact 一个来源。drop
+    之后 ``revision`` / ``resegment`` 的「config 或 artifact」双源守卫会从拒绝翻转成
+    支持，这是正确的——Job 确实不再复用任何导入译文了。
+
+    两个来源都没有时以 ``UserInputError``（退出码 2）拒绝，而不是静默成功：这个命令
+    的全部作用就是移除某样东西，没得移时报成功会让用户以为自己改对了 Job。
+    """
+
+    job = load_job(job_file)
+    workflow = get_workflow_config(job)
+    # 登记存在即可，不要求 checksum 有效：失效的登记同样会让 plan/执行侧分叉，
+    # 而且它正是 `_ensure_translation` 回落到 config 那一支的原因。
+    registered = next(
+        (item for item in job.artifacts if item.kind == "input_translation_subtitles"),
+        None,
+    )
+    configured = workflow.translation_subtitles if workflow is not None else None
+    if registered is None and not configured:
+        raise UserInputError(
+            "job has no imported translation to drop: neither an input_translation_subtitles "
+            "artifact nor a persisted workflow translation_subtitles path"
+        )
+
+    retained_path = Path(registered.path) if registered is not None else None
+    retained_checksum = (
+        checksum(retained_path) if retained_path is not None and retained_path.is_file() else None
+    )
+    invalidated = [
+        artifact for artifact in job.artifacts if artifact.kind in _DROPPED_TRANSLATION_IMPORT_KINDS
+    ]
+    job.artifacts = [
+        artifact
+        for artifact in job.artifacts
+        if artifact.kind not in _DROPPED_TRANSLATION_IMPORT_KINDS
+    ]
+    if workflow is not None and configured:
+        set_workflow_config(job, replace(workflow, translation_subtitles=None))
+    # 指纹的 artifact 登记已被上面的闭包带走，这一步还要清历史 workflow 键。
+    clear_burn_fingerprint(job)
+    for stage in (
+        StageName.TRANSLATE,
+        StageName.SUBTITLE_QA,
+        StageName.RENDER,
+        StageName.BURN,
+        StageName.MEDIA_QA,
+    ):
+        record = job.stages[stage]
+        record.status = StageStatus.PENDING
+        record.started_at = None
+        record.completed_at = None
+        record.error = None
+    save_job(job)
+
+    result = DroppedTranslationImport(
+        retained_path=retained_path,
+        retained_checksum=retained_checksum,
+        registered_checksum=registered.checksum if registered is not None else None,
+        translation_subtitles=configured,
+        invalidated_kinds=tuple(sorted({artifact.kind for artifact in invalidated})),
+    )
+    if event_sink:
+        for artifact in invalidated:
+            event_sink(
+                create_event(
+                    EventType.ARTIFACT_INVALIDATED,
+                    **job_event_fields(job.id, get_job_file(job)),
+                    kind=artifact.kind,
+                    path=artifact.path,
+                )
+            )
+        event_sink(
+            create_event(
+                EventType.TRANSLATION_IMPORT_DROPPED,
+                **job_event_fields(job.id, get_job_file(job)),
+                kind=ArtifactKind.INPUT_TRANSLATION_SUBTITLES.value,
+                path=str(retained_path) if retained_path is not None else None,
+                checksum=retained_checksum,
+                registered_checksum=result.registered_checksum,
+                translation_subtitles=configured,
+                invalidated_kinds=list(result.invalidated_kinds),
+            )
+        )
+    return result

@@ -363,6 +363,26 @@ xvt import-translation JOB_FILE SUBTITLE_FILE --target-language LANG [--events-j
 </details>
 
 <details>
+<summary><code>xvt drop-imported-translation</code>：放弃导入译文，回到重新翻译（advanced）</summary>
+
+```text
+xvt drop-imported-translation JOB_FILE [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--events-jsonl`。
+- 用途：Job 的译文来自 `--translation-subtitles` / `import-translation`，而你决定**不再使用这份译文**（例如 `rebuild-source --strategy asr` 换掉源时间轴之后它已经套不回去）时，用这条命令显式放弃它。此前只能跑原子 `xvt translate` 绕过去：那样能产出新译文，但错位的导入译文副本与持久化目标里的 `translation_subtitles` 原样留着，下一次 `rebuild-source` 会在同一处复发同一个死循环，Job 的持久化目标也仍写着「用导入译文」。
+- 同时清两处来源，缺一不可：移除 `input_translation_subtitles` 的 artifact 登记，并清掉 `config.workflow.translation_subtitles`。只清一处时，工作流会从另一处把它捡回来。
+- 带失效闭包：按 artifact 依赖图失效 `input_translation_subtitles` 的全部下游（`translation_mapping`、`translated_cues`、`translated_srt`、`bilingual_*`、整条润色与语义链路、`preview_*`、`burned_video`、`media_qa`、`burn_fingerprint` 等 21 个 kind），复位 `translate` / `subtitle_qa` / `render` / `burn` / `media_qa` 五个 stage 并清除烧录派生指纹。不带闭包的话译文仍然 checksum 有效，`continue` 会直接判已完成，产物依旧来自被放弃的那份译文。
+- **保留文件，不删字节**：Job 内的副本（`artifacts/input-translation.srt`）与用户原始译文文件都留在原处，只是不再被 Job 登记或引用。被放弃的 kind、路径与内容 checksum 会写进 `artifact_invalidated` 与 `translation_import_dropped` 事件。
+- **放弃不等于完成**：命令结束后译文需要重新产出，输出里直接给出下一步。`--provider auto` 且当前终端没有 API 配置时，随后的 `continue` 会停在 Agent 等待（`awaiting_input`），按提示回填即可。
+- 原子 Job（没有 `config.workflow`）同样支持，那里只有 artifact 一个来源；之后用 `xvt translate` 重新翻译。放弃之后 `prepare-source-review` 与 `resegment-translation` 的「正在复用导入译文」闸门随之解除。
+- 两处来源都不存在时以退出码 2 拒绝，不会静默成功。
+- 覆盖保护的影响：清掉 `config.workflow.translation_subtitles` 之后，那份用户原始译文文件不再属于烧录/预览的覆盖保护集（Job 确实已经不再把它当输入）。仍需要保护时，不要把 `--output` 指向它。
+
+</details>
+
+<details>
 <summary><code>xvt translate</code>：原子翻译入口</summary>
 
 ```text
