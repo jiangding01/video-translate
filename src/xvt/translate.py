@@ -997,6 +997,25 @@ def apply_polish_translations(
     ]
 
 
+def _timeline_overlap_ratio(source: Cue, translated: Cue) -> float:
+    """译文 cue 落在源 cue 时间轴内的比例。
+
+    两条映射分支共用这一份度量，口径必须一致：分母是译文 cue 自身时长，所以
+    「译文完全被源 cue 覆盖」得 1.0。``load_subtitles`` 拒绝 ``end <= start``，
+    零时长只可能来自直接构造 cue 的调用方；按不可破坏约束 4 的「测量异常回退
+    保守规则」记 0.0，而不是伪造一个满分或抛 ``ZeroDivisionError``。
+    """
+
+    duration = translated.end_ms - translated.start_ms
+    if duration <= 0:
+        return 0.0
+    overlap = max(
+        0,
+        min(source.end_ms, translated.end_ms) - max(source.start_ms, translated.start_ms),
+    )
+    return overlap / duration
+
+
 def map_subtitle_translations(
     source_cues: list[Cue],
     translated_cues: list[Cue],
@@ -1006,18 +1025,22 @@ def map_subtitle_translations(
     if not source_cues or not translated_cues:
         raise ValueError("source and translated subtitles must contain cues")
     if len(source_cues) == len(translated_cues):
-        translations = {
-            source.id: translated.target_text or ""
-            for source, translated in zip(source_cues, translated_cues, strict=True)
-        }
+        pairs = list(zip(source_cues, translated_cues, strict=True))
+        translations = {source.id: translated.target_text or "" for source, translated in pairs}
+        # 这条分支按顺序硬配，不校验时间轴，所以 confidence 必须如实报告实测重叠：
+        # 写死 1.0 会把「一次都没量过」记成「量过且完全吻合」，而
+        # translation-mapping.json 是 checksum 保护的恢复证据。
+        overlap_scores = [
+            _timeline_overlap_ratio(source, translated) for source, translated in pairs
+        ]
         return translations, {
             "method": "strict_order",
-            "confidence": 1.0,
+            "confidence": sum(overlap_scores) / len(overlap_scores),
             "source_cues": len(source_cues),
             "translated_cues": len(translated_cues),
             "assignments": [
                 {"source_id": source.id, "translated_ids": [translated.id]}
-                for source, translated in zip(source_cues, translated_cues, strict=True)
+                for source, translated in pairs
             ],
         }
 
@@ -1025,17 +1048,12 @@ def map_subtitle_translations(
     overlap_scores = []
     for translated in translated_cues:
         best_source = None
-        best_overlap = 0
+        overlap_ratio = 0.0
         for source in source_cues:
-            overlap = max(
-                0,
-                min(source.end_ms, translated.end_ms) - max(source.start_ms, translated.start_ms),
-            )
-            if overlap > best_overlap:
+            ratio = _timeline_overlap_ratio(source, translated)
+            if ratio > overlap_ratio:
                 best_source = source
-                best_overlap = overlap
-        duration = translated.end_ms - translated.start_ms
-        overlap_ratio = best_overlap / duration
+                overlap_ratio = ratio
         if best_source is None or overlap_ratio < minimum_overlap:
             raise ValueError(
                 f"translated cue {translated.id} has insufficient source timeline overlap"

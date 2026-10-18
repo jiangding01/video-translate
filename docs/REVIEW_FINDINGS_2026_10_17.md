@@ -322,6 +322,10 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 **本轮刻意未修，写清现象与理由**：
 
 - **P4 `rebuild-source` 之后导入译文无法重映射，`continue` 死循环。** ASR 重建的新时间轴与导入译文的旧时间轴覆盖范围不同（本例由 P9 直接导致：ASR 漏掉开头 6s 旁白，重建后的时间轴少了那一段），译文回填找不到对应 cue，`continue` 每次都在同一步失败。**需要设计**：可行出口是换一份对齐新时间轴的译文或重跑 `translate`，但「什么条件下允许放弃导入译文」「放弃时如何不悄悄丢用户的译文」要先拍板，超出一轮修复的范围。它与 P3 同属「导航没有出口」，但 P3 能靠 Job 状态判定必然失败，P4 不能。
+
+  **阶段 1 已修（2026-10-18）：映射报告不再虚报 confidence。** 排查 P4 时发现同一个函数上还有一个**更危险的反面**：cue 数**不**相等时报错死循环固然难受，但 cue 数**恰好相等**时 `map_subtitle_translations` 走的是按顺序硬配的 `strict_order` 分支，**一次时间轴重叠都不量**，`confidence` 写死 `1.0`。这不是预检专用函数——`pipeline/translation.py` 的 `apply_subtitle_translation` 用的就是它，映射结果直接落盘成译文；而译文**文本**错位不触碰时间轴、文本完整性、显示宽度任何一项确定性 QA，一路进 `bilingual.srt` 并烧进成品。即「P4 的不等长路径是吵闹的失败，等长路径是安静的错误」。现已抽出 `_timeline_overlap_ratio` 作为两条分支共用的唯一度量，等长分支按实测重叠取平均（对齐 1.0 / 时移 300ms 得 0.7 / 完全错位得 0.0）。
+
+  **阶段 1 刻意没做：等长分支要不要真的拒收。** 取证结论是无条件收紧**必然**打红 `tests/test_translate.py::TranslateTest::test_maps_equal_cue_counts_by_order`（源 0–3000ms vs 译文 9000–12000ms）与 `tests/test_pipeline_translation.py::TranslationPipelineTest::test_existing_translation_uses_source_timeline`（源 1000–2000ms vs 译文 0–500ms）：两例的时间轴与源 cue **完全不相交**，重叠是 0 而不是「低于 0.5」，任何基于重叠的闸门都够不着它们。全量 992 条测试里只有这两条依赖宽松行为（插桩跑全量枚举，其余 18 次等长映射重叠全部充足），且两条都不是「等长但整体时移」这个真正值得担心的误伤形态——那个形态在仓库里**零测试覆盖**。收紧还会改掉 README:857 与 `skills/video-translate/SKILL.md:96` 的书面契约，且在不新增参数时没有逃生舱。决策与范围见 `HANDOFF.md`。
 - **P5 同一阶段先打 `[完成]` 再打 `[失败]`。—— ○ 已实测复现，确认是纯显示问题，已修（2026-10-18）。**
   **「纯显示」这次不是读代码的推断**：用真实命令（两个 `.srt`，第二个带 `overlap`）跑 `xvt batch`，
   人读输出里确实先后出现 `[完成] 检查字幕` 与 `[失败] 检查字幕`；同一时刻两个 `job.json` 的记账**都是对的**
