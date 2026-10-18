@@ -131,7 +131,7 @@ xvt batch-continue BATCH.json
 <summary><code>xvt run</code>：创建 Job 并执行端到端工作流</summary>
 
 ```text
-xvt run INPUT --output DIR [源字幕参数] [翻译参数] [烧录参数]
+xvt run INPUT --output DIR [源字幕参数] [翻译参数] [烧录参数] [--fail-on-waiting]
 ```
 
 - 位置参数：`input`，本地视频、音频、字幕文件或远程 URL。
@@ -140,7 +140,7 @@ xvt run INPUT --output DIR [源字幕参数] [翻译参数] [烧录参数]
 - YouTube 访问：`--youtube-subtitles`、`--subtitle-language`、`--allow-auto-subtitles`、`--cookies-from-browser`、`--proxy`。
 - 翻译：`--translation-subtitles`、`--target-language`、`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
 - 烧录与输出：`--burn`、`--burn-media`、`--burn-output`、`--software`、`--target-font`、`--source-font`、`--events-jsonl`。
-- 停在等待态时的退出码：默认 0（`awaiting_input` 是 Agent 协议的正常步骤，这是承诺不是疏漏）。需要脚本区分「完成」与「等待回填」时加 `--fail-on-waiting`，等待态返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job / batch 状态与事件流完全不变。
+- 退出码：`--fail-on-waiting`。停在等待态时默认返回 0（`awaiting_input` 是 Agent 协议的正常步骤，这是承诺不是疏漏）；需要脚本区分「完成」与「等待回填」时加上它，等待态返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job / batch 状态与事件流完全不变。
 
 </details>
 
@@ -163,14 +163,14 @@ xvt status JOB_FILE [--json]
 ```text
 xvt continue JOB_FILE [--cookies-from-browser BROWSER] [--proxy URL]
   [--acknowledge-subtitle-review] [--acknowledge-translation-review]
-  [--events-jsonl]
+  [--events-jsonl] [--fail-on-waiting]
 ```
 
 - 位置参数：`job_file`。
 - 远程重试：`--cookies-from-browser`、`--proxy`。
 - 人工确认：`--acknowledge-subtitle-review` 只确认当前 `needs_review` 字幕 QA；`--acknowledge-translation-review` 只确认当前译文语义报告。两者都不能绕过 error 级确定性 QA。
 - 事件：`--events-jsonl`。
-- 停在等待态时的退出码：默认 0（`awaiting_input` 是 Agent 协议的正常步骤，这是承诺不是疏漏）。需要脚本区分「完成」与「等待回填」时加 `--fail-on-waiting`，等待态返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job / batch 状态与事件流完全不变。
+- 退出码：`--fail-on-waiting`。停在等待态时默认返回 0（`awaiting_input` 是 Agent 协议的正常步骤，这是承诺不是疏漏）；需要脚本区分「完成」与「等待回填」时加上它，等待态返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job / batch 状态与事件流完全不变。
 
 </details>
 
@@ -184,7 +184,7 @@ xvt apply JOB_FILE RESPONSE_FILE [--check | --continue] [--events-jsonl] [--fail
 - 位置参数：`job_file`、`response_file`。
 - `--check` 仅预检人工译文 JSON/SRT，不保存、不调用模型；有效返回 0，无效返回 2，不能与 `--continue` 合用。
 - 可选参数：`--continue` 在回填成功后继续同一端到端工作流；`--events-jsonl` 输出纯 JSONL 事件。源文修订会失效译文及下游产物，因此不接受 `--continue`。
-- 停在等待态时的退出码：默认 0。加 `--fail-on-waiting` 后，`--continue` 的续跑停在 `awaiting_input` 时返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job 状态与事件流完全不变。不加 `--continue` 时该旗标没有作用——单纯的回填不会停在等待态。
+- 退出码：`--fail-on-waiting`。停在等待态时默认返回 0；加上它之后，`--continue` 的续跑停在 `awaiting_input` 时返回退出码 10；旗标只改退出码，不发 `cli_failed`，Job 状态与事件流完全不变。不加 `--continue` 时该旗标没有作用——单纯的回填不会停在等待态。
 - 仅用于有持久化工作流目标且能从响应或等待状态确定路由的 Job；无法安全判断时会报错而不会猜测。
 
 </details>
@@ -194,6 +194,7 @@ xvt apply JOB_FILE RESPONSE_FILE [--check | --continue] [--events-jsonl] [--fail
 
 ```text
 xvt batch INPUT_DIRECTORY --output DIR [--recursive] [转写/翻译/烧录参数]
+  [--fail-on-waiting]
 ```
 
 - 位置参数：`input_directory`；必填参数：`--output`。
@@ -201,7 +202,7 @@ xvt batch INPUT_DIRECTORY --output DIR [--recursive] [转写/翻译/烧录参数
 - 转写：`--engine`、`--language`、`--source-strategy`、`--segmentation-preset`。
 - 翻译：`--target-language`、`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
 - 烧录与输出：`--burn`、`--software`、`--target-font`、`--source-font`、`--events-jsonl`。
-- 停在等待态时的退出码：默认 0。加 `--fail-on-waiting` 后，「无失败条目、有等待条目」返回退出码 10；有失败条目仍返回 6（**6 优先于 10**，失败压过等待）。
+- 退出码：`--fail-on-waiting`。停在等待态时默认返回 0；加上它之后，「无失败条目、有等待条目」返回退出码 10；有失败条目仍返回 6（**6 优先于 10**，失败压过等待）。
 
 </details>
 
@@ -209,14 +210,14 @@ xvt batch INPUT_DIRECTORY --output DIR [--recursive] [转写/翻译/烧录参数
 <summary><code>xvt batch-continue</code>：继续已有批处理</summary>
 
 ```text
-xvt batch-continue BATCH_FILE [--events-jsonl]
+xvt batch-continue BATCH_FILE [--events-jsonl] [--fail-on-waiting]
 ```
 
 - 位置参数：`batch_file`。
 - 可选参数：`--events-jsonl`。遇到 `awaiting_input` 会停止该项，不会自动重烧可能已移动、替换的烧录成品，也不会把「等待 Agent 回填」的条目记为已完成；等待项包括 Agent 翻译/润色/语义校对回填、人工译文确认、烧录成品重新关联，以及局部重译（`retranslate-cues`）回填。先按 Job 的 `status` 处理。
 - 已完成条目的**中间**产物（`normalized_audio`、`word_transcript`、批次 manifest 等）失效不再改写成失败：条目仍是 `completed`，只在 `item["verification"]` 与 `batch_item_completed` 事件里标注 `degraded` 并列出失效 kind，需要逐项审计时运行 `xvt verify JOB`。交付物失效不适用此放行——缺烧录成品仍停在 relink 引导，缺 `bilingual.ass` 或 `source.srt` 会落到 `continue` 重建（前者由 `render` 零 API 成本重新渲染，后者由 `resume` 重建）。
 - 普通模式（不加 `--events-jsonl`）会在汇总行之后逐条打印需要处理的条目：状态、`job.json` 路径、恢复建议与可复制的下一步命令（最多展开 10 条，其余提示改用 `--events-jsonl` 看全量）。所有打进终端的人读行都会转义控制字符（`\r`、ESC 等显示为 `\r` / `\x1b`，中文等正常 Unicode 不变），避免扫描到的文件名、远端视频标题或错误消息覆盖已打印的行、清屏并伪造出一条 `next:` 命令；这是全 CLI 的统一行为，不限于批处理条目导航。反过来，**stdout 上的纯产物路径清单不转义**——那是给 `xargs` / 管道消费的契约，转义会改掉真实路径；`--events-jsonl` 的事件流同样保留原文。
-- 停在等待态时的退出码：默认 0。加 `--fail-on-waiting` 后，「无失败条目、有等待条目」返回退出码 10；有失败条目仍返回 6（**6 优先于 10**，失败压过等待）。
+- 退出码：`--fail-on-waiting`。停在等待态时默认返回 0；加上它之后，「无失败条目、有等待条目」返回退出码 10；有失败条目仍返回 6（**6 优先于 10**，失败压过等待）。
 
 </details>
 
