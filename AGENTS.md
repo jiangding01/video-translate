@@ -39,7 +39,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |
 | `src/xvt/media.py` | ffprobe 媒体检查 |
 | `src/xvt/transcribe.py` | MLX Whisper 和 faster-whisper 适配 |
-| `src/xvt/segment.py` | 词级时间戳到字幕 cue 的分段 |
+| `src/xvt/segment.py` | 词级时间戳到字幕 cue 的分段；禁則処理（行首行尾禁则）的**唯一**谓词 `forbidden_break`——cue 边界有三个产出点（主循环的句末/停顿/超时切、`_soft_cut`、`_partition_words` 的宽度切），三处都走它，新增切分出口必须接入 |
 | `src/xvt/subtitles.py` | 字幕解析、规范化和 SRT 输出 |
 | `src/xvt/align.py` | 源字幕与 ASR 的顺序模糊对齐 |
 | `src/xvt/translate.py` | 翻译批次、响应校验和译文回填 |

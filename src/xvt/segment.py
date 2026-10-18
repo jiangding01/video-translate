@@ -8,6 +8,46 @@ from xvt.qa import display_width, display_width_limit
 
 SENTENCE_END = frozenset(".?!。？！…")
 SOFT_BREAK = frozenset(",;:，；：、")
+# 禁則処理 (kinsoku shori) — 哪里**不许**切，与上面三组「哪里适合切」正交。
+#
+# 字符类取自 JIS X 4051 / W3C JLREQ 的行頭禁則 cl-02..cl-11（闭合括号、连字符、
+# 分隔标点、中点、句号、逗号、叠字记号、长音符、小字假名）与行末禁則 cl-01（起始
+# 括号），并与 Unicode UAX #14 的 CL / CP / EX / IS / NS / CJ / OP 类对齐；中文侧
+# 按 GB/T 15834 的行首行尾禁则补齐全角标点与货币前缀。CSS Text 3 的
+# ``line-break: strict`` 把 CJ（小字假名与长音符 U+30FC）解析为 NS，字幕行短，这里
+# 取 strict 一档。
+#
+# **刻意不含全角假名**：`ん`（U+3093）的 Line_Break 是 ID，JLREQ 的行頭禁則里也
+# 没有它——「ど|んなに」这类切点是**词法**问题，不是禁则问题，这组集合挡不住，
+# 不要往里加（见 docs/REVIEW_FINDINGS_2026_10_17.md 的 P7）。
+#
+# ASCII 直引号 `'` `"` 开闭同形，无法判定方向，两组都不收。
+NO_LINE_START = frozenset(
+    # cl-02 闭合括号 / UAX#14 CL, CP
+    "）］｝〕〉》」』】〙〗〟｠»’”)]}"
+    # cl-03 连字符 / UAX#14 NS, BA
+    "‐–—〜～゠"
+    # cl-04 分隔标点 / UAX#14 EX
+    "！？!?‼⁇⁈⁉"
+    # cl-05 中点与冒号分号 / UAX#14 NS, IS
+    "・･·：；:;∶"
+    # cl-06 句号 / cl-07 逗号 / UAX#14 CL, IS，以及 UAX#14 IN 的省略号
+    "。．、，.,…‥〃〆"
+    # cl-09 叠字记号 / UAX#14 NS
+    "々〻ゝゞヽヾ"
+    # cl-10 长音符 + cl-11 小字假名 / UAX#14 CJ（strict 档解析为 NS）
+    "ーぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶ"
+    "ㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ"
+    # GB/T 15834 行首禁则补充
+    "％‰℃°"
+)
+NO_LINE_END = frozenset(
+    # cl-01 起始括号 / UAX#14 OP
+    "（［｛〔〈《「『【〘〖〝｟«‘“([{"
+    # GB/T 15834 行尾禁则：货币前缀 / UAX#14 PR
+    "＄￡￥$£¥"
+)
+
 BREAK_BEFORE = frozenset(
     {
         "and",
@@ -72,17 +112,48 @@ def _to_cue(words: list[Word], language: str) -> Cue:
     )
 
 
+# 禁則違反のコスト。``_break_penalty`` 的返回值会乘以 ``max_width``，普通罚分
+# 最大是 4，所以 64 让任何一个禁则违反都压过现实 cue 里的宽度失衡总和。
+# 刻意用**罚分**而不是硬禁：一整行全是禁则字符（例如连续的长音符）时仍然切得
+# 动，不会死循环也不会返回空——兜底由结构保证，不靠额外分支。
+KINSOKU_BREAK_PENALTY = 64
+
+
+def forbidden_break(previous: Word, following: Word) -> bool:
+    """Would a line break between these two ASR words violate 禁則処理?
+
+    这是全仓关于「哪里**不许**切」的唯一判定。cue 边界有**三个**产出点——
+    ``segment_transcript`` 主循环的句末/停顿/超时切、``_soft_cut`` 的标点让位切、
+    ``_partition_words`` 的宽度切——三处都走这一个谓词，不要在调用点另造一份
+    字符比较，否则规则只盖住一部分出口，比没有更糟。
+    """
+
+    tail = previous.text.rstrip()
+    head = following.text.lstrip()
+    if head and head[0] in NO_LINE_START:
+        return True
+    return bool(tail) and tail[-1] in NO_LINE_END
+
+
 def _soft_cut(words: list[Word]) -> int | None:
     for index in range(len(words) - 2, 0, -1):
         text = words[index].text.strip()
-        if text and (text[0] in SOFT_BREAK or text[-1] in SOFT_BREAK):
-            return index + 1
+        if not text or not (text[0] in SOFT_BREAK or text[-1] in SOFT_BREAK):
+            continue
+        if forbidden_break(words[index], words[index + 1]):
+            continue
+        return index + 1
     return None
 
 
 def _break_penalty(words: list[Word], index: int) -> int:
     previous = words[index - 1].text.rstrip()
     following = _normalize_token(words[index])
+    # 禁則判定排在最前：下面三条问的是「这里适不适合切」，而禁則问的是
+    # 「这里许不许切」。例如上一个词以 ``、`` 收尾（本来是 penalty 1）而下一个
+    # 词以 ``」`` 开头时，仍然不许在这里断行。
+    if forbidden_break(words[index - 1], words[index]):
+        return KINSOKU_BREAK_PENALTY
     if previous and previous[-1] in SENTENCE_END:
         return 0
     if previous and previous[-1] in SOFT_BREAK:
@@ -359,6 +430,12 @@ def segment_transcript(
                 continue
 
         if sentence_ended or paused or too_long or next_word is None:
+            # 禁則処理: 句末、停顿和超时都只是「该切了」的信号，不是「这里许切」。
+            # 下一个词以禁则字符开头（最常见的是 ``。``+``」``）或当前词以起始
+            # 括号收尾时，推迟一个词再切——``index`` 每轮都前进，所以最坏情况是
+            # 把剩下的词并成一条 cue 交给宽度切分，不会卡住。
+            if next_word is not None and forbidden_break(word, next_word):
+                continue
             _append_cues(cues, current, transcript.language, max_width)
             current = []
 

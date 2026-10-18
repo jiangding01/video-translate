@@ -66,7 +66,7 @@ flowchart LR
 | `job_store.py` / `models.py` | 任务模型、原子持久化、schema 和 checksum |
 | `download.py` / `media.py` | yt-dlp 获取、ffprobe 媒体检查 |
 | `transcribe.py` | MLX Whisper、faster-whisper 引擎适配；后端缺失时的引擎回退与 `transcription_fallback` 留痕 |
-| `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠；提供可持久化的 ASR 分段预设 |
+| `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠；禁則処理（行首行尾禁则）的唯一谓词 `forbidden_break`；提供可持久化的 ASR 分段预设 |
 | `subtitles.py` / `align.py` | 字幕读写（SRT/VTT 导出保留字面 `{}`）和已有字幕到 ASR 的顺序模糊对齐 |
 | `translate.py` / `translation_provider.py` | 确定性语义组、结构化术语表和翻译风格、按完整组装箱的翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填；默认 API 批次 25 个 cue、请求超时 180 秒 |
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
@@ -165,6 +165,7 @@ Job 登记表是产物有效性的唯一依据，**不要按固定文件名取�
 ## 时间轴策略
 
 - ASR 请求词级时间戳，segmenter 才能依据停顿、标点和显示宽度切分。`conservative`、`balanced`、`compact` 只分别调整停顿和最大时长阈值；默认 `balanced` 保持既有结果。超宽片段会先满足硬显示宽度，再优先在句末、软标点、连接词或介词前的词级边界切开；切分发生在翻译前，译文按新的 cue ID 一一生成。若最终译文仍超过硬限制，可显式执行 `resegment-translation`，旧译文不复用，必须对新 cue ID 重新翻译。
+- 与「哪里**适合**切」正交的是**禁則処理**（行首行尾禁则）：`forbidden_break` 是全仓关于「哪里**不许**切」的唯一谓词，字符类取自 JIS X 4051 / JLREQ 行頭禁則 cl-02..cl-11 与行末禁則 cl-01，并与 Unicode UAX #14 的 CL / CP / EX / IS / NS / CJ / OP 对齐，中文侧按 GB/T 15834 补齐；小字假名与长音符按 CSS Text 3 的 `line-break: strict` 取严。cue 边界有**三个**产出点——主循环的句末/停顿/超时切、`_soft_cut` 的标点让位切、`_partition_words` 的宽度切——三处都走这一个谓词，新增切分出口必须接入，规则只盖住一部分出口比没有更糟。它以**罚分**（`KINSOKU_BREAK_PENALTY`）而非硬禁实现，整行全是禁则字符时仍然切得动。它只管排版禁则，**挡不住词法边界**（`科学|的` 这类要靠分词器，结论见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 P7）。
 - cue 的结束时间来自最后一个词，并添加受控尾部 padding。
 - 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。ASR 分段与字幕对齐共用 `segment.normalize_cue_boundaries`：默认按中点切开；中点无法给两条 cue 都留出正时长（严重重叠、完全嵌套、词时间戳回退）时把后一条推到前一条结束处（QA 的重叠判定为严格小于，边界相接合法），仍不足则补足 1ms 最小时长；尾部收口的 `min(padded_end, next_start, media_duration_ms)` 同样钳制回正时长。受影响 cue 记录 `warnings`，归一后以单调性自检 fail loudly，不把零/负时长时间轴交给 QA 变成误导性的 `invalid_timestamp`。对齐输出 cue 不与输入 cue 共享 `warnings` 列表。`warnings` 还承载一条**纯证据**记录：ASR 分段丢弃尾部非正时长词（`end_ms <= start_ms`，Whisper 偶发的解码器产物）时，末条 cue 追加一条以 `segment.TRAILING_ZERO_DURATION_WARNING_PREFIX` 开头的 warning，带词数、首尾毫秒、最大 probability 与被丢弃的文本。它**不参与任何 QA 判定**（`check_subtitles` 不读它，与上面两条边界 warning 同属留痕），只为「Whisper 尾部幻觉」这个待决策项留下可采样的证据，见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 P8。
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
