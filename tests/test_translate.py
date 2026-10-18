@@ -823,6 +823,57 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual(report["method"], "strict_order")
         self.assertEqual(report["confidence"], 1.0)
 
+    def test_required_overlap_rejects_misaligned_equal_count_mapping(self) -> None:
+        """重新套用已存副本时，等长不再能替代时间轴对应关系。
+
+        默认宽松是在兑现用户「这份译文对应当前这套源 cue」的主张；没有人为当前
+        这套源 cue 做过该主张时（``require_timeline_overlap=True``），等长只是巧合。
+        """
+
+        translated = [
+            Cue(1, 9000, 10000, "", target_text="一"),
+            Cue(2, 10000, 11000, "", target_text="二"),
+            Cue(3, 11000, 12000, "", target_text="三"),
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError, "does not line up with the current source timeline"
+        ):
+            map_subtitle_translations(self.cues, translated, require_timeline_overlap=True)
+
+    def test_required_overlap_accepts_aligned_equal_count_mapping(self) -> None:
+        """反向守卫：已存副本仍落在当前源时间轴上时照常映射。"""
+
+        translated = [
+            Cue(1, 0, 1000, "", target_text="一"),
+            Cue(2, 1000, 2000, "", target_text="二"),
+            Cue(3, 2000, 3000, "", target_text="三"),
+        ]
+
+        translations, report = map_subtitle_translations(
+            self.cues, translated, require_timeline_overlap=True
+        )
+
+        self.assertEqual(translations, {1: "一", 2: "二", 3: "三"})
+        self.assertEqual(report["method"], "strict_order")
+        self.assertEqual(report["confidence"], 1.0)
+
+    def test_required_overlap_tolerates_a_whole_timeline_shift(self) -> None:
+        """整体时移但仍压在源 cue 上的已存副本不被误伤：判据是重叠，不是严丝合缝。"""
+
+        translated = [
+            Cue(1, 300, 1300, "", target_text="一"),
+            Cue(2, 1300, 2300, "", target_text="二"),
+            Cue(3, 2300, 3300, "", target_text="三"),
+        ]
+
+        translations, report = map_subtitle_translations(
+            self.cues, translated, require_timeline_overlap=True
+        )
+
+        self.assertEqual(translations, {1: "一", 2: "二", 3: "三"})
+        self.assertAlmostEqual(report["confidence"], 0.7)
+
     def test_maps_multiple_translated_cues_by_timeline_overlap(self) -> None:
         source = [Cue(1, 0, 2000, "One")]
         translated = [

@@ -1488,7 +1488,15 @@ def apply_subtitle_translation(
     *,
     target_language: str,
     event_sink: EventSink | None = None,
+    require_timeline_overlap: bool = False,
 ) -> tuple[Path, ...]:
+    """把一份译文字幕回填到 Job 上。
+
+    ``require_timeline_overlap`` 原样透传给 ``map_subtitle_translations``：只有
+    「重新套用 Job 内早先存下的副本」的调用方传 ``True``，用户此刻显式交出字幕的
+    路径（``xvt import-translation`` / ``run --translation-subtitles``）保持默认宽松。
+    """
+
     job = load_job(job_file)
     workflow = get_workflow_config(job)
     quality = resolve_translation_quality(job)
@@ -1511,7 +1519,11 @@ def apply_subtitle_translation(
         role="translated",
         target_language=target_language,
     )
-    translations, mapping_report = map_subtitle_translations(source_cues, translated_cues)
+    translations, mapping_report = map_subtitle_translations(
+        source_cues,
+        translated_cues,
+        require_timeline_overlap=require_timeline_overlap,
+    )
     translated = apply_translations(
         source_cues,
         translations,
