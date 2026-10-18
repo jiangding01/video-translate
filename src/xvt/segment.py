@@ -215,6 +215,47 @@ MINIMUM_CUE_DURATION_MS = 1
 
 OVERLAP_SHIFT_WARNING = "shifted cue start past the previous cue to resolve a degenerate overlap"
 MINIMUM_DURATION_WARNING = "extended cue end to keep a positive duration"
+# 解码器偶尔在音频末尾吐出一个 ``start_ms == end_ms`` 的词（2026-10-17 的真实素材里，
+# 515 个词里恰好一个，就是那条「ご視聴ありがとうございました」尾部幻觉的后半截）。
+# ``segment_transcript`` 必须丢掉它（零时长词无法构成 cue），但丢得无声无息，
+# 事后没有任何产物说明它存在过。这条 warning 只是**留痕**：它不参与任何 QA 判定
+# （``qa.check_subtitles`` 不读它，与 ``OVERLAP_SHIFT_WARNING`` /
+# ``MINIMUM_DURATION_WARNING`` 同属纯证据），目的是让后续采样的人能从
+# ``source-cues.json`` 直接捞出这种样本，再回 ``words.json`` 看词级证据。
+TRAILING_ZERO_DURATION_WARNING_PREFIX = (
+    "dropped zero-duration trailing ASR words before segmentation"
+)
+_TRAILING_ZERO_DURATION_TEXT_LIMIT = 80
+
+
+def _trailing_zero_duration_words(words: list[Word]) -> list[Word]:
+    """Return the maximal suffix of ``words`` that :func:`segment_transcript` drops.
+
+    判据与那条过滤器互为取反（``end_ms <= start_ms``），所以**时间戳回退的词**
+    （``end_ms < start_ms``，词级时间戳没有在任何地方被钳过）也算在内；警告文本
+    同时打出首尾毫秒，读的人不必靠措辞判断是零时长还是回退。
+    刻意只看**尾部**：转写中段的零时长词是另一回事（成因与量级都不同），
+    这里不替它表态。
+    """
+
+    index = len(words)
+    while index and words[index - 1].end_ms <= words[index - 1].start_ms:
+        index -= 1
+    return words[index:]
+
+
+def _trailing_zero_duration_warning(dropped: list[Word]) -> str:
+    text = "".join(word.text for word in dropped).strip()
+    if len(text) > _TRAILING_ZERO_DURATION_TEXT_LIMIT:
+        text = text[: _TRAILING_ZERO_DURATION_TEXT_LIMIT - 1] + "…"
+    probabilities = [word.probability for word in dropped if word.probability is not None]
+    probability = f"{max(probabilities):.3f}" if probabilities else "unknown"
+    noun = "word" if len(dropped) == 1 else "words"
+    return (
+        f"{TRAILING_ZERO_DURATION_WARNING_PREFIX}: {len(dropped)} {noun} "
+        f"spanning {dropped[0].start_ms}\u2192{dropped[-1].end_ms}ms, "
+        f"max probability {probability}, text {text!r}"
+    )
 
 
 def _append_warning(cue: Cue, message: str) -> None:
@@ -293,6 +334,7 @@ def segment_transcript(
 ) -> list[Cue]:
     words = [word for word in transcript.words if word.text.strip()]
     words, tail_trimmed = _trim_trailing_hallucination(words, config)
+    dropped_tail = _trailing_zero_duration_words(words)
     words = [word for word in words if word.end_ms > word.start_ms]
     if not words:
         return []
@@ -325,4 +367,6 @@ def segment_transcript(
         cue.id = cue_id
     if tail_trimmed:
         cues[-1].warnings.append("trimmed trailing repeated ASR output with unreliable timestamps")
+    if dropped_tail:
+        _append_warning(cues[-1], _trailing_zero_duration_warning(dropped_tail))
     return cues

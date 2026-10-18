@@ -4,9 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from xvt.models import Transcript, Word
+from xvt.models import Cue, Transcript, Word
 from xvt.qa import check_subtitles
-from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
+from xvt.segment import (
+    TRAILING_ZERO_DURATION_WARNING_PREFIX,
+    SegmentationConfig,
+    segment_transcript,
+    segmentation_config_for_preset,
+)
 from xvt.transcribe import (
     TranscriptionError,
     transcribe_audio,
@@ -317,6 +322,121 @@ class TranscriptionTest(unittest.TestCase):
             "trimmed trailing repeated ASR output with unreliable timestamps",
             cues[0].warnings,
         )
+
+    def _tail_hallucination_transcript(self, *, include_zero_duration_tail: bool) -> Transcript:
+        """The 2026-10-17 real sample: a zero-duration trailing word after real speech."""
+
+        words = [
+            Word("ご", 242020, 242280, 0.75830078125),
+            Word("視", 242280, 243800, 0.978515625),
+            Word("聴", 243800, 245140, 1.0),
+        ]
+        if include_zero_duration_tail:
+            words.append(Word("ありがとうございました", 245140, 245140, 0.9990234375))
+        return Transcript(language="ja", engine="mlx", words=tuple(words))
+
+    def test_records_dropped_zero_duration_trailing_word(self) -> None:
+        cues = segment_transcript(
+            self._tail_hallucination_transcript(include_zero_duration_tail=True),
+            media_duration_ms=245180,
+        )
+        control = segment_transcript(
+            self._tail_hallucination_transcript(include_zero_duration_tail=False),
+            media_duration_ms=245180,
+        )
+
+        # 约束 1：留痕不得改变 cue 数量、ID、时间轴或文本。
+        self.assertEqual(
+            [(cue.id, cue.start_ms, cue.end_ms, cue.source_text) for cue in cues],
+            [(cue.id, cue.start_ms, cue.end_ms, cue.source_text) for cue in control],
+        )
+        self.assertEqual(control[-1].warnings, [])
+
+        traces = [
+            warning
+            for warning in cues[-1].warnings
+            if warning.startswith(TRAILING_ZERO_DURATION_WARNING_PREFIX)
+        ]
+        self.assertEqual(len(traces), 1, cues[-1].warnings)
+        self.assertIn("245140", traces[0])
+        self.assertIn("ありがとうございました", traces[0])
+        self.assertIn("0.999", traces[0])
+
+    def test_does_not_record_zero_duration_words_inside_the_transcript(self) -> None:
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(
+                Word("Hello", 0, 400, 0.9),
+                Word(" there", 400, 400, 0.99),
+                Word(" world.", 400, 900, 0.9),
+            ),
+        )
+
+        cues = segment_transcript(transcript)
+
+        self.assertEqual([cue.source_text for cue in cues], ["Hello world."])
+        self.assertEqual(
+            [
+                warning
+                for cue in cues
+                for warning in cue.warnings
+                if warning.startswith(TRAILING_ZERO_DURATION_WARNING_PREFIX)
+            ],
+            [],
+        )
+
+    def test_dropped_tail_word_trace_does_not_change_subtitle_qa(self) -> None:
+        cues = segment_transcript(
+            self._tail_hallucination_transcript(include_zero_duration_tail=True),
+            media_duration_ms=245180,
+        )
+        self.assertTrue(
+            any(
+                warning.startswith(TRAILING_ZERO_DURATION_WARNING_PREFIX)
+                for warning in cues[-1].warnings
+            )
+        )
+
+        traced = check_subtitles(cues)
+        for cue in cues:
+            cue.warnings = [
+                warning
+                for warning in cue.warnings
+                if not warning.startswith(TRAILING_ZERO_DURATION_WARNING_PREFIX)
+            ]
+        untraced = check_subtitles(cues)
+
+        self.assertEqual(traced.status, untraced.status)
+        self.assertEqual(traced.issues, untraced.issues)
+        self.assertEqual(traced.status, "pass")
+        self.assertEqual(traced.issues, ())
+
+    def test_imported_subtitle_cues_are_not_flagged_by_the_tail_trace(self) -> None:
+        """用户导入字幕以口头致谢收尾是合法内容，留痕既不产生也不被 QA 读到。"""
+
+        imported = [
+            Cue(
+                id=1,
+                start_ms=0,
+                end_ms=2000,
+                source_text="ご視聴ありがとうございました",
+                source_language="ja",
+                provenance="user",
+                timing_confidence=1.0,
+            )
+        ]
+        baseline = check_subtitles(imported)
+
+        imported[0].warnings.append(
+            f"{TRAILING_ZERO_DURATION_WARNING_PREFIX}: 1 word at 0ms, "
+            "max probability 0.999, text 'ありがとうございました'"
+        )
+        traced = check_subtitles(imported)
+
+        self.assertEqual(baseline.status, "pass")
+        self.assertEqual(traced.status, baseline.status)
+        self.assertEqual(traced.issues, baseline.issues)
 
     def test_clamps_tail_padding_to_media_duration(self) -> None:
         transcript = Transcript(

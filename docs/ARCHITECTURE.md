@@ -166,7 +166,7 @@ Job 登记表是产物有效性的唯一依据，**不要按固定文件名取�
 
 - ASR 请求词级时间戳，segmenter 才能依据停顿、标点和显示宽度切分。`conservative`、`balanced`、`compact` 只分别调整停顿和最大时长阈值；默认 `balanced` 保持既有结果。超宽片段会先满足硬显示宽度，再优先在句末、软标点、连接词或介词前的词级边界切开；切分发生在翻译前，译文按新的 cue ID 一一生成。若最终译文仍超过硬限制，可显式执行 `resegment-translation`，旧译文不复用，必须对新 cue ID 重新翻译。
 - cue 的结束时间来自最后一个词，并添加受控尾部 padding。
-- 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。ASR 分段与字幕对齐共用 `segment.normalize_cue_boundaries`：默认按中点切开；中点无法给两条 cue 都留出正时长（严重重叠、完全嵌套、词时间戳回退）时把后一条推到前一条结束处（QA 的重叠判定为严格小于，边界相接合法），仍不足则补足 1ms 最小时长；尾部收口的 `min(padded_end, next_start, media_duration_ms)` 同样钳制回正时长。受影响 cue 记录 `warnings`，归一后以单调性自检 fail loudly，不把零/负时长时间轴交给 QA 变成误导性的 `invalid_timestamp`。对齐输出 cue 不与输入 cue 共享 `warnings` 列表。
+- 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。ASR 分段与字幕对齐共用 `segment.normalize_cue_boundaries`：默认按中点切开；中点无法给两条 cue 都留出正时长（严重重叠、完全嵌套、词时间戳回退）时把后一条推到前一条结束处（QA 的重叠判定为严格小于，边界相接合法），仍不足则补足 1ms 最小时长；尾部收口的 `min(padded_end, next_start, media_duration_ms)` 同样钳制回正时长。受影响 cue 记录 `warnings`，归一后以单调性自检 fail loudly，不把零/负时长时间轴交给 QA 变成误导性的 `invalid_timestamp`。对齐输出 cue 不与输入 cue 共享 `warnings` 列表。`warnings` 还承载一条**纯证据**记录：ASR 分段丢弃尾部非正时长词（`end_ms <= start_ms`，Whisper 偶发的解码器产物）时，末条 cue 追加一条以 `segment.TRAILING_ZERO_DURATION_WARNING_PREFIX` 开头的 warning，带词数、首尾毫秒、最大 probability 与被丢弃的文本。它**不参与任何 QA 判定**（`check_subtitles` 不读它，与上面两条边界 warning 同属留痕），只为「Whisper 尾部幻觉」这个待决策项留下可采样的证据，见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 P8。
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
 - 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。纯字幕 Job 没有媒体时长或画幅，只跳过这两类媒体相关检查，保留其余时间轴、文本、术语和阅读速度校验。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
 
