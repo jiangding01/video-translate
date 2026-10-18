@@ -77,6 +77,49 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(select_subtitle_language("zh-CN", ("zh-CN", "zh-TW")), "zh-CN")
         self.assertIsNone(select_subtitle_language("ja", ("en", "zh-CN")))
 
+    def test_output_template_escapes_literal_percent_in_the_job_directory(self) -> None:
+        """yt-dlp 会展开 `-o` 值里**目录部分**的模板字段，字面量 `%` 必须写成 `%%`。
+
+        实测（yt-dlp 2026.08.19，离线 `--load-info-json ... --print filename`）：
+        `-o '/Users/x/My %(title)s videos/source.%(ext)s'` 打印
+        `/Users/x/My PWNED TITLE videos/source.mp4`——文件落到 Job 目录之外；
+        `'/Users/x/100%% done/source.%(ext)s'` 打印 `/Users/x/100% done/source.mp4`，
+        转义后回到用户真正的目录名。
+        """
+
+        for name, download in (
+            (
+                "download_remote_subtitles",
+                lambda root, runner: download_remote_subtitles(
+                    "https://youtu.be/abc", root, language="en", runner=runner
+                ),
+            ),
+            (
+                "download_remote_media",
+                lambda root, runner: download_remote_media(
+                    "https://youtu.be/abc", root, audio_only=True, runner=runner
+                ),
+            ),
+        ):
+            with self.subTest(download=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "My %(title)s videos"
+                    root.mkdir()
+                    captured: list[tuple[str, ...]] = []
+
+                    def runner(args, root=root, captured=captured):
+                        captured.append(tuple(args))
+                        (root / "source.en.srt").write_text("subtitle", encoding="utf-8")
+                        (root / "source.m4a").write_bytes(b"audio")
+                        return CommandResult(tuple(args), 0, str(root / "source.m4a"), "")
+
+                    download(root, runner)
+
+                template = captured[0][captured[0].index("-o") + 1]
+                self.assertEqual(template, f"{root}".replace("%", "%%") + "/source.%(ext)s")
+                self.assertIn("%%(title)s", template)
+                self.assertTrue(template.endswith("/source.%(ext)s"))
+
     def test_downloads_remote_subtitles_without_media(self) -> None:
         calls = []
         with tempfile.TemporaryDirectory() as directory:

@@ -27,11 +27,11 @@ from xvt.pipeline import (
     REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
     add_artifact,
     agent_semantic_review_waiting,
-    agent_translation_polish_core_satisfied,
+    agent_translate_and_polish_core_satisfied,
+    agent_translate_and_polish_progress_ready,
+    agent_translate_and_polish_started,
+    agent_translate_and_polish_waiting,
     agent_translation_polish_manifest_valid,
-    agent_translation_polish_progress_ready,
-    agent_translation_polish_started,
-    agent_translation_polish_waiting,
     apply_subtitle_translation,
     artifact_checksum_for,
     burn_translated_job,
@@ -927,7 +927,7 @@ def _translation_satisfied(job: Job, config: WorkflowConfig | None = None) -> bo
     )
     if not standard or config is None or config.translation_quality == "standard":
         return standard
-    polished = translation_polish_satisfied(job) or agent_translation_polish_core_satisfied(job)
+    polished = translation_polish_satisfied(job) or agent_translate_and_polish_core_satisfied(job)
     return polished and semantic_review_satisfied(job)
 
 
@@ -1066,7 +1066,7 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
         if config.translation_quality == "polished":
             polished_ready = translation_polish_satisfied(
                 job
-            ) or agent_translation_polish_core_satisfied(job)
+            ) or agent_translate_and_polish_core_satisfied(job)
             if polished_ready:
                 if agent_semantic_review_waiting(job):
                     return ("await_agent_semantic_review",)
@@ -1079,11 +1079,11 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
                 if goals.needs_burn and not _burn_satisfied(job, config):
                     steps.append("burn")
                 return tuple(steps)
-            if agent_translation_polish_progress_ready(job):
+            if agent_translate_and_polish_progress_ready(job):
                 steps.append("polish")
-            elif agent_translation_polish_waiting(job):
+            elif agent_translate_and_polish_waiting(job):
                 return ("await_agent_translation",)
-            elif draft_path is None and agent_translation_polish_started(job):
+            elif draft_path is None and agent_translate_and_polish_started(job):
                 steps.append("translate")
             if steps:
                 if goals.needs_burn and not _burn_satisfied(job, config):
@@ -1204,11 +1204,11 @@ def _ensure_translation(
     if config.translation_quality == "polished":
         polished_ready = translation_polish_satisfied(
             job
-        ) or agent_translation_polish_core_satisfied(job)
+        ) or agent_translate_and_polish_core_satisfied(job)
         if not polished_ready:
-            if agent_translation_polish_progress_ready(job):
+            if agent_translate_and_polish_progress_ready(job):
                 complete_agent_polished_outputs(path, event_sink=event_sink)
-            elif agent_translation_polish_waiting(job):
+            elif agent_translate_and_polish_waiting(job):
                 return _emit_waiting(
                     job=job,
                     path=path,
@@ -1228,9 +1228,9 @@ def _ensure_translation(
                     )
             else:
                 invalid_agent_manifest = (
-                    agent_translation_polish_started(job)
-                    and not agent_translation_polish_waiting(job)
-                    and not agent_translation_polish_progress_ready(job)
+                    agent_translate_and_polish_started(job)
+                    and not agent_translate_and_polish_waiting(job)
+                    and not agent_translate_and_polish_progress_ready(job)
                 )
                 if (
                     job.stages[StageName.TRANSLATE].status is StageStatus.AWAITING_INPUT

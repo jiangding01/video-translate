@@ -536,7 +536,7 @@ def _require_usable_translation_manifest(job: Job) -> None:
     manifest artifact，回填按无 manifest 处理）；后两种一旦被同样放行，`task` 路由会
     静默退化成标准翻译，并跳过 `_require_manifest_source_cues` 的源 cue 绑定。
 
-    只在回填这一写路径收紧：`agent_translation_polish_waiting` 等只读谓词仍使用不抛
+    只在回填这一写路径收紧：`agent_translate_and_polish_waiting` 等只读谓词仍使用不抛
     异常的 `_translation_manifest`，`status` 不应因 manifest 损坏而失败。
     """
     if not any(item.kind == "translation_batches" for item in job.artifacts):
@@ -689,12 +689,12 @@ def _agent_polish_progress(
         return None
 
 
-def agent_translation_polish_waiting(job: Job) -> bool:
+def agent_translate_and_polish_waiting(job: Job) -> bool:
     manifest = _agent_polished_manifest(job)
     return manifest is not None and _agent_polish_progress(job, manifest) is None
 
 
-def agent_translation_polish_started(job: Job) -> bool:
+def agent_translate_and_polish_started(job: Job) -> bool:
     artifact = next((item for item in job.artifacts if item.kind == "translation_batches"), None)
     data = None
     if artifact is not None:
@@ -715,7 +715,7 @@ def agent_translation_polish_started(job: Job) -> bool:
     )
 
 
-def agent_translation_polish_progress_ready(job: Job) -> bool:
+def agent_translate_and_polish_progress_ready(job: Job) -> bool:
     manifest = _agent_polished_manifest(job)
     return manifest is not None and _agent_polish_progress(job, manifest) is not None
 
@@ -741,7 +741,7 @@ def _agent_polished_cues(job: Job) -> list[Cue]:
     )
 
 
-def agent_translation_polish_core_satisfied(job: Job) -> bool:
+def agent_translate_and_polish_core_satisfied(job: Job) -> bool:
     try:
         expected = _agent_polished_cues(job)
         polished_path = valid_artifact_path(job, "translation_polished_cues")
@@ -767,8 +767,8 @@ def complete_agent_polished_outputs(
     摘记录沿用既有的「按 kind 过滤 ``job.artifacts``」失效机制，不另造写法；只摘这
     一条，**不**用 ``downstream_of(TRANSLATION_DRAFT_CUES)``——那个闭包包含本函数
     刚刚产出的 ``translation_polished_cues``。恢复依据（约束 7）不受影响：planner 的
-    polished 腿对一次成型 Job 走 ``agent_translation_polish_core_satisfied`` /
-    ``agent_translation_polish_started``（两者都只看 manifest 与响应，不看草稿），
+    polished 腿对一次成型 Job 走 ``agent_translate_and_polish_core_satisfied`` /
+    ``agent_translate_and_polish_started``（两者都只看 manifest 与响应，不看草稿），
     ``polish-translation`` 本来就以 ``AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE`` 拒绝这
     类 Job，``translation_progress`` 等 checkpoint 记录原样保留。物理文件（若还在）
     不删，只是不再被登记为本 Job 的产物。
@@ -1415,7 +1415,7 @@ def apply_agent_translation(
         if quality != "polished" or polished_manifest.get("target_language") != target_language:
             raise ValueError("translation response does not match the polished job goal")
         translations = _load_agent_polished_response(response_file, polished_manifest)
-        if agent_translation_polish_core_satisfied(job):
+        if agent_translate_and_polish_core_satisfied(job):
             polished_path = valid_artifact_path(job, "translation_polished_cues")
             assert polished_path is not None
             return (polished_path,)

@@ -110,6 +110,8 @@ stage 状态迁移（`pipeline/common.py`），由 `StageStatus → EventType` �
 | `phase` | string? | 可选业务子阶段：`draft`、`polish`、`semantic_review` 或 `repair` |
 | `error` | object? | 仅 `stage_failed` 且记录了失败信息时存在，`{category, message}` |
 
+`detail` 与 `phase` **实际上只挂在 `stage_started` 上**（`detail` 的全部调用点都是 `StageStatus.RUNNING`；`phase` 另有少量收尾调用点带它，例如一次成型润色的 `stage_completed`）。收尾事件不带 `detail` 是既有行为，本文档不承诺改变它；消费端要把「哪一侧的 QA / 渲染」关联到收尾事件，得自己按 `(job_id, stage)` 记住上一条 `stage_started` 的 `detail`——CLI 的人读输出就是这么做的。
+
 ## artifact 登记
 
 产物登记与失效（`pipeline/common.py` 与各业务子模块）。

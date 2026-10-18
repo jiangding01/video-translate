@@ -833,6 +833,15 @@ class _HumanEventSink(_TrackedEventSink):
         self._last_progress_at: dict[str, float] = {}
         self._pending_skips: list[str] = []
         self._last_failed_stage: str | None = None
+        # `detail` / `phase` 只挂在 RUNNING 事件上（实测 2026-10-18），收尾事件不带，
+        # 于是 `[进行中] 检查源字幕` 会退化成 `[完成] 检查字幕`。这里按 (job_id, stage)
+        # 记住 `[进行中]` 那行用过的限定词，收尾行自己不带时复用它——纯显示补偿，
+        # 不碰事件载荷，`job.json` 与 JSONL 事件流一字不改。
+        self._stage_qualifiers: dict[tuple[str | None, str], tuple[object, object]] = {}
+        # 本次运行里已经打过 `[完成]` 的 (job_id, 标签)。同一个 Job 的同一条标签再打
+        # `[失败]` 时两行都是真话，一行都不压，只给失败行加「重新进入」让它自解释。
+        # 键带 job_id：`xvt batch` 一个 sink 跨多个 Job，跨 Job 的同名标签不是重新进入。
+        self._completed_stage_labels: set[tuple[str | None, str]] = set()
         self._workflow_started_at: float | None = None
         self._seen_translation = False
         # 最近一次打印过的 `[等待]` 原因原文：等待终态的 `恢复建议：` 与它逐字相同时跳过，
@@ -990,6 +999,12 @@ class _HumanEventSink(_TrackedEventSink):
         status = event.data.get("status")
         detail = event.data.get("detail")
         phase = event.data.get("phase")
+        job_id = event.data.get("job_id")
+        qualifier_key = (job_id if isinstance(job_id, str) else None, stage)
+        if event.type == EventType.STAGE_STARTED:
+            self._stage_qualifiers[qualifier_key] = (detail, phase)
+        elif detail is None and phase is None:
+            detail, phase = self._stage_qualifiers.get(qualifier_key, (None, None))
         if stage == "translate" and status in {"running", "succeeded", "awaiting_input"}:
             self._seen_translation = True
         label = _stage_display_label(
@@ -1013,11 +1028,15 @@ class _HumanEventSink(_TrackedEventSink):
             if self._last_failed_stage == stage:
                 return
             self._last_failed_stage = stage
-            self._line(f"[失败] {label}")
+            if (qualifier_key[0], label) in self._completed_stage_labels:
+                self._line(f"[失败] {label}（重新进入后失败，前面那行 [完成] 仍然成立）")
+            else:
+                self._line(f"[失败] {label}")
         elif status == "awaiting_input":
             self._line(f"[等待] {label}")
         else:
             self._last_failed_stage = None
+            self._completed_stage_labels.add((qualifier_key[0], label))
             self._line(f"[完成] {label}")
 
     def _render_batch_recovery(self, data: dict[str, object]) -> None:

@@ -954,9 +954,9 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         semantic_review_waiting,
     )
     from xvt.pipeline.translation import (
-        agent_translation_polish_progress_ready,
-        agent_translation_polish_started,
-        agent_translation_polish_waiting,
+        agent_translate_and_polish_progress_ready,
+        agent_translate_and_polish_started,
+        agent_translate_and_polish_waiting,
     )
 
     if agent_semantic_review_waiting(job):
@@ -1015,11 +1015,11 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
     # 局部重译等待（原子分支此前把它当成初译等待，给出的 apply-translation 命令对重译
     # 响应是错的）已在 qa_blocked 之前统一判定，这里不必再判一次。
 
-    agent_waiting = agent_translation_polish_waiting(job)
-    agent_progress = agent_translation_polish_progress_ready(job)
+    agent_waiting = agent_translate_and_polish_waiting(job)
+    agent_progress = agent_translate_and_polish_progress_ready(job)
     invalid_polished_agent = (
         job.config.get("translation_quality") == "polished"
-        and agent_translation_polish_started(job)
+        and agent_translate_and_polish_started(job)
         and not agent_waiting
         and not agent_progress
     )

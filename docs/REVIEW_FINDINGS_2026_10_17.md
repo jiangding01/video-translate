@@ -322,7 +322,21 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 **本轮刻意未修，写清现象与理由**：
 
 - **P4 `rebuild-source` 之后导入译文无法重映射，`continue` 死循环。** ASR 重建的新时间轴与导入译文的旧时间轴覆盖范围不同（本例由 P9 直接导致：ASR 漏掉开头 6s 旁白，重建后的时间轴少了那一段），译文回填找不到对应 cue，`continue` 每次都在同一步失败。**需要设计**：可行出口是换一份对齐新时间轴的译文或重跑 `translate`，但「什么条件下允许放弃导入译文」「放弃时如何不悄悄丢用户的译文」要先拍板，超出一轮修复的范围。它与 P3 同属「导航没有出口」，但 P3 能靠 Job 状态判定必然失败，P4 不能。
-- **P5 同一阶段先打 `[完成]` 再打 `[失败]`。** 纯显示问题：`_HumanEventSink._render_stage` 对 `stage_completed` 与 `stage_failed` 各自独立去重（`_last_failed_stage` 只压相邻重复的失败），同一 stage 先成功后失败时两行都会打出来。不影响 `job.json` 与事件流。未修是因为要先定「同一 stage 在一次运行里能否合法地先成功再失败」（恢复路径上确实可能），再决定是去重还是改文案。
+- **P5 同一阶段先打 `[完成]` 再打 `[失败]`。—— ○ 已实测复现，确认是纯显示问题，已修（2026-10-18）。**
+  **「纯显示」这次不是读代码的推断**：用真实命令（两个 `.srt`，第二个带 `overlap`）跑 `xvt batch`，
+  人读输出里确实先后出现 `[完成] 检查字幕` 与 `[失败] 检查字幕`；同一时刻两个 `job.json` 的记账**都是对的**
+  （`…-189cb866` 的 `subtitle_qa` 为 `succeeded`，`…-ec72be76` 的为 `failed`，错误文本是
+  `subtitle QA failed; inspect the QA artifact and repair subtitles`），失败没有被挂到不该失败的 stage 上。
+  **实测同时推翻了原条目对机制的描述**：`_last_failed_stage` 的相邻去重根本没参与，真正的原因有两条——
+  ① `detail` / `phase` 只挂在 RUNNING 事件上，`stage_completed` / `stage_failed` 不带，
+  于是 `[进行中] 检查源字幕` 的收尾行退化成泛称 `[完成] 检查字幕`（`[进行中] 生成源字幕文件` → `[完成] 生成字幕文件`
+  同病，这是**每一次运行都看得见**的另一处显示缺陷，原条目没发现）；② `xvt batch` 一个 sink 跨多个 Job 复用，
+  泛称标签于是能在一次运行里先完成后失败。**单 Job 内反而造不出同名标签的那一对**：`subtitle_qa` 的源文/译文两侧
+  本来就该读成「检查源字幕」「检查译文字幕」，是 ① 把这个区分抹掉了。
+  **修法（纯渲染层，不碰事件载荷，`job.json` 与 JSONL 一字不改）**：`_HumanEventSink` 按 `(job_id, stage)` 记住
+  `[进行中]` 那行用过的限定词，收尾行自己不带时复用它；另外按 `(job_id, 标签)` 记住本次运行已打过 `[完成]` 的标签，
+  同一个 Job 的同一条标签再打 `[失败]` 时**两行都保留**（压掉一行是隐瞒信息），只给失败行加
+  「重新进入后失败，前面那行 [完成] 仍然成立」。键带 `job_id`：批处理跨 Job 的同名标签不是重新进入，不加这个标注。
 - **P7 `conservative` 预设产生跨词硬切**（切在「ど|んなに」「科学|的」）。机制是更长的停顿阈值先把多个词合并成超宽 cue，再按显示宽度硬切，切点落在字符数而非语义边界。属**分段算法质量**，要动 `segment.py` 的切分策略并补日文/中文的语义边界用例，是独立一项。
 - **P8 Whisper 尾部幻觉（「ご視聴」贴到媒体末尾）无 QA 门拦截。** 它会进翻译批次并出现在成品里。`segment.py` 已有「低置信重复尾部」的裁剪启发式（`test_does_not_trim_high_confidence_repetition` 钉住它不碰高置信重复），这条幻觉够不着它——**此处是读代码的推断，未对该素材逐条验证两个条件**。属**新增 QA 启发式**（例如「贴着媒体末尾、与正文无词级重叠、命中常见套话词表」），需要先收集足够样本避免误删真实结尾，否则会把合法结尾当幻觉删掉。
 - **P9 ASR 漏掉开头 6s 旁白。** 复现确认是**模型召回问题，不是 XVT 的缺陷**（同一段音频换参数仍漏）。登记在此只因为它直接导致了 P4：源时间轴缺头，导入译文就对不上。无修复动作，供排查 P4 时参照。
@@ -349,7 +363,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
   测试刻意不止于「`primary_command` 等于某个字符串」（那正是这类缺陷的温床）：`tests/test_cli.py::CliTest::test_missing_polish_draft_recovery_command_drives_job_to_completion` 用一个**真实跑完**的 polished + Agent Job（只删一个 `translation-draft-cues.json`）出发，把 `shlex.split(plan.primary_command)[1:]` 原样喂给 `main`，再按既有 Agent 协议驱动回 `completed` 并要求 `verify` 全绿。
 - **C2 一次成型 `translate_and_polish` 收尾留下死 artifact 记录，`status` 推荐的 `verify` 必然失败** — ○ 已复现，**已修（本轮）**。从 C1 的状态走另一条出口（`xvt translate --provider agent` → 一次成型）把 Job 推到 `completed` 后，`status --json` 给 `category=complete` / `primary_command=xvt verify ...`，而 `xvt verify` 报 `FAIL translation_draft_cues: artifact file is missing` / `overall: fail`（退出码 5）。根因：一次成型路径从不写 `translation-draft-cues.json`，也没把那条已失效的登记从 `job.artifacts` 摘掉（`status --json` 的 `artifacts` 里有它、`reusable_artifacts` 里没有）。违反完成标准「Job、stage、artifact、checksum 和事件能够解释任务当前状态」，也是又一处「推荐一条注定失败的命令」。
   修法：在一次成型路径的唯一收尾点 `pipeline.translation.complete_agent_polished_outputs` 里，沿用既有的「按 kind 过滤 `job.artifacts`」失效机制摘掉这一条。**不**用 `downstream_of(ArtifactKind.TRANSLATION_DRAFT_CUES)`：那个闭包包含本函数刚刚产出的 `translation_polished_cues`。
-  **对约束 7 的核实**：摘掉后没有恢复路径依赖它。planner 的 polished 腿对一次成型 Job 走 `agent_translation_polish_core_satisfied` / `agent_translation_polish_started`，两者都只看 manifest 与响应；`polish-translation` 本来就以 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE` 拒绝这类 Job；`translation_progress` 等 checkpoint 记录原样保留；物理文件不删。**实测核对过一处相邻猜测并证伪**：原以为摘掉记录会让「一次成型 manifest 失效」的 Job 从 `repair_polish_draft` 改判成 `translate`，实际两种情形都仍是 `repair_polish_draft`——`agent_translation_polish_started` 的 kinds 分支还要求没有 `translation_polish_batches` 记录，而那条记录来自更早一轮 Q5a 润色、不在任何失效闭包里。分类因此零变化，只有 `verify` 的结论变对了。
+  **对约束 7 的核实**：摘掉后没有恢复路径依赖它。planner 的 polished 腿对一次成型 Job 走 `agent_translate_and_polish_core_satisfied` / `agent_translate_and_polish_started`，两者都只看 manifest 与响应；`polish-translation` 本来就以 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE` 拒绝这类 Job；`translation_progress` 等 checkpoint 记录原样保留；物理文件不删。**实测核对过一处相邻猜测并证伪**：原以为摘掉记录会让「一次成型 manifest 失效」的 Job 从 `repair_polish_draft` 改判成 `translate`，实际两种情形都仍是 `repair_polish_draft`——`agent_translate_and_polish_started` 的 kinds 分支还要求没有 `translation_polish_batches` 记录，而那条记录来自更早一轮 Q5a 润色、不在任何失效闭包里。分类因此零变化，只有 `verify` 的结论变对了。
 - **C3 `xvt resume` 在 `repair_polish_draft` 状态下退出码 0 但不推进，并把 stage 记账推成假话** — ○ 已复现，**本轮刻意未修（只登记）**。实测：该状态下 `xvt resume JOB` 退出 0、Job 没有任何推进，却把 `subtitle_qa` / `render` 推成 `succeeded`、`burn` / `media_qa` 推成 `skipped`——而这个 Job 既没有译文 cue 也没有任何译文渲染产物，状态行从此说假话。恢复分类没有被带偏（`plan_advance_steps` 不读这几个 stage 的状态），危害有限。要修得先定清楚 `resume` 这条转写腿在「译文腿半截」的 Job 上该怎么收尾，属于单独一项。
 
 ## 观察（危害低，可不处理）
@@ -357,13 +371,30 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 - 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——这是 R3.2 的低成本替代点（执行器改为按 `advance_steps[0]` 分派）。
 - `recovery` ⇄ `pipeline` 的环实际还包含 `recovery` ⇄ `workflow`（9 处函数级 import）；`common.py` 里有一处已属多余的惰性 import 可顺手转顶层。
 - ~~socks5 等非 http scheme 的 userinfo 密码含 `@` 时脱敏漏掉后半段（实测）。~~ **已修（2026-10-18）**：`_USERINFO_PATTERN` 的字符类此前排除 `@`，匹配停在第一个 `@`；现改为贪婪匹配 + 回溯到 authority 里的**最后**一个 `@`，与 http/https 分支（`redact_url` 的 `netloc.rsplit("@", 1)`）同口径。判定依据是 RFC 3986 的 authority 终止符（`/` `?` `#` 空白），不是 scheme 白名单，任意 scheme 一致成立；`?` / `#` 之后的 `@` 不再被误吞。`process.py` 的 `_redact_command` 对非 http scheme 确实没有自己的 userinfo 处理（`redact_url` 只认 http/https），但它的唯一出口是 `create_event`，由事件边界兜住，本轮一并补了守卫测试，未在调用点重复脱敏。
-- yt-dlp 的 `-o` 模板不转义 output root 里的 `%`（元数据展开可能写到 Job 目录外，事后检查只报错不清理）。
+- ~~yt-dlp 的 `-o` 模板不转义 output root 里的 `%`（元数据展开可能写到 Job 目录外，事后检查只报错不清理）。~~
+  **○ 已实测证实（2026-10-18，yt-dlp 2026.08.19），已修。** 原条目写的是「可能」，这次取证了：离线
+  `yt-dlp --load-info-json <伪造 info> --skip-download --print filename -o …`（info 里 `title=PWNED TITLE`、`id=abc123`）
+  打印出 `-o '/Users/x/My %(title)s videos/source.%(ext)s'` → `/Users/x/My PWNED TITLE videos/source.mp4`，
+  `-o '/Users/x/%(id)s/source.%(ext)s'` → `/Users/x/abc123/source.mp4`——**目录部分同样被当模板展开**，
+  产物落到 Job 目录之外（下载后的越界检查只报错，不会把写出去的文件收回来）。转义约定也一并验了：
+  `'/Users/x/100%% done/source.%(ext)s'` → `/Users/x/100% done/source.mp4`，
+  而 `'/Users/x/50% off/…'` 这类不构成字段的 `%` 本就原样通过，转义它结果不变，因此全量转义是安全的。
+  修法是 `download.py` 新增 `_source_output_template(root)`：只把 root 里的字面量 `%` 写成 `%%`，
+  `source.%(ext)s` 是真模板保持原样；两处 `-o` 调用点共用它。用真实 yt-dlp 回验过修复后的模板：
+  `/Users/x/My %%(title)s videos/source.%(ext)s` → `/Users/x/My %(title)s videos/source.mp4`。
 - ~~`relink` 在源媒体缺失时误报 "fingerprint is stale"。~~ **已修（2026-10-18，B1）**，见上方 B 系列。
 - ~~`repair_polish_draft` 的 `manual_fix` 没有给出可执行命令（依赖 F2 修复后补）。~~ **已修（2026-10-18，C 系列 C1）**，见下方 C 系列。
 - **○ 已复现（polished 真实 E2E 验收）：`xvt apply JOB RESPONSE --continue` 在一条命令内把译文 QA 与渲染做了两遍。** 语义收尾先产出一次完整的译文 QA + 渲染产物，紧接着的 `continue` 腿又从同一份 cue 重算一次，结果逐字相同、Job 状态正确，纯属重复做功（纯字幕 Job 上只是几十毫秒，长片 + 已知画幅的 libass 行宽测量会明显变贵）。**本轮刻意未修**：要动语义收尾与 `continue` 腿的衔接（谁负责渲染、谁只负责推进），风险大于收益，需要单独立项并补「收尾产物被 `continue` 复用而不重算」的测试。
-- `translation.py` 的 `agent_translation_polish_*` 与 `polish.py` 的同名前缀谓词含义相反，建议改名 `agent_translate_and_polish_*`。
+- ~~`translation.py` 的 `agent_translation_polish_*` 与 `polish.py` 的同名前缀谓词含义相反，建议改名 `agent_translate_and_polish_*`。~~ **已修（2026-10-18）**：`translation.py` 那组四个谓词
+  （`_waiting` / `_started` / `_progress_ready` / `_core_satisfied`）判定的是 `task=translate_and_polish` 的一次成型，
+  已改名为 `agent_translate_and_polish_*`，与它们读的 manifest task 对齐；`polish.py` 的
+  `agent_translation_polish_manifest_valid`（单独一轮润色）与 `apply_agent_translation_polish` 刻意保持原名。
+  纯符号改名、零行为变化（把新名字逐字换回旧名字后与改名前逐字相同，只剩一处 import 与 `__all__` 的字母序位置变化），协议快照零 diff。
 - **`tests/test_doctor.py::DoctorTest::test_ffmpeg_capability_timeout_kills_grandchild_process_group` 是 flaky。** 2026-10-18 全量跑时偶发变红，单独重跑与再次全量都通过。它依赖子进程组 kill 与 timeout 的真实时序，机器负载高时会抖。未定位，登记以免下次有人把它当成真实回归。
-- README 用法块漏了 `--fail-on-waiting`。
+- ~~README 用法块漏了 `--fail-on-waiting`。~~ **已修（2026-10-18）**：按 parser 内省核实，支持该旗标的只有
+  `run` / `continue` / `apply` / `batch` / `batch-continue` 五条命令；此前只有 `apply` 的签名块列了它，
+  另外四条只在「停在等待态时的退出码」那条散文里提过。现在五条命令的签名块都列出该旗标，
+  参数条目也统一以「退出码：`--fail-on-waiting`。」开头。`tests/test_readme_cli_reference.py` 仍绿。
 
 ## 未验证（△ 低置信，动手前先复现）
 
