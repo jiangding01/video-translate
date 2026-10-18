@@ -162,7 +162,18 @@
 
 - **保留文件，不删字节。** 导入译文是 `shutil.copy2` 进 Job 的副本（`artifacts/input-translation.srt`），摘登记不丢数据；用户原始文件更不碰。留痕按约束 7 走两层：每个被失效的 artifact 一条 `artifact_invalidated`，外加一条 `translation_import_dropped` 记下 kind、被放弃副本的路径与内容 checksum、被清掉的 `translation_subtitles` 与失效 kind 清单。路径进事件不违反约束 5（禁的是凭据与内容，路径不是），文本仍走 `create_event` 的统一脱敏。
 - **两处来源都没有时以退出码 2 拒绝**，不静默成功：这条命令的全部作用就是移除某样东西，没得移时报成功会让用户以为自己改对了 Job。代价如实记：它因此**不是幂等的**，连跑两次第二次失败。
-- **原子 Job（无 `config.workflow`）支持**，那里只有 artifact 一个来源，之后用 `xvt translate` 重新翻译。drop 之后 `revision.source_review_supported` 与 `resegment` 的「config 或 artifact」双源闸门会从拒绝**翻转成放行**——这是正确的（Job 确实不再复用任何导入译文），语义由 `tests/test_drop_imported_translation.py` 钉住。重分段在译文重新产出之前仍会以「缺 `translated_cues`」拒绝，只是拒绝的理由换成了真正的那一个。
+- **原子 Job（无 `config.workflow`）支持**，那里只有 artifact 一个来源，之后用 `xvt translate` 重新翻译。drop 之后 `revision.source_review_supported`（**双源**：config 或 artifact）的「正在复用导入译文」闸门会从拒绝**翻转成放行**——这是正确的（Job 确实不再复用任何导入译文），语义由 `tests/test_drop_imported_translation.py` 钉住。`resegment` 的那道闸门**不是双源，是 config-only**（详见下节），原子导入 Job 本来就不被它拦住；drop 之后重分段仍会以「缺 `translated_cues`」拒绝，只是拒绝的理由换成了真正的那一个。
+
+### 重分段闸门为什么只看 config
+
+`pipeline/resegment.py` 的导入译文闸门只问 `workflow.translation_subtitles`，不问 `input_translation_subtitles` 这条 artifact 登记；`pipeline/revision.py` 的 `source_review_supported` 两处都问。**这不是遗漏，两道闸门防的不是同一件事**，2026-10-18 用真实命令逐条实测确认：
+
+- **`revision` 防的是「用户的原文↔译文配对」被改坏。** 修订源 cue 文本之后那份导入译文再也对不上，而它是用户亲手交的、系统无法重新生成——只要这份译文还在被复用，无论来自 config 还是 artifact，都不能动源文。双源是对的。
+- **`resegment` 防的是「自动重新导入」的复发循环。** 持久化了 `workflow.translation_subtitles` 的 Job 上，重分段换掉时间轴后 `continue` 会把同一份译文再套一遍、再次超宽、再次要求重分段。原子导入 Job 没有那条持久化目标：重分段按失效闭包把 `input_translation_subtitles` 连同全部下游一起移出登记（文件留在盘上），Job 干净地回到 `translate`，没有东西会把旧译文捡回来。
+
+实测对照（同一支素材、同一份译文字幕）：端到端导入 Job（`run --translation-subtitles`）上 `xvt resegment-translation` 以退出码 2 拒绝；原子导入 Job（`run --target-language` → `import-translation`）上它跑完并退出 0，6 条新 `asr_resegmented` 源 cue 落盘，`status` 给 `retryable` / `steps: translate`。
+
+**刻意不把 `resegment` 收紧成双源。** 那会新增一条**没有出口**的拒绝：重分段要靠 `translated_cues` 量超宽，而唯一的「放弃导入译文」命令 `xvt drop-imported-translation` 会连 `translated_cues` 一起失效——实测 drop 之后 `resegment-translation` 立刻以「缺 `translated_cues`」退出码 2 失败。被收紧的用户只剩「先花钱整轮重译一遍，才被允许重分段」这一条路，而他手里本来就有一份能用来量宽度的译文。保持现状。
 - **放弃不等于完成。** 命令收尾复用 `build_recovery_plan` 打印下一步（不在调用点自己拼命令）：`--provider auto` 且当前终端没有 API 配置时，随后的 `continue` 会落到 Agent 模式停在 `awaiting_input`，输出必须让用户看出「下一步是重新翻译」而不是「已经好了」。
 - **覆盖保护集随之收缩。** `paths.py` 的 `_user_input_paths` 把 `config.workflow.translation_subtitles` 算作受保护的用户原始输入；清掉它之后那份文件退出保护集，Job 内那份副本也因为不再登记而退出 artifact 保护。这是正确的——Job 确实不再把它们当输入——但如实记下来：此后 `burn` / `preview` 的 `--output` 指向那两个路径不会再被拦住。`job.input` 与 `config["subtitles"]` 的保护不受影响。
 

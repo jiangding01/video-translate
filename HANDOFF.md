@@ -2,6 +2,18 @@
 
 更新时间：2026-10-18
 
+2026-10-18 **两条小修：`xvt resume` 不再抹掉译文腿的 QA 阻断；`resegment` 闸门判定为不该改**（分支 `codex/resume-bookkeeping-and-resegment-gate`，未合并、未开 PR）。两条都先实证再动手，**两条既有记录的定性都被实测推翻了一半**。
+
+**① C3 的原定性不成立，但同一处另有一个真缺陷。** 原记录说 `repair_polish_draft` 状态下 `xvt resume` 把 `subtitle_qa` / `render` 推成 `succeeded`、`burn` / `media_qa` 推成 `skipped`「状态行从此说假话」。真实复现后逐个判定，**四个都是真话**：前两个是 `_finish_subtitle_job` 真的重跑了源字幕 QA、真的重渲染了 `source.srt`（stage 名被源腿与译文腿共用，这是 C1 那类歧义）；后两个在纯字幕 Job 上**永远**是真话——`--burn` 被 `WorkflowGoals` 拒、`burn` / `preview` 各有一道 `input_kind == "subtitle"` 拒，全仓唯一写 BURN 非复位值的地方在那道拒绝之后。**因此刻意没给 BURN / MEDIA_QA 补「与 TRANSLATE 同款」的守卫**：在这条路径上不可达，加了是零行为差异的死码。
+
+**但把复现换成「译文腿停在 QA 人工复核」，同一段代码就在说假话了。** `SUBTITLE_QA=awaiting_input` 且 `translated_subtitle_qa` 有效时跑 `resume`：stage 被源腿的通过改写成 `succeeded`，`recovery.subtitle_qa_failure_guidance` 按 stage 状态判「QA 还拦着吗」，于是导航从 `manual_fix` + `continue --acknowledge-subtitle-review`（唯一出口）降级成 `retryable` + 裸 `continue`，而那条 `continue` 实测只会重算译文 QA 再次停在 `awaiting_input`、Job 不前进——「推荐一条无法推进的命令」又一次。**确定性 QA 门没有被绕过**（`continue` 重算后照旧阻断，约束 4 成立），丢的是导航与状态行的真实性。媒体 Job 的 `_finish_resumed_source` 同病，已实测确认并一并修掉（修复前 `subtitle_qa=succeeded` / `retryable`，修复后 `awaiting_input` / `manual_fix`）。
+
+**修法只拦降级，不拦 resume 的本职。** 新增 `transcription._translated_leg_blocks_subtitle_qa`（判据与 `subtitle_qa_failure_guidance` 同口径：stage 停在 FAILED / AWAITING_INPUT 且译文 QA 报告仍 checksum 有效；报告已失效时让路，与 `recovery._translated_qa_needs_rebuild` 一致），成立时源腿照常重算并重新登记 `qa.json`、照常把被删掉的 `source.srt` 补回来，只是经 `complete_qa_stage(..., preserve_blocking_stage=True)` 不改 stage、不发 `subtitle_review_acknowledged`——放行只体现在返回值上。源腿**自己**阻断（未确认的 `needs_review` / `failed`）仍照常记账，那是更靠前的新事实。`RENDER` 刻意不动：`recovery` / `workflow` / `cli` 全仓没有一处读它的状态，`render=succeeded` 对源腿也是真话。
+
+**② `resegment` 的 config-only 闸门：判定为不该改。** 实测两边都跑了：端到端导入 Job 上 `xvt resegment-translation` 退出码 2 拒绝；原子导入 Job（`run --target-language` → `import-translation`）上它**跑完并退出 0**——不是被别的守卫挡住，是真的跑完了。但结果状态**自洽**：6 条 `asr_resegmented` 源 cue 落盘，导入译文连同下游按失效闭包移出登记（7 条 `artifact_invalidated`，文件留在盘上），`status` 回到 `retryable` / `steps: translate`，没有「旧译文被套回新时间轴」这类残留。两道闸门防的不是同一件事：`revision` 防的是用户亲手交的原文↔译文配对被改坏（artifact 在就危险，双源对），`resegment` 防的是持久化目标导致的自动重新导入复发循环（config 在才危险）。**收紧会新增一条没有出口的拒绝**——重分段要靠 `translated_cues` 量超宽，而唯一的放弃出口 `xvt drop-imported-translation` 会连 `translated_cues` 一起失效，实测 drop 之后 `resegment-translation` 立刻以「缺 `translated_cues`」退出码 2 失败，被拒的用户只剩「先整轮重译一遍才被允许重分段」。**零代码改动**，只更正文档：`docs/RECOVERY.md` 与本文件此前都把 `resegment` 的闸门写成「config 或 artifact 双源」，那是错的。
+
+测试 1015 → 1016（新增 1 条红先回归，子测试 263 不变），**既有断言零改动**，协议快照零 diff。**遗留**：`resume` 在译文腿阻断时不再打印 `[进行中] 检查源字幕` / `[完成] 检查源字幕` 两行（那两行来自 stage 事件，而这次恰恰不写 stage）——源侧 QA 仍然跑了、`qa.json` 仍然重写了，只是人读流里看不见；判断为可接受（stage 没变就不该报 stage 变了），如果要让它可见，得给「跑了但不改 stage」另造一类事件，不值得。
+
 2026-10-18 **P4 阶段 3：`xvt drop-imported-translation`——显式放弃导入译文，P4 三阶段至此全部完成**（分支 `codex/drop-imported-translation`，未合并、未开 PR）。
 
 **它不是新能力，是把一条既有的隐式旁路诚实化。** 今天「放弃导入译文」唯一的办法是跑原子 `xvt translate`：那条命令不看导入分支、直接改写 `translated_cues`，之后 `_ensure_translation` 在导入分支**之前**就按译文有效满足返回，实测能走到 `completed`。但那只是绕过——错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，**实测再跑一次 `rebuild-source` 原地复发同一个死循环**，而且 Job 的持久化目标仍写着「用导入译文」，解释不了自己的产物从哪来。
@@ -10,7 +22,7 @@
 
 **刻意不并入 `translation_candidate_qa` / `translation_review_revision`**（`resegment` 把它们显式并入）：那里的理由是重分段丢弃了 cue id、报告永久作废；这里源 cue 一个字节没动，两者都以内容 checksum 绑定在被放弃的候选上（`candidate_qa_issues` 比 `candidate_cues_checksum`，`human_revision_scope` 先要求 `translation_reviewed_cues` 仍是当前候选），候选失效后自行判否，而读它们的两条恢复分支都在 `await_translation_review` 之内、该等待步骤要求候选有效。
 
-**四个判断题的结论**：①没有导入译文的 Job 上**拒绝**（退出码 2），代价是不幂等、连跑两次第二次失败——但这个命令的全部作用就是移除某样东西，报成功会让用户以为改对了 Job。②`workflow=None` 的原子导入 Job **支持**（那里只有 artifact 一源），drop 之后 `revision.source_review_supported` 与 `resegment` 的双源闸门从拒绝翻转成放行，这是正确的，语义已由测试钉住。③输出明说「放弃不等于完成」，收尾复用 `build_recovery_plan` 打印下一步，不在调用点自己拼命令；`--provider auto` 缺 API 配置时随后的 `continue` 停在 Agent 等待。④**进 `alternative_commands` 的第一位**，整轮重译退到第二位：drop 拆掉复发地雷而重译只是绕过，把后者放进导航却不给前者就是把那条「只是绕过」的话说完又不给解法。
+**四个判断题的结论**：①没有导入译文的 Job 上**拒绝**（退出码 2），代价是不幂等、连跑两次第二次失败——但这个命令的全部作用就是移除某样东西，报成功会让用户以为改对了 Job。②`workflow=None` 的原子导入 Job **支持**（那里只有 artifact 一源），drop 之后 `revision.source_review_supported` 的双源闸门从拒绝翻转成放行，这是正确的，语义已由测试钉住。（**2026-10-18 更正**：这句原文把 `resegment` 也算进「双源闸门」，那是错的——它只看 config，原子导入 Job 本来就不被它拦住，详见本文件顶部的 C4。）③输出明说「放弃不等于完成」，收尾复用 `build_recovery_plan` 打印下一步，不在调用点自己拼命令；`--provider auto` 缺 API 配置时随后的 `continue` 停在 Agent 等待。④**进 `alternative_commands` 的第一位**，整轮重译退到第二位：drop 拆掉复发地雷而重译只是绕过，把后者放进导航却不给前者就是把那条「只是绕过」的话说完又不给解法。
 
 **已知代价（如实记）**：清掉 `config.workflow.translation_subtitles` 之后，那份用户原始译文文件退出 `paths.py` 的烧录/预览覆盖保护集，Job 内副本也因不再登记而退出 artifact 保护。这是正确的（Job 确实不再把它们当输入），但此后 `burn` / `preview` 的 `--output` 指向那两个路径不会被拦住；`job.input` 与 `config["subtitles"]` 的保护不受影响。
 
