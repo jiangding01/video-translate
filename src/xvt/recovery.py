@@ -1202,6 +1202,7 @@ def _recovery_for_workflow(
         media_qa_failure,
         missing_burn_source_media,
         plan_advance_steps,
+        source_media_relink_available,
     )
 
     steps = plan_advance_steps(job, workflow)
@@ -1330,10 +1331,17 @@ def _recovery_for_workflow(
     # （两步都要读实际媒体文件），于是 primary_command 还推荐 continue 就是推荐一条
     # **必然再次失败**的命令，而 alternative_commands 是空的——用户没有任何出口。
     # 这是本仓库第 6 次同类缺陷，归 manual_fix 并点名那个路径。
-    # 出口有两条：把源媒体放回原路径，或者（媒体是永久搬家时）用
-    # `xvt relink-source-media JOB NEW_PATH` 把持久化路径指过去——它只认与 v2 proof
-    # 登记的 source_media_checksum 相同的文件，匹配时零重烧回到完成。
-    # **本分支的文案尚未接入后者，这是已知缺口**（下一批补）。
+    # 出口有两条：把源媒体原样放回登记路径，或者（媒体是永久搬家时）用
+    # `xvt relink-source-media JOB NEW_MEDIA_PATH` 把持久化路径指过去——它只认与 v2
+    # proof 登记的 source_media_checksum 相同的文件。
+    # 后者**只在它真的会成功时**才进推荐位：命令本身要求 checksum 有效的 v2 proof，
+    # 拿不到就以退出码 2 失败，所以这里用 workflow 侧的 `source_media_relink_available`
+    # 把关（legacy fingerprint 的旧 Job 维持原样：不给首选命令，只点名那个路径）。
+    # 判定刻意留在 workflow 侧而不是在这里重造：只暴露 `_burn_proof` 会让「有没有烧录
+    # 目标」「是不是远程 Job」两条前置条件在调用点各写一遍，命令收紧时导航不跟着动。
+    # 两支都不承诺「放回去就不必 continue」：快路径要 `{path,size,mtime_ns}` 全等，
+    # mtime 变了得走内容 checksum 回退，而存量 proof 缺 source_media_identity 时回退
+    # 拿不到授权、Job 仍落到 burn。因此统一让用户之后重新运行 `xvt status` 看下一步。
     # 刻意**不**推荐 `xvt burn JOB --media NEW`：它虽然能产出合格成品，却不改持久化
     # 路径，Job 会继续停在这里，等于把用户引进另一个死角。
     # 判定范围刻意收窄到「计划只剩 render / burn」：还有 translate 等步骤时 continue
@@ -1343,10 +1351,24 @@ def _recovery_for_workflow(
     if burn_is_the_rest:
         missing_media = missing_burn_source_media(job, workflow, local_only=True)
         if missing_media is not None:
+            if source_media_relink_available(job, workflow):
+                return plan(
+                    "manual_fix",
+                    f"源媒体不在登记路径 {missing_media}，render 与 burn 都要读它；"
+                    "把该文件原样放回该路径，或用 relink-source-media 把持久化路径指到"
+                    "新位置（只接受内容与原媒体完全相同的文件）；之后重新运行 xvt status "
+                    "查看下一步。",
+                    primary_command=_job_command(
+                        "relink-source-media",
+                        job_file,
+                        "NEW_MEDIA_PATH",
+                    ),
+                    advance_steps=steps,
+                )
             return plan(
                 "manual_fix",
-                f"源媒体不在登记路径 {missing_media}，重烧需要它；"
-                "把该文件放回原路径后再运行 continue。",
+                f"源媒体不在登记路径 {missing_media}，render 与 burn 都要读它；"
+                "把该文件原样放回该路径，之后重新运行 xvt status 查看下一步。",
                 primary_command=None,
                 advance_steps=steps,
             )

@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from dataclasses import asdict, replace
@@ -2259,7 +2260,14 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             self.assertEqual(job_file.read_bytes(), before)
 
     def test_recovery_needs_manual_fix_when_source_media_is_missing(self) -> None:
-        """源媒体不在登记路径时 render / burn 都必然失败，不得再推荐 continue。"""
+        """源媒体不在登记路径时 render / burn 都必然失败，不得再推荐 continue。
+
+        ``_relinkable_job`` 签发的是 checksum 有效的 v2 proof，因此这个 Job 够格做
+        ``relink-source-media``：首选命令给它（占位符待用户替换成新路径）。原先这里断的是
+        ``primary_command is None``——那是把「不推荐 continue」这个意图过度收紧成了
+        「一条命令都不给」；意图本身改用下面的 ``assertNotIn`` 显式表达，而
+        ``is None`` 搬到了下一条「没有 v2 proof」的反证测试上，它在那里才真正成立。
+        """
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2270,8 +2278,39 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             plan = build_recovery_plan(job_file)
 
             self.assertEqual(plan.category, "manual_fix")
+            self.assertEqual(
+                plan.primary_command,
+                f"xvt relink-source-media {shlex.quote(str(job_file))} NEW_MEDIA_PATH",
+            )
+            self.assertNotIn("xvt continue", str(plan.primary_command))
+            self.assertEqual(plan.alternative_commands, ())
+            self.assertIn(str(media), plan.reason)
+            self.assertEqual(plan.advance_steps, ("burn",))
+
+    def test_recovery_withholds_relink_source_media_without_a_v2_proof(self) -> None:
+        """没有 checksum 有效的 v2 proof 时绝不推荐 ``relink-source-media``。
+
+        那条命令本身要求 v2 proof，拿不到就以退出码 2 失败；在这种 Job 上把它放进推荐位
+        就是又一次「推荐一条在该状态下必然失败的命令」。legacy fingerprint 的旧 Job 维持
+        原状：不给首选命令，只点名缺失的那个路径。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            job = load_job(job_file)
+            job.artifacts = [item for item in job.artifacts if item.kind != "burn_fingerprint"]
+            job.config["workflow"]["burn_fingerprint"] = "legacy"
+            save_job(job)
+            media = root / "video.mp4"
+            media.unlink()
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
             self.assertIsNone(plan.primary_command)
             self.assertEqual(plan.alternative_commands, ())
+            self.assertNotIn("relink-source-media", plan.reason)
             self.assertIn(str(media), plan.reason)
             self.assertEqual(plan.advance_steps, ("burn",))
 

@@ -196,12 +196,12 @@
 
 源媒体不在登记路径时 `render` 与 `burn` 都会以 `video file does not exist: <path>` 失败（两步都要读实际媒体文件）。因此：
 
-- **`status` / `continue` 的恢复分类**：计划只剩 `render` / `burn` 且**本地**源媒体不在登记路径时归 `manual_fix`，`reason` 点名那个路径，`primary_command` 为 `None`——不推荐一条必然再次失败的 `continue`。导航给出的出口是文件系统动作：把源媒体放回原路径后再 `continue`（媒体是永久搬家时另有 `relink-source-media`，见下）。刻意**不**推荐 `xvt burn JOB --media NEW`：它能产出合格成品，但不改持久化的源媒体路径，Job 会继续停在同一状态。
+- **`status` / `continue` 的恢复分类**：计划只剩 `render` / `burn` 且**本地**源媒体不在登记路径时归 `manual_fix`，`reason` 点名那个路径——不推荐一条必然再次失败的 `continue`。导航给出两条出口：把源媒体**原样**放回该路径，或者（媒体是永久搬家时）用下一节的 `relink-source-media` 把持久化路径指到新位置。**`primary_command` 只在 `relink-source-media` 真的会成功时才给它**：该命令本身要求 checksum 有效的 v2 proof，拿不到就以退出码 2 失败，因此这道资格交给 workflow 侧的 `source_media_relink_available` 把关（与命令本体共用同一份判定，不在 `recovery` 就地重造）；只有 legacy fingerprint 的旧 Job 维持 `primary_command` 为 `None`，只点名那个路径。两支都**不**承诺「放回去就不必 `continue`」——指纹快路径要求 `{path, size, mtime_ns}` 全等，mtime 变了得走内容 checksum 回退，而存量 proof 缺 `source_media_identity` 时回退拿不到授权、Job 仍落到 `burn`；因此统一让用户之后重新运行 `xvt status` 看下一步。`alternative_commands` 两支都为空。刻意**不**推荐 `xvt burn JOB --media NEW`：它能产出合格成品，但不改持久化的源媒体路径，Job 会继续停在同一状态。
 - **远程 Job 刻意例外**：下载产物缺失时 `continue` 能重新获取媒体，那是真出口，仍按 `retryable` 处理。
 - **计划里还有 `translate` 等步骤时不拦**：那些步骤 `continue` 能真正推进。
 - **`relink` 的报错**：源媒体不在原路径时报「source media is missing: `<path>`」而不是「fingerprint is stale」——指纹并没有过期，是算不出来。方向不变（两者都拒绝），只是说对了原因。
 
-**媒体是永久搬家（而不是临时不在）时**，出口是下一节的 `xvt relink-source-media`，它把持久化路径指到新位置。**恢复导航目前还没有接入它**：上面那条 `manual_fix` 的 `reason` 仍只说「把该文件放回原路径后再运行 continue」，`primary_command` 仍是 `None`。如实记录：这是已知的导航缺口，接入 `recovery` 是下一批的事。
+**媒体是永久搬家（而不是临时不在）时**，出口是下一节的 `xvt relink-source-media`，它把持久化路径指到新位置。**恢复导航已经接入它**：Job 具备 checksum 有效的 v2 proof 时 `primary_command` 就是 `xvt relink-source-media JOB NEW_MEDIA_PATH`，新路径位置是**占位符**——媒体搬到哪里只有用户知道，导航不猜（与 `relink-burned-output` 的 `EXISTING_VIDEO` 同款写法）。分类仍是 `manual_fix` 而不是 `awaiting_input`：这个状态确实需要人工给出新路径，而 `batch.py` 把 `manual_fix` 归入「绝不自动推进」，改分类会改变批处理语义。
 
 ## 源媒体搬家后的路径重指
 
@@ -215,6 +215,8 @@
 - 媒体不是远程 URL（见下）。
 - 存在 checksum 有效的 `version=2` burn proof。没有它就没有可比对的基线，证明不了是同一份媒体；legacy fingerprint 不给这条出口，与 `relink-burned-output` 同口径。
 - 候选文件存在且是文件，其内容 checksum 等于 proof 登记的 `source_media_checksum`。
+
+其中「`burn` 为真」「媒体不是远程」「存在 v2 proof」三条（与候选文件无关、只看 Job 本身的条件）收敛在 `workflow.source_media_relink_blocker` 一份实现里：命令本体消费它的标签取报错文案，恢复导航消费布尔包装 `source_media_relink_available` 决定要不要把这条命令放进推荐位。两侧同口径是刻意的——只暴露「有没有 proof」会让另外两条前置条件在导航侧再写一遍，命令收紧时导航不跟着动。
 
 任一条不满足以退出码 2 拒绝，Job 一个字节都不改。
 

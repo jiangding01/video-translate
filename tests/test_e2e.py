@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import pysubs2
 from ffmpeg_support import FFMPEG_REQUIREMENT, ffmpeg_can_render_ass
 
+from xvt.cli import main
 from xvt.job_store import get_job_file, load_job
 from xvt.media import probe_media
 from xvt.models import StageName, StageStatus, Transcript, Word
@@ -224,6 +226,75 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(file_checksum(burned), burned_checksum)
             self.assertEqual(burned.stat().st_mtime_ns, burned_mtime_ns)
             self.assertEqual(file_checksum(proof_path), proof_checksum)
+
+    def test_recovery_navigation_hands_over_a_runnable_relink_source_media_command(self) -> None:
+        """导航推荐的那条命令必须真的能推进：原样取出、替换占位符、照常执行。
+
+        只断言 ``primary_command`` 等于某个字符串不算数——本仓库同类缺陷（推荐一条在
+        该状态下必然失败的命令）已经出现过六次，字符串相等正是它们每次都满足的条件。
+        这里从真实的「源媒体搬家」状态出发（不打桩，FFmpeg 真跑、产物真落盘、v2 proof
+        真的由工作流签发），把恢复计划吐出来的命令行 ``shlex.split`` 开、只把占位符换成
+        真实新路径，然后原样喂给 CLI ``main``，断言它退出码 0 且 Job 真的回到 ``complete``。
+        「没有重烧」仍由成品 checksum 与 mtime 都未变证明。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            self._create_video(media)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            result = run_workflow(
+                WorkflowOptions(
+                    input=str(media),
+                    output=root / "work",
+                    subtitles=source,
+                    translation_subtitles=translated,
+                    target_language="zh-CN",
+                    burn=True,
+                    hardware_encoding=False,
+                )
+            )
+
+            self.assertEqual(result.status, "completed")
+            job_file = result.job_file
+            job = load_job(job_file)
+            burned = Path(next(item.path for item in job.artifacts if item.kind == "burned_video"))
+            burned_checksum = file_checksum(burned)
+            burned_mtime_ns = burned.stat().st_mtime_ns
+
+            moved = root / "newhome" / "input.mp4"
+            moved.parent.mkdir()
+            media.rename(moved)
+
+            stale = build_recovery_plan(job_file)
+            self.assertEqual(stale.category, "manual_fix")
+            self.assertIsNotNone(stale.primary_command)
+            argv = shlex.split(str(stale.primary_command))
+            self.assertEqual(argv[:2], ["xvt", "relink-source-media"])
+            self.assertEqual(Path(argv[2]), Path(job_file))
+            self.assertEqual(argv[3:], ["NEW_MEDIA_PATH"])
+            argv[3] = str(moved)
+
+            self.assertEqual(main(argv[1:]), 0)
+
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+            self.assertEqual(
+                require_workflow_config(load_job(job_file)).burn_media,
+                str(moved.resolve()),
+            )
+            # 推荐的命令零重烧：成品内容与 mtime 都没动。
+            self.assertEqual(file_checksum(burned), burned_checksum)
+            self.assertEqual(burned.stat().st_mtime_ns, burned_mtime_ns)
 
     def test_real_audio_normalization_with_mocked_asr_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -261,7 +261,7 @@ xvt relink-source-media JOB_FILE NEW_MEDIA [--events-jsonl]
 - 只写 `config.workflow.burn_media` 一个字段：不重烧、不改 artifact 登记、不改 stage，失败时 Job 一个字节都不改。因为没有产物变动，`--events-jsonl` 只输出 CLI 终态事件（`cli_completed`，带 `media` 字段给出新路径），不发 artifact 事件。
 - 存量 v2 proof（缺可选字段 `source_media_identity`，即该 Job 上一次烧录早于该字段引入）仍会被接受并写入新路径，但指纹回退拿不到授权，`status` 会要求重烧一次（重烧后新 proof 即补上该字段）。
 - 远程 Job 不支持：媒体是 Job 内登记的下载产物，不是文件系统上的用户文件，「搬家」不适用；下载产物缺失时直接 `continue` 重新获取。
-- 当前 `status` 在源媒体缺失时只提示「把该文件放回原路径后再运行 continue」，**还没有**提示这条命令；媒体确实搬了家时请直接运行它。
+- `status` 已经接入这条命令：源媒体不在登记路径、且 Job 有 checksum 有效的 v2 proof 时，恢复计划的首选命令就是 `xvt relink-source-media JOB NEW_MEDIA_PATH`（新路径是占位符，替换成媒体现在的位置即可）；只有 legacy fingerprint 的旧 Job 不提示它（对它们这条命令会失败），仍只提示把文件原样放回原路径。
 
 </details>
 

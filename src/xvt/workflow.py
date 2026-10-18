@@ -728,14 +728,59 @@ def relink_burned_output(
     return candidate_path
 
 
+#: ``relink-source-media`` 的 Job 侧前置条件消息表。文案逐字沿用命令原有的报错，
+#: 收敛成表只是为了让「命令」与「导航谓词」共用同一份判定。
+_SOURCE_MEDIA_RELINK_BLOCKER_MESSAGES = {
+    "goal": "job has no persisted burned-video goal",
+    "remote": (
+        "source media relink does not apply to a remote media job; its media is a "
+        "download registered inside the Job, not a path on your filesystem"
+    ),
+    "proof": "source media relink requires a checksum-valid v2 burn proof",
+}
+
+
+def source_media_relink_blocker(job: Job, config: WorkflowConfig) -> str | None:
+    """``relink-source-media`` 在这个 Job 上的**阻塞原因**；会走到候选校验时返回 None。
+
+    判定的是 Job 侧（与候选文件无关）的那三条前置条件，标签供调用方派生各自的出口：
+
+    - ``"goal"``：没有持久化的烧录目标
+    - ``"remote"``：媒体是远程 Job 内登记的下载产物，"搬家" 不适用
+    - ``"proof"``：没有 checksum 有效的 v2 burn proof，没有可比对的基线
+
+    形态照 ``media_qa_failure`` / ``media_qa_passed``：命令本体消费标签取报错文案，
+    ``recovery`` 消费布尔包装决定要不要把这条命令放进推荐位。**两侧必须同口径**——
+    只把 ``_burn_proof`` 暴露出去会逼 ``recovery`` 在调用点重造另外两条前置条件，
+    于是命令收紧时导航不会跟着动，下一次「推荐一条在该状态下必然失败的命令」就从
+    那里长出来（本仓库此类缺陷已经出现过六次）。
+    """
+
+    if not config.burn:
+        return "goal"
+    if _burn_media_is_remote(_burn_media_value(job, config)):
+        return "remote"
+    if _burn_proof(job) is None:
+        return "proof"
+    return None
+
+
+def source_media_relink_available(job: Job, config: WorkflowConfig) -> bool:
+    """``relink-source-media`` 在这个 Job 上够不够格（不关心阻塞原因）。"""
+
+    return source_media_relink_blocker(job, config) is None
+
+
 def relink_source_media(job_file: str | Path, media: str | Path) -> Path:
     """把持久化的烧录源媒体路径指到一份**内容完全相同**的现存文件（源媒体搬家）。
 
     为什么需要它：源媒体永久换位置（路径变了、内容没变）之后，状态机本来就处理得了
     这件事——``_burn_fingerprint_satisfied`` 的内容 checksum 回退在「差异只来自媒体
     身份、内容 checksum 仍等于 proof 登记那份」时照旧判指纹成立，于是 Job 零重烧回到
-    完成。缺的只是一个受支持的方式去改那个路径：此前唯一的办法是手改 ``job.json``
-    （``recovery`` 的 manual_fix 文案因此只能说「把该文件放回原路径」）。
+    完成。缺的只是一个受支持的方式去改那个路径：此前唯一的办法是手改 ``job.json``。
+    ``recovery`` 的源媒体缺失分支已经把这条命令放进推荐位，但**只在它会成功时**——
+    资格判定见 ``source_media_relink_blocker`` / ``source_media_relink_available``，
+    本函数与那条导航共用同一份实现。
 
     与 ``relink_burned_output`` 的同与不同：
 
@@ -770,16 +815,12 @@ def relink_source_media(job_file: str | Path, media: str | Path) -> Path:
         config = require_workflow_config(job)
     except ValueError as error:
         raise UserInputError("job has no persisted burned-video workflow goal") from error
-    if not config.burn:
-        raise UserInputError("job has no persisted burned-video goal")
-    if _burn_media_is_remote(_burn_media_value(job, config)):
-        raise UserInputError(
-            "source media relink does not apply to a remote media job; its media is a "
-            "download registered inside the Job, not a path on your filesystem"
-        )
+    blocker = source_media_relink_blocker(job, config)
+    if blocker is not None:
+        raise UserInputError(_SOURCE_MEDIA_RELINK_BLOCKER_MESSAGES[blocker])
+    # 谓词放行即保证这三者成立；proof 在这里只是再取一次登记值，不重判。
     proof = _burn_proof(job)
-    if proof is None:
-        raise UserInputError("source media relink requires a checksum-valid v2 burn proof")
+    assert proof is not None
 
     media_path = Path(media).expanduser()
     if media_path.is_dir():
