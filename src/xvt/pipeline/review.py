@@ -131,7 +131,21 @@ def complete_qa_stage(
     job: Job,
     report: Any,
     event_sink: EventSink | None,
+    *,
+    preserve_blocking_stage: bool = False,
 ) -> bool:
+    """按 QA 报告记账 SUBTITLE_QA 并返回是否放行。
+
+    ``preserve_blocking_stage``：``SUBTITLE_QA`` 这个 stage 名由源腿与译文腿共用。
+    译文腿停在 ``needs_review`` / ``failed`` 时，源腿重跑（``xvt resume``）放行**不得**
+    把那条阻断改写成 ``SUCCEEDED``——``recovery.subtitle_qa_failure_guidance`` 正是按
+    stage 状态判断「QA 还拦着吗」，一旦被改成放行，唯一出口
+    ``continue --acknowledge-subtitle-review`` 就从导航里消失，换成一条必然退回等待态的
+    ``continue``。置 ``True`` 时「放行」只体现在返回值上，stage 与放行事件都不写；源腿
+    自己阻断（未确认的 ``needs_review`` 或 ``failed``）仍照常记账，那是比译文复核更靠前
+    的新事实，必须说出来。
+    """
+
     if report.status == "needs_review":
         # 人工确认通道：仅当当前报告的全部 review 级问题都是用户已确认集合的
         # 子集时放行；出现任何新的 review 问题仍然阻断，error 级永不放行。
@@ -151,16 +165,17 @@ def complete_qa_stage(
                 "layout": report.layout,
             },
         ):
-            if event_sink:
-                event_sink(
-                    create_event(
-                        EventType.SUBTITLE_REVIEW_ACKNOWLEDGED,
-                        **job_event_fields(job.id, get_job_file(job)),
-                        review_count=len(review_issues),
-                        source="stored_acknowledgment",
+            if not preserve_blocking_stage:
+                if event_sink:
+                    event_sink(
+                        create_event(
+                            EventType.SUBTITLE_REVIEW_ACKNOWLEDGED,
+                            **job_event_fields(job.id, get_job_file(job)),
+                            review_count=len(review_issues),
+                            source="stored_acknowledgment",
+                        )
                     )
-                )
-            set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
+                set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
             return True
     if report.status == "needs_review":
         set_stage(
@@ -181,7 +196,8 @@ def complete_qa_stage(
             error=message,
         )
         raise RuntimeError(message)
-    set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
+    if not preserve_blocking_stage:
+        set_stage(job, StageName.SUBTITLE_QA, StageStatus.SUCCEEDED, event_sink)
     return True
 
 

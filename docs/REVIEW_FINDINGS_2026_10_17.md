@@ -402,8 +402,31 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 - **C2 一次成型 `translate_and_polish` 收尾留下死 artifact 记录，`status` 推荐的 `verify` 必然失败** — ○ 已复现，**已修（本轮）**。从 C1 的状态走另一条出口（`xvt translate --provider agent` → 一次成型）把 Job 推到 `completed` 后，`status --json` 给 `category=complete` / `primary_command=xvt verify ...`，而 `xvt verify` 报 `FAIL translation_draft_cues: artifact file is missing` / `overall: fail`（退出码 5）。根因：一次成型路径从不写 `translation-draft-cues.json`，也没把那条已失效的登记从 `job.artifacts` 摘掉（`status --json` 的 `artifacts` 里有它、`reusable_artifacts` 里没有）。违反完成标准「Job、stage、artifact、checksum 和事件能够解释任务当前状态」，也是又一处「推荐一条注定失败的命令」。
   修法：在一次成型路径的唯一收尾点 `pipeline.translation.complete_agent_polished_outputs` 里，沿用既有的「按 kind 过滤 `job.artifacts`」失效机制摘掉这一条。**不**用 `downstream_of(ArtifactKind.TRANSLATION_DRAFT_CUES)`：那个闭包包含本函数刚刚产出的 `translation_polished_cues`。
   **对约束 7 的核实**：摘掉后没有恢复路径依赖它。planner 的 polished 腿对一次成型 Job 走 `agent_translate_and_polish_core_satisfied` / `agent_translate_and_polish_started`，两者都只看 manifest 与响应；`polish-translation` 本来就以 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE` 拒绝这类 Job；`translation_progress` 等 checkpoint 记录原样保留；物理文件不删。**实测核对过一处相邻猜测并证伪**：原以为摘掉记录会让「一次成型 manifest 失效」的 Job 从 `repair_polish_draft` 改判成 `translate`，实际两种情形都仍是 `repair_polish_draft`——`agent_translate_and_polish_started` 的 kinds 分支还要求没有 `translation_polish_batches` 记录，而那条记录来自更早一轮 Q5a 润色、不在任何失效闭包里。分类因此零变化，只有 `verify` 的结论变对了。
-- **C3 `xvt resume` 在 `repair_polish_draft` 状态下退出码 0 但不推进，并把 stage 记账推成假话** — ○ 已复现，**本轮刻意未修（只登记）**。实测：该状态下 `xvt resume JOB` 退出 0、Job 没有任何推进，却把 `subtitle_qa` / `render` 推成 `succeeded`、`burn` / `media_qa` 推成 `skipped`——而这个 Job 既没有译文 cue 也没有任何译文渲染产物，状态行从此说假话。恢复分类没有被带偏（`plan_advance_steps` 不读这几个 stage 的状态），危害有限。要修得先定清楚 `resume` 这条转写腿在「译文腿半截」的 Job 上该怎么收尾，属于单独一项。
+- **C3 `xvt resume` 在 `repair_polish_draft` 状态下退出码 0 但不推进，并把 stage 记账推成假话** — ○ 已复现，**原定性不成立，已更正；但同一处另有一个真缺陷，已修（2026-10-18）**。
 
+  **① 原记录的「假话」定性错了，这里更正。** 2026-10-18 用真实命令重跑了原条目的复现路径（`run src.srt --target-language zh --provider agent` → `apply --continue` → `polish-translation --provider agent` → 删 `artifacts/translation-draft-cues.json`），逐字记下 `job.json` 的 stage 块：`subtitle_qa` `pending → succeeded`、`render` `pending → succeeded`、`burn` `pending → skipped`、`media_qa` `pending → skipped`，`translate` 停在 `awaiting_input` 不动。逐个判真假的结论是**四个都是真话**：
+
+  - `subtitle_qa=succeeded` / `render=succeeded`：`_finish_subtitle_job` 真的重跑了**源**字幕 QA（`qa.json` 重写并重新登记，`status: pass`）、真的重渲染了 `source.srt`（重新登记）。stage 名被源腿与译文腿共用，这两条对**源腿**是真话——与 C1 同源的歧义，不是假值。
+  - `burn=skipped` / `media_qa=skipped`：这是纯字幕 Job，`config.workflow.burn` 实测为 `false`，而且**不可能为 true**——`WorkflowGoals` 以 `--burn requires media input` 拒绝，`burn_translated_job` 与 `preview_translated_job` 又各有一道 `input_kind == "subtitle"` 拒绝。全仓唯一把 BURN 写成非复位值的地方是 `pipeline/burnin.py`，它在那道拒绝之后。所以纯字幕 Job 上这两个 stage 的取值只可能是 PENDING 或 SKIPPED，写 SKIPPED 永远是真话。
+  - `TRANSLATE` 的守卫生效了（`awaiting_input` 不是 PENDING，没被改写）。
+  - 恢复分类确实没被带偏：`status` 前后都是 `manual_fix` / `repair_polish_draft`，reason 逐字相同。
+
+  **因此刻意不给 `BURN` / `MEDIA_QA` 补「与 TRANSLATE 同款」的守卫**：那条守卫在纯字幕 Job 上不可达，加了是零行为差异的死码。真要让它可达，得先让纯字幕 Job 能烧录，那时这里要连同三处拒绝一起重估。
+
+  **② 但同一处确实有一个真缺陷，是原条目没看到的那一面。** 把复现换成「译文腿停在 QA 人工复核」（`run src.srt --target-language zh --provider agent` → `apply --continue` 回填一份会超宽的译文），`SUBTITLE_QA` 停在 `awaiting_input`、`translated_subtitle_qa` 报告 checksum 有效。此时跑 `xvt resume`：
+
+  ```
+  before: subtitle_qa=awaiting_input  category=manual_fix  advance_steps=[]
+          primary=xvt continue JOB --acknowledge-subtitle-review
+  after : subtitle_qa=succeeded       category=retryable   advance_steps=['render']
+          primary=xvt continue JOB          reason=译文 cue 已就绪，可以补齐字幕渲染产物后继续。
+  ```
+
+  源腿的 QA 通过把译文腿**尚未解决**的阻断改写成了 `succeeded`，`recovery.subtitle_qa_failure_guidance` 正是按 stage 状态判断「QA 还拦着吗」，于是唯一出口 `continue --acknowledge-subtitle-review` 从导航里消失，换成一条**必然退回等待态**的裸 `continue`（实测跑它只会重算译文 QA 再次停在 `awaiting_input`，退出码 0，Job 不前进）。这是本仓库「推荐一条在该状态下无法推进的命令」这类缺陷的又一次。确定性 QA 门**没有**被绕过（`continue` 重算后照旧阻断，约束 4 成立），损失的是导航与状态行的真实性。媒体 Job 的姐妹函数 `_finish_resumed_source` 同病，已一并实测确认并修掉。
+
+  修法：`pipeline/transcription._translated_leg_blocks_subtitle_qa` 判「`SUBTITLE_QA` 停在 FAILED / AWAITING_INPUT 且 `translated_subtitle_qa` 仍 checksum 有效」（与 `subtitle_qa_failure_guidance` 同口径，译文报告已失效时让路，和 `recovery._translated_qa_needs_rebuild` 一致），成立时源腿照常重算并重新登记 `qa.json`、照常补回 `source.srt`（`resume` 的本职一点没少做），但经 `complete_qa_stage(..., preserve_blocking_stage=True)` 放弃改写 stage 与 `subtitle_review_acknowledged` 事件——放行只体现在返回值上。源腿**自己**阻断（未确认的 `needs_review` 或 `failed`）仍照常记账，那是比译文复核更靠前的新事实。`RENDER` 不在修复范围：全仓 `recovery` / `workflow` / `cli` 没有一处读它的状态，`render=succeeded` 对源腿也是真话，属于 C1 那类歧义。
+
+  红先：`tests/test_pipeline_transcription.py::TranscriptionPipelineTest::test_resume_keeps_the_translated_review_block_on_the_shared_qa_stage` 在修复前报 `AssertionError: <StageStatus.SUCCEEDED: 'succeeded'> != <StageStatus.AWAITING_INPUT: 'awaiting_input'>`。
 ## 观察（危害低，可不处理）
 
 - 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——这是 R3.2 的低成本替代点（执行器改为按 `advance_steps[0]` 分派）。

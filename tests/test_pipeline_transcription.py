@@ -27,7 +27,11 @@ from xvt.pipeline import (
     run_subtitle_transcription,
 )
 from xvt.process import CommandResult
-from xvt.recovery import file_checksum
+from xvt.recovery import (
+    file_checksum,
+    subtitle_qa_failure_guidance,
+    valid_artifact_path,
+)
 from xvt.segment import segment_transcript, segmentation_config_for_preset
 
 
@@ -110,6 +114,63 @@ class TranscriptionPipelineTest(unittest.TestCase):
                 load_job(job_file).stages[StageName.SUBTITLE_QA].status,
                 StageStatus.FAILED,
             )
+
+    def test_resume_keeps_the_translated_review_block_on_the_shared_qa_stage(self) -> None:
+        """源腿重跑不得把译文腿尚未解决的 QA 阻断抹成「已通过」。
+
+        `SUBTITLE_QA` 这个 stage 名由源腿与译文腿共用。译文 QA 停在 needs_review 时，
+        唯一出口是 `continue --acknowledge-subtitle-review`；`xvt resume` 重跑源字幕 QA
+        后若把这个 stage 写成 SUCCEEDED，`subtitle_qa_failure_guidance` 就读不到阻断，
+        恢复导航会从「去确认」降级成一条必然回到等待态的 `continue`。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nHello there.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\n"
+                "你好这一行译文被故意写得非常非常长用来触发显示宽度复核"
+                "从而让译文 QA 停在人工确认上\n",
+                encoding="utf-8",
+            )
+
+            job = run_subtitle_transcription(source, root / "output", language="en")
+            job_file = get_job_file(job)
+            apply_subtitle_translation(job_file, translated, target_language="zh")
+
+            blocked = load_job(job_file)
+            self.assertEqual(
+                blocked.stages[StageName.SUBTITLE_QA].status, StageStatus.AWAITING_INPUT
+            )
+            self.assertIsNotNone(valid_artifact_path(blocked, "translated_subtitle_qa"))
+            before = subtitle_qa_failure_guidance(blocked, job_file)
+            self.assertIsNotNone(before)
+            assert before is not None
+            self.assertIn("--acknowledge-subtitle-review", before.primary_command or "")
+
+            source_srt = next(item for item in blocked.artifacts if item.kind == "source_srt")
+            Path(source_srt.path).unlink()
+            resume_job(job_file)
+
+            resumed = load_job(job_file)
+            # 源腿照常把被删掉的 source.srt 补回来——守卫只拦 stage 降级，不拦恢复本职。
+            self.assertTrue(
+                next(
+                    Path(item.path) for item in resumed.artifacts if item.kind == "source_srt"
+                ).is_file()
+            )
+            self.assertEqual(
+                resumed.stages[StageName.SUBTITLE_QA].status, StageStatus.AWAITING_INPUT
+            )
+            after = subtitle_qa_failure_guidance(resumed, job_file)
+            self.assertIsNotNone(after)
+            assert after is not None
+            self.assertIn("--acknowledge-subtitle-review", after.primary_command or "")
 
     def test_run_local_transcription_persists_artifacts_and_stage_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
