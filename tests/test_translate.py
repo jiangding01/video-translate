@@ -776,6 +776,104 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual(translations, {1: "一", 2: "二", 3: "三"})
         self.assertEqual(report["method"], "strict_order")
 
+    def test_misaligned_equal_count_mapping_does_not_claim_full_confidence(self) -> None:
+        """等长按序映射不得把完全错位的译文记成 confidence 1.0。
+
+        ``translation-mapping.json`` 是 checksum 保护的恢复证据。写死的 1.0 会让
+        「按顺序硬套、一次重叠都没量过」看起来像一次经过校验的精确映射，事后无从
+        分辨这份译文到底对没对上。
+        """
+
+        translated = [
+            Cue(1, 9000, 10000, "", target_text="一"),
+            Cue(2, 10000, 11000, "", target_text="二"),
+            Cue(3, 11000, 12000, "", target_text="三"),
+        ]
+
+        _, report = map_subtitle_translations(self.cues, translated)
+
+        self.assertEqual(report["confidence"], 0.0)
+
+    def test_equal_count_mapping_confidence_follows_measured_overlap(self) -> None:
+        """整体时移的等长导入按实测重叠记分，而不是一律满分。"""
+
+        translated = [
+            Cue(1, 300, 1300, "", target_text="一"),
+            Cue(2, 1300, 2300, "", target_text="二"),
+            Cue(3, 2300, 3300, "", target_text="三"),
+        ]
+
+        _, report = map_subtitle_translations(self.cues, translated)
+
+        self.assertEqual(report["method"], "strict_order")
+        self.assertAlmostEqual(report["confidence"], 0.7)
+
+    def test_aligned_equal_count_mapping_keeps_full_confidence(self) -> None:
+        """反向守卫：时间轴对齐的合法等长导入仍然满分通过。"""
+
+        translated = [
+            Cue(1, 0, 1000, "", target_text="一"),
+            Cue(2, 1000, 2000, "", target_text="二"),
+            Cue(3, 2000, 3000, "", target_text="三"),
+        ]
+
+        translations, report = map_subtitle_translations(self.cues, translated)
+
+        self.assertEqual(translations, {1: "一", 2: "二", 3: "三"})
+        self.assertEqual(report["method"], "strict_order")
+        self.assertEqual(report["confidence"], 1.0)
+
+    def test_required_overlap_rejects_misaligned_equal_count_mapping(self) -> None:
+        """重新套用已存副本时，等长不再能替代时间轴对应关系。
+
+        默认宽松是在兑现用户「这份译文对应当前这套源 cue」的主张；没有人为当前
+        这套源 cue 做过该主张时（``require_timeline_overlap=True``），等长只是巧合。
+        """
+
+        translated = [
+            Cue(1, 9000, 10000, "", target_text="一"),
+            Cue(2, 10000, 11000, "", target_text="二"),
+            Cue(3, 11000, 12000, "", target_text="三"),
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError, "does not line up with the current source timeline"
+        ):
+            map_subtitle_translations(self.cues, translated, require_timeline_overlap=True)
+
+    def test_required_overlap_accepts_aligned_equal_count_mapping(self) -> None:
+        """反向守卫：已存副本仍落在当前源时间轴上时照常映射。"""
+
+        translated = [
+            Cue(1, 0, 1000, "", target_text="一"),
+            Cue(2, 1000, 2000, "", target_text="二"),
+            Cue(3, 2000, 3000, "", target_text="三"),
+        ]
+
+        translations, report = map_subtitle_translations(
+            self.cues, translated, require_timeline_overlap=True
+        )
+
+        self.assertEqual(translations, {1: "一", 2: "二", 3: "三"})
+        self.assertEqual(report["method"], "strict_order")
+        self.assertEqual(report["confidence"], 1.0)
+
+    def test_required_overlap_tolerates_a_whole_timeline_shift(self) -> None:
+        """整体时移但仍压在源 cue 上的已存副本不被误伤：判据是重叠，不是严丝合缝。"""
+
+        translated = [
+            Cue(1, 300, 1300, "", target_text="一"),
+            Cue(2, 1300, 2300, "", target_text="二"),
+            Cue(3, 2300, 3300, "", target_text="三"),
+        ]
+
+        translations, report = map_subtitle_translations(
+            self.cues, translated, require_timeline_overlap=True
+        )
+
+        self.assertEqual(translations, {1: "一", 2: "二", 3: "三"})
+        self.assertAlmostEqual(report["confidence"], 0.7)
+
     def test_maps_multiple_translated_cues_by_timeline_overlap(self) -> None:
         source = [Cue(1, 0, 2000, "One")]
         translated = [

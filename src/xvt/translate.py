@@ -997,27 +997,100 @@ def apply_polish_translations(
     ]
 
 
+def _timeline_overlap_ratio(source: Cue, translated: Cue) -> float:
+    """译文 cue 落在源 cue 时间轴内的比例。
+
+    两条映射分支共用这一份度量，口径必须一致：分母是译文 cue 自身时长，所以
+    「译文完全被源 cue 覆盖」得 1.0。``load_subtitles`` 拒绝 ``end <= start``，
+    零时长只可能来自直接构造 cue 的调用方；按不可破坏约束 4 的「测量异常回退
+    保守规则」记 0.0，而不是伪造一个满分或抛 ``ZeroDivisionError``。
+    """
+
+    duration = translated.end_ms - translated.start_ms
+    if duration <= 0:
+        return 0.0
+    overlap = max(
+        0,
+        min(source.end_ms, translated.end_ms) - max(source.start_ms, translated.start_ms),
+    )
+    return overlap / duration
+
+
+def _reject_unverified_strict_order(
+    pairs: list[tuple[Cue, Cue]],
+    overlap_scores: list[float],
+    minimum_overlap: float,
+) -> None:
+    """已存译文副本与当前源时间轴对不上时，带着实测数字大声失败。
+
+    文案必须说清「是哪一份译文、和什么对不上、为什么现在才查」：这条失败在阶段 1
+    还没有自动出口，用户得靠这段话自己判断下一步。
+    """
+
+    offenders = [
+        (source, translated, ratio)
+        for (source, translated), ratio in zip(pairs, overlap_scores, strict=True)
+        if ratio < minimum_overlap
+    ]
+    if not offenders:
+        return
+    worst_source, worst_translated, worst_ratio = min(offenders, key=lambda item: item[2])
+    raise ValueError(
+        "the imported translation kept in the job does not line up with the current source "
+        f"timeline: {len(offenders)} of {len(pairs)} cues fall outside their source cue "
+        f"(worst: translated cue {worst_translated.id} "
+        f"[{worst_translated.start_ms}-{worst_translated.end_ms}ms] against source cue "
+        f"{worst_source.id} [{worst_source.start_ms}-{worst_source.end_ms}ms], overlap "
+        f"{worst_ratio:.2f} < {minimum_overlap:.2f}). The cue counts happen to match, but the "
+        "source timeline has changed since that translation was imported, so matching counts do "
+        "not establish which translated line belongs to which source cue. Import a translation "
+        "that matches the current source cues, or translate them again."
+    )
+
+
 def map_subtitle_translations(
     source_cues: list[Cue],
     translated_cues: list[Cue],
     *,
     minimum_overlap: float = 0.5,
+    require_timeline_overlap: bool = False,
 ) -> tuple[dict[int, str], dict[str, Any]]:
+    """把译文字幕映射到源 cue 上。源时间轴始终优先，译文只贡献文本。
+
+    ``require_timeline_overlap`` 决定等长输入要不要校验时间轴，判据是语义而不是
+    Job 状态：**有没有人为当前这套源 cue 主张过「这份译文属于它」**。
+
+    - 默认 ``False``：用户此刻显式交出一份字幕（``import-translation``、
+      ``run --translation-subtitles``）就是在做那个主张，等长即按序接受是在兑现它，
+      也是 README 与 Skill 写明的契约——数量一致时不要求时间覆盖。
+    - ``True``：调用方拿的是早先存下的副本（Job 内的 ``input_translation_subtitles``），
+      去套一套**可能已经变过**的源 cue（例如 ``rebuild-source --strategy asr`` 之后）。
+      没有人为这套源 cue 做过主张，等长只是巧合，必须由时间轴证实对应关系。
+
+    不等长分支两种模式下口径相同：一直按时间轴重叠匹配。
+    """
+
     if not source_cues or not translated_cues:
         raise ValueError("source and translated subtitles must contain cues")
     if len(source_cues) == len(translated_cues):
-        translations = {
-            source.id: translated.target_text or ""
-            for source, translated in zip(source_cues, translated_cues, strict=True)
-        }
+        pairs = list(zip(source_cues, translated_cues, strict=True))
+        translations = {source.id: translated.target_text or "" for source, translated in pairs}
+        # 这条分支按顺序硬配，所以 confidence 必须如实报告实测重叠：写死 1.0 会把
+        # 「一次都没量过」记成「量过且完全吻合」，而 translation-mapping.json 是
+        # checksum 保护的恢复证据。
+        overlap_scores = [
+            _timeline_overlap_ratio(source, translated) for source, translated in pairs
+        ]
+        if require_timeline_overlap:
+            _reject_unverified_strict_order(pairs, overlap_scores, minimum_overlap)
         return translations, {
             "method": "strict_order",
-            "confidence": 1.0,
+            "confidence": sum(overlap_scores) / len(overlap_scores),
             "source_cues": len(source_cues),
             "translated_cues": len(translated_cues),
             "assignments": [
                 {"source_id": source.id, "translated_ids": [translated.id]}
-                for source, translated in zip(source_cues, translated_cues, strict=True)
+                for source, translated in pairs
             ],
         }
 
@@ -1025,17 +1098,12 @@ def map_subtitle_translations(
     overlap_scores = []
     for translated in translated_cues:
         best_source = None
-        best_overlap = 0
+        overlap_ratio = 0.0
         for source in source_cues:
-            overlap = max(
-                0,
-                min(source.end_ms, translated.end_ms) - max(source.start_ms, translated.start_ms),
-            )
-            if overlap > best_overlap:
+            ratio = _timeline_overlap_ratio(source, translated)
+            if ratio > overlap_ratio:
                 best_source = source
-                best_overlap = overlap
-        duration = translated.end_ms - translated.start_ms
-        overlap_ratio = best_overlap / duration
+                overlap_ratio = ratio
         if best_source is None or overlap_ratio < minimum_overlap:
             raise ValueError(
                 f"translated cue {translated.id} has insufficient source timeline overlap"

@@ -1340,15 +1340,19 @@ def _ensure_translation(
             event_sink=event_sink,
         )
 
-    translation_subtitles = (
-        valid_artifact_path(job, "input_translation_subtitles") or config.translation_subtitles
-    )
+    retained_translation = valid_artifact_path(job, "input_translation_subtitles")
+    translation_subtitles = retained_translation or config.translation_subtitles
     if translation_subtitles:
         apply_subtitle_translation(
             path,
             translation_subtitles,
             target_language=target_language,
             event_sink=event_sink,
+            # 走 Job 内早先存下的副本时，没有人为当前这套源 cue 主张过「这份译文属于
+            # 它」（`rebuild-source` 之后源时间轴可能已经变了），等长不足为凭，必须
+            # 由时间轴重叠证实。用户此刻经 `--translation-subtitles` 交出的文件是那个
+            # 主张本身，保持默认宽松。
+            require_timeline_overlap=retained_translation is not None,
         )
         return None
 

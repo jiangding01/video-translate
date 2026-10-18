@@ -364,3 +364,46 @@ class RebuildSourceTest(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertIn("translation_mapping", artifact_kinds)
             self.assertIn("translated_cues", artifact_kinds)
+
+    def test_continue_refuses_retained_translation_that_misses_the_rebuilt_timeline(self) -> None:
+        """重建后的源时间轴与已存译文对不上时，``continue`` 必须大声失败。
+
+        cue 数恰好相等（这里 1v1）曾让按序硬配一路放行：译文**文本**错位不触碰
+        时间轴、文本完整性、显示宽度任何一项确定性 QA，错译会进 ``bilingual.srt``
+        并烧进成品。重建后的源 cue 没有任何人主张过与这份旧译文对应，等长在这里
+        只是巧合。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, artifacts = self._job_with_checkpoints(root, with_words=True)
+            # 已存副本停在 3.0–3.9s，而 words.json 只有 0–900ms 的一个词，
+            # 重建出的源 cue 与它完全不相交。
+            retained_translation = artifacts / "input-translation.srt"
+            retained_translation.write_text(
+                "1\n00:00:03,000 --> 00:00:03,900\n你好。\n",
+                encoding="utf-8",
+            )
+
+            job = load_job(job_file)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": False}
+            job.artifacts.append(
+                Artifact(
+                    "input_translation_subtitles",
+                    str(retained_translation),
+                    file_checksum(retained_translation),
+                )
+            )
+            save_job(job)
+
+            rebuild_source(job_file, strategy="asr")
+
+            with self.assertRaisesRegex(
+                ValueError, "does not line up with the current source timeline"
+            ):
+                continue_workflow(job_file)
+
+            rebuilt = load_job(job_file)
+            artifact_kinds = {artifact.kind for artifact in rebuilt.artifacts}
+            self.assertNotIn("translated_cues", artifact_kinds)
+            self.assertNotIn("bilingual_srt", artifact_kinds)
