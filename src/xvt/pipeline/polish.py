@@ -23,7 +23,7 @@ from xvt.pipeline.common import (
 )
 from xvt.pipeline.translation import (
     TranslationRunResult,
-    agent_translation_polish_started,
+    agent_translate_and_polish_started,
     run_provider_batches,
 )
 from xvt.recovery import valid_artifact_path
@@ -137,7 +137,7 @@ def _prepare_draft(
     if config.translation_quality == "polished":
         if existing is None:
             # 复用 planner / recovery 已有的那条「Agent 一次成型」判定，不另造谓词。
-            if agent_translation_polish_started(job):
+            if agent_translate_and_polish_started(job):
                 raise ValueError(AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE)
             raise ValueError("polished workflow has no valid translation draft checkpoint")
         identity_changed = (

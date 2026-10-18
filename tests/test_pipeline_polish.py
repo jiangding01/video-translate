@@ -9,7 +9,7 @@ from xvt.errors import ExitCode, UserInputError
 from xvt.job_store import get_job_file, load_job, save_job
 from xvt.models import Cue, StageName, StageStatus
 from xvt.pipeline import (
-    agent_translation_polish_core_satisfied,
+    agent_translate_and_polish_core_satisfied,
     apply_agent_semantic_review,
     apply_agent_translation,
     apply_agent_translation_polish,
@@ -288,7 +288,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 <= kinds
             )
             self.assertNotIn("translated_cues", kinds)
-            self.assertTrue(agent_translation_polish_core_satisfied(job))
+            self.assertTrue(agent_translate_and_polish_core_satisfied(job))
             polished_path = next(
                 Path(artifact.path)
                 for artifact in job.artifacts
@@ -351,7 +351,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
 
             apply_agent_translation(job_file, response, target_language="zh-CN")
 
-            self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
+            self.assertTrue(agent_translate_and_polish_core_satisfied(load_job(job_file)))
 
     def test_new_agent_job_rejects_stale_fingerprint_without_writing_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -871,7 +871,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
                 encoding="utf-8",
             )
             apply_agent_translation(job_file, response, target_language="zh-CN")
-            self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
+            self.assertTrue(agent_translate_and_polish_core_satisfied(load_job(job_file)))
 
             with self.assertRaises(ValueError) as caught:
                 run_translation_polish(job_file)
@@ -881,7 +881,7 @@ class TranslationPolishPipelineTest(unittest.TestCase):
             self.assertIn("translation-draft-cues.json", message)
             self.assertNotIn("no valid translation draft checkpoint", message)
             # Job 不被这次拒绝改写：仍是一个译文目标已满足的 polished Job。
-            self.assertTrue(agent_translation_polish_core_satisfied(load_job(job_file)))
+            self.assertTrue(agent_translate_and_polish_core_satisfied(load_job(job_file)))
 
     def test_provider_override_reruns_completed_polish_from_original_draft(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

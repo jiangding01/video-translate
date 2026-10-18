@@ -79,7 +79,7 @@
 
 遗留情形：用户在一个**已满足**的 polished Job 上显式重开 `polish-translation` 或语义校对的 Agent 等待时，计划仍会是空的（`status` 报 complete）。它不是本轮修复的路径，也没有已知的 E2E 复现；真要修就按第 2 条同样补一条满足度之前的早退，并同步更新上面那张表态表。
 
-相邻但**不同**的一种情形已经有出口：Agent `task=translate_and_polish` 的一次成型 Job 结构上就没有 `translation-draft-cues.json`，`polish-translation` 对它根本开不起来——`pipeline.polish._prepare_draft` 复用 `agent_translation_polish_started` 识别这类 Job，以退出码 2 明确拒绝并说明「润色在初译那一步就完成了」，不再和「当前目标已完成」的恢复建议拼成一句自相矛盾的话。「draft 曾存在但 checksum 失效」仍走原来那条「需要恢复原始译文草稿」的引导，两种情形不共用文案。
+相邻但**不同**的一种情形已经有出口：Agent `task=translate_and_polish` 的一次成型 Job 结构上就没有 `translation-draft-cues.json`，`polish-translation` 对它根本开不起来——`pipeline.polish._prepare_draft` 复用 `agent_translate_and_polish_started` 识别这类 Job，以退出码 2 明确拒绝并说明「润色在初译那一步就完成了」，不再和「当前目标已完成」的恢复建议拼成一句自相矛盾的话。「draft 曾存在但 checksum 失效」仍走原来那条「需要恢复原始译文草稿」的引导，两种情形不共用文案。
 
 ### `repair_polish_draft` 的恢复出口
 
@@ -96,7 +96,7 @@
 
 `complete_agent_polished_outputs`（一次成型路径的唯一收尾点）在收尾时把 `translation_draft_cues` 登记移出 `job.artifacts`。这条路径结构上从不写 `translation-draft-cues.json`：初译与润色在同一次回填里完成，`translation_polished_cues` 派生自 `source_cues` 与那份响应。此前某一轮 Q5a 润色留下的草稿登记会一路挂到 `completed`，于是 `status` 报 `complete` 并推荐 `xvt verify`，而 `verify` 必然以 `artifact file is missing` 失败——「Job、artifact、checksum 能解释当前状态」不成立，推荐的也是一条注定失败的命令。
 
-摘记录沿用既有的「按 kind 过滤 `job.artifacts`」失效机制，只摘这一条，**不**走 `downstream_of(TRANSLATION_DRAFT_CUES)`（那个闭包含刚刚产出的 `translation_polished_cues`）。不影响恢复依据：planner 的 polished 腿对一次成型 Job 只看 manifest 与响应（`agent_translation_polish_core_satisfied` / `agent_translation_polish_started`），`polish-translation` 本来就以 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE` 拒绝这类 Job，`translation_progress` 等 checkpoint 记录原样保留；物理文件不删，只是不再登记为本 Job 的产物。
+摘记录沿用既有的「按 kind 过滤 `job.artifacts`」失效机制，只摘这一条，**不**走 `downstream_of(TRANSLATION_DRAFT_CUES)`（那个闭包含刚刚产出的 `translation_polished_cues`）。不影响恢复依据：planner 的 polished 腿对一次成型 Job 只看 manifest 与响应（`agent_translate_and_polish_core_satisfied` / `agent_translate_and_polish_started`），`polish-translation` 本来就以 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE` 拒绝这类 Job，`translation_progress` 等 checkpoint 记录原样保留；物理文件不删，只是不再登记为本 Job 的产物。
 
 ### 宣告完成前的终检守卫
 
