@@ -49,6 +49,7 @@ from xvt.pipeline import (
     cue_retranslation_waiting,
     inspect_input,
     interrupt_running_stage,
+    pending_translation_import_blocker,
     preflight_translation_review_fixes,
     prepare_agent_translation,
     prepare_source_review,
@@ -1200,14 +1201,30 @@ def _human_review_waiting(job: Job) -> bool:
     return bool(qa and qa.status is StageStatus.AWAITING_INPUT) or semantic_review_waiting(job)
 
 
-def _print_recovery_navigation(job_file: str | Path) -> None:
+def _print_recovery_navigation(
+    job_file: str | Path,
+    *,
+    labels: dict[str, str] = _EN_RECOVERY_LABELS,
+    reason_prefix: str = "recovery: ",
+    fallback_reason: str | None = None,
+) -> None:
+    """打印恢复计划的原因与导航行。命令一律由 ``build_recovery_plan`` 单点拼装。
+
+    ``labels`` / ``reason_prefix`` 只切方言：原子命令的输出是英文，``rebuild-source``
+    这类中文输出的命令传 ``_ZH_RECOVERY_LABELS``。``fallback_reason`` 是计划算不出来
+    时的兜底诊断——调用方手里已经有一句**确证**的诊断时传进来，免得只剩一条
+    「再看 status」。
+    """
+
     try:
         plan = build_recovery_plan(job_file)
     except (XvtError, OSError, RuntimeError, ValueError):
+        if fallback_reason is not None:
+            _print_safe(f"{reason_prefix}{fallback_reason}")
         _print_safe(f"next: xvt status {shlex.quote(str(job_file))}")
         return
-    _print_safe(f"recovery: {plan.reason}")
-    for line in _recovery_lines(plan, labels=_EN_RECOVERY_LABELS, verbose=False):
+    _print_safe(f"{reason_prefix}{plan.reason}")
+    for line in _recovery_lines(plan, labels=labels, verbose=False):
         _print_safe(line)
 
 
@@ -1625,8 +1642,21 @@ def _cmd_rebuild_source(arguments: argparse.Namespace) -> int:
         _print_safe(f"质量报告: {result.qa_path}")
         job = load_job(arguments.job_file)
         quoted_job_file = shlex.quote(str(Path(arguments.job_file).expanduser().resolve()))
-        if get_workflow_config(job) is not None:
-            _print_safe(f"继续任务: xvt continue {quoted_job_file}")
+        workflow_config = get_workflow_config(job)
+        if workflow_config is not None:
+            # 重建换掉了源时间轴，Job 里保留的已存译文可能已经套不回去——那时
+            # `continue` 必然在映射处失败。当场给出恢复计划的真出口，别让用户先跑
+            # 一次注定失败的命令才发现。谓词与 status / continue 是同一份实现。
+            blocker = pending_translation_import_blocker(job, workflow_config)
+            if blocker is None:
+                _print_safe(f"继续任务: xvt continue {quoted_job_file}")
+            else:
+                _print_recovery_navigation(
+                    arguments.job_file,
+                    labels=_ZH_RECOVERY_LABELS,
+                    reason_prefix="恢复建议：",
+                    fallback_reason=blocker,
+                )
         else:
             target_language = resolve_target_language(job)
             if target_language:

@@ -1192,6 +1192,7 @@ def _recovery_for_workflow(
     延迟导入 ``xvt.workflow``，避免 ``workflow → recovery → workflow`` 循环导入。
     """
 
+    from xvt.pipeline.common import pending_translation_import_blocker
     from xvt.pipeline.semantic import semantic_review_satisfied
     from xvt.pipeline.translation import (
         REPAIR_POLISH_DRAFT_MANUAL_FIX_MESSAGE,
@@ -1394,6 +1395,20 @@ def _recovery_for_workflow(
         )
 
     if "translate" in steps or "import_translation" in steps:
+        # 这一步不一定会调用翻译提供方：Job 内留着已存译文时 `_ensure_translation`
+        # 会把它重新套到当前源 cue 上。套不回去时 `continue` 必然在同一处失败且
+        # 一个字节都不改 Job，继续给 retryable + continue 就是推荐一条注定失败的
+        # 命令（第 7 次同类缺陷）。谓词与执行侧同一份实现，见
+        # `pipeline.common.pending_translation_import_blocker`。
+        blocker = pending_translation_import_blocker(job, workflow)
+        if blocker is not None:
+            return _pending_translation_import_manual_fix(
+                job_file=job_file,
+                workflow=workflow,
+                plan=plan,
+                steps=steps,
+                diagnosis=blocker,
+            )
         reason = "源字幕有效，可以继续未完成的翻译阶段。"
     elif "polish" in steps:
         reason = "译文草稿有效，可以继续未完成的润色阶段。"
@@ -1410,6 +1425,76 @@ def _recovery_for_workflow(
         "retryable",
         reason,
         primary_command=_job_command("continue", job_file),
+        advance_steps=steps,
+    )
+
+
+def _pending_translation_import_manual_fix(
+    *,
+    job_file: Path,
+    workflow: WorkflowConfig,
+    plan: Callable[..., RecoveryPlan],
+    steps: tuple[str, ...],
+    diagnosis: str,
+) -> RecoveryPlan:
+    """已存译文套不回当前源 cue 时的 manual_fix 导航。
+
+    ``diagnosis`` 是 ``status`` 与 ``continue`` 共用的那句诊断（由
+    ``pipeline.common.pending_translation_import_blocker`` 产出，两边逐字一致）；
+    本函数只在它后面接一句**导航**，与 ``_repair_polish_draft_manual_fix`` 同构。
+
+    两条出口都经过实测，但不是等价的：
+
+    - 首选 ``import-translation``：导入一份对齐当前源 cue 的译文后 Job 走到
+      ``completed``，而且 ``add_artifact`` 按 kind 去重，这一次导入会**顶掉**那份
+      错位的 ``input_translation_subtitles`` 登记——死局本身被拆掉。
+    - 备选整轮重译：同样能走到 ``completed``，但它**只是绕过**。错位的
+      ``input_translation_subtitles`` 与 ``config.workflow.translation_subtitles``
+      原样留着，再跑一次 ``rebuild-source`` 会在同一处复发，所以代价必须讲明。
+
+    ``continue`` 必然再次失败，任何推荐位都不放。``resegment-translation`` 也不是
+    出口：它换的是源 cue 的切分，解决不了「这份译文对不上」；持久化了
+    ``workflow.translation_subtitles`` 的 Job 上它还有一道配置级闸门，恒以退出码 2
+    拒绝。
+
+    分类选 ``manual_fix`` 而不是 ``awaiting_input``：这不是「等一份可回填的输入」，
+    而且 ``batch`` 把 ``manual_fix`` 归入「绝不自动推进」并记 ``failed``，
+    ``batch-continue`` 因此不再每轮重撞同一个失败。
+    """
+
+    # 谓词只在有 target_language 时出声，所以这里两条命令总能拼出来；守卫留着是因为
+    # 两者都必须带 --target-language，少了它推荐出去就是一条跑不通的命令。
+    target_language = workflow.target_language
+    primary: str | None = None
+    alternatives: tuple[str, ...] = ()
+    if target_language:
+        primary = _job_command(
+            "import-translation",
+            job_file,
+            "TRANSLATED_SUBTITLE",
+            "--target-language",
+            shlex.quote(target_language),
+        )
+        alternatives = (
+            _job_command(
+                "translate",
+                job_file,
+                "--target-language",
+                shlex.quote(target_language),
+                "--provider",
+                shlex.quote(workflow.provider),
+            ),
+        )
+    return plan(
+        "manual_fix",
+        f"{diagnosis}"
+        "导入一份对齐当前源 cue 时间轴的译文字幕即可继续，"
+        "这次导入会按 kind 顶掉 Job 里那份错位的导入译文登记，死局随之拆除。"
+        "备选的整轮重译也能跑完，但它只是绕过：错位的导入译文副本与持久化目标里的"
+        " translation_subtitles 原样留着，下一次 rebuild-source 会在同一处复发"
+        "（openai-compatible 模式下它还是真实 API 成本）。",
+        primary_command=primary,
+        alternative_commands=alternatives,
         advance_steps=steps,
     )
 

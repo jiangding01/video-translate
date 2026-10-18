@@ -327,6 +327,10 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
   **闸门按语义分，不按 Job 状态分**：判据是有没有人为当前这套源 cue 主张过「这份译文属于它」。用户此刻显式交出字幕（`import-translation` / `run --translation-subtitles`）是在做那个主张，等长即按序接受照旧（契约与文案一字未改，它同时就是逃生舱）；只有 `continue` 重新套用 Job 内存下的`input_translation_subtitles` 时传 `require_timeline_overlap=True`，等长也要逐对满足重叠。另抽出 `_timeline_overlap_ratio` 作为两条分支共用的唯一度量，`confidence` 改为实测。
 
+  **阶段 2 已修（2026-10-18）：导航死局本身。** 阶段 1 把「安静的错误」变成了「吵闹的失败」，但那条失败仍然没有出口——真实复现的 `status --json` 是 `retryable` / `advance_steps=["import_translation"]` / `primary_command=xvt continue …`，而那条 `continue` 逐字输出「任务失败：translated cue 1 has insufficient source timeline overlap」后，紧跟着的恢复建议又是同一条 `continue`；连跑两次 stderr 逐字相同，`diff -r` 整个 Job 目录只有 `.xvt.lock` 的 PID 变了。**只改 `continue` 的错误处理无效**：`recovery` 严格只读、不感知运行期异常，而这条失败发生在 `set_stage(RUNNING)` 之前、Job 一个字节都不改，下次 `status` 照旧只看 artifact 与 config。判定因此进了 `build_recovery_plan`，范式照搬「强制对齐置信度不足的死循环出口」：单点只读谓词 `pipeline.common.pending_translation_import_blocker` 从 artifact + config 纯推导，重叠度量复用阶段 1 的 `map_subtitle_translations`，由 `status` / `continue` / `rebuild-source` 收尾三处消费同一句诊断。分类归 `manual_fix`（顺带修好 `batch-continue` 每轮重撞同一个失败），首选 `import-translation`（实测走到 `completed`，且按 kind 去重会顶掉错位登记、拆掉复发地雷），备选整轮重译并讲明它只是绕过。判定条件与取舍见 [恢复与回填契约](RECOVERY.md#已存译文套不回重建后的源时间轴)。
+
+  **阶段 3 仍未做：显式放弃导入译文。** 原条目里「什么条件下允许放弃导入译文、放弃时如何不悄悄丢用户的译文」这个设计问题没有被阶段 2 回答——阶段 2 只做了「让状态能解释自己 + 给出已经存在的出口」。`xvt drop-imported-translation`（双源同时清、带 `downstream_of(INPUT_TRANSLATION_SUBTITLES)` 失效闭包）仍待立项。
+
   **为什么没走「无条件收紧」。** 它**必然**打红 `tests/test_translate.py::TranslateTest::test_maps_equal_cue_counts_by_order`（源 0–3000ms vs 译文 9000–12000ms）与 `tests/test_pipeline_translation.py::TranslationPipelineTest::test_existing_translation_uses_source_timeline`（源 1000–2000ms vs 译文 0–500ms）：两例的时间轴与源 cue **完全不相交**，重叠是 0 而不是「低于 0.5」，任何基于重叠的闸门都够不着它们。全量 992 条测试里只有这两条依赖宽松行为（插桩跑全量枚举，其余 18 次等长映射重叠全部充足），且两条都不是「等长但整体时移」这个真正值得担心的误伤形态——**那个形态在仓库里零测试覆盖**，不该拿它给方案加权重。落地的按语义分流两条都走显式路径，零变红。
 
   **阶段 2 待做**：这条失败还没有自动出口，`recovery` 不认识它、`status` 不给命令。详见 `HANDOFF.md`。

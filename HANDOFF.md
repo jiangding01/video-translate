@@ -2,13 +2,29 @@
 
 更新时间：2026-10-18
 
+2026-10-18 **P4 阶段 2：`status` 正在推荐一条必然失败的命令——已修**（分支 `codex/import-translation-recovery-exit`，未合并、未开 PR）。真实复现：媒体 Job 导入译文 → `rebuild-source --strategy asr` 之后，`status --json` 给 `category=retryable` / `advance_steps=["import_translation"]` / `primary_command=xvt continue …` / `alternative_commands=[]`，而那条 `continue` 逐字输出「任务失败：translated cue 1 has insufficient source timeline overlap」，紧跟着的恢复建议又是同一条 `continue`，退出码 2；连跑两次 stderr 逐字相同，`diff -r` 整个 Job 目录只有 `.xvt.lock` 的 PID 变了。**导航零变化，用户没有出口**——本仓库第 7 次同类缺陷。
+
+**只改 `continue` 的错误处理无效**：`recovery` 严格只读、从 artifact + config 纯推导，不感知运行期异常；而这条失败发生在 `set_stage(RUNNING)` **之前**，Job 一个字节都不改，下次 `status` 照旧给同样的结论。判定因此进了 `build_recovery_plan`，范式照搬 [强制对齐置信度不足的死循环出口](docs/RECOVERY.md#强制对齐置信度不足的死循环出口)。
+
+**一份纯谓词，三处消费。** `pipeline.common.pending_translation_import_blocker(job, config)`：只读纯谓词，不写盘、不登记 artifact、不改 stage，重叠度量**复用阶段 1 的** `map_subtitle_translations`（连同 `require_timeline_overlap` 语义与 `_timeline_overlap_ratio`），不就地重造。放在 `pipeline/common.py` 是因为它是包内叶子（已 import `xvt.translate`），三个消费点 `recovery` / `workflow` / `cli` 都够得着，`transcription` 这类子模块将来要用也不必新增依赖边——放 `pipeline/translation.py` 会逼出 `transcription → translation` 这条白名单外的新边。三处消费：① `recovery._recovery_for_workflow` 的 `translate` / `import_translation` 分支归 **`manual_fix`** 并给出口（本阶段核心）；② `workflow._ensure_translation` 回填前的闸门，带**同一句诊断**失败（异常类型刻意仍是 `ValueError`、退出码仍是 2，不顺手改调用方看得见的契约）；③ `cli._cmd_rebuild_source` 收尾改打恢复计划的 reason + 导航行，不再无条件打「继续任务: xvt continue」。
+
+**出口按实测定，不自己发明。** 首选 `xvt import-translation JOB TRANSLATED_SUBTITLE --target-language LANG`（实测走到 `completed`、`verify` 全 PASS，且 `add_artifact` 按 kind 去重会**顶掉**错位登记、把复发地雷一起拆掉）；备选 `xvt translate JOB --target-language LANG --provider <持久化 provider>`，reason 里讲明它**只是绕过**（错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，再跑一次 `rebuild-source` 原地复发）。`continue` 不进任何推荐位；`resegment-translation` 不是出口（配置级闸门，对这类 Job 恒退出码 2）。分类选 `manual_fix` 而非 `awaiting_input` 同时修好批处理：`batch.py` 把 `manual_fix` 归入「绝不自动推进」并记 `failed`，`batch-continue` 不再每轮重撞同一个失败。文案按成因分两种（那份字幕**读不出来**／**时间轴对不上**）。
+
+**谓词刻意在 `polished` 档沉默**：那条腿的 `_ensure_translation` 永远在自己的块里返回、draft 失效时直接 `run_translation`，从不重新套用已存译文；对它出声会把一次真能推进的 `continue` 判死，并连带让 `batch-continue` 把条目记成 failed。已用「摘掉这道守卫」实测过该反证测试会变红。
+
+测试 999 → 1006（新增 7 条，子测试 263 不变），**既有断言零改动**，协议快照零 diff。其中一条是**自证推荐命令真能推进**的全链路测试：真实 CLI 造状态（`run --subtitles --translation-subtitles` → `rebuild-source --strategy asr`，只打桩 ffprobe / ffmpeg 抽音 / ASR 模型三处），把恢复计划吐出来的 `primary_command` 用 `shlex.split` 拆开、只把占位符换成真实字幕路径，**原样喂给 `main(argv[1:])`**，断言退出码 0、Job 回到 `complete`、`verify` 全 PASS；另一条是反证（映射得上的已存译文不得被归 `manual_fix`，且 `continue` 真能把它推到 `complete`）。
+
+**中途打红 9 条既有测试，全部回退了自己的改动而不是改断言**：8 条是我在 `cli.py` 里新加的 helper 与既有 `_print_recovery_navigation` **同名**（后定义的覆盖前者），改为给既有那份加两个带默认值的方言参数；1 条是 `tests/test_rebuild_source.py::test_continue_refuses_retained_translation_that_misses_the_rebuilt_timeline` 断言 `ValueError`，我原本抛了 `UserInputError`——改回 `ValueError`（那本来就是这条路径今天的异常契约，退出码不变）。
+
+**遗留（阶段 3，未做）**：`xvt drop-imported-translation`（显式放弃、双源同时清、带 `downstream_of(INPUT_TRANSLATION_SUBTITLES)` 失效闭包）仍待立项——本阶段刻意不新增 CLI 命令，只做「让状态能解释自己 + 给出已经存在的出口」。
+
 2026-10-18 **P4 阶段 1：等长盲映射会把错位译文静默烧进成品——已修**（分支 `codex/strict-order-overlap-guard`，未合并、未开 PR）。`translate.map_subtitle_translations` 在「源 cue 数 == 译文 cue 数」时按顺序硬配、一次重叠都不量，还把 `confidence` 写死 `1.0`。这不只是预检函数：`pipeline/translation.apply_subtitle_translation` 用的就是它，映射结果直接落盘成译文；而译文**文本**错位不触碰时间轴、文本完整性、显示宽度任何一项确定性 QA，一路进 `bilingual.srt` 并烧进成品。**P4 的不等长路径是吵闹的失败，等长路径是安静的错误**，后者危险得多。
 
 **闸门按语义分，不按 Job 状态分**：判据是**有没有人为当前这套源 cue 主张过「这份译文属于它」**。用户此刻显式交出一份字幕（`xvt import-translation`、`run --translation-subtitles`）就是在做那个主张，等长即按序接受是在兑现它——该路径行为、契约（README:857 / `skills/video-translate/SKILL.md:96`）与文案**一字未改**，它同时就是逃生舱：被挡住的用户再 `import-translation` 一次即可，而他们本来就该这么做。只有 `continue` 拿 Job 内早先存下的 `input_translation_subtitles` 去套一套**可能已经变过**的源 cue 时（`rebuild-source --strategy asr` 之后），才传 `require_timeline_overlap=True`，等长视为巧合、必须由逐对重叠证实。实现上只有三处：纯函数加一个默认 `False` 的参数、`apply_subtitle_translation` 原样透传、`workflow._ensure_translation` 那**一个**调用点把 `or` 拆成具名变量后传 `retained_translation is not None`（选择逻辑一字未改，该分支的归类/出口/错误处理全未触碰，那是阶段 2）。另外抽出 `_timeline_overlap_ratio` 作为两条分支共用的唯一度量，`confidence` 改为实测（对齐 1.0 / 时移 300ms 得 0.7 / 完全错位 0.0），顺带堵掉不等长分支上零时长 cue 的 `ZeroDivisionError`。
 
 **没有采用方案 A（无条件收紧）或方案 B（按 `source_rebuild_requested` 收紧）。** A 会改掉书面契约、在不加旗标时把「等长且整体时移超过半个 cue」的合法导入彻底堵死，且**必然**打红两条既有测试——`tests/test_translate.py::TranslateTest::test_maps_equal_cue_counts_by_order`（源 0–3000ms vs 译文 9000–12000ms）与 `tests/test_pipeline_translation.py::TranslationPipelineTest::test_existing_translation_uses_source_timeline`（源 1000–2000ms vs 译文 0–500ms），两例时间轴与源 cue **完全不相交**，重叠是 0 而不是「低于 0.5」，任何基于重叠的闸门都够不着，没有调参空间。B 则要把一条正确性闸门挂在 `docs/ARCH_IMPROVEMENT_PLAN.md:154` 已点名为技术债的顶层裸键 `source_rebuild_requested` 上，并把 `import-translation` 以外同类路径的洞留着。落地的这版两条既有测试都走显式路径，**零变红**。测试 992 → 999（新增 7 条），既有断言零改动，协议快照零 diff。
 
-**遗留（阶段 2）**：这条失败目前**没有自动出口**——`recovery` 不认识它，`status` 不会给命令，`batch-continue` 会把这种条目记成失败。可接受（它取代的是一份已经错了的字幕，且 cue 数不等的同一场景今天本来也是无出口失败），但该给导航出口。另：`docs/ARCHITECTURE.md:133` 原先说 `rebuild-source` 保留导入译文以便 `continue`「在新 cue 上重新验证映射」，该句此前是假的，闸门落地后已改成如实描述。
+~~**遗留（阶段 2）**：这条失败目前**没有自动出口**……~~ 已由下面的阶段 2 做掉。另：`docs/ARCHITECTURE.md:133` 原先说 `rebuild-source` 保留导入译文以便 `continue`「在新 cue 上重新验证映射」，该句此前是假的，闸门落地后已改成如实描述。
 
 2026-10-18 **P8（Whisper 尾部幻觉）收尾：结论固化 + 做掉一个前置条件，刻意不实现启发式**（分支 `codex/tail-word-evidence`，未合并、未开 PR）。上一轮用真实素材把 P8 查清了，结论是**现在不该做**，本轮只把结论写进 `docs/REVIEW_FINDINGS_2026_10_17.md`，并做掉调查点出的那个前置条件。**① 原条目的归因改正了。** `_trim_trailing_hallucination` 是**纯重复检测器**，在 `segment.py:182-183` 的 `repeat_count < 3` 就早退（末词 `ありがとうございました` 的游程长度是 1），`:186-191` 的置信度闸门与 `:192-196` 的 `pathological_timestamps` **从未被执行到**——原条目说「置信度太高够不着」，方向对、归因错。原条目那句「此处是读代码的推断」也已作废并换成实测结果。**② 写明 n=1 / 0 负样本这个硬约束**：`asr/` 下 10 个 Job 的 `words.json` sha256 全同，有效样本只有一支视频，语料里没有任何一支真的以口头致谢收尾的视频，误伤率在数学上无法估计。三个原候选信号逐条量下来都不成立（「贴媒体末尾」是 `_normalize_boundaries` 钳出来的循环论证且近乎全判阳性；「与正文无词级重叠」的强度来自日文逐字分词，英文整词下 "Thanks **for** watching" 必然漏报；「套话词表」要匹配的文本已被截断成「ご視聴」，且按构造无法区分幻觉与讲者真说的致谢）。**③ 唯一干净的信号是零时长尾 token**（`ありがとうございました` @245140–245140，p=0.999；515 词里恰好 1 个，零误报），它量的是解码器产物而非内容，所以原理上不会误伤合法结尾——但 `pathological_timestamps` 把它和 `repeat_count >= 8` 捆死了，且回溯循环会在 `聴` 处 break。**④ 写明三条开工前置条件**（10–15 份覆盖 ja/zh/en 的真实转写含 3–5 份负样本；先拍板「cue 能不能被删、经由哪条命令」，不定就只能是 advisory、`error` 形态不在选项里；确认该签名在 faster-whisper 上也复现，目前一份样本都没有）**与形态建议**（`review` 级 + provenance 闸门，先例是 `qa.py:291-302` 的 `low_timing_confidence`；闸门不可省，`check_subtitles` 是**全仓 8 个调用点**共用的，含用户导入字幕的候选 QA `source_selection.py:104`，而用户字幕上一句「ご視聴ありがとうございました」完全合法）。
 
@@ -86,7 +102,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 956 个测试、235 个子测试，全部通过（2026-10-17） |
+| 自动化测试 | 1006 个测试、263 个子测试，全部通过（2026-10-18） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |

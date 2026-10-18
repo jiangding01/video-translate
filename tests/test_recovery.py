@@ -3,12 +3,18 @@ import os
 import shlex
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.cli import main
 from xvt.job_store import create_job, load_job, save_job
-from xvt.models import Artifact, StageName, StageStatus
-from xvt.pipeline import retranslate_cues
+from xvt.media import MediaInfo
+from xvt.models import Artifact, StageName, StageStatus, Transcript, Word
+from xvt.pipeline import pending_translation_import_blocker, retranslate_cues
+from xvt.process import CommandResult
 from xvt.recovery import (
     _candidate_qa_blocker_reason,
     _semantic_review_options,
@@ -19,6 +25,8 @@ from xvt.recovery import (
     valid_artifact_path,
     verify_job,
 )
+from xvt.workflow import continue_workflow
+from xvt.workflow_config import require_workflow_config
 
 
 class RecoveryTest(unittest.TestCase):
@@ -1969,3 +1977,235 @@ class GlossaryViolationDeadlockTest(unittest.TestCase):
             assert guidance is not None
             self.assertIn("xvt retranslate-cues", guidance.message)
             self.assertIn("--cue 3 --cue 7", guidance.message)
+
+
+class PendingTranslationImportDeadEndTest(unittest.TestCase):
+    """`rebuild-source` 之后已存译文套不回新源 cue 时，导航必须给出真出口。
+
+    这是本仓库第 7 次「status 推荐一条必然失败的命令」：`continue` 会在
+    `map_subtitle_translations` 原地失败（退出码 2），而恢复计划照旧给
+    `retryable` + `continue`，用户没有出口。
+
+    场景全部用**真实 CLI 命令**造：`xvt run`（带 `--subtitles` 与
+    `--translation-subtitles`）→ `xvt rebuild-source --strategy asr`。打桩只替掉
+    ffprobe、ffmpeg 抽音与 ASR 模型三处，产物照真实运行落盘、artifact 照真实登记。
+    """
+
+    def _media_info(self, media: Path) -> MediaInfo:
+        return MediaInfo(
+            path=str(media),
+            duration_ms=5_000,
+            size_bytes=media.stat().st_size,
+            format_name="mp4",
+            width=1920,
+            height=1080,
+            frame_rate=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            has_video=True,
+            has_audio=True,
+        )
+
+    def _rebuilt_job(self, root: Path, *, words: tuple[Word, ...]) -> Path:
+        media = root / "input.mp4"
+        media.write_bytes(b"video")
+        source = root / "source.srt"
+        source.write_text(
+            "1\n00:00:00,200 --> 00:00:01,500\nHello world.\n\n"
+            "2\n00:00:03,000 --> 00:00:04,500\nSecond line.\n",
+            encoding="utf-8",
+        )
+        translated = root / "translated.srt"
+        translated.write_text(
+            "1\n00:00:00,200 --> 00:00:01,500\n你好，世界。\n\n"
+            "2\n00:00:03,000 --> 00:00:04,500\n第二行。\n",
+            encoding="utf-8",
+        )
+        media_info = self._media_info(media)
+
+        def run_ffmpeg(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"audio")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with (
+            patch("xvt.pipeline.common.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+        ):
+            self.assertEqual(
+                main(
+                    [
+                        "run",
+                        str(media),
+                        "--output",
+                        str(root / "work"),
+                        "--subtitles",
+                        str(source),
+                        "--translation-subtitles",
+                        str(translated),
+                        "--target-language",
+                        "zh-CN",
+                    ]
+                ),
+                0,
+            )
+        job_file = next((root / "work").rglob("job.json"))
+
+        with (
+            patch("xvt.pipeline.common.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch(
+                "xvt.pipeline.transcription.transcribe_audio",
+                return_value=Transcript(language="en", engine="mlx", words=words),
+            ),
+        ):
+            self.assertEqual(main(["rebuild-source", str(job_file), "--strategy", "asr"]), 0)
+        return job_file
+
+    _UNMAPPABLE_WORDS = (Word("Hello.", 0, 500, 0.9),)
+    _MAPPABLE_WORDS = (Word("Hello.", 200, 1_500, 0.9), Word("Second.", 3_000, 4_500, 0.9))
+
+    def test_status_offers_a_real_exit_instead_of_the_failing_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._rebuilt_job(root, words=self._UNMAPPABLE_WORDS)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            self.assertEqual(plan.advance_steps, ("import_translation",))
+            assert plan.primary_command is not None
+            self.assertIn("xvt import-translation", plan.primary_command)
+            self.assertNotIn("xvt continue", plan.primary_command)
+            self.assertTrue(
+                any("xvt translate" in command for command in plan.alternative_commands),
+                plan.alternative_commands,
+            )
+            self.assertFalse(
+                any("xvt continue" in command for command in plan.alternative_commands),
+                plan.alternative_commands,
+            )
+
+    def test_recommended_command_actually_drives_the_job_to_completed(self) -> None:
+        """自证推荐命令真的能推进：把 primary_command 原样喂回 CLI。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._rebuilt_job(root, words=self._UNMAPPABLE_WORDS)
+            aligned = root / "aligned.srt"
+            aligned.write_text(
+                "1\n00:00:00,000 --> 00:00:00,500\n你好。\n",
+                encoding="utf-8",
+            )
+
+            plan = build_recovery_plan(job_file)
+            assert plan.primary_command is not None
+            argv = shlex.split(plan.primary_command)
+            self.assertEqual(argv[:2], ["xvt", "import-translation"])
+            self.assertEqual(Path(argv[2]), Path(job_file).resolve())
+            self.assertEqual(argv[3:], ["TRANSLATED_SUBTITLE", "--target-language", "zh-CN"])
+            # 只把占位符换成真实路径，其余 token 原样喂回 CLI。
+            argv[3] = str(aligned)
+
+            with patch(
+                "xvt.pipeline.common.probe_media", return_value=self._media_info(root / "input.mp4")
+            ):
+                self.assertEqual(main(argv[1:]), 0)
+
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+            self.assertEqual(verify_job(job_file)["status"], "pass")
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
+            )
+
+    def test_still_mappable_translation_is_not_pushed_into_manual_fix(self) -> None:
+        """反证：映射得上的已存译文不得被归 manual_fix，continue 仍是真出口。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._rebuilt_job(root, words=self._MAPPABLE_WORDS)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "retryable")
+            assert plan.primary_command is not None
+            self.assertIn("xvt continue", plan.primary_command)
+
+            with patch(
+                "xvt.pipeline.common.probe_media", return_value=self._media_info(root / "input.mp4")
+            ):
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+
+    def test_continue_failure_message_is_verbatim_the_recovery_diagnosis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._rebuilt_job(root, words=self._UNMAPPABLE_WORDS)
+            job = load_job(job_file)
+            diagnosis = pending_translation_import_blocker(job, require_workflow_config(job))
+
+            assert diagnosis is not None
+            self.assertIn(diagnosis, build_recovery_plan(job_file).reason)
+            with (
+                patch(
+                    "xvt.pipeline.common.probe_media",
+                    return_value=self._media_info(root / "input.mp4"),
+                ),
+                self.assertRaises(ValueError) as raised,
+            ):
+                continue_workflow(job_file)
+            self.assertEqual(str(raised.exception), diagnosis)
+
+    def test_rebuild_source_tail_points_at_the_exit_not_at_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = StringIO()
+            with redirect_stdout(output):
+                self._rebuilt_job(root, words=self._UNMAPPABLE_WORDS)
+
+            printed = output.getvalue()
+            self.assertIn("xvt import-translation", printed)
+            self.assertNotIn("继续任务: xvt continue", printed)
+
+    def test_blocker_stays_silent_on_the_polished_leg(self) -> None:
+        """polished Job 从不重新套用已存译文副本，谓词不得对它出声。
+
+        ``_ensure_translation`` 的 polished 分支永远在自己的块里返回，draft 失效时
+        直接 ``run_translation``。对它报 manual_fix 会把一次真能推进的 ``continue``
+        判死，并连带让 ``batch-continue`` 把条目记成 failed。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._rebuilt_job(root, words=self._UNMAPPABLE_WORDS)
+            job = load_job(job_file)
+            standard = require_workflow_config(job)
+            self.assertIsNotNone(pending_translation_import_blocker(job, standard))
+
+            polished = replace(standard, translation_quality="polished")
+
+            self.assertIsNone(pending_translation_import_blocker(job, polished))
+
+    def test_blocker_separates_a_missing_file_from_a_timeline_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._rebuilt_job(root, words=self._UNMAPPABLE_WORDS)
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+
+            mismatch = pending_translation_import_blocker(job, config)
+            assert mismatch is not None
+            self.assertIn("时间轴", mismatch)
+
+            retained = next(
+                item for item in job.artifacts if item.kind == "input_translation_subtitles"
+            )
+            job.artifacts.remove(retained)
+            save_job(job)
+            Path(str(config.translation_subtitles)).unlink()
+
+            missing = pending_translation_import_blocker(load_job(job_file), config)
+            assert missing is not None
+            self.assertNotEqual(missing, mismatch)
+            self.assertIn(str(config.translation_subtitles), missing)

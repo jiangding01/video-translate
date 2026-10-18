@@ -43,6 +43,7 @@ from xvt.pipeline import (
     error_category,
     finalize_acknowledged_subtitle_review,
     is_subtitle_input,
+    pending_translation_import_blocker,
     resolved_translation_policy,
     resume_job,
     resume_remote_transcription,
@@ -1343,6 +1344,16 @@ def _ensure_translation(
     retained_translation = valid_artifact_path(job, "input_translation_subtitles")
     translation_subtitles = retained_translation or config.translation_subtitles
     if translation_subtitles:
+        # 与 status 共用同一份只读谓词、同一句诊断：这份已存译文套不回当前源 cue 时
+        # apply_subtitle_translation 必然在映射处失败，而且失败发生在 set_stage 之前、
+        # Job 一个字节都不改。提前带着那句诊断失败，用户看到的「任务失败」与随后的
+        # 「恢复建议」逐字同源，不会一句说英文细节、一句说「源字幕有效可以继续」。
+        blocker = pending_translation_import_blocker(job, config)
+        if blocker is not None:
+            # 异常类型刻意保持 ValueError：今天这条路径就是 map_subtitle_translations
+            # 的 ValueError 一路冒到 CLI（退出码 2），提前失败只是把同一句话说得更清楚，
+            # 不顺手改调用方看得见的异常契约。
+            raise ValueError(blocker)
         apply_subtitle_translation(
             path,
             translation_subtitles,
