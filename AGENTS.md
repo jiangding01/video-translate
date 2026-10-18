@@ -32,7 +32,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/checksums.py` | 文件内容 SHA-256 的唯一实现（零依赖叶子，供 recovery / candidate_qa / pipeline.common 共用） |
 | `src/xvt/recovery.py` | checksum 校验、`RecoveryPlan` / `advance_steps`、与 planner 对齐的 status 恢复建议 |
 | `src/xvt/artifacts.py` | artifact kind 枚举、派生依赖图与失效闭包 |
-| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账，并承载翻译策略回退的**唯一**实现 `resolved_translation_policy`：快照优先、顶层 `translation_policy` 兜底，翻译侧与译文 QA 侧必须同口径，否则术语死锁）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾，并承载 provider 批次循环与重试的唯一实现 `run_provider_batches` / `translate_batch_with_retries`）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`semantic_state`（语义链路只读纯函数：`semantic_review_target` 及其批次重算与指纹、报告与 issue 的解析/校验/序列化、人工修订范围、repair checkpoint 读取；零副作用叶子，包内只依赖 `common`，供 review / revision / semantic 共用，不写盘不登记 artifact 不改 stage）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
+| `src/xvt/pipeline/` | stage 推进与 artifact 登记的业务主链包：`common`（共享记账，并承载翻译策略回退的**唯一**实现 `resolved_translation_policy`：快照优先、顶层 `translation_policy` 兜底，翻译侧与译文 QA 侧必须同口径，否则术语死锁；以及「Job 内已存译文还能不能套回当前 `source_cues`」的**唯一**只读谓词 `pending_translation_import_blocker`，由 `status` / `continue` / `rebuild-source` 收尾三处消费，重叠度量复用 `translate.map_subtitle_translations`，不得就地重造）、`review`（QA 与人工确认）、`revision`（人工译文修订）、`transcription`（转写与恢复）、`translation`（翻译与收尾，并承载 provider 批次循环与重试的唯一实现 `run_provider_batches` / `translate_batch_with_retries`）、`polish`（可恢复润色）、`semantic`（语义校对与一次修复）、`semantic_state`（语义链路只读纯函数：`semantic_review_target` 及其批次重算与指纹、报告与 issue 的解析/校验/序列化、人工修订范围、repair checkpoint 读取；零副作用叶子，包内只依赖 `common`，供 review / revision / semantic 共用，不写盘不登记 artifact 不改 stage）、`retranslate`（局部重译）、`resegment`（重分段）、`burnin`（预览与烧录）；`__init__` 仅 re-export |
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/stages.py` | Stage 计划表：给定输入组合声明转写阶段跳过哪些 stage（先计划、后执行的单一事实来源） |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
@@ -69,7 +69,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 - `xvt status JOB` 展示 stage、`advance_steps` 与下一步命令（优先看这里，不要猜 resume/continue）。产物有效性判定与 `continue` 使用**同一套全量 checksum 校验**，只是同一次判定内对同一文件只哈希一次。它对缺失烧录成品只做静态资格判断，不额外计算源媒体内容 checksum。记忆化边界与元数据证伪/证实的界线详见 [恢复与回填契约](docs/RECOVERY.md#产物有效性校验与-checksum-记忆化)。
 - `xvt continue JOB` 读取 `job.config.workflow`（类型化为 `WorkflowConfig`），补齐未完成的翻译和烧录。它不用于没有持久化工作流目标的旧 Job。等待态退出码同 `run`（默认 0，`--fail-on-waiting` 时 10）。
 - `xvt resume JOB` 只恢复转写 checkpoint，例如规范化音频、词级转写或源 cue（advanced）。
-- `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本供后续重新映射；纯字幕 Job 不支持。
+- `xvt rebuild-source JOB --strategy asr` 只在用户明确要求时以 ASR 重建媒体 Job 的源时间轴（advanced）。它优先复用 checksum 有效的 words/audio checkpoint，失效旧 source cue 及全部下游产物，并保留 Job 内有效的输入译文副本——**保留不等于还能用**：这份副本能否套回新的源时间轴，由 `status` / `continue` / 本命令收尾共用的只读谓词 `pipeline.common.pending_translation_import_blocker` 当场判定；套不回去时本命令收尾就给出 `import-translation` 出口，`status` 归 `manual_fix`，`continue` 带同一句诊断失败，三侧都不再推荐那条必然失败的 `continue`（判定条件与两条出口的取舍见 [恢复与回填契约](docs/RECOVERY.md#已存译文套不回重建后的源时间轴)）；纯字幕 Job 不支持。
 - `xvt prepare-source-review JOB --cue ID` / `apply-source-review-fixes JOB REVIEW` 显式修订源 cue 文本，保留 ID、时间轴、words 和 provenance，立即重跑源字幕 QA，并失效旧翻译及全部下游；导入译文工作流不支持。
 - `xvt translate JOB` 是独立翻译入口（advanced）。`--provider auto` 在 Base URL、模型和 API Key 完整时调用兼容 API，否则进入 Agent 模式。
 - Agent 模式生成 `translation-batches.json` 并进入 `awaiting_input`。必须先回填再运行 `continue`。

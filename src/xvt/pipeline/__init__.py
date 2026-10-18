@@ -23,6 +23,7 @@ from xvt.pipeline.common import (
     inspect_input,
     interrupt_running_stage,
     is_subtitle_input,
+    pending_translation_import_blocker,
     resolved_translation_policy,
 )
 from xvt.pipeline.polish import (
@@ -134,6 +135,7 @@ __all__ = [
     "error_category",
     "interrupt_running_stage",
     "is_subtitle_input",
+    "pending_translation_import_blocker",
     "prepare_agent_translation",
     "prepare_agent_semantic_review",
     "prepare_source_review",

@@ -120,6 +120,34 @@
 
 **已知未覆盖的相邻情形**：`--align-subtitles` 还有第二种失败——对齐本身置信度达标，但对齐后的字幕 QA 出 error 级问题（报错点名「rerun without `--align-subtitles`」）。它同样让 `continue` 每次失败，但那条路径的 QA 报告不落盘，Job 状态里没有任何证据能证明「必然失败」，因此刻意不改它的分类（照 AGENTS 的口径：判不准就不动分类）。要给它出口得先把那次对齐后 QA 的结论登记成 artifact。
 
+### 已存译文套不回重建后的源时间轴
+
+端到端 Job 上「补齐译文」这一步不一定调用翻译提供方：`workflow._ensure_translation` 会优先把 Job 内保留的 `input_translation_subtitles` 副本（退而求其次是 `config.workflow.translation_subtitles` 指向的用户原始文件）重新套到当前 `source_cues` 上。`rebuild-source --strategy asr` 换掉源时间轴之后，这份已存译文可能根本套不回去：`map_subtitle_translations` 原地失败（退出码 2），而失败发生在 `set_stage(RUNNING)` **之前**，Job 一个字节都不改。此前恢复计划照旧给 `retryable` + `primary_command=xvt continue JOB`、`alternative_commands` 为空——`continue` 失败后自荐的还是刚失败的那一条，导航零变化，用户没有出口（本仓库第 7 次同类缺陷）。
+
+`recovery` 严格只读、不感知运行期异常，所以判定必须从 artifact + config 纯推导，和上一节的对齐置信度死局同一范式。单点实现是 `pipeline.common.pending_translation_import_blocker(job, config)`：**只读纯谓词**，不写盘、不登记 artifact、不改 stage，重叠度量直接复用 `translate.map_subtitle_translations`（连同它的 `require_timeline_overlap` 语义与 `_timeline_overlap_ratio` 阈值），不在恢复侧另造一套。`status`（`recovery._recovery_for_workflow` 的 `translate` / `import_translation` 分支）、`continue`（`_ensure_translation` 回填前的闸门）与 `rebuild-source` 收尾三处消费同一份实现与同一句诊断。
+
+出声的条件（任一不成立就返回 `None`，让既有分类原样生效）：
+
+- 持久化目标有 `target_language`，且质量档**不是** `polished`——polished 腿的 `_ensure_translation` 永远在自己的块里返回，draft 失效时直接 `run_translation`，从不重新套用已存译文，对它出声会把一次真能推进的 `continue` 判死。
+- 取到一份待回填的译文：`input_translation_subtitles` checksum 有效时用它，否则用 `config.workflow.translation_subtitles`（取值顺序与 `_ensure_translation` 逐字一致）。两者都没有时这一步会真的去调用提供方，不归本谓词管。
+- `source_cues` checksum 有效且非空（约束 9：产物有效性只认内容 checksum）。源 cue 本身不可信时断言「译文套不上」没有依据。
+- 用上面两份输入真跑一次映射并失败。
+
+诊断分两种成因，给用户的动作不同，文案因此分开：**那份文件读不出来**（用户原始文件被删或改坏，只可能出现在 `config` 那一支——artifact 那一支的 checksum 已经证明文件在）与**时间轴对不上**。两者都点名那份字幕的绝对路径，后者还带上 `map_subtitle_translations` 的实测细节。
+
+分类是 `manual_fix` 而不是 `awaiting_input`：这不是「等一份可回填的输入」，而且 `batch` 把 `manual_fix` 归入「绝不自动推进」并记 `failed`，`batch-continue` 因此不再每轮重撞同一个失败（此前这类条目是 `retryable`）。
+
+两条出口都实测走得通，但不等价：
+
+- **首选 `xvt import-translation JOB TRANSLATED_SUBTITLE --target-language LANG`。** 导入一份对齐当前源 cue 的译文后 Job 走到 `completed`、`verify` 全项 PASS；而且 `add_artifact` 按 kind 去重，这一次导入会**顶掉**那份错位的 `input_translation_subtitles` 登记——死局本身被拆掉。字幕路径是占位符：哪一份译文对齐了新时间轴只有用户知道，导航不猜（与 `relink-source-media` 的 `NEW_MEDIA_PATH` 同款写法）。
+- **备选 `xvt translate JOB --target-language LANG --provider <持久化 provider>`。** 同样能走到 `completed`，但它**只是绕过**：错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，再跑一次 `rebuild-source` 会在同一处复发。`reason` 里必须讲明这一点（openai-compatible 模式下它还是真实 API 成本）。
+
+`continue` 在这个状态下必然再次失败，**任何推荐位都不放**。`xvt resegment-translation` 也不是出口：它换的是源 cue 的切分，解决不了「这份译文对不上」；持久化了 `workflow.translation_subtitles` 的 Job 上它还有一道配置级闸门（`resegment.py`），恒以退出码 2 拒绝。
+
+`continue` 抛出的异常类型刻意保持 `ValueError`（今天这条路径就是 `map_subtitle_translations` 的 `ValueError` 一路冒到 CLI，退出码 2），提前失败只是把同一句话说得更清楚，不顺手改调用方看得见的异常契约。`rebuild-source` 收尾同样复用 `build_recovery_plan` 的命令，不在调用点自己拼：重建完成后当场告诉用户这条路已经断了，别让他们再跑一次注定失败的 `continue` 才发现。
+
+**显式放弃这份导入译文**（双源同时清、带 `downstream_of(INPUT_TRANSLATION_SUBTITLES)` 失效闭包的 `drop-imported-translation`）不在本轮范围内；本节只做「让状态能解释自己 + 给出已存在的出口」。
+
 ## 翻译提供方身份的固化
 
 ### 固化时机

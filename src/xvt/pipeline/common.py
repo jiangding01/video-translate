@@ -32,8 +32,12 @@ from xvt.job_store import get_job_file, load_job, save_job, utc_now
 from xvt.media import MediaInfo, probe_media
 from xvt.models import Artifact, Cue, Job, StageName, StageStatus, Word
 from xvt.render import AssStyleOptions
-from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS
-from xvt.translate import TranslationPolicy, translation_policy_from_dict
+from xvt.subtitles import SUPPORTED_SUBTITLE_EXTENSIONS, load_subtitles
+from xvt.translate import (
+    TranslationPolicy,
+    map_subtitle_translations,
+    translation_policy_from_dict,
+)
 from xvt.workflow_config import WorkflowConfig, clear_burn_fingerprint, get_workflow_config
 
 
@@ -380,6 +384,100 @@ def load_cues(path: Path) -> list[Cue]:
     except (AttributeError, TypeError) as error:
         raise ValueError(f"invalid cue artifact: {error}") from error
     return cues
+
+
+def pending_translation_import_blocker(job: Job, config: WorkflowConfig) -> str | None:
+    """待执行的 ``import_translation`` / ``translate`` 注定失败时给出诊断，否则 ``None``。
+
+    端到端 Job 上「补齐译文」这一步并不总是调用翻译提供方：``_ensure_translation``
+    会优先把 Job 内保留的 ``input_translation_subtitles`` 副本（退而求其次是
+    ``config.workflow.translation_subtitles`` 指向的用户原始文件）重新套到当前
+    ``source_cues`` 上。``rebuild-source --strategy asr`` 之后源时间轴已经变过，这份
+    已存译文可能根本套不回去，于是 ``continue`` 每次都在 ``map_subtitle_translations``
+    原地失败、Job 一个字节都不改——而 ``build_recovery_plan`` 严格只读、不感知运行期
+    异常，照旧给出 ``retryable`` + ``continue``，用户没有任何出口（本仓库第 7 次同类
+    缺陷，前 6 次见 docs/REVIEW_FINDINGS_2026_10_17.md）。
+
+    判定与「强制对齐置信度不足的死循环出口」同一范式：**只看 Job 状态，不猜异常**，
+    从 artifact + config 纯推导，并且只在能**确证**必然失败时才出声——源 cue 或译文
+    任一侧拿不到可信输入时返回 ``None``，让既有分类原样生效。
+
+    严格只读：不写盘、不登记 artifact、不改 stage。``status`` / ``continue`` /
+    ``rebuild-source`` 收尾三处消费同一份实现与同一句诊断，重叠度量直接复用
+    ``map_subtitle_translations``（连同它的 ``require_timeline_overlap`` 语义），
+    不在这里重造一套阈值。
+
+    两种成因给用户的动作不同，文案必须分开：文件读不出来是「那份文件没了」，
+    映射不上是「时间轴对不上」。
+    """
+
+    # recovery 顶层 import 了 pipeline，这里只能函数级 import（与 translation_qa_context
+    # 同一处理）。pipeline 包内依赖全是模块顶层 import，本行不在守卫范围内。
+    from xvt.recovery import valid_artifact_path
+
+    target_language = config.target_language
+    if not target_language:
+        return None
+    # polished 腿不走这条路：`_ensure_translation` 的 polished 分支永远在自己的块里
+    # 返回，draft 失效时直接 `run_translation`，从不重新套用已存译文副本。对它出声
+    # 会把一次真能推进的 continue 误判成 manual_fix，连带让 batch-continue 停摆。
+    if config.translation_quality == "polished":
+        return None
+    # 与 _ensure_translation 的取值顺序逐字一致：Job 内副本优先，其次是持久化目标里
+    # 记着的用户原始文件。两者都没有时这一步会真的去调用翻译提供方，不归本谓词管。
+    retained = valid_artifact_path(job, "input_translation_subtitles")
+    if retained is not None:
+        subtitle_path: Path = retained
+    elif config.translation_subtitles:
+        subtitle_path = Path(config.translation_subtitles).expanduser()
+    else:
+        return None
+
+    # 约束 9：只认 checksum 有效的源 cue。失效或缺失时这一步会先在别处失败，
+    # 断言「译文套不上」没有依据。
+    source_path = valid_artifact_path(job, "source_cues")
+    if source_path is None:
+        return None
+    try:
+        source_cues = load_cues(source_path)
+    except (OSError, ValueError):
+        # UnicodeError / JSONDecodeError 都是 ValueError 的子类，这里一并接住。
+        return None
+    if not source_cues:
+        return None
+
+    try:
+        translated_cues = load_subtitles(
+            subtitle_path,
+            role="translated",
+            target_language=target_language,
+        )
+    except (OSError, ValueError, XvtError) as error:
+        return (
+            f"这个 Job 要回填的译文字幕 {subtitle_path} 现在读不出来（{error}）；"
+            "continue 会在读取这份文件时原地失败，Job 状态不会有任何变化。"
+        )
+    if not translated_cues:
+        return (
+            f"这个 Job 要回填的译文字幕 {subtitle_path} 不含任何 cue；"
+            "continue 会在读取这份文件时原地失败，Job 状态不会有任何变化。"
+        )
+
+    try:
+        map_subtitle_translations(
+            source_cues,
+            translated_cues,
+            # 与 _ensure_translation 同口径：Job 内副本没有人为当前这套源 cue 主张过
+            # 归属，等长只是巧合，必须由时间轴证实。
+            require_timeline_overlap=retained is not None,
+        )
+    except ValueError as error:
+        return (
+            f"这个 Job 保留的已存译文 {subtitle_path} 已经套不回当前源 cue 的时间轴"
+            f"（{error}）；源时间轴在那份译文导入之后变过（例如 rebuild-source "
+            "--strategy asr），continue 每次都会在同一处失败，Job 状态不会有任何变化。"
+        )
+    return None
 
 
 def parse_cue_text_items(items: Any) -> dict[int, str] | None:
