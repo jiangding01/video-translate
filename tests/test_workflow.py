@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from dataclasses import asdict, replace
@@ -57,6 +58,7 @@ from xvt.workflow import (
     plan_advance_steps,
     planned_run_steps,
     relink_burned_output,
+    relink_source_media,
     run_workflow,
     workflow_goals,
 )
@@ -2258,7 +2260,14 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             self.assertEqual(job_file.read_bytes(), before)
 
     def test_recovery_needs_manual_fix_when_source_media_is_missing(self) -> None:
-        """源媒体不在登记路径时 render / burn 都必然失败，不得再推荐 continue。"""
+        """源媒体不在登记路径时 render / burn 都必然失败，不得再推荐 continue。
+
+        ``_relinkable_job`` 签发的是 checksum 有效的 v2 proof，因此这个 Job 够格做
+        ``relink-source-media``：首选命令给它（占位符待用户替换成新路径）。原先这里断的是
+        ``primary_command is None``——那是把「不推荐 continue」这个意图过度收紧成了
+        「一条命令都不给」；意图本身改用下面的 ``assertNotIn`` 显式表达，而
+        ``is None`` 搬到了下一条「没有 v2 proof」的反证测试上，它在那里才真正成立。
+        """
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2269,8 +2278,39 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
             plan = build_recovery_plan(job_file)
 
             self.assertEqual(plan.category, "manual_fix")
+            self.assertEqual(
+                plan.primary_command,
+                f"xvt relink-source-media {shlex.quote(str(job_file))} NEW_MEDIA_PATH",
+            )
+            self.assertNotIn("xvt continue", str(plan.primary_command))
+            self.assertEqual(plan.alternative_commands, ())
+            self.assertIn(str(media), plan.reason)
+            self.assertEqual(plan.advance_steps, ("burn",))
+
+    def test_recovery_withholds_relink_source_media_without_a_v2_proof(self) -> None:
+        """没有 checksum 有效的 v2 proof 时绝不推荐 ``relink-source-media``。
+
+        那条命令本身要求 v2 proof，拿不到就以退出码 2 失败；在这种 Job 上把它放进推荐位
+        就是又一次「推荐一条在该状态下必然失败的命令」。legacy fingerprint 的旧 Job 维持
+        原状：不给首选命令，只点名缺失的那个路径。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            job = load_job(job_file)
+            job.artifacts = [item for item in job.artifacts if item.kind != "burn_fingerprint"]
+            job.config["workflow"]["burn_fingerprint"] = "legacy"
+            save_job(job)
+            media = root / "video.mp4"
+            media.unlink()
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
             self.assertIsNone(plan.primary_command)
             self.assertEqual(plan.alternative_commands, ())
+            self.assertNotIn("relink-source-media", plan.reason)
             self.assertIn(str(media), plan.reason)
             self.assertEqual(plan.advance_steps, ("burn",))
 
@@ -2464,6 +2504,178 @@ class BurnFingerprintArtifactTest(unittest.TestCase):
                 relink_burned_output(job_file, candidate)
 
             self.assertEqual(job_file.read_bytes(), before)
+
+    # ``relink-source-media``：源媒体永久搬家后把持久化路径指到新位置。
+    # 状态机本来就处理得了「媒体搬家」——内容 checksum 回退（见
+    # docs/RECOVERY.md#指纹不匹配时的源媒体内容-checksum-回退）在路径变了、内容没变时
+    # 仍判指纹成立。缺的只是一个受支持的方式去改那个路径：此前只能手改 job.json。
+    # 下面这组钉住「命令真的把 Job 从 manual_fix 带回 complete，且一帧都没有重编码」，
+    # 以及它的 fail-closed 反面。复用同一份 _relinkable_job 夹具，不另起一个类
+    # （继承它会把父类全部用例再跑一遍）。
+
+    def _moved_media(self, root: Path) -> Path:
+        media = root / "video.mp4"
+        moved = root / "newhome" / "video.mp4"
+        moved.parent.mkdir(parents=True)
+        media.rename(moved)
+        return moved
+
+    def test_relink_source_media_repoints_burn_media_without_reburn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, burned, _candidate = self._relinkable_job(root)
+            media = root / "video.mp4"
+            moved = self._moved_media(root)
+
+            stale = load_job(job_file)
+            stale_config = require_workflow_config(stale)
+            self.assertFalse(_burn_satisfied(stale, stale_config))
+            self.assertEqual(plan_advance_steps(stale, stale_config), ("burn",))
+            self.assertEqual(build_recovery_plan(job_file).category, "manual_fix")
+            artifacts_before = [(item.kind, item.path, item.checksum) for item in stale.artifacts]
+            burned_stat = burned.stat()
+
+            result = relink_source_media(job_file, moved)
+
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertEqual(result, moved.resolve())
+            self.assertEqual(config.burn_media, str(moved.resolve()))
+            self.assertTrue(_burn_satisfied(job, config))
+            self.assertEqual(plan_advance_steps(job, config), ())
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+            # 零重烧：成品与 proof 都没有被重写（mtime 与 checksum 都不变）。
+            self.assertEqual(
+                [(item.kind, item.path, item.checksum) for item in job.artifacts],
+                artifacts_before,
+            )
+            self.assertEqual(burned.stat().st_mtime_ns, burned_stat.st_mtime_ns)
+            self.assertFalse(media.exists())
+
+            # 幂等：已经指向这里时不再写盘。
+            before = job_file.read_bytes()
+            self.assertEqual(relink_source_media(job_file, moved), moved.resolve())
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_relink_source_media_rejects_unproven_candidates_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = {
+                "content": "checksum does not match",
+                "missing": "does not exist",
+                "directory": "is not a file",
+                "legacy_proof": "v2 burn proof",
+                "remote": "remote media job",
+            }
+            for case in expected:
+                with self.subTest(case=case):
+                    case_root = root / case
+                    case_root.mkdir()
+                    job_file, _burned, _candidate = self._relinkable_job(case_root)
+                    moved = self._moved_media(case_root)
+                    job = load_job(job_file)
+                    if case == "content":
+                        moved.write_bytes(b"other-media")
+                    elif case == "missing":
+                        moved.unlink()
+                    elif case == "directory":
+                        moved.unlink()
+                        moved.mkdir()
+                    elif case == "legacy_proof":
+                        job.artifacts = [
+                            item for item in job.artifacts if item.kind != "burn_fingerprint"
+                        ]
+                        job.config["workflow"]["burn_fingerprint"] = "legacy"
+                        save_job(job)
+                    else:
+                        job.input = "https://example.com/watch?v=abc"
+                        save_job(job)
+                    before = job_file.read_bytes()
+
+                    with self.assertRaises(UserInputError) as caught:
+                        relink_source_media(job_file, moved)
+
+                    self.assertIn(expected[case], str(caught.exception))
+                    self.assertEqual(job_file.read_bytes(), before)
+                    self.assertIsNone(require_workflow_config(load_job(job_file)).burn_media)
+
+    def test_relink_source_media_rejects_a_copied_job_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            moved = self._moved_media(root)
+            copied_job = root / "copied-job.json"
+            copied_job.write_bytes(job_file.read_bytes())
+
+            with self.assertRaisesRegex(UserInputError, "persisted identity"):
+                relink_source_media(copied_job, moved)
+
+            self.assertEqual(copied_job.read_bytes(), job_file.read_bytes())
+
+    def test_relink_source_media_rejects_jobs_without_a_burn_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "video.mp4"
+            media.write_bytes(b"media")
+            job = create_job(str(media), root)
+            job_file = save_job(job)
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "workflow goal"):
+                relink_source_media(job_file, media)
+
+            self.assertEqual(job_file.read_bytes(), before)
+
+            job = load_job(job_file)
+            job.config["workflow"] = {"target_language": "zh-CN", "burn": False}
+            save_job(job)
+            before = job_file.read_bytes()
+
+            with self.assertRaisesRegex(UserInputError, "burned-video goal"):
+                relink_source_media(job_file, media)
+
+            self.assertEqual(job_file.read_bytes(), before)
+
+    def test_relink_source_media_accepts_proofs_without_the_recorded_identity(self) -> None:
+        """存量 v2 proof（没有 ``source_media_identity``）仍可重指路径，但要重烧一次。
+
+        授权依据是 proof 的 ``source_media_checksum``，那是 v2 的必需字段，匹配即证明
+        是同一份媒体，写入是正确的。零重烧是 ``_burn_fingerprint_satisfied`` 回退的性质，
+        不是本命令的承诺：缺身份字段时回退拿不到授权，Job 照旧落到 ``burn``——那也是
+        用户能真正推进的出口（否则他只剩手改 job.json）。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _burned, _candidate = self._relinkable_job(root)
+            job = load_job(job_file)
+            proof_path = Path(
+                next(item.path for item in job.artifacts if item.kind == "burn_fingerprint")
+            )
+            document = json.loads(proof_path.read_text(encoding="utf-8"))
+            document.pop("source_media_identity")
+            proof_path.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            job.artifacts = [
+                Artifact(item.kind, item.path, file_checksum(proof_path))
+                if item.kind == "burn_fingerprint"
+                else item
+                for item in job.artifacts
+            ]
+            save_job(job)
+            moved = self._moved_media(root)
+
+            self.assertEqual(relink_source_media(job_file, moved), moved.resolve())
+
+            job = load_job(job_file)
+            config = require_workflow_config(job)
+            self.assertEqual(config.burn_media, str(moved.resolve()))
+            self.assertFalse(_burn_satisfied(job, config))
+            self.assertEqual(plan_advance_steps(job, config), ("burn",))
+            # 出口真的能推进：媒体就在新路径上，重烧不再撞「video file does not exist」。
+            self.assertIsNone(missing_burn_source_media(job, config))
 
 
 class WorkflowPlannerTest(unittest.TestCase):

@@ -78,6 +78,7 @@ from xvt.workflow import (
     continue_workflow,
     plan_advance_steps,
     relink_burned_output,
+    relink_source_media,
     run_workflow,
 )
 from xvt.workflow_config import (
@@ -299,6 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
     relink_burned_parser.add_argument("job_file")
     relink_burned_parser.add_argument("existing_video")
     relink_burned_parser.add_argument("--events-jsonl", action="store_true")
+
+    relink_source_media_parser = subparsers.add_parser(
+        "relink-source-media",
+        help="[advanced] Repoint the persisted burn source media after verifying its checksum",
+    )
+    relink_source_media_parser.add_argument("job_file")
+    relink_source_media_parser.add_argument("new_media")
+    relink_source_media_parser.add_argument("--events-jsonl", action="store_true")
 
     resume_parser = subparsers.add_parser(
         "resume",
@@ -1546,6 +1555,20 @@ def _cmd_relink_burned_output(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_relink_source_media(arguments: argparse.Namespace) -> int:
+    path = relink_source_media(arguments.job_file, arguments.new_media)
+    if arguments.events_jsonl:
+        # 只改 config.workflow.burn_media，没有 artifact 变动可报；新路径随 CLI 终态带出。
+        _complete(
+            arguments,
+            job_file=str(Path(arguments.job_file).expanduser().resolve()),
+            media=str(path),
+        )
+    else:
+        _print_safe(f"已重新关联源媒体: {path}")
+    return 0
+
+
 def _cmd_resume(arguments: argparse.Namespace) -> int:
     event_sink = _event_sink(arguments)
     job = resume_job(arguments.job_file, event_sink=event_sink)
@@ -2295,6 +2318,7 @@ _COMMAND_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "status": _cmd_status,
     "verify": _cmd_verify,
     "relink-burned-output": _cmd_relink_burned_output,
+    "relink-source-media": _cmd_relink_source_media,
     "resume": _cmd_resume,
     "rebuild-source": _cmd_rebuild_source,
     "continue": _cmd_continue,
@@ -2333,6 +2357,7 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "apply",
         "continue",
         "relink-burned-output",
+        "relink-source-media",
         "resume",
         "rebuild-source",
         "translate",
