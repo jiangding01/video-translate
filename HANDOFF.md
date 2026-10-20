@@ -2,6 +2,20 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **#136 的事后 review：补掉依赖方向守卫整类漏判，修正两处失效的代码引用**（分支 `fix/doc-refs-and-import-guard-hole`，D1/D2/D3，详见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 D 系列）。
+
+**① 为什么有这一轮。** #136 合并后补做了一次 `check` 全面 review。**代码侧零发现**，而且是机械证据：给 12 个被 `mock.patch` 的外部算子在源模块上套计数器，拆包前后跑全量，真函数调用次数**逐字相同**（probe_media 24、transcribe_audio 2、check_subtitles 746……）——任何一处 patch 从有效变成无效，真函数都会跑起来而让计数上升；再统计每个 patch 目标的实际命中率，299 次装载 / 40 次空载 / 265 次调用，前后也完全一致，且没有任何「装了但该目标一次都没截到调用」的纯空目标。两道都干净，所以 223 处 patch 目标改写没有制造静默失效。
+
+**② 三条发现全在文档与守卫上，其中两条是 #136 自己制造的。** D1 是依赖方向守卫的整类漏判（见下）；D2 是 F10 的代码引用被 #136 改成了「更自信的错」（原 `transcription.py:313` 本来就指在空行上，#136 顺手改成「`_record_effective_engine` 一带」，而那个函数只读写 `job.config["engine"]`）；D3 是「尾部幻觉 QA 门」形态建议里 8 个 `check_subtitles` 调用点的路径清单失效——那不是历史叙述而是将来动手时的清单，已重新对账并改为「路径 + 所属函数名」（行号漂移、函数名不漂移）。
+
+**③ D1 的六种漏法与「这不是 #136 引入的」。** `_intra_package_target` 原先在第一个匹配上就 `return`，且只认带尾点的 `startswith("xvt.pipeline.")`。实测在 `transcription/shared.py` 里插入 `from xvt.pipeline import resegment`、`from xvt.pipeline import error_category`、`import xvt.pipeline`、`from .resume import resume_job`、`import xvt.pipeline.common, xvt.pipeline.transcription.resume`、`from xvt.pipeline.transcription import shared` 任意一条，守卫**全绿**。原实现（拆包前）在前五种写法上逐字同形，所以那五条都是**先于 #136** 的；第六条（`from xvt.pipeline.transcription import shared` 解出子包而非子模块）则是 **#136 自己的**——拆包前没有子包，这种写法还不存在，#136 为子包重写了解析函数却把「取最短前缀」的压扁行为带了过来。「ruff 是否兜底」也实测过：只有多 alias 那条被 `E401` / `I001` 拦下，其余五种 ruff 全绿（测的时候要让导入名真的被用到，否则 F401 会把结论污染成「全都报错」）。更该记住的是过程问题：#136 发现了「只看第一个 alias」这个限制，只把它写进会话笔记的「观察，未改」而没有登记成条目——**知道一个守卫有洞而只写在过程笔记里，等于没写**。
+
+**④ 修法与红先。** `_intra_package_target` → `_intra_package_targets` 返回**集合**；新增 `_resolve_module_path` 按已知模块集合取最长前缀；`ImportFrom` 的被导入名也接到 base 后再查一次（覆盖 `from xvt.pipeline.transcription import shared` 的真实边是子模块而非子包）；包根与相对 import 一律报成哨兵 `_PACKAGE_ROOT`，白名单里没有也不该有这一项（包根 `__init__` import 了全部子模块，包内反向依赖它就是加载期循环的来源）；函数级守卫同步补相对 import。**红先取的是诚实的红**：先只做「改名 + 返回集合」的壳、内部仍走旧判定，8 条新测试里 **6 条报 AssertionError**，另 2 条是负向控制（自引用、包外 import）本来就绿——如果直接加新函数再跑，8 条都会是 `NameError`，那种红不是证据。实装后再用真实文件逐条复测 8 例违规全部变红并还原。白名单无需改动，反证了今天没有任何包内模块依赖包根。
+
+**⑤ 同族两条由 #137 替 #136 补上**（留作记录）：`ROADMAP.md` 的「②结构性重构」桶被 #136 清空却没改，`REVIEW_FINDINGS` 末尾「六条遗留里还剩五条」的计数也没随第 ⑥ 条划掉而更新。#136 的收尾只对账了 `transcription.py` 这个**字符串**的出现位置，没对账「哪些结论因为这次改动而变了」——与既往「收尾文档同步不能只补 review 点名条目」是同一个形状，第二次犯。
+
+**⑥ 验证。** `ruff check` / `ruff format --check` 全绿，`pytest -q` 为 `1079 passed, 312 subtests`（+8 条新测试，子测试数不变），协议快照零 diff，`xvt --help` 正常。CHANGELOG 未记（零用户可见变化）。
+
 2026-10-20 **`pipeline/transcription.py` 按长函数治理约定（F13）拆成子包**（分支 `refactor/split-transcription-module`，纯搬移，零行为变化，CHANGELOG 未记）。
 
 **① 为什么现在做。** F13 的约定写的是「`transcription.py` 若突破 2000 行，按『本地转写 / 远程获取 / resume 与 rebuild』三簇拆分模块」。它当时 2076 行，阈值已破，这条也作为 O8 条目 (d) 的第 6 条遗留登记着。
