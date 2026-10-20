@@ -2,6 +2,18 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **对齐后 QA 报告（`aligned_report`）落盘为 `aligned_subtitle_qa` artifact —— review 清单最后一条「未修，独立立项」已修**（分支 `codex/persist-aligned-report`，未合并、未开 PR）。
+
+**① 缺口先实证，确认成立。** `ffmpeg -f lavfi` 合成 3.72s 视频 + `say` 配音，源字幕用压缩时间轴（三条可匹配 cue 挤在 0–1.4s）外加一条音频里没说的尾句，真实 `xvt run … --subtitles … --align-subtitles` 一次命中：退出码 2，`stages.align` 落 `failed` 带那句通用错误文本，`artifacts/` 下六个文件里**没有任何一个**讲得出对齐后是哪条 cue 的哪个 issue——唯一带 issue 列表的 `source-candidate-qa.json` 讲的是**输入**字幕的原时间轴（8 条 `too_short` / `reading_speed` warning、零 error），`status --json` 的 `report_paths` 为 `[]`。要看出问题只能拿 `alignment.json` 里重定时后的 cue（第 4 条 3887–4967ms）去跟 `media.json` 的 3723ms 对账，正是条目说的「自己猜」。
+
+**② 回落 ASR 那一支「相对好些」的说法要收紧。** `selection_reason=alignment_post_qa_failed` 只是结论，明细同样丢了；更坑的是那一支的 `qa.json` 讲的是最终采用的 **ASR** cue、不是被拒的对齐候选，照它排查会看错对象。因此**两支都登记**，报告在 `check_subtitles` 之后、任何分支判定之前无条件落盘，「有没有这份报告」只对应「对齐真的跑过了」一个条件（与 `subtitle_alignment` 同一条件），不会出现「有时有有时没有」。该支只在远程 Job（下载到的人工候选 QA 失败 → 自动对齐）上可达，用真实 `align_source_cues` + 插桩下载/模型/ffmpeg 覆盖。
+
+**③ 落盘点与抛出路径。** 写在 `aligned_report = check_subtitles(...)` 紧后、两道门之前的直线代码里；`add_artifact` 自己 `save_job`，登记当场落到磁盘上的 `job.json`，不依赖后续收尾。实测失败 Job 的 `job.json` 里 `aligned_subtitle_qa` 在册，`xvt verify` 打 `PASS aligned_subtitle_qa: artifact is valid`。
+
+**④ 约束 4 核实不受影响。** 只加证据、不碰判定：修复后同一条命令仍是退出码 2、`ALIGN` 仍是 `failed`、错误文案一字未改，`source_cues` / `source_srt` / `subtitle_qa` 一个都没登记。**不新增事件类型**（`artifact_created` 的 `kind` 是自由字符串，`docs/EVENTS.md` 字段表无需改动）。**`DERIVES_FROM` 填法**：派生自 `subtitle_alignment` 与 `media_info`，并与 `source_candidate_qa` 同构地作为 `source_cues` 的**上游**——它讲的是对齐候选，那套 cue 可能被采用也可能被回落 ASR 顶掉。实测 `downstream_of(source_cues)` 仍是 30 个 kind、三条 legacy 闭包基线测试全绿，`downstream_of(subtitle_alignment|media_info|word_transcript|input_subtitles|normalized_audio|remote_info|source_video|downloaded_media)` 八个根都覆盖到新 kind；`rebuild-source` 那边是显式集合而非闭包，已同步加入（它本就显式失效 `subtitle_alignment`，留下报告会是讲不清现状的旧证据）。
+
+测试 1032 → 1037（新增 5 条，其中 3 条红先、2 条是反向守卫：对齐成功时行为不变、没跑对齐的 Job 不得凭空多出这份报告），子测试 263 不变，**既有断言零改动、既有测试零变红**，协议快照零 diff。**遗留**：`docs/RECOVERY.md` 里「强制对齐置信度不足的死循环出口」那条的相邻情形——对齐后 QA error 门失败仍归 `retryable` 并推荐必然失败的 `continue`（实测连跑两次 stderr 逐字相同）。**挡住它的前置条件（证据不落盘）现在已经解除**，但改分类是独立一项，本轮刻意没动，RECOVERY 该段已改写成现状。
+
 2026-10-20 **恢复导航收尾三件：polished 原子 Job 的判定顺序缺口已修（同类缺陷第 8 次）；另两条「未验证」条目一条证伪、一条判为过期注释**（分支 `codex/atomic-polished-ordering`，未合并、未开 PR）。三件都先实证再动手。
 
 **① 主菜：polished 原子 Job 让「润色候选有效」盖掉在途整轮 Agent 等待 —— 危害确认，已修。** `recovery.py` 原子段里那条 `retryable` 排在既有的原子等待分支之前，根因是 `prepare_agent_translation` 只置 `TRANSLATE=awaiting_input` 而**不失效** `translation_polished_cues`。**清单原文的触发条件和危害形态都要更正**：(a) 它不是跟在 qa_blocked 让路后面——前两条语义等待分支（尤其 `semantic_review_waiting`，只要候选 QA 有 issue 就为真）会先接住术语死锁那类状态，真正的前提是 `semantic_review_target` 为 **None**（语义报告缺失/失效）；(b) 原文说「同样会盖掉刚写入的 manifest」，实测 Agent 模式下 manifest 被**原样重写、fingerprint 不变**，所以不是无条件作废。确认的危害是两层：**零推进死循环**（`_cmd_translate` 在 `mode == "agent"` 时早退，润色与语义腿根本不跑，`status` 分类与推荐逐轮不变，而真正能推进的 `apply-translation` 从头到尾不出现在导航里），以及**用户显式传过 `--batch-size` / `--glossary` 时真的作废**——原子 Job 的策略与 batch size 不回退 Job 快照，推荐命令省掉这些参数，实测 `batch_size` 2 → 25、`fingerprint` `ee66afe6…` → `7a1fddfc…`，准备好的响应被 `apply-translation` 以 `translation response fingerprint does not match the current manifest` 拒收，而那条报错自己又给出同一条命令。**修法**：该分支额外要求 `not workflow.agent_full_translation_waiting(job)`，与原子 `qa_blocked` 让路共用同一份谓词（顺带把那处函数内延迟导入收成一处）。**相邻的已知遗漏（未修、需单独决策）**：原子侧两条语义等待不判「整轮请求是否最新」，端到端侧的 `_full_translation_request_is_newest` + `_SUPERSEDED_BY_FULL_TRANSLATION` 在原子侧没有对应物，于是语义等待态下再开一轮整轮 `translate` 时 `status` 仍指向已被取代的 `apply-semantic-review`（实测）；它不改写在途 manifest、响应事后仍能回填，危害低于本条。

@@ -596,6 +596,14 @@ def _process_adaptive_media(
                 video_width=media_info.width,
                 video_height=media_info.height,
             )
+            # 无条件先落盘再判定：这份报告是 `alignment_accepted`、强制对齐的 QA error 门
+            # 与回落 ASR 的依据，而强制对齐被该门拒绝时函数直接抛出。写在任何分支之前，
+            # 抛出路径上也必然留下可校验的产物；`add_artifact` 自己 `save_job`，
+            # 登记随之落到磁盘上的 `job.json`，不依赖后续的收尾。它只是证据，不参与
+            # 放行与阻断的判定，也只在对齐真的跑过时存在（与 `subtitle_alignment` 同一条件）。
+            aligned_qa_path = artifacts_directory / "aligned-subtitle-qa.json"
+            write_json(aligned_qa_path, asdict(aligned_report))
+            add_artifact(job, "aligned_subtitle_qa", aligned_qa_path, event_sink)
             alignment_accepted = alignment.confidence >= minimum_alignment_confidence and not any(
                 issue.severity == "error" for issue in aligned_report.issues
             )
@@ -1921,6 +1929,7 @@ def rebuild_source(
             add_artifact(job, "media_info", media_info, event_sink)
 
     invalidated_kinds = downstream_of(ArtifactKind.SOURCE_CUES) | {
+        ArtifactKind.ALIGNED_SUBTITLE_QA,
         ArtifactKind.SOURCE_CANDIDATE_QA,
         ArtifactKind.SOURCE_CUES,
         ArtifactKind.SOURCE_REVIEW_REVISION,
