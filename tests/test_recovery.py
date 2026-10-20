@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xvt.cli import main
+from xvt.events import EventType
 from xvt.job_store import create_job, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, StageName, StageStatus, Transcript, Word
@@ -25,7 +26,7 @@ from xvt.recovery import (
     valid_artifact_path,
     verify_job,
 )
-from xvt.workflow import continue_workflow
+from xvt.workflow import continue_workflow, plan_advance_steps
 from xvt.workflow_config import require_workflow_config
 
 
@@ -2436,3 +2437,326 @@ class AtomicPolishedTranslationWaitPrecedenceTest(unittest.TestCase):
             self.assertIn("润色候选有效", plan.reason)
             assert plan.primary_command is not None
             self.assertIn("--translation-quality polished", plan.primary_command)
+
+    # ---- 语义等待让路：只在整轮请求「真的是最新」时让位给 apply-translation ----
+
+    def _apply_translation(self, job_file: Path, response: Path) -> None:
+        with redirect_stdout(StringIO()):
+            self.assertEqual(
+                main(
+                    [
+                        "apply-translation",
+                        str(job_file),
+                        str(response),
+                        "--target-language",
+                        "zh-CN",
+                    ]
+                ),
+                0,
+            )
+
+    def _normal_semantic_wait_job(self, root: Path) -> Path:
+        """S1：初译已回填，Job 停在正常的 Agent 语义校对等待上。"""
+
+        job_file = self._atomic_polished_job(root)
+        self._apply_translation(job_file, self._agent_response(job_file, root / "round1.json"))
+        self.assertTrue(self._semantic_wait_reached(job_file))
+        return job_file
+
+    def _semantic_response(self, job_file: Path, path: Path) -> Path:
+        job = load_job(job_file)
+        report_path = valid_artifact_path(job, "translation_semantic_qa")
+        assert report_path is not None
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        payload = {
+            "fingerprint": report["fingerprint"],
+            "initial_results": [{"batch": 1, "issues": []}],
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_superseding_full_round_beats_a_still_valid_semantic_wait(self) -> None:
+        """S2：语义报告仍有效，但用户又开了新一轮整轮请求 -> 推荐按新 manifest 回填。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._normal_semantic_wait_job(root)
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "translate",
+                            str(job_file),
+                            "--target-language",
+                            "zh-CN",
+                            "--provider",
+                            "agent",
+                            "--batch-size",
+                            "2",
+                        ]
+                    ),
+                    0,
+                )
+            job = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(job, "translation_semantic_qa"))
+            manifest_path = valid_artifact_path(job, "translation_batches")
+            assert manifest_path is not None
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["batch_size"], 2)
+
+            response = self._agent_response(job_file, root / "round2.json")
+            payload = json.loads(response.read_text(encoding="utf-8"))
+            for item in payload["items"]:
+                item["text"] = f"二轮{item['id']}"
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self._apply_recommended_command(build_recovery_plan(job_file), response)
+
+            # 推进回语义等待，且候选是新一轮（而不是第一轮）的内容。
+            self.assertTrue(self._semantic_wait_reached(job_file))
+            candidate = valid_artifact_path(load_job(job_file), "translation_polished_cues")
+            assert candidate is not None
+            self.assertIn("二轮1", candidate.read_text(encoding="utf-8"))
+
+    def test_normal_semantic_wait_is_not_yielded_to_the_bare_full_round_predicate(self) -> None:
+        """S1 护栏：正常语义等待上整轮谓词恒真，但整轮请求不是最新，必须仍推荐语义回填。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._normal_semantic_wait_job(root)
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(len(plan.prerequisite_commands), 1, plan.prerequisite_commands)
+            argv = shlex.split(plan.prerequisite_commands[0])
+            self.assertEqual(argv[:2], ["xvt", "apply-semantic-review"])
+
+            self.assertIsNone(valid_artifact_path(load_job(job_file), "translated_cues"))
+            response = self._semantic_response(job_file, root / "semantic.json")
+            argv[argv.index("RESPONSE")] = str(response)
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(argv[1:]), 0)
+
+            # 走通到出成品：译文落盘、语义等待消失（TRANSLATE 阶段的 awaiting 残留是
+            # 原子 Job 既有表象，与本组判定无关，这里不断言它）。
+            job = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(job, "translated_cues"))
+            self.assertIsNotNone(valid_artifact_path(job, "translated_srt"))
+            self.assertFalse(self._semantic_wait_reached(job_file))
+
+    def test_superseding_full_round_beats_a_pending_human_semantic_review(self) -> None:
+        """人工 review 分支（``semantic_review_waiting``）同口径让路。
+
+        用 ``source_suspect`` 构造带 issue 且无需修复的真实报告：回填后 Job 停在人工
+        review 上；此时再开一轮整轮请求，推荐必须改成按新 manifest 回填。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._normal_semantic_wait_job(root)
+            report_path = valid_artifact_path(load_job(job_file), "translation_semantic_qa")
+            assert report_path is not None
+            fingerprint = json.loads(report_path.read_text(encoding="utf-8"))["fingerprint"]
+            issue = {
+                "category": "source_suspect",
+                "cue_ids": [1],
+                "severity": "review",
+                "message": "源文可疑。",
+                "suggested_items": [],
+            }
+            review = root / "semantic-issue.json"
+            review.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": fingerprint,
+                        "initial_results": [{"batch": 1, "issues": [issue]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(["apply-semantic-review", str(job_file), str(review)]), 0)
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertNotIn("apply-translation", " ".join(plan.prerequisite_commands))
+
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "translate",
+                            str(job_file),
+                            "--target-language",
+                            "zh-CN",
+                            "--provider",
+                            "agent",
+                            "--batch-size",
+                            "2",
+                        ]
+                    ),
+                    0,
+                )
+            response = self._agent_response(job_file, root / "round2.json")
+            self._apply_recommended_command(build_recovery_plan(job_file), response)
+            self.assertTrue(self._semantic_wait_reached(job_file))
+
+
+_THREE_CUE_SOURCE = (
+    "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n\n"
+    "2\n00:00:02,500 --> 00:00:04,500\nThis is a test subtitle.\n\n"
+    "3\n00:00:05,000 --> 00:00:07,000\nThe quick brown fox jumps.\n"
+)
+
+
+def _quiet_cli(testcase: unittest.TestCase, argv: list[str]) -> None:
+    with redirect_stdout(StringIO()):
+        testcase.assertEqual(main(argv), 0)
+
+
+def _clear_translation_env(testcase: unittest.TestCase) -> None:
+    """翻译链路钉在 Agent 模式，防止开发机 / CI 配齐三项环境变量后真的发请求。"""
+
+    patcher = patch.dict(
+        "os.environ",
+        {
+            "XVT_TRANSLATION_BASE_URL": "",
+            "XVT_TRANSLATION_MODEL": "",
+            "XVT_TRANSLATION_API_KEY": "",
+        },
+    )
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
+class FullTranslationRequestNewestValidityTest(unittest.TestCase):
+    """整轮请求「是否最新」只在**有效**的取代 kind 之间比登记次序。
+
+    登记仍在、文件已失效（被删 / 损坏）的重译 manifest 背后不可能挂着活等待，却会
+    因为登记在 ``translation_batches`` 之后而把一次有效、可回填的整轮等待盖成「完成」。
+    """
+
+    def setUp(self) -> None:
+        _clear_translation_env(self)
+
+    def _cli(self, argv: list[str]) -> None:
+        _quiet_cli(self, argv)
+
+    def _response(self, job_file: Path, path: Path, *, prefix: str) -> Path:
+        manifest_path = valid_artifact_path(load_job(job_file), "translation_batches")
+        assert manifest_path is not None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload = {
+            "items": [
+                {"id": item["id"], "text": f"{prefix}{item['id']}"}
+                for batch in manifest["batches"]
+                for item in batch["items"]
+            ],
+            "job_id": manifest["job_id"],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def _satisfied_job(self, root: Path) -> Path:
+        source = root / "src.srt"
+        source.write_text(_THREE_CUE_SOURCE, encoding="utf-8")
+        output = root / "out"
+        self._cli(
+            [
+                "run",
+                str(source),
+                "--output",
+                str(output),
+                "--target-language",
+                "zh-CN",
+                "--provider",
+                "agent",
+            ]
+        )
+        job_file = next(output.rglob("job.json"))
+        first = self._response(job_file, root / "r1.json", prefix="一轮")
+        self._cli(["apply", str(job_file), str(first)])
+        job = load_job(job_file)
+        self.assertEqual(plan_advance_steps(job, require_workflow_config(job)), ())
+        return job_file
+
+    def _request_cue_retranslation(self, job_file: Path) -> None:
+        self._cli(
+            [
+                "retranslate-cues",
+                str(job_file),
+                "--cue",
+                "2",
+                "--target-language",
+                "zh-CN",
+                "--provider",
+                "agent",
+            ]
+        )
+
+    def _deceptive_job(self, root: Path) -> Path:
+        """满足的 Job → 第二轮整轮 → 局部重译 → 重译 manifest 文件被删（登记仍在）。"""
+
+        job_file = self._satisfied_job(root)
+        self._cli(["translate", str(job_file), "--target-language", "zh-CN", "--provider", "agent"])
+        self._request_cue_retranslation(job_file)
+        job = load_job(job_file)
+        self.assertEqual(
+            plan_advance_steps(job, require_workflow_config(job)), ("await_cue_retranslation",)
+        )
+        manifest = valid_artifact_path(job, "cue_retranslation_batches")
+        assert manifest is not None
+        manifest.unlink()
+        job = load_job(job_file)
+        self.assertIn("cue_retranslation_batches", [a.kind for a in job.artifacts])
+        self.assertIsNone(valid_artifact_path(job, "cue_retranslation_batches"))
+        return job_file
+
+    def test_stale_cue_retranslation_registration_keeps_the_full_round_in_the_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._deceptive_job(Path(directory))
+            job = load_job(job_file)
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("await_agent_translation",),
+            )
+
+    def test_stale_cue_retranslation_registration_does_not_let_continue_complete(self) -> None:
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._deceptive_job(Path(directory))
+            result = continue_workflow(job_file, event_sink=events.append)
+        self.assertEqual(result.status, "awaiting_input")
+        self.assertNotIn(EventType.WORKFLOW_COMPLETED.value, [e.type for e in events])
+
+    def test_recovery_command_for_the_full_round_wait_really_advances_the_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._deceptive_job(root)
+            plan = build_recovery_plan(job_file)
+            self.assertEqual(plan.category, "awaiting_input")
+            self.assertEqual(plan.advance_steps, ("await_agent_translation",))
+
+            # 把计划吐出的命令原样喂回 CLI：Job 真的推进到第二轮译文。
+            self.assertEqual(len(plan.prerequisite_commands), 1, plan.prerequisite_commands)
+            argv = shlex.split(plan.prerequisite_commands[0])
+            self.assertEqual(argv[:2], ["xvt", "apply"])
+            response = self._response(job_file, root / "r2.json", prefix="二轮")
+            argv[argv.index("RESPONSE")] = str(response)
+            self._cli(argv[1:])
+            job = load_job(job_file)
+            self.assertIs(job.stages[StageName.TRANSLATE].status, StageStatus.SUCCEEDED)
+            translated = valid_artifact_path(job, "translated_cues")
+            assert translated is not None
+            self.assertIn("二轮1", translated.read_text(encoding="utf-8"))
+
+    def test_valid_newer_cue_retranslation_request_still_supersedes(self) -> None:
+        """对照：重译 manifest 有效时，更晚登记的它仍取代整轮请求。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._deceptive_job(root)
+            # 复位成有效形态：重新发起一次局部重译（登记在整轮之后，文件有效）。
+            self._request_cue_retranslation(job_file)
+            job = load_job(job_file)
+            self.assertIsNotNone(valid_artifact_path(job, "cue_retranslation_batches"))
+            self.assertEqual(
+                plan_advance_steps(job, require_workflow_config(job)),
+                ("await_cue_retranslation",),
+            )
