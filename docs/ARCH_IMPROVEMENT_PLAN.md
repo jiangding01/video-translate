@@ -121,7 +121,7 @@
 
 ## R3：架构演进（较高投入，polished Agent E2E 与默认质量决策后启动）
 
-R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独立。
+R3.1 已完成（Phase 5 于 2026-10-20 关闭），**R3.2 已于 2026-10-20 取消**（理由见该节），因此原先的 R3.1 → R3.2 串行顺序不再适用；R3.3 的评估闸门已据此改写，R3.4 独立、可穿插。
 
 ### R3.1 统一 provider 传输抽象：Agent 作为传输而非平行编排（F8）
 
@@ -131,22 +131,34 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 - 顺带收敛翻译逻辑的文件边界：`translate.py`（分组与批次协议）、`translation_provider.py`（传输）、`pipeline/translation|polish|semantic.py`（编排）职责单一化，消除 F4 之外残余的交叉引用。
 - 测试策略：provider 以参数注入（延续 `opener` 的 DI 先例），新编排测试传 fake provider 对象，逐步替换 `mock.patch` 模块函数的用法（F11）；迁移期间两种方式并存。
 - 验收：polish/semantic/retranslate 的 API 与 Agent 行为测试全部通过且编排实现只有一份；对既有等待中 Job 的回填回归测试通过。
-- **实施拆分（2026-10-17 定，5 个独立可合阶段）**：Phase 1 协议快照回归网（**已完成**）→ Phase 2 消解 semantic ↔ review/revision 的函数级 import 环（抽 `pipeline/semantic_state.py`，R1.3 的欠账；**已完成**，实际下移整个传递闭包 18 个只读派生函数，并新增 ast 守卫禁止包内函数级 import）→ ~~Phase 3 Agent 交接前奏单份化~~（已折入 Phase 4：实测 `TRANSLATION_FALLBACK` 全仓只有 translation.py 与 polish.py 两处发射，retranslate 与 semantic 的 agent 分支只 `set_stage` 一行，独立成阶段买不回一轮 PR + CI 周期）→ Phase 4 API 批次循环单份化（**已全部完成**，分三次提交：4a translation+retranslate、4b polish、4c semantic；4b 随 polish 的真实用例补上了 `run_provider_batches` 的 `stage_extras`（润色失败收口要带 `extras={"phase": "polish"}`），并把 `TRANSLATION_FALLBACK` 的两处发射收敛成 `pipeline/common.py` 的 `emit_agent_fallback`；4c 把 semantic 的两条差异参数化为 `with_batch_index`（批次事件多带本轮 1 起序号）与 `fail_stage`（循环内不收口 stage，由外层 `except` 统一带 `phase=semantic_review`），四条链路至此共用同一份循环骨架）→ Phase 5 语义链路编排单份化（Agent 作为传输，`run_translation_semantic_review` 与 `apply_agent_semantic_review` 的链路决策合一）。**Phase 5 的轻量替代 O1 已于 2026-10-20 做完**：两条链路的「问题分拣」与「终态收口」各收敛为 `semantic.py` 的一份模块私有 helper（`_partition_issues` / `_conclude_semantic_review`），零行为变化、协议快照零 diff；剩下的「初审 / 修复 / 复审」三步在两侧已无逐字重复可搬（API 逐批 provider 调用加 checkpoint 续跑 vs. Agent 对一份已回填响应一次性解析校验），**建议据此关闭 Phase 5**，留主干拍板，理由见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 O1 条目 (f)。每阶段的硬验收是 `tests/test_provider_protocol_snapshot.py` 零 diff。
+- **实施拆分（2026-10-17 定，5 个独立可合阶段）**：Phase 1 协议快照回归网（**已完成**）→ Phase 2 消解 semantic ↔ review/revision 的函数级 import 环（抽 `pipeline/semantic_state.py`，R1.3 的欠账；**已完成**，实际下移整个传递闭包 18 个只读派生函数，并新增 ast 守卫禁止包内函数级 import）→ ~~Phase 3 Agent 交接前奏单份化~~（已折入 Phase 4：实测 `TRANSLATION_FALLBACK` 全仓只有 translation.py 与 polish.py 两处发射，retranslate 与 semantic 的 agent 分支只 `set_stage` 一行，独立成阶段买不回一轮 PR + CI 周期）→ Phase 4 API 批次循环单份化（**已全部完成**，分三次提交：4a translation+retranslate、4b polish、4c semantic；4b 随 polish 的真实用例补上了 `run_provider_batches` 的 `stage_extras`（润色失败收口要带 `extras={"phase": "polish"}`），并把 `TRANSLATION_FALLBACK` 的两处发射收敛成 `pipeline/common.py` 的 `emit_agent_fallback`；4c 把 semantic 的两条差异参数化为 `with_batch_index`（批次事件多带本轮 1 起序号）与 `fail_stage`（循环内不收口 stage，由外层 `except` 统一带 `phase=semantic_review`），四条链路至此共用同一份循环骨架）→ Phase 5 语义链路编排单份化（Agent 作为传输，`run_translation_semantic_review` 与 `apply_agent_semantic_review` 的链路决策合一）。**Phase 5 的轻量替代 O1 已于 2026-10-20 做完**：两条链路的「问题分拣」与「终态收口」各收敛为 `semantic.py` 的一份模块私有 helper（`_partition_issues` / `_conclude_semantic_review`），零行为变化、协议快照零 diff；剩下的「初审 / 修复 / 复审」三步在两侧已无逐字重复可搬（API 逐批 provider 调用加 checkpoint 续跑 vs. Agent 对一份已回填响应一次性解析校验），**Phase 5 据此于 2026-10-20 关闭（已拍板，不再实施）**——再往下合需要先造一层「一轮 review 怎么取得」的抽象去覆盖约 0 行重复，与 AGENTS「修改流程」第 6 条（不为尚未确认的需求预留抽象层）相悖；理由见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 O1 条目 (f)。每阶段的硬验收是 `tests/test_provider_protocol_snapshot.py` 零 diff。
 - 原文两处前提已按代码实况更正：① 传输与重试早已由 `pipeline/translation.py` 的 `translate_batch_with_retries` 统一（provider 批次函数经 `request=` 注入），剩余工作是其上的编排而非传输本身；② `Pending(manifest)` 不能按批次返回——Agent 一次为全部批次写一份 manifest，分片落盘会直接破坏「manifest 格式不变」的红线，所以抽象按**步骤**（一组批次）而非按批次。
 - Phase 4 的共享循环放在 `pipeline/translation.py` 内，不新建模块：测试把 38 处桩钉在 `xvt.pipeline.translation` 的 `translate_batch` / `time.sleep` / `_backoff_delay` 上，把重试实现移出会一并废掉这些桩，且新模块与 translation 互相依赖会成环。polish/semantic/retranslate 已依赖 translation，放这里零新依赖边。
 
-### R3.2 内容寻址 step 缓存统一 checkpoint（F7）
+### ~~R3.2 内容寻址 step 缓存统一 checkpoint（F7）~~（2026-10-20 取消）
+
+**取消理由。** 本项的两条直接收益经 2026-10-17 至 10-20 这一轮的实际缺陷分布检验，一条已被更便宜的手段覆盖，另一条被实证证明**不是本项能解决的问题**：
+
+- 「上游变化后下游自然失效」这条收益，现有 `artifacts.downstream_of` 的主动失效闭包已经在承担，且本轮多次改动（`drop-imported-translation`、`rebuild-source`、源文修订）都证明它是**可审计**的——闭包写在 `artifacts.py` 一处、读得出来、测得到；换成「键不匹配即自然失效」会把失效判据散进每个步骤的键构造里，出问题时不再有单点可查。
+- 「`plan_advance_steps` 与 `_advance_workflow` 的人工对齐义务消失」这条是本项最大的卖点，但**实证不成立**。本轮同类缺陷「`status` 推荐一条必然失败的命令」修了 **9 次**，三侧（planner / executor / recovery）不一致确实是根因，可每一次的内容都是「Job 处在一个没有任何自动步骤能推进的状态」（导入译文套不回重建后的时间轴、润色草稿需人工修复、强制对齐被对齐后 QA 拒绝、源媒体搬家、烧录成品失联……）——**这些都不是缓存命中与否的问题**，内容寻址缓存一条都挡不住：键算得再对，那一步照样执行不了。真正起作用的是本轮确立的那套做法（只读纯谓词 → 落进 `build_recovery_plan` → 文案与执行侧逐字共用 → 端到端测试必须把推荐命令原样喂回 `main()` 并断言 Job 真的推进了）。
+
+**保留的那一小块。** 本项里唯一仍然值钱的是那条低成本替代：`_ensure_translation` 的等待分支基本是防御性死码、且文案与规划器不同，执行器应改为按 `advance_steps[0]` 分派。它**不随本项取消**，仍登记在 `docs/REVIEW_FINDINGS_2026_10_17.md`「观察」一节，独立成小项。
+
+<details><summary>原方案（存档，不再实施）</summary>
+
 
 - 抽出统一机制：每个 LLM 步骤声明输入（源 cue checksum、模型、端点、prompt 版本、策略、上游产物 checksum）与输出 artifact，框架计算输入哈希作为缓存键，命中即复用、未命中执行后落盘。现有各特性的 fingerprint 正是这些缓存键，本项把"算键、查缓存、失效"从各特性代码抽到一处。
 - 直接收益：`continue` 与首跑收敛为同一条执行路径——重跑 pipeline，命中的步骤瞬间跳过；`plan_advance_steps` 与 `_advance_workflow` 的人工对齐义务消失；上游变化后下游"自然失效"（键不匹配），`downstream_of` 主动失效闭包退化为清理手段而非正确性依赖。
 - 实施策略：新机制先以现有 progress/checkpoint 文件为存储后端逐特性接入（translation → polish → semantic），每步保持磁盘格式不变、只换读写代码；全部接入后再评估是否统一存储布局。禁止一次性大爆炸迁移。
 - 验收：每接入一个特性，其中断恢复测试组（含 fingerprint 失效场景）不改断言通过；`status` 输出保持一致。
 
+</details>
+
 ### R3.3 schema 演进：启用迁移链，stage 数据化（F9）
 
 - 现状成本：`translate` stage 内部实际有草稿、润色、语义校对、修复、复查、人工修订六个阶段，状态只能由 `semantic_review_waiting` / `_repair_chain_satisfied` 等函数从 artifact 存在性反推，`status` 展示层靠 detail 补丁。
 - 方案：`SCHEMA_VERSION` 升至 2，`_MIGRATIONS[1]` 写第一个纯函数迁移：把冻结 stage 枚举扩展为 Job 内的 steps 数据列表（每步含名称、状态、detail），`translate` 的六个子阶段获得显式命名状态。旧 Job 读取时自动沿迁移链升级，`from_dict` 机制已就绪。
-- 本项影响面最大（models、recovery、status、事件展示、全部相关测试），是否实施待 R3.1/R3.2 落地后重新评估——若前两项完成后状态反推代码已明显缩减，本项可降级或取消。
+- 本项影响面最大（models、recovery、status、事件展示、全部相关测试）。**评估闸门已于 2026-10-20 改写**：原闸门是「待 R3.1/R3.2 落地后重新评估，若状态反推代码已明显缩减则降级或取消」，而 R3.2 已取消、R3.1 已完成，闸门的前半条不再可用。按后半条就地评估：状态反推代码**并未缩减**——`translate` 的六个子阶段至今仍由 `semantic_review_waiting` / `_repair_chain_satisfied` 等函数从 artifact 存在性反推，R3.1 收敛的是批次循环、不碰状态表示。所以本项**前提依然成立、保持待评估**，但它是唯一动 schema 的项，仍默认可取消。**新的触发条件**：出现一次能归因到「子阶段状态只能从 artifact 存在性反推」的真实缺陷（显式 steps 本可避免），即立项。
 - 验收（若实施）：v1 Job 样本经迁移后 `status` / `continue` / `verify` 行为不变；迁移函数有独立单测。
 
 ### R3.4 config 单轨化（F10）
@@ -164,7 +176,7 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 1. **立即**：R1 全部（四项合计改动量小，可一到两个 PR）。
 2. **GUI 之前**：R2.1、R2.2、R2.3 译文/源文修订 SRT 通道与 R2.4 两阶段恢复安全均已完成；polished Agent 主链真实 E2E 也已完成，下一项是 Q6.2 语义收敛验证。
 3. **质量验收**：polished API 路径真实 E2E 已完成；Agent 主链真实 E2E 已于 2026-10-11 完成；默认保持 standard + faithful，继续做 Q6.2 收敛验证及多样本质量/成本对照。
-4. **质量验收之后**：R3.1 → R3.2，随后再设计 Q7 翻译上下文与术语候选包，避免新增模型步骤后立即重做 provider 和 checkpoint；R3.3 重新评估，R3.4 可穿插。
+4. **质量验收之后**：R3.1 已完成（Phase 5 关闭）、R3.2 已取消，所以这一档现在直接接 Q7 翻译上下文与术语候选包的设计——原先「先做完 checkpoint 统一再设计 Q7」的顾虑随 R3.2 取消而消失，Q7 新增的模型步骤按既有 `run_provider_batches` + fingerprint checkpoint 接入即可；R3.3 按其新触发条件待命，R3.4 可穿插。
 5. **上述内核稳定后**：实现只消费现有事件、Job、QA artifact、人工修订 SRT 和预览能力的可视化校对工作台。
 
 每项均遵循 AGENTS.md 修改流程：单分支串行、超过 10 文件拆小、行为变化补测试、提交前过 ruff + pytest 硬门槛、同步文档。
@@ -173,5 +185,5 @@ R3 各项相互关联，建议按 R3.1 → R3.2 顺序实施；R3.3、R3.4 独�
 
 - R1/R2 均不改变磁盘格式与协议，回退即 revert。
 - R2.1 的主要风险是 `test_cli.py`（1516 行）patch 目标漂移——每个搬移 PR 先跑守卫 grep 再跑全量测试。
-- R3.1/R3.2 的红线：artifact 文件名、manifest 格式、fingerprint 语义、事件序列不变；任何一步导致旧 Job 或等待中 manifest 不可恢复即停止并回退。
+- R3.1 的红线（R3.2 已取消，该条对它不再适用）：artifact 文件名、manifest 格式、fingerprint 语义、事件序列不变；任何一步导致旧 Job 或等待中 manifest 不可恢复即停止并回退。
 - R3.3 是唯一动 schema 的项，独立成 PR、独立可回退，且默认可取消。

@@ -2,6 +2,20 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **拍板关闭 R3.1 Phase 5、取消 R3.2，并改写 R3.3 的评估闸门**（分支 `docs/close-phase5-and-r32`，纯文档，`src/` 与 `tests/` 零改动）。
+
+**① Phase 5 关闭。** 依据是 O1（#132）做完后的实测：两条语义链路的首尾两个决策点（问题分拣、终态收口）已各收敛为一份 helper，中间三步（初审 / 修复 / 复审）的差异是协议本质的——API 侧逐批 provider 调用加 checkpoint 续跑，Agent 侧对一份已回填响应一次性解析校验，**已无逐字重复可搬**。再往下合要先造一层「一轮 review 怎么取得」的抽象去覆盖约 0 行重复，与 AGENTS「修改流程」第 6 条相悖。由原建议的「降级」改为关闭。
+
+**② R3.2 取消，理由比原 review 建议更强。** 原建议是「延后、大概率取消」，依据是「低成本替代够用 + 缓存框架与保持简单冲突」。本轮给出的更硬的依据是：R3.2 最大的卖点「`plan_advance_steps` 与 `_advance_workflow` 的人工对齐义务消失」**实证不成立**。本轮「`status` 推荐一条必然失败的命令」同类缺陷修了 **9 次**，三侧（planner / executor / recovery）不一致确实是根因，但每一次的内容都是「Job 处在一个没有任何自动步骤能推进的状态」（导入译文套不回重建后的时间轴、润色草稿需人工修复、强制对齐被对齐后 QA 拒绝、源媒体搬家、烧录成品失联……）——**内容寻址缓存一条都挡不住**，键算得再对那一步照样执行不了。真正消掉这类缺陷的是本轮确立的做法：只读纯谓词 → 落进 `build_recovery_plan`（不是只改 `continue`，因为 recovery 只读、失败发生在 `set_stage` 之前）→ 文案与执行侧逐字共用 → 端到端测试必须把推荐命令原样喂回 `main()` 并断言 Job 真的推进了。另一条卖点「上游变化后下游自然失效」则已由 `artifacts.downstream_of` 的主动失效闭包承担，且它写在一处、可审计，换成「键不匹配即自然失效」会把失效判据散进每个步骤的键构造里。R3.2 原方案折进 `<details>` 存档，未删字节。
+
+**③ 保留 R3.2 的一小块，不随它作废。** 「`_ensure_translation` 的等待分支基本是防御性死码、文案与规划器不同，执行器应改为按 `advance_steps[0]` 分派」原登记为「R3.2 的低成本替代点」，现独立成小项留在 REVIEW_FINDINGS「观察」一节——它要消除的是**文案与判定在两侧各写一份**，与缓存无关。
+
+**④ R3.3 的评估闸门必须改写（否则悬空）。** 原闸门是「待 R3.1/R3.2 落地后重新评估，若状态反推代码已明显缩减则降级或取消」，R3.2 取消后前半条不再可用。按后半条就地评估：状态反推代码**并未缩减**，`translate` 的六个子阶段至今仍由 `semantic_review_waiting` / `_repair_chain_satisfied` 等函数从 artifact 存在性反推（R3.1 收敛的是批次循环，不碰状态表示），所以 R3.3 **前提依然成立、保持待评估**，仍默认可取消，并给了新的触发条件：出现一次能归因到「子阶段状态只能从 artifact 存在性反推」的真实缺陷即立项。交付顺序第 4 档与风险节的「R3.1/R3.2 红线」一并据此改写——Q7 现在可直接设计，新增模型步骤按既有 `run_provider_batches` + fingerprint checkpoint 接入。
+
+**⑤ 顺带更正一处指向不清的引用。** REVIEW_FINDINGS 原文写「完整缓存框架与 AGENTS 第 6 条冲突」，但「不可破坏的约束」第 6 条讲的是外部命令必须以参数数组执行，与本项无关；实际指的是「修改流程」第 6 条（不为尚未确认的需求预留抽象层），已改为明确写法并注明更正。
+
+**⑥ 零代码改动。** `ruff check` / `ruff format --check` / `pytest -q`（1071 passed, 312 subtests）全绿，CHANGELOG 未记（无用户可见变化，与既往纯文档轮同口径）。
+
 2026-10-20 **对齐回落 ASR 后分段失败时 ALIGN 不再永久停在 `running`（O8 条目 (d) 第 ③ 条）**（分支 `codex/align-terminal-state-on-fallback`，PR #133，已合并）。
 
 **① 实证复现用真实 `xvt run`，不手搓 `job.json`。** 只替掉两个外部依赖：PATH 上放一个离线替身 `yt-dlp`（`--dump-single-json` 回报带 `subtitles: {"en": ...}` 的元数据，字幕下载写出第 3 条越出媒体时长的 SRT，媒体下载拷一份 ffmpeg 现场合成的 3s 静音 m4a），`PYTHONPATH` 上放一个替身 `mlx_whisper`（`transcribe` 返回**词级时间戳全为零时长**的两个词）。xvt 本体、`job.json`、ffmpeg/ffprobe 全走真实路径。**为什么这么构造**：`else:` 回落分支要求 `plan.action is ALIGN` 且 `align_subtitles` 为假，而 `plan_source_selection` 只在「自动策略 + 平台**人工**字幕候选 + 候选 QA 有 error」时给出 ALIGN——所以必须是远程 Job，候选 QA 要出 error（第 3 条 `outside_media`）。对齐照样算得出来（文本能匹配、置信度够）但对齐后 QA 仍有 error，`alignment_accepted` 为假、回落 ASR；`segment_transcript` 把零时长词全部过滤掉后 `not words` 返回 `[]`，`not cues` 抛 `RuntimeError`。这条比「未知 preset」可靠：`--segmentation-preset` 在 argparse 层就有 `choices`，`xvt run` 根本传不进未知 preset。

@@ -351,7 +351,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 **(e) 零行为变化的验证。** `1067 passed, 312 subtests`，与基线逐字一致；既有断言零改动；`tests/test_provider_protocol_snapshot.py` 零 diff（golden 文件未被改写，`git status` 只有源文件与文档），这是本条目的硬验收——`semantic.py` 在 provider 编排的快照路径上。CHANGELOG 未记（零用户可见变化，与 O8 两轮同口径）。
 
-**(f) 对「Phase 5 轻量替代」那句的回报。** 成立，但要说准：O1 吃掉的是语义链路**首尾两个决策点**（分拣、收口），它们现在各只有一份；Phase 5 原本要合的「初审 → 可修复？→ 修复 → 复审 → 确认/等待」里，中间三步在两条链路上的形态差异是**协议本质的**——API 侧是 `_run_review_phase` / `_run_repair_phase` 的逐批 provider 调用加 checkpoint 续跑，Agent 侧是对一份已回填响应做一次性解析校验（`agent_results` + `parse_semantic_repair_response` + `apply_semantic_repairs`），两者之间已无逐字重复可搬。再往下合需要先造一层「一轮 review 怎么取得」的抽象，为约 0 行重复引入一层间接，与 AGENTS「保持实现简单」相悖。**建议据此把 Phase 5 关闭（而非降级）**，仍留主干拍板。
+**(f) 对「Phase 5 轻量替代」那句的回报。** 成立，但要说准：O1 吃掉的是语义链路**首尾两个决策点**（分拣、收口），它们现在各只有一份；Phase 5 原本要合的「初审 → 可修复？→ 修复 → 复审 → 确认/等待」里，中间三步在两条链路上的形态差异是**协议本质的**——API 侧是 `_run_review_phase` / `_run_repair_phase` 的逐批 provider 调用加 checkpoint 续跑，Agent 侧是对一份已回填响应做一次性解析校验（`agent_results` + `parse_semantic_repair_response` + `apply_semantic_repairs`），两者之间已无逐字重复可搬。再往下合需要先造一层「一轮 review 怎么取得」的抽象，为约 0 行重复引入一层间接，与 AGENTS「保持实现简单」相悖。**据此于 2026-10-20 拍板关闭 Phase 5（而非降级）**，`ROADMAP.md` 与 `docs/ARCH_IMPROVEMENT_PLAN.md` 已同步。
 
 ## 2026-10-17 ASR 转写腿真实 E2E 验收发现（P 系列，与上面的 F/O 编号无关）
 
@@ -530,7 +530,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 ## 观察（危害低，可不处理）
 
-- 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——这是 R3.2 的低成本替代点（执行器改为按 `advance_steps[0]` 分派）。
+- 执行器 `_ensure_translation` 的等待分支基本是防御性死码，且文案与规划器不同——执行器应改为按 `advance_steps[0]` 分派。**R3.2 于 2026-10-20 取消后，这条是它唯一被保留下来的部分**，独立成小项（原登记为「R3.2 的低成本替代点」）：它要消除的是**文案与判定在两侧各写一份**，与缓存无关，因此不随 R3.2 一起作废。
 - `recovery` ⇄ `pipeline` 的环实际还包含 `recovery` ⇄ `workflow`（9 处函数级 import）；`common.py` 里有一处已属多余的惰性 import 可顺手转顶层。
 - ~~socks5 等非 http scheme 的 userinfo 密码含 `@` 时脱敏漏掉后半段（实测）。~~ **已修（2026-10-18）**：`_USERINFO_PATTERN` 的字符类此前排除 `@`，匹配停在第一个 `@`；现改为贪婪匹配 + 回溯到 authority 里的**最后**一个 `@`，与 http/https 分支（`redact_url` 的 `netloc.rsplit("@", 1)`）同口径。判定依据是 RFC 3986 的 authority 终止符（`/` `?` `#` 空白），不是 scheme 白名单，任意 scheme 一致成立；`?` / `#` 之后的 `@` 不再被误吞。`process.py` 的 `_redact_command` 对非 http scheme 确实没有自己的 userinfo 处理（`redact_url` 只认 http/https），但它的唯一出口是 `create_event`，由事件边界兜住，本轮一并补了守卫测试，未在调用点重复脱敏。
 - ~~yt-dlp 的 `-o` 模板不转义 output root 里的 `%`（元数据展开可能写到 Job 目录外，事后检查只报错不清理）。~~
@@ -625,4 +625,4 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 **剩余未处理**：O8 条目 (d) 登记的六条遗留里还剩五条（副本部分已于 2026-10-20 裁定收尾；第 ③ 条「回落分支 ALIGN 留 RUNNING」已于 2026-10-20 修复，其余五条留主干拍板），以及「观察」一节里尚未处理的几条。O1 与 O9 / O10 / O11、O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
 
-对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小（O1 已于 2026-10-20 做完，实测确认两条链路在中间三步上**已无逐字重复可搬**，建议由「降级」进一步改为**关闭** Phase 5，理由见上方 O1 条目 (f)，仍未拍板）；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。
+对既有计划的建议（来自 review）——**两条均已于 2026-10-20 拍板：Phase 5 关闭、R3.2 取消**，原建议与依据保留在下面供追溯。**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小（O1 已于 2026-10-20 做完，实测确认两条链路在中间三步上**已无逐字重复可搬**，建议由「降级」进一步改为**关闭** Phase 5，理由见上方 O1 条目 (f)，仍未拍板）；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS「修改流程」第 6 条（不为尚未确认的需求预留抽象层）冲突（原文写的是「AGENTS 第 6 条」，指向不清：「不可破坏的约束」第 6 条讲的是外部命令参数数组，与本项无关，此处已更正）。**2026-10-20 拍板取消**，且取消理由比原建议更强：R3.2 最大的卖点是「`plan_advance_steps` 与 `_advance_workflow` 的人工对齐义务消失」，而本轮「`status` 推荐一条必然失败的命令」同类缺陷修了 **9 次**、三侧不一致确实是根因，但每一次都是「Job 处在一个没有任何自动步骤能推进的状态」——**内容寻址缓存一条都挡不住**，键算得再对那一步照样执行不了；真正起作用的是本轮确立的那套做法（只读纯谓词 → 落进 `build_recovery_plan` → 文案与执行侧逐字共用 → 端到端测试把推荐命令原样喂回 `main()` 并断言 Job 真的推进）。低成本替代（执行器按 `advance_steps[0]` 分派）**不随本项取消**，仍留在「观察」一节独立成小项。详见 [架构改进与工程加固技术方案](ARCH_IMPROVEMENT_PLAN.md) 的 R3.2 节。
