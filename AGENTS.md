@@ -112,6 +112,14 @@ uv run --no-sync xvt --help
 
 集成测试（`tests/test_e2e.py`、`tests/test_burn.py`）要求 ffmpeg **带 libass 的 `ass` 滤镜**——烧录与预览靠 `-vf ass=filename=...` 送字幕。homebrew 把 ffmpeg 拆成了两个 formula，精简的 `ffmpeg` 不带 `--enable-libass`，**本地与 CI 都要装 `ffmpeg-full`**；缺 libass 时这些测试会跳过并说明原因（`pytest -rs` 可见），不会伪装成通过。
 
+**本地与 CI 还都需要系统能解析到字幕字体**，否则行宽 QA 会**静默降级到保守规则**：`render.font_for_language` 在非 darwin / 非 win32 上给 zh / ja / ko 要 `Noto Sans CJK SC` / `JP` / `KR`、给其余语言要 `DejaVu Sans`（darwin 上要 Hiragino / Helvetica，系统自带），缺字体时 libass 报 `failed to find any fallback with glyph` → `measure_bilingual_line_widths` 抛 `ValueError` → `qa.check_subtitles` 回退保守显示单位上限并只记一条 `layout_measurement_unavailable` warning。**这不会让任何测试变红**（涉及行宽的用例全部打桩了测量函数），所以它靠一步独立的能力断言兜住：
+
+```bash
+uv run --no-sync python .github/scripts/verify_layout_measurement.py
+```
+
+它对 zh / ja / en 各真的调一次 `measure_bilingual_line_widths` 并断言报告自己的 `layout["measurement"] == "measured"`，**不是** `fc-list | grep cjk` 这类代理指标（「字体包在盘上」≠「fontconfig 解析得到那个家族」≠「libass 量得出包围盒」）。CI 两个平台都跑这一步，Linux 侧装 `fonts-noto-cjk`；该步**必须排在 `uv sync` 之后**（脚本 import xvt），不能像 ffmpeg 那两步一样提到最前。
+
 涉及本机运行时依赖时，再执行：
 
 ```bash

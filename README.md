@@ -572,6 +572,7 @@ xvt burn JOB_FILE [--media PATH] [--output PATH] [--software]
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 - FFmpeg，烧录时需包含 libass，建议同时具备 VideoToolbox 或 libx264
+- 能渲染目标语言全部字形的字幕字体（macOS 系统自带 Hiragino；Linux 上中日韩需要 `fonts-noto-cjk` 一类包）。缺字体时烧录仍可进行，但行宽 QA 无法测量，会回退保守限制并给出 warning，`xvt doctor` 的字体检查会报 fail
 - yt-dlp，仅 YouTube 输入需要
 - macOS Apple Silicon 使用 MLX Whisper 时安装 `asr-mlx` extra
 
