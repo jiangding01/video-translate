@@ -2,6 +2,20 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **对齐回落 ASR 后分段失败时 ALIGN 不再永久停在 `running`（O8 条目 (d) 第 ③ 条）**（分支 `codex/align-terminal-state-on-fallback`，未合并、未开 PR）。
+
+**① 实证复现用真实 `xvt run`，不手搓 `job.json`。** 只替掉两个外部依赖：PATH 上放一个离线替身 `yt-dlp`（`--dump-single-json` 回报带 `subtitles: {"en": ...}` 的元数据，字幕下载写出第 3 条越出媒体时长的 SRT，媒体下载拷一份 ffmpeg 现场合成的 3s 静音 m4a），`PYTHONPATH` 上放一个替身 `mlx_whisper`（`transcribe` 返回**词级时间戳全为零时长**的两个词）。xvt 本体、`job.json`、ffmpeg/ffprobe 全走真实路径。**为什么这么构造**：`else:` 回落分支要求 `plan.action is ALIGN` 且 `align_subtitles` 为假，而 `plan_source_selection` 只在「自动策略 + 平台**人工**字幕候选 + 候选 QA 有 error」时给出 ALIGN——所以必须是远程 Job，候选 QA 要出 error（第 3 条 `outside_media`）。对齐照样算得出来（文本能匹配、置信度够）但对齐后 QA 仍有 error，`alignment_accepted` 为假、回落 ASR；`segment_transcript` 把零时长词全部过滤掉后 `not words` 返回 `[]`，`not cues` 抛 `RuntimeError`。这条比「未知 preset」可靠：`--segmentation-preset` 在 argparse 层就有 `choices`，`xvt run` 根本传不进未知 preset。
+
+**修复前**（逐字）：`align` = `{"status": "running", "started_at": "...", "completed_at": null, "error": null}`，`segment` = `{"status": "failed", "completed_at": "...", "error": "transcription produced no subtitle cues"}`；终端只打出 `[进行中] 对齐字幕`，再没有收尾行。**修复后**：`align` = `{"status": "succeeded", "completed_at": "...", "error": null}`，`segment` 的失败归属与文案一字未改；终端多出 `[完成] 对齐字幕`。
+
+**② 取 (b)：终态落在对齐决策做完的那一刻。** 在回落分支里、交棒 `current_stage = SEGMENT` **之前**落 `set_stage(ALIGN, SUCCEEDED)`，并把原先整段末尾那行无条件的 `set_stage(ALIGN, SUCCEEDED)` 并进已有的 `if selected_kind == "aligned_subtitles":` 块——该块本就负责「采用对齐 → SEGMENT SKIPPED」的记账，`selected_kind` 在三条分支里分别是 `aligned_subtitles` / `aligned_subtitles` / `asr`，恰好互斥，不会重复记也不会漏记，且沿用了文件里已有的同一套 idiom（而不是新造一个标志位）。**否掉 (a)**：把那行提到 if/elif/else 之前，会让强制对齐的两处 `raise` 发生在 ALIGN 已标 `succeeded` 之后、被外层 except 覆写成 `failed`，正是 #116 刚修过的「同一 stage 先完成后失败」形态（#116 的修法只是渲染层给失败行加一句「重新进入后失败」，重新造出这个形态等于让那句注解去解释一个本不该出现的翻转）；而 (a) 在回落路径上的效果与 (b) 完全相同，纯粹多付一个回归。**否掉 (c)**：要在记账**边界**的 except 里加「`current_stage` 是 SEGMENT 而 ALIGN 仍 RUNNING 就一并收口」的特例，等于在失败处理器里写一条**成功**记录；它只修错误路径、成功路径上终态仍落得过晚，还与 96d38f8 裁定过的「except 里刻意不扫 RUNNING 的 stage」（恢复路径上可能留着上一次中断的 RUNNING）相冲突。
+
+**③ 事件顺序确有变化，且仅此一处。** 回落路径上 `align` 的 `stage_completed` 由「`segment` 收尾之后」前移到「`segment` 开工之前」。**既有测试零变红、既有断言零改动**：全仓没有一处断言 align/segment 的事件顺序，协议快照里 `align` 出现 0 次（实际跑过，零 diff）。新增 4 条测试：回落成功的事件顺序、回落后分段失败的终态与失败归属、强制对齐被拒时 `align` 只有 `stage_started → stage_failed`（反证 (a)，约束 4 不受影响）、对齐被采用时 `align` 收尾紧接 `segment` 跳过且 `segment` 从不开工。`1067 → 1071 passed`，子测试仍 312。
+
+**④ 用户可见变化，CHANGELOG 已记。** `recovery.py` 的 `current_stage = active or failed[-1]` 优先取第一个 RUNNING/AWAITING_INPUT 的 stage，所以修复前 `xvt status --json` 的 `recovery_plan.current_stage` 是 `align`（指向一个其实已经做完的阶段），修复后是真正失败的 `segment`，`completed_stages` 多出 `align`；恢复分类仍是 `retryable`，退出码与恢复建议一字未改。实测两侧 `status --json` 已对账。
+
+**⑤ 对主干判断的两处更正。** (一) 任务描述给的复现配方是「媒体 Job + **用户源字幕**」，这条走不到缺陷现场：用户字幕（`SourceCandidateKind.USER`）在自动策略下只会得到 `SourceSelectionAction.SUBTITLES`，要进对齐必须显式 `--align-subtitles`，而那会进 `if align_subtitles:` 的强制腿、不是出事的 `else:` 回落腿。缺陷现场只有「自动策略 + 平台人工字幕 + 候选 QA error」一条进路，即**远程 Job**。(二) 硬门槛 2 要求「回落后分段成功」的事件序列也不得变，这与 (b) 自身的代价（主干在候选 (b) 里已点明「ALIGN succeeded 从 SEGMENT 之后挪到 SEGMENT 之前」）直接冲突，不可能同时满足；按主干在门槛 4 里的指示如实回报：顺序确实变了，但没有任何既有断言因此变红。
+
 2026-10-20 **O1 语义收口去重：`semantic.py` 抽出 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper**（分支 `codex/o1-semantic-conclude-helper`，未合并、未开 PR）。
 
 **① 核实结果。** 三处终态收口确认存在：`run_translation_semantic_review` 的 `reviewed_candidate` 分支（原 :676-687）与常规分支（原 :737-748）**去缩进后逐字相同**，`apply_agent_semantic_review` 收尾（原 :1070-1081）结构相同但条件用 `final_issues`、`mode` 是字面量 `"agent"`。两处问题分拣的位置**与 review 清单写的不同**：清单指的 `_ensure_candidate_qa` + `paths.append` 配对只有 2 行且不是分拣，真正重复的是 :701-704 与 :944-947 的 `repairable` / `preserved` 按类别过滤（只差输入变量名）。
@@ -22,7 +36,7 @@
 
 **③ 零行为变化。** `1067 passed, 312 subtests`，前后一致；既有断言零改动，协议快照零 diff。CHANGELOG 未记（零用户可见变化，与 O8 死码那轮同）。
 
-**④ 遗留去向。** 本轮核实出的六条（C 对齐段异常无记账、C 的 `"auto"` 不转 `None`、A 回落分支 ALIGN 留 RUNNING、C 空 cue 无前置拦截、B 对齐段无测试、`transcription.py` 2055 行待拆）均刻意未修，登记在 REVIEW_FINDINGS O8 条目 (d)，留主干拍板。
+**④ 遗留去向。** 本轮核实出的六条（C 对齐段异常无记账、C 的 `"auto"` 不转 `None`、A 回落分支 ALIGN 留 RUNNING、C 空 cue 无前置拦截、B 对齐段无测试、`transcription.py` 2055 行待拆）当时均刻意未修，登记在 REVIEW_FINDINGS O8 条目 (d)，留主干拍板。**其中第 ③ 条（A 回落分支 ALIGN 留 RUNNING）已于 2026-10-20 修复**，见本文件最新一条；其余五条仍留主干拍板。
 
 2026-10-20 **修掉不带 scheme 的签名 URL 脱敏漏整条 query（安全，约束 5）**（分支 `codex/redact-schemeless-query`，未合并、未开 PR）。
 
