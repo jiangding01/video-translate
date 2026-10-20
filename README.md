@@ -661,6 +661,8 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
 
 强制对齐是 fail-closed 的：对齐结果置信度低于阈值时失败（可用 `--allow-low-confidence-alignment` 显式放行），对齐后的字幕 QA 出现 error 级问题时同样失败，且 `--allow-low-confidence-alignment` 不放行这一类问题。后一种失败请读 `aligned-subtitle-qa.json`：它在算出之后、任何判定之前就落盘登记，所以**失败的 Job 上也一定有**，逐条给出是哪个 cue 的哪个 issue 码。此时去掉 `--align-subtitles` 会**保留源字幕原有时间轴**（不是回退到 ASR 分段）；确实需要按语音重建时间轴时，请改用 `--source-strategy asr`（不能与 `--align-subtitles` 同用），或先修复源字幕本身。
 
+两种失败**都不要重跑 `continue`**：对齐选项固化在 `job.config` 里，`continue` 拿同一份字幕与同一份转写重跑，每次都复现同一个退出码 2。`status` 对两者都归 `manual_fix`，首选命令是真正能推进的 `xvt rebuild-source JOB --strategy asr`（它关闭对齐、改用 ASR 时间轴，并复用已有的词级转写），对齐后 QA 失败这一种还会在 `report_paths` 里给出 `aligned-subtitle-qa.json` 的路径。注意上面三条出口里只有「用 ASR 重建时间轴」能作用在**既有 Job** 上：去掉 `--align-subtitles`（保留源字幕文本与原时间轴）和修复源字幕都要重新运行 `run` 创建新 Job——Job 内 checksum 有效的 `input-subtitles.srt` 副本优先于 `--subtitles` 指向的原始文件，改原文件对既有 Job 不起作用。
+
 ### 3. 纯字幕文件工作流
 
 源字幕可以直接作为输入创建 Job，无需提供视频或音频：
@@ -907,7 +909,7 @@ uv run --no-sync xvt rebuild-source "/path/to/job.json" \
   --proxy "http://127.0.0.1:7890"
 ```
 
-这是 advanced 原子命令，`continue` 不会自动执行。它优先复用校验通过的词级转写、规范化音频和本地或已下载媒体；只有远程 Job 缺少这些可复用内容时，才按显式 Cookie/代理重新获取。命令持久化 ASR 策略与修复意图并关闭对齐，失效旧候选 QA、source cue、选择、重分段及全部下游产物，但保留 Job 内 checksum 有效的输入译文副本，以便原始外部译文文件已移动时仍可按新时间轴重新映射。**保留不等于还能用**：新的源时间轴可能与那份译文完全对不上，命令收尾会当场判定并说明——对不上时它不再提示 `xvt continue`（那条命令必然失败），而是给出 `xvt import-translation JOB <对齐新时间轴的译文> --target-language ...`，`xvt status` 同步归为需要人工处理并给出同一条出口。修复中断后 `status` 会继续给出显式重试命令；成功后端到端 Job 运行 `xvt continue JOB`，旧原子 Job 运行 `xvt translate JOB --target-language ...`。`status` 仅在非 ASR 源字幕 QA 为 error 且可重建时首次建议此命令；ASR 自身 QA error、`needs_review` 和译文 QA 不会重复建议重建。
+这是 advanced 原子命令，`continue` 不会自动执行。它优先复用校验通过的词级转写、规范化音频和本地或已下载媒体；只有远程 Job 缺少这些可复用内容时，才按显式 Cookie/代理重新获取。命令持久化 ASR 策略与修复意图并关闭对齐，失效旧候选 QA、source cue、选择、重分段及全部下游产物，但保留 Job 内 checksum 有效的输入译文副本，以便原始外部译文文件已移动时仍可按新时间轴重新映射。**保留不等于还能用**：新的源时间轴可能与那份译文完全对不上，命令收尾会当场判定并说明——对不上时它不再提示 `xvt continue`（那条命令必然失败），而是给出 `xvt import-translation JOB <对齐新时间轴的译文> --target-language ...`，`xvt status` 同步归为需要人工处理并给出同一条出口。修复中断后 `status` 会继续给出显式重试命令；成功后端到端 Job 运行 `xvt continue JOB`，旧原子 Job 运行 `xvt translate JOB --target-language ...`。`status` 在三种状态下会建议此命令：非 ASR 源字幕 QA 为 error 且可重建时（首次建议，ASR 自身 QA error、`needs_review` 和译文 QA 不会重复建议重建），以及 `--align-subtitles` 的两种 fail-closed 失败——对齐置信度低于门限、或对齐后字幕 QA 出 error 级问题——此时它是唯一能作用在既有 Job 上的出口。
 
 ### 8. 生成短片段预览
 

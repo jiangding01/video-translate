@@ -131,7 +131,31 @@
 
 恢复计划现在在这个状态下归 `manual_fix`，首选命令是 `xvt rebuild-source JOB --strategy asr`（它把 `align_subtitles` 置为 `false` 并优先复用 checksum 有效的 words/audio checkpoint，是真正能推进的出口；另一条出口是重新运行 `run` 调整对齐选项）。判定只看 Job 状态，不猜异常：媒体 Job、`align_subtitles is True`、未放行低置信、`subtitle_alignment` checksum 有效且其 `confidence` 低于 `minimum_alignment_confidence`，并且 **`word_transcript` 与 `input_subtitles` 两份对齐输入都 checksum 有效**。缺任一输入时重跑可能得到不同置信度，不能断言「必然失败」，那种 Job 仍按既有的转写 checkpoint 恢复处理。批处理侧 `manual_fix` 记为 `failed` 并保留恢复指令，不再反复重试一条注定失败的 `continue`。
 
-**已知未覆盖的相邻情形**：`--align-subtitles` 还有第二种失败——对齐本身置信度达标，但对齐后的字幕 QA 出 error 级问题（报错点名「rerun without `--align-subtitles`」）。它同样让 `continue` 每次失败（实测连跑两次 stderr 逐字相同、退出码都是 2）。**此前挡住它的前置条件现在已经不成立**：那次对齐后 QA 的结论已经登记为 `aligned_subtitle_qa` artifact（`aligned-subtitle-qa.json`，checksum 有效，`xvt verify` 会逐条校验），Job 状态里因此已经有可判定的证据。**但分类仍然一字未改**，仍是「存在 checksum 有效的转写 checkpoint，可以从断点继续」+ `primary_command=xvt continue`：登记这份报告的那次改动只补证据、不碰任何恢复判定，改分类是独立一项（照置信度门那条的范式：只读谓词从 artifact + config 纯推导，归 `manual_fix` 并给 `rebuild-source --strategy asr` 这类真正能推进的出口）。在那之前，用户能拿到的是明细而不是出口。
+### 强制对齐被对齐后 QA 拒绝的死循环出口
+
+`--align-subtitles` 的第二种失败：对齐本身置信度达标，但**对齐后的字幕 QA 出 error 级问题**，强制对齐被那道门拒绝（报错点名「rerun without `--align-subtitles`」）。形态与上一节相同——`ALIGN` 记 `failed`、`source_cues` 缺失、转写 checkpoint 全在，`continue` 拿同一份 `input_subtitles` 与同一份 `word_transcript` 重跑，对齐与对齐后 QA 都是确定性的，实测连跑两次 stderr 逐字相同、退出码都是 2。此前它同样落到「存在 checksum 有效的转写 checkpoint，可以从断点继续」+ `primary_command=xvt continue`、`alternative_commands` 为空（本仓库第 9 次同类缺陷）。
+
+恢复计划现在归 `manual_fix`，首选命令是 `xvt rebuild-source JOB --strategy asr`（实测退出码 0，之后 Job 能被驱动到 `completed`、`xvt verify` 全项 PASS）。单点实现是只读谓词 `recovery._alignment_post_qa_deadlock`，成立时返回那份报告的路径，守卫链：
+
+- 不是纯字幕 Job（纯字幕 Job 不支持 ASR 重建，也不支持对齐）。
+- `align_subtitles is True`。**自动策略**下对齐后 QA 失败不是死局：那一支会回落 ASR 并正常产出 `source_cues`（`source-selection.json` 记 `alignment_post_qa_failed`），不能被判死。
+- `aligned_subtitle_qa` checksum 有效，且报告里有 error 级 issue。判据直接取自这份报告（`_qa_report_has_errors`，与译文 QA 侧同一份实现），而不是 `subtitle_alignment`：挡住对齐的就是报告里的 error 级 issue。这份报告自「对齐后 QA 报告落盘」那次改动起在抛出之前无条件登记，所以失败的 Job 上一定有。
+- **`word_transcript` 与 `input_subtitles` 两份对齐输入都 checksum 有效**，与置信度门同一条守卫：缺任一输入时重跑会重新转写或重新导入，结论可能不同，不能断言「必然失败」。
+- **`_source_can_be_rebuilt`**——比置信度门**多的一道**。本条的唯一出口就是 `rebuild-source --strategy asr`，而 `media_info` 失效且本地媒体也不在盘上时那条命令自己会以「source rebuild requires an available local media file」失败；推荐一条跑不起来的命令正是这条判定要修的毛病，所以不留这个角。不成立时让既有分类原样生效，那种 Job 的去向与本改动之前完全相同。刻意**不**回头给置信度门补这道守卫：那会改动一条既有判定，不在本条的范围内。
+
+**与置信度门的关系**：两道门可以在同一个 Job 上同时成立（置信度低且对齐后 QA 也有 error），而执行侧先抛置信度门，所以本判定**排在 `_alignment_confidence_deadlock` 之后**，文案对得上先失败的那一条。两条谓词各自独立、互不覆写；测试 `AlignmentPostQaDeadlockTest::test_confidence_gate_keeps_its_own_reason_when_both_gates_trip` 钉住这个顺序。
+
+**刻意不照抄的一条守卫**：`--allow-low-confidence-alignment` 与本条**无关**，本判定不看它。那个旗标只放行「低置信但 QA 干净」的对齐，对齐后 QA 的 error 门在它之后无条件执行（`pipeline.transcription`），照抄会让带旗标的 Job 继续卡在必然失败的 `continue` 上。
+
+`report_paths` 带上 `aligned-subtitle-qa.json` 的绝对路径，`reason` 点名这个文件名。该字段本来就不是 `SUBTITLE_QA` stage 专属（局部重译等待带 `cue-retranslation-batches.json`、语义等待带语义 QA 报告，都在 `TRANSLATE` stage），这里属于同一种用法；`xvt status` 与命令失败时的恢复导航都按 `verbose` 渲染它（`report: <路径>`），用户不必再拿 `alignment.json` 去跟 `media.json` 的时长对账。
+
+**没有第二条命令可推荐**，`alternative_commands` 刻意为空，理由都实测过：
+
+- 报错点的「rerun without `--align-subtitles`」与「`--source-strategy asr`」都是 `run` 的旗标，**会创建新 Job**，推不动这一个；`align_subtitles` 固化在 `job.config` 里，除 `rebuild-source` 外没有命令会把它翻成 `false`。前者保留的是用户字幕的**文本与原时间轴**，与 `rebuild-source`（改用 ASR 文本与 ASR 时间轴）并不等价，因此只在 `reason` 里点名，不进推荐位。
+- 「fix the source subtitles」在既有 Job 上**没有受支持的入口**。`prepare-source-review` / `apply-source-review-fixes` 不适用（实测以 `source review requires valid source cues` 退出码 2 拒绝——这个 Job 的源 cue 还没产出），也没有「重指源字幕」的命令（`relink-source-media` 只管源媒体）。改用户原始字幕文件本身也不起作用：`_candidate_from_job` 优先取 Job 内 checksum 有效的 `input_subtitles` 副本，实测改原文件后 `continue` 仍复现同一个失败。这同样只在 `reason` 里以「修好源字幕后重新运行 `run`」出现。
+- `continue` 必然再次失败，**任何推荐位都不放**。
+
+批处理侧 `manual_fix` 记为 `failed` 并保留恢复指令，`batch-continue` 不再每轮重撞同一个失败。**约束 4 不受影响**：只改导航分类与文案，QA 的放行与阻断判定、错误文案与退出码一字未改，强制对齐失败仍然失败。
 
 ### 已存译文套不回重建后的源时间轴
 

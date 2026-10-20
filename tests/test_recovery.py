@@ -881,9 +881,10 @@ class RecoveryTest(unittest.TestCase):
     def test_alignment_above_the_threshold_is_not_treated_as_a_deadlock(self) -> None:
         """置信度达标时这条判定不生效。
 
-        强制对齐还有第二种失败（对齐后字幕 QA 出 error 级问题）同样会卡住 `continue`，
-        但那条路径不落盘 QA 报告，Job 状态证明不了「必然失败」，因此刻意不在这里断言——
-        本测试只钉住置信度门这一条判定的边界，不声称另一种失败已经有出口。
+        强制对齐的第二种失败（对齐后字幕 QA 出 error 级问题）现在由
+        ``_alignment_post_qa_deadlock`` 单独判定，用例在
+        ``AlignmentPostQaDeadlockTest``。本 Job 没有 ``aligned_subtitle_qa`` 登记，
+        那条判定够不着它，因此这里仍然只钉住置信度门这一条判定的边界。
         """
 
         with tempfile.TemporaryDirectory() as directory:
@@ -2759,4 +2760,435 @@ class FullTranslationRequestNewestValidityTest(unittest.TestCase):
             self.assertEqual(
                 plan_advance_steps(job, require_workflow_config(job)),
                 ("await_cue_retranslation",),
+            )
+
+
+class AlignmentPostQaDeadlockTest(unittest.TestCase):
+    """强制对齐被**对齐后字幕 QA 的 error 门**拒绝时，导航必须给出真出口。
+
+    这是「`status` 推荐一条必然失败的命令」的第 9 次：`--align-subtitles` 的第二种失败
+    （对齐置信度达标、对齐后 QA 出 error 级 issue）此前照旧落到「存在 checksum 有效的
+    转写 checkpoint，可以从断点继续」+ `primary_command=xvt continue`，而 `continue`
+    拿的是同一份 `input_subtitles` 与同一份 `word_transcript`，对齐与 QA 都是确定性的，
+    实测连跑两次 stderr 逐字相同、退出码都是 2。
+
+    判据只看 Job 状态：对齐后 QA 的结论现在登记为 `aligned_subtitle_qa`
+    （`aligned-subtitle-qa.json`，checksum 有效，在抛出之前就落盘），不需要猜运行期异常。
+    """
+
+    def _add_artifact(self, job, root: Path, kind: str, content: str = "{}") -> Path:
+        path = root / f"{kind}.json"
+        path.write_text(content, encoding="utf-8")
+        job.artifacts.append(Artifact(kind, str(path), file_checksum(path)))
+        return path
+
+    _ERROR_REPORT = json.dumps(
+        {
+            "status": "failed",
+            "cue_count": 4,
+            "issues": [
+                {
+                    "code": "outside_media",
+                    "severity": "error",
+                    "cue_id": 4,
+                    "message": "cue is outside media duration",
+                },
+                {
+                    "code": "low_timing_confidence",
+                    "severity": "review",
+                    "cue_id": 4,
+                    "message": "timeline requires manual review",
+                },
+            ],
+            "layout": None,
+        }
+    )
+    _WARNING_REPORT = json.dumps(
+        {
+            "status": "warning",
+            "cue_count": 4,
+            "issues": [
+                {
+                    "code": "too_short",
+                    "severity": "warning",
+                    "cue_id": 2,
+                    "message": "cue is shorter than 600ms",
+                }
+            ],
+            "layout": None,
+        }
+    )
+
+    def _post_qa_deadlock_job(
+        self,
+        root: Path,
+        *,
+        report: str | None = None,
+        confidence: float = 0.75,
+        job_input: str = "/tmp/input.mp4",
+        **config_overrides,
+    ) -> Path:
+        """构造「对齐后 QA 出 error」的断点态：转写 checkpoint 全在，只缺 source_cues。"""
+
+        config = {
+            "engine": "mlx",
+            "source_language": "en",
+            "source_strategy": "auto",
+            "align_subtitles": True,
+            "minimum_alignment_confidence": 0.55,
+            "allow_low_confidence_alignment": False,
+            "workflow": {"target_language": "zh-CN", "burn": False},
+        }
+        config.update(config_overrides)
+        job = create_job(job_input, root, config)
+        self._add_artifact(job, root, "media_info")
+        self._add_artifact(job, root, "normalized_audio")
+        self._add_artifact(job, root, "word_transcript")
+        self._add_artifact(job, root, "input_subtitles")
+        self._add_artifact(
+            job, root, "subtitle_alignment", json.dumps({"confidence": confidence, "cues": []})
+        )
+        if report is not None:
+            self._add_artifact(job, root, "aligned_subtitle_qa", report)
+        job.stages[StageName.ALIGN].status = StageStatus.FAILED
+        job.stages[StageName.ALIGN].error = (
+            "aligned subtitles failed subtitle QA with error-level issues; rerun without "
+            "--align-subtitles to keep the source subtitle timeline as-is, use "
+            "--source-strategy asr to build the timeline from speech instead, or fix the "
+            "source subtitles"
+        )
+        return save_job(job)
+
+    def test_post_qa_error_does_not_recommend_a_doomed_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(self._post_qa_deadlock_job(root, report=self._ERROR_REPORT))
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("rebuild-source", plan.primary_command or "")
+        self.assertIn("--strategy asr", plan.primary_command or "")
+        commands = (plan.primary_command or "", *plan.alternative_commands)
+        self.assertFalse(
+            any(command.split()[1:2] == ["continue"] for command in commands),
+            f"注定失败的 continue 不得出现在恢复计划里: {commands}",
+        )
+
+    def test_reason_and_report_paths_point_at_the_registered_report(self) -> None:
+        """明细是「对齐后 QA 报告落盘」刚解锁的能力：reason 点名报告、report_paths 给出绝对路径。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._post_qa_deadlock_job(root, report=self._ERROR_REPORT)
+            report_path = valid_artifact_path(load_job(job_file), "aligned_subtitle_qa")
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertIn("aligned-subtitle-qa.json", plan.reason)
+        self.assertIn("--align-subtitles", plan.reason)
+        assert report_path is not None
+        self.assertEqual(plan.report_paths, (str(report_path),))
+
+    def test_warning_only_aligned_report_is_still_retryable(self) -> None:
+        """反证：对齐后 QA 只有 warning 时这条判定不得生效。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(
+                self._post_qa_deadlock_job(root, report=self._WARNING_REPORT)
+            )
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+        self.assertEqual(plan.report_paths, ())
+
+    def test_detection_requires_both_alignment_inputs(self) -> None:
+        """缺一份对齐输入时重跑可能得到不同结果，不能断言「必然失败」。"""
+
+        for missing in ("word_transcript", "input_subtitles"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                job_file = self._post_qa_deadlock_job(root, report=self._ERROR_REPORT)
+                job = load_job(job_file)
+                job.artifacts = [artifact for artifact in job.artifacts if artifact.kind != missing]
+                save_job(job)
+
+                plan = build_recovery_plan(job_file)
+
+                self.assertEqual(plan.category, "retryable")
+                self.assertIn("continue", plan.primary_command or "")
+
+    def test_allow_low_confidence_flag_does_not_mask_the_post_qa_gate(self) -> None:
+        """`--allow-low-confidence-alignment` 与这条无关：它放行不了 QA error 门。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(
+                self._post_qa_deadlock_job(
+                    root,
+                    report=self._ERROR_REPORT,
+                    allow_low_confidence_alignment=True,
+                )
+            )
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("rebuild-source", plan.primary_command or "")
+
+    def test_confidence_gate_keeps_its_own_reason_when_both_gates_trip(self) -> None:
+        """两道门同时成立时，先抛出的置信度门保留自己的文案，不被本条抢走。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(
+                self._post_qa_deadlock_job(
+                    root,
+                    report=self._ERROR_REPORT,
+                    confidence=0.231,
+                )
+            )
+
+        self.assertEqual(plan.category, "manual_fix")
+        self.assertIn("置信度", plan.reason)
+        self.assertNotIn("aligned-subtitle-qa.json", plan.reason)
+        self.assertEqual(plan.report_paths, ())
+
+    def test_job_without_forced_alignment_is_left_alone(self) -> None:
+        """`align_subtitles` 不为 True 时（自动策略会回落 ASR）不得被判死。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = build_recovery_plan(
+                self._post_qa_deadlock_job(
+                    root,
+                    report=self._ERROR_REPORT,
+                    align_subtitles=False,
+                )
+            )
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
+    def test_unrebuildable_job_is_not_pointed_at_a_rebuild_that_cannot_run(self) -> None:
+        """出口跑不起来时不出声：比置信度门多的那一道守卫。
+
+        ``media_info`` 失效且本地媒体不在盘上时 `rebuild-source` 自己会以
+        「source rebuild requires an available local media file」失败——推荐一条跑不起来
+        的命令正是这条判定要修的毛病。这种 Job 维持本改动之前的既有去向。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._post_qa_deadlock_job(
+                root,
+                report=self._ERROR_REPORT,
+                job_input=str(root / "gone.mp4"),
+            )
+            job = load_job(job_file)
+            job.artifacts = [
+                artifact for artifact in job.artifacts if artifact.kind != "media_info"
+            ]
+            save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertNotEqual(plan.category, "manual_fix")
+        self.assertNotIn("rebuild-source", plan.primary_command or "")
+        self.assertEqual(plan.report_paths, ())
+
+    def test_subtitle_only_job_is_left_alone(self) -> None:
+        """纯字幕 Job 没有 ASR 重建出口，这条判定不得对它出声。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._post_qa_deadlock_job(
+                root,
+                report=self._ERROR_REPORT,
+                input_kind="subtitle",
+            )
+
+            plan = build_recovery_plan(job_file)
+
+        self.assertEqual(plan.category, "retryable")
+        self.assertIn("continue", plan.primary_command or "")
+
+
+class AlignmentPostQaDeadlockExitTest(unittest.TestCase):
+    """自证推荐命令真能推进：全程真实 CLI，只打桩 ffprobe / ffmpeg 抽音 / ASR 模型。
+
+    实证基线（真实媒体 + 真实 mlx-whisper，见 HANDOFF）：`xvt run … --align-subtitles`
+    退出码 2，`status` 给 `retryable` + `continue`，连跑两次 `continue` 退出码都是 2 且
+    stderr 逐字相同；`xvt rebuild-source --strategy asr` 退出码 0 后 Job 走到 complete、
+    `xvt verify` 全项 PASS。本测试把同一条链路搬进默认测试套件。
+    """
+
+    def _media_info(self, media: Path) -> MediaInfo:
+        return MediaInfo(
+            path=str(media),
+            duration_ms=3_000,
+            size_bytes=media.stat().st_size,
+            format_name="mp4",
+            width=1920,
+            height=1080,
+            frame_rate=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            has_video=True,
+            has_audio=True,
+        )
+
+    # 三条能匹配上的 cue 挤在 0–0.7s，外加一条音频里根本没说的尾句：
+    # 对齐把时间轴放大 2.8 倍，尾句被推到媒体时长之外（outside_media，error 级），
+    # 而覆盖率 3/4 × 匹配分 1.0 = 0.75 仍高于默认门限 0.55，置信度门不参与。
+    _WORDS = (
+        Word("Hello", 0, 600, 0.9),
+        Word("world", 700, 1_300, 0.9),
+        Word("again", 1_400, 2_000, 0.9),
+    )
+    _SOURCE_SRT = (
+        "1\n00:00:00,000 --> 00:00:00,200\nHello\n\n"
+        "2\n00:00:00,250 --> 00:00:00,450\nworld\n\n"
+        "3\n00:00:00,500 --> 00:00:00,700\nagain\n\n"
+        "4\n00:00:01,200 --> 00:00:01,500\nGoodbye forever\n"
+    )
+
+    def _deadlocked_job(self, root: Path) -> Path:
+        media = root / "input.mp4"
+        media.write_bytes(b"video")
+        source = root / "source.srt"
+        source.write_text(self._SOURCE_SRT, encoding="utf-8")
+        media_info = self._media_info(media)
+
+        def run_ffmpeg(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"audio")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with (
+            patch("xvt.pipeline.common.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch(
+                "xvt.pipeline.transcription.transcribe_audio",
+                return_value=Transcript(language="en", engine="mlx", words=self._WORDS),
+            ),
+        ):
+            # 强制对齐被对齐后 QA 的 error 门拒绝：退出码 2，ALIGN 记 failed。
+            self.assertEqual(
+                main(
+                    [
+                        "run",
+                        str(media),
+                        "--output",
+                        str(root / "work"),
+                        "--subtitles",
+                        str(source),
+                        "--align-subtitles",
+                        "--language",
+                        "en",
+                        "--target-language",
+                        "zh-CN",
+                        "--provider",
+                        "agent",
+                    ]
+                ),
+                2,
+            )
+        job_file = next((root / "work").rglob("job.json"))
+        job = load_job(job_file)
+        self.assertIs(job.stages[StageName.ALIGN].status, StageStatus.FAILED)
+        self.assertIsNone(valid_artifact_path(job, "source_cues"))
+        report_path = valid_artifact_path(job, "aligned_subtitle_qa")
+        self.assertIsNotNone(report_path)
+        assert report_path is not None
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [
+                (issue["code"], issue["cue_id"])
+                for issue in report["issues"]
+                if issue["severity"] == "error"
+            ],
+            [("outside_media", 4)],
+        )
+        return job_file
+
+    def test_continue_is_a_dead_end_and_is_not_recommended(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._deadlocked_job(root)
+            media_info = self._media_info(root / "input.mp4")
+
+            # `continue` 连跑两次：退出码与 Job 状态都不变，导航零推进。
+            with (
+                patch("xvt.pipeline.common.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            ):
+                for _ in range(2):
+                    self.assertEqual(main(["continue", str(job_file)]), 2)
+                    job = load_job(job_file)
+                    self.assertIs(job.stages[StageName.ALIGN].status, StageStatus.FAILED)
+                    self.assertIsNone(valid_artifact_path(job, "source_cues"))
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "manual_fix")
+            assert plan.primary_command is not None
+            self.assertIn("xvt rebuild-source", plan.primary_command)
+            self.assertNotIn("xvt continue", plan.primary_command)
+            self.assertFalse(
+                any("xvt continue" in command for command in plan.alternative_commands),
+                plan.alternative_commands,
+            )
+
+    def test_recommended_command_actually_drives_the_job_to_completed(self) -> None:
+        """把 `primary_command` 原样 `shlex.split` 后喂回 CLI，断言 Job 真的走到完成。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._deadlocked_job(root)
+            media_info = self._media_info(root / "input.mp4")
+
+            plan = build_recovery_plan(job_file)
+            assert plan.primary_command is not None
+            argv = shlex.split(plan.primary_command)
+            self.assertEqual(argv[:2], ["xvt", "rebuild-source"])
+            self.assertEqual(Path(argv[2]), Path(job_file).resolve())
+            self.assertEqual(argv[3:], ["--strategy", "asr"])
+
+            with (
+                patch("xvt.pipeline.common.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            ):
+                self.assertEqual(main(argv[1:]), 0)
+
+                rebuilt = load_job(job_file)
+                self.assertIs(rebuilt.stages[StageName.ALIGN].status, StageStatus.SKIPPED)
+                self.assertIsNotNone(valid_artifact_path(rebuilt, "source_cues"))
+                self.assertIs(rebuilt.config["align_subtitles"], False)
+
+                # 重建之后的导航回到常规翻译推进，Agent 回填后 Job 走到完成。
+                after_rebuild = build_recovery_plan(job_file)
+                self.assertEqual(after_rebuild.category, "retryable")
+                self.assertEqual(main(["continue", str(job_file)]), 0)
+
+                manifest_path = valid_artifact_path(load_job(job_file), "translation_batches")
+                assert manifest_path is not None
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                response = root / "response.json"
+                response.write_text(
+                    json.dumps(
+                        {
+                            "items": [
+                                {"id": item["id"], "text": "你好。"}
+                                for batch in manifest["batches"]
+                                for item in batch["items"]
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertEqual(main(["apply", str(job_file), str(response), "--continue"]), 0)
+
+            self.assertEqual(build_recovery_plan(job_file).category, "complete")
+            self.assertEqual(verify_job(job_file)["status"], "pass")
+            self.assertIs(
+                load_job(job_file).stages[StageName.TRANSLATE].status,
+                StageStatus.SUCCEEDED,
             )

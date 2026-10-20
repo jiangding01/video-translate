@@ -331,7 +331,9 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
   **落盘点与抛出路径**：写在 `aligned_report = check_subtitles(...)` 紧后、置信度门与 QA error 门之前的直线代码里；`add_artifact` 自己 `save_job`，登记当场落到磁盘上的 `job.json`，不依赖后续收尾，因此抛出的那条路径上也必然留下产物（实测失败 Job 的 `job.json` 里 `aligned_subtitle_qa` 在册，`xvt verify` 打 `PASS aligned_subtitle_qa: artifact is valid`）。
 
-  **约束 4 不受影响**：只加证据、不碰判定。修复后同一条命令仍是退出码 2、`ALIGN` 仍是 `failed`、错误文本一字未改，`source_cues` / `source_srt` / `subtitle_qa` 一个都没登记。**不新增事件类型**：`add_artifact` 已发 `artifact_created`（`kind` 字段是自由字符串，`docs/EVENTS.md` 的字段表无需改动），另造一个事件只会给同一件事两个口径。**依赖图**：派生自 `subtitle_alignment` 与 `media_info`，并与 `source_candidate_qa` 同构地作为 `source_cues` 的**上游**——它讲的是对齐候选，那套 cue 可能被采用也可能被回落 ASR 顶掉。`downstream_of(SOURCE_CUES)` 因此一字未变（仍是 30 个 kind，legacy 闭包基线测试全绿），`resegment` 与源文修订的闭包不会抹掉一份仍然成立的对齐证据；`rebuild-source` 那一侧是显式集合而非闭包，已同步加入这个 kind（它本来就显式失效 `subtitle_alignment`，留下报告会是一份讲不清现状的旧证据）。
+  **约束 4 不受影响**：只加证据、不碰判定。修复后同一条命令仍是退出码 2、`ALIGN` 仍是 `failed`、错误文本一字未改，`source_cues` / `source_srt` / `subtitle_qa` 一个都没登记。
+
+  **它解锁的导航缺口已修（2026-10-20，独立一项）**：这份报告落盘后，「强制对齐被对齐后 QA 的 error 门拒绝」第一次可以从 Job 状态纯推导出来，于是 `recovery._alignment_post_qa_deadlock` 把该状态从「存在 checksum 有效的转写 checkpoint，可以从断点继续」+ `primary_command=xvt continue` 改成 `manual_fix` + `rebuild-source --strategy asr`，并把报告路径带进 `report_paths`。这是 P3 那类「primary_command 必然再次失败」缺陷的第 9 次；判定排在置信度门之后，且**刻意不看** `--allow-low-confidence-alignment`（那个旗标放行不了 QA error 门）。详见[恢复与回填契约](RECOVERY.md#强制对齐被对齐后-qa-拒绝的死循环出口)。**不新增事件类型**：`add_artifact` 已发 `artifact_created`（`kind` 字段是自由字符串，`docs/EVENTS.md` 的字段表无需改动），另造一个事件只会给同一件事两个口径。**依赖图**：派生自 `subtitle_alignment` 与 `media_info`，并与 `source_candidate_qa` 同构地作为 `source_cues` 的**上游**——它讲的是对齐候选，那套 cue 可能被采用也可能被回落 ASR 顶掉。`downstream_of(SOURCE_CUES)` 因此一字未变（仍是 30 个 kind，legacy 闭包基线测试全绿），`resegment` 与源文修订的闭包不会抹掉一份仍然成立的对齐证据；`rebuild-source` 那一侧是显式集合而非闭包，已同步加入这个 kind（它本来就显式失效 `subtitle_alignment`，留下报告会是一份讲不清现状的旧证据）。
 
 **本轮刻意未修，写清现象与理由**：
 
