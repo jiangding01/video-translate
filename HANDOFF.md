@@ -2,7 +2,7 @@
 
 更新时间：2026-10-20
 
-2026-10-20 **工作流烧录腿复用渲染腿的布局 QA 与 ASS，不再重算一遍（review 清单「`apply --continue` 把 QA 与渲染做了两遍」已修，但原条目的归因被实证更正）**（分支 `codex/apply-continue-no-double-render`，未合并、未开 PR）。
+2026-10-20 **工作流烧录腿复用渲染腿的布局 QA 与 ASS，不再重算一遍（review 清单「`apply --continue` 把 QA 与渲染做了两遍」已修，但原条目的归因被实证更正）**（分支 `codex/apply-continue-no-double-render`，PR #128，未合并）。
 
 **① 实证先于动手，原条目的机制写错了。** 真实 CLI 逐步复现（纯字幕源 + `--provider agent --translation-quality polished`，零网络零 API；媒体为 `ffmpeg -f lavfi` 合成的 640×360 视频）：
 - **纯字幕 Job（无媒体、不烧录）上根本没有第二遍。** `xvt apply JOB SEMANTIC_RESPONSE --continue` 的事件流里 `SUBTITLE_QA`(`detail=translated`) 与 `RENDER` 各一次，`continue` 腿只有 `workflow_started` + `workflow_completed`。原因：语义收尾后 `_translation_satisfied` 为真，`_ensure_translation` 根本不被调用，`semantic.py::_finalize_candidate` 那道复用短路**轮不到上场**（主会话提示里怀疑「短路没命中」，实证是「短路不参与」）。
@@ -15,6 +15,12 @@
 **③ 约束 4 没被削弱。** 放行判定仍排在复用判定**之前**：`_assert_translated_qa_gate` 对同一份报告跑 `review_gate_satisfied`（与 `complete_qa_stage` 同口径），`failed` 或未确认的 `needs_review` 在那里就抛 `RuntimeError`，烧录一帧都不开始。复用只省掉一次结论必然相同的重算。
 
 **④ 验证。** 新增 9 条测试（1055 → 1064，子测试 265 不变）。红先逐字：`tests/test_e2e.py::…::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` → `AssertionError: 2 != 1`；`tests/test_pipeline_burnin.py::…::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` → `AssertionError: Expected 'measure_bilingual_line_widths' to not have been called. Called 1 times.`。另 7 条是反证/边界：约束 4 反证（术语违规译文走 `xvt apply --continue` 仍非零退出、`SUBTITLE_QA=failed`、`bilingual_ass` / `burned_video` 都未登记）、换画幅不复用、换字体不复用、测量降级（`measurement="unavailable"`）不复用、cue 越出本次烧录媒体不复用且 QA 照旧判 failed、已确认的 `needs_review` 报告不复用、原子 `burn` 永不复用。**既有断言零改动、既有测试零变红、协议快照零 diff**（快照场景都是纯字幕 Job，不烧录）。修复后真实 `apply --continue` 重跑：第二遍事件消失，四份产物 SHA-256 与修复前逐字相同，`status` 为 `complete`、`xvt verify` 全项 PASS。
+
+**⑤ CI 分叉与一条顺带取证出来的既有盲区。** 首次 CI（PR #128）macOS 两版通过、ubuntu-latest 两版都在 `qa_reports` 报 `AssertionError: 2 != 1`（`1 failed, 1063 passed`，零 skip，`ass` 滤镜在 Ubuntu 上是有的）。**不是复用判定的 bug**：Ubuntu 那份报告的 `layout["measurement"]` 不是 `measured`、且带着 `layout_measurement_unavailable`，也就是行宽测量真的抛了错、`qa.check_subtitles` 真的回退到保守上限，复用判定**正确地 fail closed 拒绝** → 烧录腿重测重渲（这部分由改形后的测试在 CI 上断言）。机制是强指向但未逐字取证：CI 的 Linux 侧只 `apt-get install -y ffmpeg`、**从未装过字幕字体**（`git log -p .github/workflows/ci.yml` 全历史零 font/noto/cjk），而 `render.font_for_language` 在非 darwin/非 win32 上给 zh 要 `Noto Sans CJK SC`，缺字体时 libass 报 `failed to find any fallback with glyph` → `ValueError`；但报告只记结论不记抛错原因，「是缺字形而非别的 `CommandError` / `OSError`」没有 CI 侧的逐字证据（本机 Docker daemon 未运行，没在 Linux 容器里回放）。本机把 `xvt.qa.measure_bilingual_line_widths` 打成缺字形失败，逐项复刻了 Ubuntu 的事件签名（`workflow completed`、报告 `warning` + 唯一 issue `layout_measurement_unavailable`、`subtitle_qa(detail=translated)` 1 次、`render` 3 次（`source` / `translated` / 无 detail）、两份产物各 2 次）。
+
+因此那条 E2E 测试改成**读报告自己的 `measurement` 再分两路断言确定计数**，不放宽、不 skip：`measured` → 两份产物各 1 次、`RENDER` 2 次；非 `measured` → 各 2 次、`RENDER` 3 次，**并且**断言报告里带着 `layout_measurement_unavailable`（这条把「为什么没复用」钉死在降级上）。断言消息里打出 `measurement` / `status` / issue 列表 / 各计数，CI 上一行就能看出判定依据。变异检验：强制 `_reusable_rendered_layout` 返回 `None` 而测量成立，测试报 `2 != 1 : measurement='measured' …`——降级那一路没有盖住真 bug。**既有断言零改动**（改的是本分支上一轮自己加的那条测试的断言结构）、协议快照零 diff。
+
+顺带取证出的既有盲区（**本轮刻意未修，只登记**）：**Ubuntu CI 上行宽测量一直是失败的，那条路径从未真正测量过**，且既有测试一条都看不见——涉及行宽的用例（`test_layout_qa.py` / `test_pipeline_burnin.py` / `test_candidate_layout_guard.py` / `test_revision_preflight.py` / `test_workflow.py`）全部 patch 掉了测量函数，E2E 里真实测量在跑但短译文在降级的保守规则下照样放行。要修是给 CI 的 Linux 侧装 `fonts-noto-cjk` 并加一步能力断言（与 `ffmpeg-full` 那步同形），属于另一件事，已写进 REVIEW_FINDINGS 的「观察」一节。**没有新增 `ffmpeg_can_measure_bilingual_layout()` 探针**：探针只能用另一组输入（文本、字体随 `target_language` 变）再探一次，与真实调用可能不一致——那正是「门控 ≠ 真实前置条件」这一类事故的来源；而且探针的用处是 `skipUnless`，会把降级那条真实行为跳过、CI 照样全绿。直接读那份报告的实际结论更准也更便宜。
 
 **遗留（如实记录）**：(a) `xvt preview` 每次都做一次完整 libass 测量（`persist=False`），它是独立命令、不构成一条命令内的第二遍，本批未动；(b) 原子 `xvt burn` 在渲染腿已产出等价布局时同样会重测一遍，这是刻意保留的既有行为（该命令可覆盖媒体与字体）；(c) 译文 QA 停在 `needs_review` / `failed` 的阻断路径上，`finalize_translation` 与随后的恢复导航各读一次报告，不涉及重复测量。文档已按「全分支对账」同步：RECOVERY（新一节「烧录腿复用渲染腿的布局 QA 与 ASS」）、AGENTS（约束 4 + `pipeline` 表格 `burnin` 条目）、README（行宽 QA 段）、CHANGELOG、REVIEW_FINDINGS（该条目标为已修并写入机制更正）。
 

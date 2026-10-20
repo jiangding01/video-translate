@@ -298,12 +298,30 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(burned.stat().st_mtime_ns, burned_mtime_ns)
 
     def test_workflow_burn_reuses_the_rendered_layout_qa_and_ass(self) -> None:
-        """真实 Job 路径：烧录腿必须复用渲染腿刚产出的译文布局 QA 与双语 ASS。
+        """真实 Job 路径：烧录腿对渲染腿刚产出的译文布局 QA 与双语 ASS 的完整复用判定。
 
         这条刻意不打桩（零网络、零模型：源字幕与译文都由用户提供，FFmpeg 真跑）：
         渲染腿与烧录腿都真的执行，产物真的落盘、artifact 真的登记、stage 真的推进。
         按**事件计数**断言，而不是只断言产物存在——重复做功恰恰会把同一份产物算两遍，
         逐字相同、状态正确，只有事件数会说出真话。
+
+        复用成立要求报告自己的 ``layout["measurement"] == "measured"``，而行宽测量能否
+        成功取决于**本机有没有能渲染译文每个字形的字幕字体**（`qa.check_subtitles` 在
+        `measure_bilingual_line_widths` 抛错时回退保守显示单位上限，并记一条
+        ``layout_measurement_unavailable``）。装了 CJK 字体的机器（本项目主力平台 macOS）
+        走测量成功一路；CI 的 ubuntu-latest 走降级一路（那边装的是 apt 的 ffmpeg，CI 从未
+        安装任何字幕字体，而 `render.font_for_language` 在 Linux 上给 zh 要 Noto Sans CJK SC）。
+        两条都是真实可达的行为，所以**两条都断言确定的计数**，而不是 skip 掉一条、也不是
+        放宽成「1 或 2 都行」：
+
+        - ``measured`` → 复用发生，两份产物各恰登记 1 次。
+        - 非 ``measured`` → fail closed 拒绝复用，烧录腿重测重渲，各恰 2 次，**并且**那份
+          报告里确实带着 ``layout_measurement_unavailable``。最后这条是关键：它把「为什么
+          没复用」钉死在降级上，复用若因别的原因（`_reusable_rendered_layout` 里的真 bug）
+          失效，这条测试照样红。
+
+        读的是落盘的 `qa-translated.json`：复用发生时它就是渲染腿那份；没复用时烧录腿按
+        同样五项输入重算后原样覆写（确定性报告，无时间戳），`measurement` 仍是同一结论。
         """
 
         events: list = []
@@ -373,12 +391,38 @@ class EndToEndTest(unittest.TestCase):
                 and event.data.get("kind") == "bilingual_ass"
             ]
 
-            self.assertEqual(len(translated_qa_runs), 1)
-            self.assertEqual(len(qa_reports), 1)
-            self.assertEqual(len(translated_renders), 1)
-            self.assertEqual(len(ass_renders), 1)
-            # 源腿渲染（detail=source）之后只应再有译文渲染这一次。
-            self.assertEqual(len(render_runs), 2)
+            report = json.loads(
+                (Path(result.job_file).parent / "artifacts" / "qa-translated.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            layout = report.get("layout")
+            self.assertIsInstance(layout, dict, f"report has no layout block: {report}")
+            issue_codes = sorted(issue["code"] for issue in report["issues"])
+            # 失败时把整条判定依据打进断言消息：CI 上只有这一行能说明复用为何没发生。
+            decision = (
+                f"measurement={layout.get('measurement')!r} status={report['status']!r} "
+                f"issues={issue_codes} qa_reports={len(qa_reports)} ass={len(ass_renders)} "
+                f"renders={[event.data.get('detail') for event in render_runs]}"
+            )
+
+            # 两腿都走的记账与复用无关：译文 QA 的 stage_started 只有收尾腿发（烧录腿的
+            # `_check_render_layout` 不发），译文渲染的 detail=translated 同理只有渲染腿发。
+            self.assertEqual(len(translated_qa_runs), 1, decision)
+            self.assertEqual(len(translated_renders), 1, decision)
+
+            if layout.get("measurement") == "measured":
+                # 真实测量成立 → 复用发生：两份产物各只登记一次。
+                self.assertEqual(len(qa_reports), 1, decision)
+                self.assertEqual(len(ass_renders), 1, decision)
+                # 源腿渲染（detail=source）之后只应再有译文渲染这一次。
+                self.assertEqual(len(render_runs), 2, decision)
+            else:
+                # 降级报告不复用（fail closed）：烧录腿重测重渲，并自己再记一次 RENDER。
+                self.assertIn("layout_measurement_unavailable", issue_codes, decision)
+                self.assertEqual(len(qa_reports), 2, decision)
+                self.assertEqual(len(ass_renders), 2, decision)
+                self.assertEqual(len(render_runs), 3, decision)
 
     def test_apply_continue_still_blocks_on_failing_translated_subtitle_qa(self) -> None:
         """约束 4 的反证：复用不得让一次本该拦住的译文 QA 被跳过。
