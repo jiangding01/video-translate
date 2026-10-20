@@ -175,7 +175,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | **已修（本轮）**，见下方 O6 条目 |
 | O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | **已修（本轮）**，见下方 O7 条目 |
-| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**，副本部分核实属实但不动，见下方 O8 条目 |
+| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**；副本部分 2026-10-20 已裁定：分段侧收敛为 `_segmentation_config`，对齐侧刻意不抽（B/C 冻结的 legacy 路径），遗留六条登记留主干拍板，见下方 O8 条目 |
 | O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | **已修（本轮）**，四处逐条核实后改，见下方 O9 条目 |
 | O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | **已修（本轮）**，见下方 O10 条目 |
 | O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | **已修（本轮）**，见下方 O11 条目 |
@@ -190,15 +190,31 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 
 改法：删掉两个恒真 `if` 与其后不可达的 `return _process_acquired_media(...)`，并在原地留注释写明「Job 由本函数创建所以键必然存在，旧 Job 只从 resume 入口进」。零行为变化，未新增测试（没有可观测的行为差异可断言），全量测试零变红。
 
-**「对齐/分段规则 3–4 份副本且已漂移」核实属实，本轮不动**（结构性重构，超出可优化范围）。定位与漂移内容：
+**「对齐/分段规则 3–4 份副本」2026-10-20 已裁定并收尾**（分支 `refactor/o8-align-segment-copies`）。三份对齐副本现位置：A=`_process_adaptive_media`（对齐段 :585 区域）、B=`_process_acquired_media`（对齐段 :802 区域）、C=`resume_job` 的对齐分支（现 :1801 区域；上一版表格写的 :1653 是旧行号，已勘误）。
 
-| 位置 | 函数 | 置信度门 | 对齐后 QA error 门 | 失败行为 |
+**(a) 三份副本对账结论。**
+
+| 副本 | 可达性 | 置信度门 | 对齐后 QA error 门 | 失败归属 |
 | --- | --- | --- | --- | --- |
-| `pipeline/transcription.py:488` 起（函数 `_process_adaptive_media`，:375） | 主路径 | 有（参数来源：函数入参） | **有** | 自动回落 ASR 分段，`selection_reason` 区分 `alignment_below_threshold` / `alignment_post_qa_failed` |
-| 同文件 :696 起（函数 `_process_acquired_media`，:621） | legacy 路径，O8 修完后只由 `resume_remote_transcription` 到达 | 有（参数来源：函数入参） | **无** | 抛 `ValueError` |
-| 同文件 :1653 起（函数 `resume_job`，:1533） | resume 路径 | 有（参数来源：`job.config` 现读） | **无** | `set_stage(FAILED)` 后抛 `ValueError`，错误文案不带数值 |
+| A `_process_adaptive_media` | 现代 Job 主路径 | 有 | **有**（驱动回落 ASR、`selection_reason`、`aligned-subtitle-qa.json`） | ALIGN，可回落 |
+| B `_process_acquired_media` | 仅 `resume_remote_transcription` 在 config 缺 `source_strategy` 时到达 | 有 | 无 | ALIGN FAILED |
+| C `resume_job` 对齐分支 | 仅 `resume_job` 判 `source_strategy` 为假时进入 | 有 | 无 | ALIGN FAILED |
 
-分段侧的 `segment_transcript(transcript, segmentation_config_for_preset(str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))), media_duration_ms=...)` 全文出现 5 次（`segmentation_config_for_preset` 的调用点在 :537、:561、:717、:1679、:1734）。两类副本都值得单独立项：对齐门的「QA error 是否参与」这条差异是真实的语义漂移，不是刻意差异的书面记录。
+- **B/C 对现代 Job 不可达，仅为 v0.1.x 真实历史 Job 保留，处理方式是冻结，不删除也不补齐。** 证据链：`source_strategy` 键由 d1f2b58（2026-07-25）引入、v0.2.0 才进入发布版本，v0.1.0/v0.1.1 创建的媒体 Job 均缺键；今天三个 `create_job` 调用点的 config 字面量都写键，无命令会删键；B 的唯一 src 调用点是 `resume_remote_transcription`（上游判键分流），C 的进入前提是 `resume_job` 判键为假。
+- **「对齐后 QA error 门只有 A 有」是刻意不对称，不是漂移。** 该门属于 v0.2.0 source-selection 特性（回落 ASR、`selection_reason`、`aligned-subtitle-qa.json`）；B/C 没有回落机制（legacy 语义），error 级 issue 并不放行：三份副本的最终 cue 都汇入同一个 `_run_source_subtitle_qa`，`complete_qa_stage` 对 error 级 fail-closed（约束 4 满足），差异只是失败归属（ALIGN vs SUBTITLE_QA）、专用报告与回落能力。
+- **三种失败记账方式的可观测结果已收敛**：三处都落 ALIGN FAILED、同文案带数值、category 同为 `workflow`、同发 `stage_failed`。A/B 的边界记账（外层 except + `current_stage`）与 C 的调用点手写 `set_stage` 是两种既定风格（HANDOFF 2026-10-18 有裁定记录），不统一。
+- **对齐侧不抽公共函数**：B/C 冻结后「防同步漂移」的收益为零（它们本就不该跟 A 的现代语义同步），抽取只会碰冻结路径。只在 B/C 加了冻结注释。
+
+**(c) 分段侧已收敛。** 原先 5 处逐字相同的 `segmentation_config_for_preset(str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET)))` 现统一为模块私有 helper `_segmentation_config(job)`。其中 4 处是真分段调用；第 5 处（`rebuild_source`）**不是分段，是 fail-fast 预校验**（返回值丢弃，目的是改动 Job 前对未知 preset 提前失败），已在原地补注释。零行为变化。
+
+**(d) 本轮核实新发现、刻意未修（行为变化，留主干拍板）。**
+
+1. C 的对齐段对 `load_subtitles` / `align_source_cues` 自身抛出的异常无记账，ALIGN 可能留 RUNNING（legacy-only）。
+2. C 向 `load_subtitles` 传 `source_language` 原值，`"auto"` 不转 `None`（A/B 会转），cue 元数据会带字面量 `"auto"`（legacy-only）。
+3. A 的回落分支中 `segment_transcript` 失败时 `current_stage` 已切到 SEGMENT，ALIGN 留 RUNNING（现代路径，错误路径上的 stage 终态残留，与 96d38f8 容忍 RUNNING 残留的既有口径相邻）。
+4. C 对空 cue 无前置拦截，`allow_low_confidence_alignment=True` 时可能写出空 source-cues（legacy-only，下游 SUBTITLE_QA 仍兜底）。
+5. B 的对齐段（含置信度门）没有任何测试覆盖。
+6. `transcription.py` 已达 2055 行（本轮加 helper 与冻结注释后为 2062 行），突破了 O8 自己写的「突破 2000 行再按三簇拆」阈值，拆分另行立项。
 
 ### O9 四处文档措辞 — **已修（本轮）**
 
@@ -573,6 +589,6 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 5. ~~**去重**：F5。~~ 已修（本轮）。
 6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
 
-**剩余未处理**：O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」一节里尚未处理的几条。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
+**剩余未处理**：O1，O8 条目 (d) 登记的六条遗留（副本部分已于 2026-10-20 裁定收尾，遗留留主干拍板），以及「观察」一节里尚未处理的几条。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。
