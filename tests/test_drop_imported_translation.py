@@ -80,7 +80,7 @@ class DropImportedTranslationTest(unittest.TestCase):
         info = _media_info(media)
         with (
             patch("xvt.pipeline.common.probe_media", return_value=info),
-            patch("xvt.pipeline.transcription.probe_media", return_value=info),
+            patch("xvt.pipeline.transcription.local.probe_media", return_value=info),
         ):
             self.assertEqual(
                 main(
@@ -115,10 +115,10 @@ class DropImportedTranslationTest(unittest.TestCase):
 
         with (
             patch("xvt.pipeline.common.probe_media", return_value=info),
-            patch("xvt.pipeline.transcription.probe_media", return_value=info),
-            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.resume.probe_media", return_value=info),
+            patch("xvt.pipeline.transcription.local.run_command", side_effect=run_ffmpeg),
             patch(
-                "xvt.pipeline.transcription.transcribe_audio",
+                "xvt.pipeline.transcription.local.transcribe_audio",
                 return_value=Transcript(language="en", engine="mlx", words=words),
             ),
             patch("sys.stdout", new_callable=StringIO),

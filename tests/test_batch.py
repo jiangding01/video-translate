@@ -1086,9 +1086,9 @@ class BatchBilingualAssDeliverableTest(unittest.TestCase):
             words=(Word("Hello.", 1000, 1800, 0.9),),
         )
         with (
-            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
-            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
-            patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            patch("xvt.pipeline.transcription.local.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.local.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.local.transcribe_audio", return_value=transcript),
         ):
             job = run_local_transcription(media, output)
         job_file = get_job_file(job)

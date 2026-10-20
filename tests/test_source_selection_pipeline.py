@@ -64,15 +64,15 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             media.write_bytes(b"video")
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.local.probe_media",
                     return_value=self._media_info(media),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ) as transcribe,
             ):
@@ -97,11 +97,11 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             )
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.local.probe_media",
                     return_value=self._media_info(media),
                 ),
-                patch("xvt.pipeline.transcription.run_command") as run_command,
-                patch("xvt.pipeline.transcription.transcribe_audio") as transcribe,
+                patch("xvt.pipeline.transcription.local.run_command") as run_command,
+                patch("xvt.pipeline.transcription.local.transcribe_audio") as transcribe,
             ):
                 job = run_local_transcription(media, root, subtitles=subtitles)
                 selection = self._selection(job)
@@ -145,29 +145,29 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return AlignmentResult(tuple(cues), (), 0.0, 1.0, 0.1, ("low confidence",))
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=download_media,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.remote.probe_media",
                     return_value=self._media_info(root / "audio.m4a"),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ) as transcribe,
                 patch(
-                    "xvt.pipeline.transcription.align_source_cues",
+                    "xvt.pipeline.transcription.local.align_source_cues",
                     side_effect=low_confidence_alignment,
                 ) as align,
             ):
@@ -313,21 +313,21 @@ class SourceSelectionPipelineTest(unittest.TestCase):
         transcript = Transcript(language="en", engine="mlx", words=words)
 
         with (
-            patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+            patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles",
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
                 side_effect=download_subtitles,
             ),
             patch(
-                "xvt.pipeline.transcription.download_remote_media",
+                "xvt.pipeline.transcription.remote.download_remote_media",
                 side_effect=download_media,
             ),
-            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.remote.probe_media", return_value=media_info),
             patch(
-                "xvt.pipeline.transcription.run_command",
+                "xvt.pipeline.transcription.local.run_command",
                 side_effect=self._write_normalized_audio,
             ),
-            patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            patch("xvt.pipeline.transcription.local.transcribe_audio", return_value=transcript),
         ):
             return run_remote_transcription(
                 "https://youtu.be/abc",
@@ -390,22 +390,22 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             )
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=download_media,
                 ),
-                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.remote.probe_media", return_value=media_info),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=transcript,
                 ),
             ):
@@ -460,13 +460,13 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return path
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
-                patch("xvt.pipeline.transcription.download_remote_media") as download_media,
-                patch("xvt.pipeline.transcription.transcribe_audio") as transcribe,
+                patch("xvt.pipeline.transcription.remote.download_remote_media") as download_media,
+                patch("xvt.pipeline.transcription.local.transcribe_audio") as transcribe,
             ):
                 job = run_remote_transcription(
                     "https://youtu.be/abc",
@@ -499,13 +499,13 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return path
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=RuntimeError("download unavailable"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "download unavailable"),
@@ -544,25 +544,25 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return path
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=download_media,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.remote.probe_media",
                     return_value=self._media_info(root / "audio.m4a"),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ),
             ):
@@ -604,25 +604,25 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return path
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=download_media,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.remote.probe_media",
                     return_value=self._media_info(root / "audio.m4a"),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ) as transcribe,
             ):
@@ -654,15 +654,15 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             )
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.local.probe_media",
                     return_value=self._media_info(media),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     side_effect=RuntimeError("ASR unavailable"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "ASR unavailable"),
@@ -686,7 +686,7 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             subtitles.write_text("not an srt", encoding="utf-8")
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.local.probe_media",
                     return_value=self._media_info(media),
                 ),
                 self.assertRaises(ValueError),
@@ -715,9 +715,9 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             )
             remote_info = RemoteMediaInfo("abc", "Example", 5_000, "https://youtu.be/abc", (), ())
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=RuntimeError("download unavailable"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "download unavailable"),
@@ -745,15 +745,15 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             subtitles.write_text("", encoding="utf-8")
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.local.probe_media",
                     return_value=self._media_info(media),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ),
             ):
@@ -787,15 +787,15 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             subtitles.write_bytes("1\n00:00:01,000 --> 00:00:02,500\n你好世界\n".encode("gbk"))
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.local.probe_media",
                     return_value=self._media_info(media),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ),
             ):
@@ -857,7 +857,7 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch(
-                "xvt.pipeline.transcription.probe_media",
+                "xvt.pipeline.transcription.local.probe_media",
                 return_value=self._media_info(media),
             ):
                 job = run_local_transcription(
@@ -894,7 +894,7 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch(
-                "xvt.pipeline.transcription.probe_media",
+                "xvt.pipeline.transcription.local.probe_media",
                 return_value=self._media_info(media),
             ):
                 job = run_local_transcription(
@@ -944,29 +944,29 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return path
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_media",
+                    "xvt.pipeline.transcription.remote.download_remote_media",
                     side_effect=download_media,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.remote.probe_media",
                     return_value=self._media_info(root / "audio.m4a"),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.run_command",
+                    "xvt.pipeline.transcription.local.run_command",
                     side_effect=self._write_normalized_audio,
                 ),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ),
                 patch(
-                    "xvt.pipeline.transcription.segment_transcript",
+                    "xvt.pipeline.transcription.local.segment_transcript",
                     side_effect=RuntimeError("segment interrupted"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "segment interrupted"),
@@ -1005,9 +1005,9 @@ class SourceSelectionPipelineTest(unittest.TestCase):
                 return path
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles",
                     side_effect=download_subtitles,
                 ),
             ):
@@ -1022,9 +1022,9 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             Path(source_srt.path).unlink()
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote") as inspect_remote,
+                patch("xvt.pipeline.transcription.remote.inspect_remote") as inspect_remote,
                 patch(
-                    "xvt.pipeline.transcription.download_remote_subtitles"
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles"
                 ) as download_remote_subtitles,
             ):
                 result = continue_workflow(root / "jobs" / job.id / "job.json")
@@ -1057,8 +1057,8 @@ class SourceSelectionPipelineTest(unittest.TestCase):
             job_file = save_job(job)
             remote_info = RemoteMediaInfo("abc", "Example", 5_000, "https://youtu.be/abc", (), ())
             with (
-                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
-                patch("xvt.pipeline.transcription.transcribe_audio") as transcribe,
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
+                patch("xvt.pipeline.transcription.local.transcribe_audio") as transcribe,
             ):
                 resumed = resume_remote_transcription(job_file)
                 source_cues = next(item for item in resumed.artifacts if item.kind == "source_cues")

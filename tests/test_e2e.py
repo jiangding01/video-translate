@@ -502,7 +502,9 @@ class EndToEndTest(unittest.TestCase):
                 words=(Word("Hello.", 200, 1200, 1.0),),
             )
 
-            with patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript):
+            with patch(
+                "xvt.pipeline.transcription.local.transcribe_audio", return_value=transcript
+            ):
                 job = run_local_transcription(media, root / "output")
 
             artifacts = {artifact.kind: Path(artifact.path) for artifact in job.artifacts}

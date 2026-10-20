@@ -10,7 +10,8 @@ from xvt.errors import DependencyError
 from xvt.job_store import create_job, get_job_directory
 from xvt.models import StageName, StageStatus
 from xvt.pipeline.common import add_artifact, media_info_from_remote_metadata
-from xvt.pipeline.transcription import _acquire_remote_job, run_remote_transcription
+from xvt.pipeline.transcription import run_remote_transcription
+from xvt.pipeline.transcription.remote import _acquire_remote_job
 from xvt.recovery import valid_artifact_path
 
 
@@ -47,13 +48,14 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
         events = []
         with (
             patch(
-                "xvt.pipeline.transcription.inspect_remote",
+                "xvt.pipeline.transcription.remote.inspect_remote",
                 side_effect=[self.authenticated, self.anonymous],
             ) as inspect,
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles", side_effect=self.download
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
+                side_effect=self.download,
             ) as download,
-            patch("xvt.pipeline.transcription.download_remote_media") as media,
+            patch("xvt.pipeline.transcription.remote.download_remote_media") as media,
         ):
             _, _, candidate = _acquire_remote_job(
                 self.job,
@@ -80,20 +82,21 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
     def test_retry_after_subtitle_download_failure_keeps_anonymous_access(self):
         with (
             patch(
-                "xvt.pipeline.transcription.inspect_remote",
+                "xvt.pipeline.transcription.remote.inspect_remote",
                 side_effect=[self.authenticated, self.anonymous],
             ),
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles",
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
                 side_effect=RuntimeError("interrupted"),
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "interrupted"):
                 self.acquire()
         with (
-            patch("xvt.pipeline.transcription.inspect_remote") as inspect,
+            patch("xvt.pipeline.transcription.remote.inspect_remote") as inspect,
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles", side_effect=self.download
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
+                side_effect=self.download,
             ) as download,
         ):
             _, _, candidate = self.acquire()
@@ -104,10 +107,10 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
     def test_probe_failure_does_not_silently_start_asr_and_redacts_credentials(self):
         with (
             patch(
-                "xvt.pipeline.transcription.inspect_remote",
+                "xvt.pipeline.transcription.remote.inspect_remote",
                 side_effect=[self.authenticated, RuntimeError("https://example.com/?token=secret")],
             ),
-            patch("xvt.pipeline.transcription.download_remote_media") as media,
+            patch("xvt.pipeline.transcription.remote.download_remote_media") as media,
         ):
             with self.assertRaisesRegex(DependencyError, "匿名补查失败") as raised:
                 self.acquire()
@@ -118,7 +121,8 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
     def test_different_video_is_rejected(self):
         other = RemoteMediaInfo("other", "Other", 5000, self.url, ("en",), ())
         with patch(
-            "xvt.pipeline.transcription.inspect_remote", side_effect=[self.authenticated, other]
+            "xvt.pipeline.transcription.remote.inspect_remote",
+            side_effect=[self.authenticated, other],
         ):
             with self.assertRaisesRegex(ValueError, "不同的视频"):
                 self.acquire()
@@ -129,9 +133,9 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
         path = get_job_directory(self.job) / "artifacts" / "remote.json"
         self.assertNotIn("subtitles_anonymous", metadata)
         with (
-            patch("xvt.pipeline.transcription.inspect_remote", return_value=self.anonymous),
+            patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=self.anonymous),
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles",
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
                 side_effect=RuntimeError("stop"),
             ),
         ):
@@ -140,9 +144,10 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
         path.write_text(json.dumps(metadata), encoding="utf-8")
         add_artifact(self.job, "remote_info", path, None)
         with (
-            patch("xvt.pipeline.transcription.inspect_remote") as inspect,
+            patch("xvt.pipeline.transcription.remote.inspect_remote") as inspect,
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles", side_effect=self.download
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
+                side_effect=self.download,
             ) as download,
         ):
             self.acquire()
@@ -165,13 +170,15 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
                 media_path.write_bytes(b"media")
                 with (
                     patch(
-                        "xvt.pipeline.transcription.inspect_remote", return_value=self.authenticated
+                        "xvt.pipeline.transcription.remote.inspect_remote",
+                        return_value=self.authenticated,
                     ) as inspect,
                     patch(
-                        "xvt.pipeline.transcription.download_remote_media", return_value=media_path
+                        "xvt.pipeline.transcription.remote.download_remote_media",
+                        return_value=media_path,
                     ),
                     patch(
-                        "xvt.pipeline.transcription.probe_media",
+                        "xvt.pipeline.transcription.remote.probe_media",
                         return_value=media_info_from_remote_metadata(url, 5000),
                     ),
                 ):
@@ -187,15 +194,15 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
         unrelated = RemoteMediaInfo("abc", "Other", 5000, self.url, ("fr",), ("en",))
         with (
             patch(
-                "xvt.pipeline.transcription.inspect_remote",
+                "xvt.pipeline.transcription.remote.inspect_remote",
                 side_effect=[self.authenticated, unrelated],
             ) as inspect,
-            patch("xvt.pipeline.transcription.download_remote_subtitles") as subtitles,
+            patch("xvt.pipeline.transcription.remote.download_remote_subtitles") as subtitles,
             patch(
-                "xvt.pipeline.transcription.download_remote_media", return_value=media_path
+                "xvt.pipeline.transcription.remote.download_remote_media", return_value=media_path
             ) as media,
             patch(
-                "xvt.pipeline.transcription.probe_media",
+                "xvt.pipeline.transcription.remote.probe_media",
                 return_value=media_info_from_remote_metadata(self.url, 5000),
             ),
         ):
@@ -219,10 +226,12 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
         media_path.write_bytes(b"media")
         self.job.config["workflow"] = {"target_language": "zh-CN"}
         with (
-            patch("xvt.pipeline.transcription.inspect_remote") as inspect,
-            patch("xvt.pipeline.transcription.download_remote_media", return_value=media_path),
+            patch("xvt.pipeline.transcription.remote.inspect_remote") as inspect,
             patch(
-                "xvt.pipeline.transcription.probe_media",
+                "xvt.pipeline.transcription.remote.download_remote_media", return_value=media_path
+            ),
+            patch(
+                "xvt.pipeline.transcription.remote.probe_media",
                 return_value=media_info_from_remote_metadata(self.url, 5000),
             ),
         ):
@@ -235,15 +244,16 @@ class RemoteSubtitleFallbackTest(unittest.TestCase):
     def test_polished_workflow_uses_manual_source_without_transcription(self):
         with (
             patch(
-                "xvt.pipeline.transcription.inspect_remote",
+                "xvt.pipeline.transcription.remote.inspect_remote",
                 side_effect=[self.authenticated, self.anonymous],
             ),
             patch(
-                "xvt.pipeline.transcription.download_remote_subtitles", side_effect=self.download
+                "xvt.pipeline.transcription.remote.download_remote_subtitles",
+                side_effect=self.download,
             ),
-            patch("xvt.pipeline.transcription.transcribe_audio") as transcribe,
+            patch("xvt.pipeline.transcription.local.transcribe_audio") as transcribe,
             patch(
-                "xvt.pipeline.transcription.download_remote_media",
+                "xvt.pipeline.transcription.remote.download_remote_media",
                 side_effect=AssertionError("人工字幕可用时不应下载媒体以进行 ASR"),
             ),
         ):

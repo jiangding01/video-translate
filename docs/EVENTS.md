@@ -228,7 +228,7 @@ yt-dlp 下载进度（`download.py`）。
 
 ## 转写
 
-音频转写（`transcribe.py`）与远端字幕选择（`pipeline/transcription.py`）。
+音频转写（`transcribe.py`）与远端字幕选择（`pipeline/transcription/remote.py`）。
 
 ### `transcription_progress`
 | 字段 | 类型 | 含义 |
