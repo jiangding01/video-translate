@@ -263,13 +263,18 @@ class PipelineImportDirectionTest(unittest.TestCase):
 
 
 class IntraPackageTargetResolutionTest(unittest.TestCase):
-    """解析覆盖面：六种 import 写法下守卫都不能漏掉包内依赖边。
+    """解析覆盖面：六种 import 写法下守卫都要把包内依赖边**解对**。
 
-    下面每一条在 2026-10-20 之前都是**漏判**的（守卫绿而反向边真实存在），
-    由 #136 的事后 review 实测发现。它们不是假想：`from xvt.pipeline import X`
-    这种写法在 `batch.py` / `cli.py` / `workflow.py` 与大量测试里到处都是，
-    只是目前还没有任何**包内**模块这么写；`ruff check` 对多 alias 的
-    `import a, b` 会报 I001，所以那一条另有一道兜底，但守卫自己不该依赖它。
+    2026-10-20 的事后 review 逐条注入实测过：前五种在当时的实现下**静默漏判**
+    （守卫全绿而反向边真实存在）；第六种（`from xvt.pipeline.transcription import
+    shared` 这类）当时**会红，但归因错**——边被压扁成子包名 `transcription`，
+    而真实边是 `transcription.shared`，照错误消息去查会查错模块。所以这一组测试
+    钉的是「解出的边对不对」，不单是「红不红」。
+
+    它们不是假想：`from xvt.pipeline import X` 这种写法在 `batch.py` / `cli.py` /
+    `workflow.py` 与大量测试里到处都是，只是目前还没有任何**包内**模块这么写；
+    `ruff check` 对多 alias 的 `import a, b` 会报 `E401` / `I001`，所以那一条另有
+    一道兜底，但守卫自己不该依赖它（其余五种 ruff 全绿）。
     """
 
     def _targets(self, source: str, module_name: str) -> set[str]:
@@ -329,6 +334,17 @@ class IntraPackageTargetResolutionTest(unittest.TestCase):
         self.assertEqual(
             self._targets("from xvt.pipeline.transcription import shared", "transcription.resume"),
             {"transcription.shared"},
+        )
+
+    def test_importing_oneself_through_the_subpackage_is_not_an_edge(self) -> None:
+        """`shared.py` 里 `from xvt.pipeline.transcription import shared` 是自引用，不是边。
+
+        未修版把它压扁成 `-> transcription` 报出来，是一条**误报**（那不是依赖边）。
+        取最长前缀解出 `transcription.shared`，与所在模块同名，正确地不计入。
+        """
+        self.assertEqual(
+            self._targets("from xvt.pipeline.transcription import shared", "transcription.shared"),
+            set(),
         )
 
     def test_self_import_is_not_an_edge(self) -> None:

@@ -539,42 +539,65 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 来源：#136（transcription 拆子包）合并后补做的一次 `check` 全面 review。代码侧零发现，
 三条全在文档与守卫上，**其中两条是 #136 自己制造的**。
 
-### D1 依赖方向守卫整类漏判包内→包根的 import — ✅ 已实测，**已修**
+### D1 依赖方向守卫漏判包内→包根的 import（五类静默漏判 + 一类归因错） — ✅ 已实测，**已修**
 
 `tests/test_pipeline_imports.py::_intra_package_target` 原先在第一个匹配上就 `return`，
-且只认 `startswith("xvt.pipeline.")`（带尾点）。实测在 `transcription/shared.py` 里插入
-下面任意一条，守卫**全绿**而反向边真实存在：
+且只认 `startswith("xvt.pipeline.")`（带尾点）。在 `transcription/shared.py` 里逐条注入下面
+六种写法、拿**拆包后未修的那版守卫**（`7648254`）跑 `tests/test_pipeline_imports.py`，结果是
+**五种守卫全绿（静默漏判），第六种会红但归因错**——不是六种全绿：
 
-| 写法 | 为什么漏 | `ruff` 是否兜住 |
+| 写法 | 未修版守卫的实际表现 | `ruff` 是否兜住 |
 | --- | --- | --- |
-| `from xvt.pipeline import resegment` | `node.module` 是 `xvt.pipeline`，不带尾点 | 否 |
-| `from xvt.pipeline import error_category` | 同上；这条还是对包根 `__init__` 的反向依赖 | 否 |
-| `import xvt.pipeline` | 同上 | 否 |
-| `from .resume import resume_job` | 相对 import 的 `node.module` 不带包前缀，两道守卫都看不见 | 否 |
-| `import xvt.pipeline.common, xvt.pipeline.transcription.resume` | 只看第一个 alias，第二个被第一个合法边掩盖 | **是**（`E401` + `I001`） |
-| `from xvt.pipeline.transcription import shared` | 解出的是子包 `transcription`，不是真实边 `transcription.shared` | 否 |
+| `from xvt.pipeline import resegment` | **全绿**：`node.module` 是 `xvt.pipeline`，不带尾点，整条语句被跳过 | 否 |
+| `from xvt.pipeline import error_category` | **全绿**：同上；这条还是对包根 `__init__` 的反向依赖 | 否 |
+| `import xvt.pipeline` | **全绿**：同上 | 否 |
+| `from . import common` | **全绿**：相对 import 的 `node.module` 不带包前缀（`from . import x` 甚至是 `None`），两道守卫都看不见 | 否 |
+| `import xvt.pipeline.common, xvt.pipeline.transcription.resume` | **全绿**：只看第一个 alias，`common` 是条合法边，第二个 alias（反向边）被它掩盖 | **是**（`E401` + `I001`） |
+| `from xvt.pipeline.transcription import resume as _p` | **会红，但归因错**：拦是拦住了，边却被压扁成子包名，报 `transcription.shared -> transcription`，而真实边是 `-> transcription.resume`——照这条消息去查会查错模块 | 否 |
 
-「ruff 是否兜住」那一列是实测的（给每种写法造一个**真的用到了导入名**的文件再跑
+末行两版守卫的断言消息逐字对照（同一条注入）：
+
+```
+未修版： AssertionError: transcription.shared 实际依赖了未在白名单声明的模块: {'transcription.shared -> transcription'}
+本轮后： AssertionError: transcription.shared 实际依赖了未在白名单声明的模块: {'transcription.shared -> transcription.resume'}
+```
+
+所以 `_resolve_module_path` 取**最长**前缀对末行的价值不是「把漏的补上」，而是**把归因改对**：
+压扁成子包名的那条消息会把人引到错的模块上。同一处还顺带消掉一个**误报**：
+`from xvt.pipeline.transcription import shared`（在 `shared.py` 里 import 自己）未修版同样
+报 `-> transcription`，而它根本不是依赖边；修后按自引用正确地不报。
+
+「ruff 是否兜住」那一列也是实测的（给每种写法造一个**真的用到了导入名**的文件再跑
 `ruff check --isolated --select E,F,I`，否则 F401 会把结论污染成「全都报错」）：只有多 alias
 那一条被 `E401` / `I001` 拦下，其余五种 ruff 全绿。所以守卫自己不能指望 ruff 兜底。
 
-**前五条不是 #136 引入的**：原实现（拆包前）在这五种写法上逐字同形，同样漏。**第六条是
-#136 自己的**——拆包前没有子包，这种写法还不存在；#136 为子包重写了解析函数，却把
-「取最短前缀」的压扁行为原样带了过来。更该被记住的是过程问题：#136 发现了「只看第一个
+**前五条不是 #136 引入的**：原实现（拆包前）在这五种写法上逐字同形，同样静默漏判。**末行
+那条归因错是 #136 自己的**——拆包前没有子包，这种写法还不存在；#136 为子包重写了解析函数，
+却把「取最短前缀」的压扁行为原样带了过来。更该被记住的是过程问题：#136 发现了「只看第一个
 alias」这个限制，只把它写进会话笔记的「观察，未改」，没有登记成条目——**知道一个守卫
 有洞而只写在过程笔记里，等于没写**。
 
 改法：`_intra_package_target` → `_intra_package_targets`，返回**集合**而不是首个匹配；
 新增 `_resolve_module_path` 按已知模块集合取最长前缀；`ImportFrom` 的被导入名也接到
-base 后面再查一次（覆盖 `from xvt.pipeline.transcription import shared`）；包根与相对
+base 后面再查一次（末行那条归因错就修在这里）；包根与相对
 import 一律报成哨兵 `_PACKAGE_ROOT`，而白名单里没有也不该有这一项——`xvt/pipeline/__init__.py`
 import 了全部子模块，包内反向依赖它就是加载期循环的来源。函数级守卫同步补上相对 import。
 
-**红先证据**：先只做「改名 + 返回集合」的壳、内部仍走旧判定，8 条新测试里 **6 条报
-AssertionError**（另 2 条是负向控制：自引用与包外 import，本来就该绿）。实装后 10 条全绿，
+**红先证据**：先只做「改名 + 返回集合」的壳、内部仍走旧判定，当时的 8 条新测试里 **6 条报
+AssertionError**（另 2 条是负向控制：自引用与包外 import，本来就该绿）。第 9 条
+（`test_importing_oneself_through_the_subpackage_is_not_an_edge`）是本条记录被主干纠正后补的，
+钉的是上面那个误报，未修版上同样会红（断言消息即上面那条 `-> transcription`）。实装后 11 条全绿，
 再用真实文件逐条复测：上表六种写法 + 既有的「未声明反向边」「函数体内包内 import」
-「子模块 import subprocess」共 8 例，全部变红后还原。白名单无需改动，反证了今天没有
-任何包内模块依赖包根。1071 → 1079，子测试仍 312。
+「子模块 import subprocess」共 8 例，全部变红后还原（末行那条两版都红，复测要看的是**消息
+里那条边指向谁**，不是红不红）。白名单无需改动，反证了今天没有任何包内模块依赖包根。
+1071 → 1080（9 条新测试），子测试仍 312。
+
+**本条自己的记录出过一次错，一并记在这里。** 初版把六种写法并列写在一句「守卫**全绿**而
+反向边真实存在」底下。实际是前五行实测过、第六行只做了代码推断（读 `parts[2]` 的压扁逻辑
+就直接写成「漏判」），两者混在一起没有标注；主干独立注入复现后指出末行在未修版上**会红**，
+只是归因错。**这跟下面 D2/D3 批评 #136 的「顺手修正一个自己没核过的引用」是同一个毛病**，
+只是载体从代码引用换成了实测结论：**自己的发现清单也要像代码一样逐条实测对账，推断出来的
+行不能和实测出来的行并列而不标注**。
 
 ### D2 F10 的代码引用被 #136 改成了「更自信的错」 — **已修**
 
