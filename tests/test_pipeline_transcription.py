@@ -7,10 +7,12 @@ import json
 import tempfile
 import unittest
 from dataclasses import asdict
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from xvt.align import AlignmentResult
+from xvt.cli import main
 from xvt.download import RemoteMediaInfo
 from xvt.events import Event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
@@ -1547,6 +1549,228 @@ class TranscriptionPipelineTest(unittest.TestCase):
         artifact_kinds = {artifact.kind for artifact in job.artifacts}
         self.assertIn("downloaded_subtitles", artifact_kinds)
         self.assertIn("source_srt", artifact_kinds)
+
+
+class LegacyAcquiredMediaAlignmentTest(unittest.TestCase):
+    """`_process_acquired_media`（O8 对账表里的 B）对齐段的覆盖，含置信度门。
+
+    B 是**冻结的 legacy 路径**：只有 config 缺 `source_strategy` 的 v0.1.x 旧 Job
+    可达，刻意不与现代路径 A（`_process_adaptive_media`）同步——对齐后没有 QA
+    error 门、没有回落 ASR、不登记 `source_selection` / `aligned_subtitle_qa`。
+    这些用例钉的就是这套 legacy 语义本身，**不是**要把它改成 A 的行为。
+
+    **为什么 Job 用 `create_job` 而不是真实命令造。** 今天 `src/` 里三个
+    `create_job` 调用点（`local.py` 两处、`remote.py` 一处）的 config 字面量
+    都写 `source_strategy`，所以**没有任何 CLI 命令能造出到得了 B 的 Job**——
+    这正是 B 只对历史 Job 可达的原因。因此只能像既有的
+    `test_source_selection_pipeline.py::...::test_old_remote_job_without_source_strategy_uses_legacy_subtitle_path`
+    那样，用 `create_job` 传一份缺键的 config（它仍是真实的 Job 创建与持久化
+    路径，不是手搓 `job.json`）。
+
+    **推进用的是真实命令**：`main(["continue", ...])` → `continue_workflow` →
+    远程 Job 缺 source_cues 且无转写 checkpoint → `resume_remote_transcription`
+    → config 缺 `source_strategy` → B。`resume_job` 到不了 B（它对
+    `resume_remote_transcription` 的委派写在 `"source_strategy" in job.config`
+    分支里面），`rebuild_source` 也到不了（它在委派前就把 `source_strategy`
+    写成 asr）。所以每条用例都断言到真实退出码。
+    """
+
+    _ALIGNED_SRT = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n"
+        "2\n00:00:02,000 --> 00:00:03,000\nSecond line.\n"
+    )
+    # 第 2 条越出 5s 媒体时长 → 对齐后会出 error 级 `outside_media`。
+    _OVERRUN_SRT = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n"
+        "2\n00:00:04,000 --> 00:00:06,000\nBeyond the media.\n"
+    )
+    # 文本与字幕逐词对得上 → 真实 align_source_cues 给 confidence 1.0，并按 ASR 重定时。
+    _MATCHING_WORDS = (
+        Word("Hello", 1_200, 1_500, 0.9),
+        Word("world.", 1_500, 1_800, 0.9),
+        Word("Second", 2_600, 2_900, 0.9),
+        Word("line.", 2_900, 3_200, 0.9),
+    )
+    # 文本对不上 → confidence 0.0，cue 时间轴保持原样。
+    _MISMATCHED_WORDS = (Word("Unrelated", 1_500, 2_200, 0.9),)
+
+    def _legacy_remote_job(
+        self,
+        root: Path,
+        *,
+        subtitle_text: str,
+        allow_low_confidence: bool = False,
+    ) -> Path:
+        source = root / "source.srt"
+        source.write_text(subtitle_text, encoding="utf-8")
+        config = {
+            "engine": "mlx",
+            "source_language": "en",
+            "subtitles": str(source),
+            "align_subtitles": True,
+            # 持久化工作流目标，`continue` 才会接手；目标语言留空 = 停在源字幕。
+            "workflow": {"target_language": None, "burn": False},
+        }
+        if allow_low_confidence:
+            config["allow_low_confidence_alignment"] = True
+        # 刻意不写 "source_strategy"：这是 B 唯一的可达条件。
+        return save_job(create_job("https://youtu.be/abc", root, config))
+
+    def _continue(self, root: Path, job_file: Path, words: tuple[Word, ...]) -> int:
+        remote_info = RemoteMediaInfo("abc", "Example", 5_000, "https://youtu.be/abc", (), ())
+        media_info = MediaInfo(
+            str(root / "downloaded.m4a"), 5_000, 5, "m4a", 0, 0, 0.0, "", "aac", False, True
+        )
+        transcript = Transcript(language="en", engine="mlx", words=words)
+
+        def download(_url, directory, **_kwargs):
+            path = Path(directory) / "source.m4a"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+
+        def run_ffmpeg(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"normalized")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with (
+            patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
+            patch("xvt.pipeline.transcription.remote.download_remote_media", side_effect=download),
+            patch("xvt.pipeline.transcription.remote.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.local.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.remote.transcribe_audio", return_value=transcript),
+            patch("sys.stdout", new_callable=StringIO),
+        ):
+            return main(["continue", str(job_file)])
+
+    @staticmethod
+    def _state(job_file: Path) -> tuple[dict, set[str]]:
+        data = json.loads(Path(job_file).read_text(encoding="utf-8"))
+        return data, {artifact["kind"] for artifact in data["artifacts"]}
+
+    def test_confident_alignment_succeeds_and_retimes_the_imported_cues(self) -> None:
+        """置信度门放行：ALIGN 收成功，源 cue 用的是对齐后的时间轴。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._legacy_remote_job(root, subtitle_text=self._ALIGNED_SRT)
+
+            self.assertEqual(self._continue(root, job_file, self._MATCHING_WORDS), 0)
+
+            data, kinds = self._state(job_file)
+            self.assertEqual(data["stages"]["align"]["status"], "succeeded")
+            self.assertIsNone(data["stages"]["align"]["error"])
+            self.assertIn("subtitle_alignment", kinds)
+            self.assertIn("source_cues", kinds)
+            self.assertIn("source_srt", kinds)
+            # 冻结语义：legacy 路径不登记这两样（A 才有）。
+            self.assertNotIn("source_selection", kinds)
+            self.assertNotIn("aligned_subtitle_qa", kinds)
+
+            alignment = json.loads(
+                Path(
+                    next(a["path"] for a in data["artifacts"] if a["kind"] == "subtitle_alignment")
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(alignment["confidence"], 1.0)
+            cues = json.loads(
+                Path(
+                    next(a["path"] for a in data["artifacts"] if a["kind"] == "source_cues")
+                ).read_text(encoding="utf-8")
+            )
+            # 导入字幕原本是 0–1000 / 2000–3000；落盘的是对齐后的 ASR 时间轴。
+            self.assertEqual(
+                [(cue["start_ms"], cue["end_ms"]) for cue in cues],
+                [(1_200, 1_800), (2_600, 3_200)],
+            )
+
+    def test_low_confidence_alignment_is_rejected_with_the_measured_numbers(self) -> None:
+        """置信度门拒绝：退出码 2，ALIGN 记 failed 且文案带实测数值。
+
+        `subtitle_alignment` 在门之前就落盘登记，所以失败 Job 里它仍在册——
+        用户能拿它看清对齐成了什么样；而 `source_cues` 不该出现。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._legacy_remote_job(root, subtitle_text=self._ALIGNED_SRT)
+
+            self.assertEqual(self._continue(root, job_file, self._MISMATCHED_WORDS), 2)
+
+            data, kinds = self._state(job_file)
+            self.assertEqual(data["stages"]["align"]["status"], "failed")
+            self.assertEqual(
+                data["stages"]["align"]["error"],
+                "subtitle alignment confidence is below the required threshold (0.000 < 0.550)",
+            )
+            self.assertIn("subtitle_alignment", kinds)
+            self.assertNotIn("source_cues", kinds)
+            self.assertNotIn("source_srt", kinds)
+
+    def test_allow_low_confidence_flag_lets_the_alignment_through(self) -> None:
+        """`allow_low_confidence_alignment` 放行置信度 0 的对齐。
+
+        放行之后时间轴保持导入字幕原样（对齐没算出可用的重定时），源字幕 QA
+        因此给出 `low_timing_confidence` 的 review 级 issue 并停在
+        `awaiting_input`——这是正常业务分支，不是失败：退出码 0，ALIGN 收成功。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._legacy_remote_job(
+                root, subtitle_text=self._ALIGNED_SRT, allow_low_confidence=True
+            )
+
+            self.assertEqual(self._continue(root, job_file, self._MISMATCHED_WORDS), 0)
+
+            data, kinds = self._state(job_file)
+            self.assertEqual(data["stages"]["align"]["status"], "succeeded")
+            self.assertIn("source_cues", kinds)
+            cues = json.loads(
+                Path(
+                    next(a["path"] for a in data["artifacts"] if a["kind"] == "source_cues")
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [(cue["start_ms"], cue["end_ms"]) for cue in cues],
+                [(0, 1_000), (2_000, 3_000)],
+            )
+            self.assertEqual(data["stages"]["subtitle_qa"]["status"], "awaiting_input")
+            self.assertNotIn("source_srt", kinds)
+
+    def test_error_level_issues_after_alignment_fail_closed_at_subtitle_qa(self) -> None:
+        """B 刻意没有对齐后 QA error 门，error 级 issue 由下游 fail-closed 兜底。
+
+        这是 B 与 A 之间**刻意不对称**的那一处（O8 条目 (a) 的裁定）：同样的素材
+        在 A 上会让 ALIGN 自己 failed（并驱动回落 ASR），在 B 上 ALIGN 收成功、
+        由 `_run_source_subtitle_qa` 在 SUBTITLE_QA 上 fail closed。约束 4 仍然
+        满足——error 级 issue 没有被放行到渲染。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._legacy_remote_job(
+                root, subtitle_text=self._OVERRUN_SRT, allow_low_confidence=True
+            )
+
+            self.assertEqual(self._continue(root, job_file, self._MISMATCHED_WORDS), 4)
+
+            data, kinds = self._state(job_file)
+            # 失败归属落在 SUBTITLE_QA，不是 ALIGN。
+            self.assertEqual(data["stages"]["align"]["status"], "succeeded")
+            self.assertEqual(data["stages"]["subtitle_qa"]["status"], "failed")
+            self.assertNotIn("source_srt", kinds)
+
+            report = json.loads(
+                Path(
+                    next(a["path"] for a in data["artifacts"] if a["kind"] == "subtitle_qa")
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["status"], "failed")
+            self.assertIn(
+                ("outside_media", "error"),
+                {(issue["code"], issue["severity"]) for issue in report["issues"]},
+            )
 
 
 if __name__ == "__main__":

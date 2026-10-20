@@ -2,6 +2,20 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **给 B（`_process_acquired_media`）的对齐段补测试覆盖（O8 条目 (d) 第 ⑤ 条）**（分支 `test/cover-acquired-media-alignment`，纯补测试，`src/` 零改动，CHANGELOG 未记）。
+
+**① 条目的措辞实测后收紧了。** 「B 的对齐段没有任何测试覆盖」对整个 B 不成立，对对齐段成立。`pytest-cov` / `coverage` 都没装，用 `sys.settrace` 自己量（仪器先用「已知会执行 / 已知不会执行」各一处自证）：补前 B 的 73 条可执行语句命中 **34** 条——既有的 `test_old_remote_job_without_source_strategy_uses_legacy_subtitle_path` 已覆盖「导入字幕、不对齐」那条主干。真正为零的是**对齐段本体**（10 条语句）：**0/10 → 9/10**，缺的 1 条是多行 `if (` 的起始行（条件两个操作数都命中，属行号归属不是缺口）。B 全身 34/73 → **61/73**。
+
+**② 「用真实命令造状态」这条规矩在这里只能半守，原因写清。** `src/` 里三个 `create_job` 调用点的 config 字面量**都写 `source_strategy`**，所以**没有任何 CLI 命令能造出到得了 B 的 Job**——这正是 B 只对 v0.1.x 历史 Job 可达的原因。Job 只能用 `create_job` 传缺键 config 来造（仍是真实创建与持久化路径，不是手搓 `job.json`），与既有那条 legacy 测试同口径。**推进全部走真实命令**：`main(["continue", …])` → `continue_workflow` → 远程 Job 缺 `source_cues` 且无转写 checkpoint → `resume_remote_transcription` → 缺键 → B，每条用例都断言真实退出码。顺带核实另两条入口都到不了 B：`resume_job` 的委派写在 `"source_strategy" in job.config` 分支**里面**，`rebuild_source` 在委派前就把键写成 `asr`。
+
+**③ 四条用例。** ① 门放行（文本逐词对得上 → 真实 `align_source_cues` 给 confidence 1.0）→ 退出码 0、ALIGN succeeded、`source_cues` 用**对齐后**时间轴（`1200-1800` / `2600-3200`，导入原本 `0-1000` / `2000-3000`），且不登记 `source_selection` / `aligned_subtitle_qa`（legacy 语义坐实）；② 门拒绝 → 退出码 2、ALIGN failed 文案带实测数值 `(0.000 < 0.550)`、`subtitle_alignment` 仍在册（门之前就落盘）而 `source_cues` 不在；③ `allow_low_confidence_alignment` 放行 confidence 0 → 退出码 0、时间轴保持原样、QA 因 `low_timing_confidence` 停 `awaiting_input`；④ **(a) 裁定的那处刻意不对称有了反证**：喂一条越出媒体时长的 cue，B 的 ALIGN 照样 succeeded（它没有对齐后 QA error 门），由 `_run_source_subtitle_qa` 在 SUBTITLE_QA 上 fail closed，退出码 4、报告里有 `outside_media` / `error`——约束 4 没被这处不对称破坏。
+
+**④ 红先用变异检验，注入点按 AST 定位。** 这轮不改 `src/`，没有「修复前」可跑，所以红先的做法是临时改坏 B 的对齐段。注入点全部按 **AST 节点的精确 span** 定位、注入后 `ast.parse` 一遍确认语法合法——#136 那轮按行号注入两次落进多行签名中间，`SyntaxError` 让测试变红，**红的原因不对等于没验**。五种变异（置信度比较反向、忽略 `allow_low_confidence_alignment` 短路、删 ALIGN 成功记账、不登记 `subtitle_alignment`、不采用对齐后时间轴）各让对应用例变红，四条用例都被至少一种杀掉；验完 `remote.py` 与注入前逐字相同。
+
+**⑤ 刻意没做。** 发现 B 还有未覆盖的部分（ASR-only 分段分支 `169-178`、三处输入校验 `raise`、`205` 的 `job_completed` 事件——最后那条从 B 的唯一入口结构性不可达，因为 `resume_remote_transcription` 固定传 `emit_job_completed=False`），都不在第 ⑤ 条范围内，没有顺手扩。写测试过程中**没有发现 B 的真缺陷**（它的 legacy 语义与文档描述一致）。O8(d) 剩下的 ①②④ 三条 legacy-only 按要求未碰。
+
+**⑥ 验证。** `ruff check` / `ruff format --check` 全绿，`pytest -q` 为 `1084 passed, 312 subtests`（1080 + 4 条新测试），`src/` 与协议快照 golden 均零 diff，`git diff main -- tests/` 里无删除断言，`xvt --help` 正常。
+
 2026-10-20 **#136 的事后 review：补掉依赖方向守卫整类漏判，修正两处失效的代码引用**（分支 `fix/doc-refs-and-import-guard-hole`，D1/D2/D3，详见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 D 系列）。
 
 **① 为什么有这一轮。** #136 合并后补做了一次 `check` 全面 review。**代码侧零发现**，而且是机械证据：给 12 个被 `mock.patch` 的外部算子在源模块上套计数器，拆包前后跑全量，真函数调用次数**逐字相同**（probe_media 24、transcribe_audio 2、check_subtitles 746……）——任何一处 patch 从有效变成无效，真函数都会跑起来而让计数上升；再统计每个 patch 目标的实际命中率，299 次装载 / 40 次空载 / 265 次调用，前后也完全一致，且没有任何「装了但该目标一次都没截到调用」的纯空目标。两道都干净，所以 223 处 patch 目标改写没有制造静默失效。
