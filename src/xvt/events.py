@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote_plus, unquote_plus, urlencode, urlsplit, urlunsplit
 
 # JSONL 事件协议版本。兼容性承诺见 docs/EVENTS.md：
 # 新增可选字段不升版本；删除或修改既有字段的语义必须升版本。
@@ -203,6 +203,45 @@ def _is_sensitive_query_key(key: str) -> bool:
     return any(segment in _SENSITIVE_QUERY_SEGMENTS for segment in segments)
 
 
+# 不含 scheme 的 `路径?query`：yt-dlp / urllib3 的失败消息常常只带路径与 query
+# （`unable to download video data: /videoplayback?sig=...`、
+# `HTTPSConnectionPool(host=..., port=443): /videoplayback?sig=...`、协议相对的
+# `//host/videoplayback?sig=...`）。`_URL_PATTERN` 要求 `https?://`、
+# `_USERINFO_PATTERN` 要求 `scheme://`，三种形态两条都够不着（2026-10-18 实测原样
+# 返回，签名明文落进事件与 `job.json`，违反不可破坏约束 5）。
+#
+# 口径刻意**不是**「对整个不含 scheme 的 `路径?query` 脱敏」——`?k=v` / `k=v` 这个
+# 形状在 ffmpeg 滤镜串（`ass=filename=...`、`scale=640:360`）、yt-dlp 格式选择器
+# （`bv*+ba/b`）与普通日志散文（`width=161 limit=492`）里到处都是，整体脱敏的误伤面
+# 大一个量级。改为只脱敏**键名已被 `_is_sensitive_query_key` 判为敏感**的那些
+# `key=value` 的值，与有没有 scheme 无关：误伤面从「任何 `?k=v` 形状」收窄到
+# 「键名命中策展名单」，判定本体复用上面那三层匹配，不在这里重造。
+#
+# 分隔符只认 `?` 与 `&`，与 `redact_url` 依赖的 `parse_qsl`（Python 3.10 起不再按 `;`
+# 切分）同口径——两条路径对同一段 query 的切分必须一致，否则「有没有 scheme」就成了
+# 凭据能否泄漏的开关。键名在判定前按 `parse_qsl` 的口径解码一次（`%73ig` → `sig`）。
+#
+# 值的终止边界取 RFC 3986 之外再加一圈日志常见包裹符：空白、`&`（下一个参数）、
+# `#`（fragment）、引号、反引号、`<` `>`、右括号 `)` `]` `}`、`;`、`|`。真实消息里
+# query 后面跟的就是这些（样本之一整段被 `HTTPSConnectionPool(...)` 包着、query 跟在
+# `: ` 后面；另一种形态是 `(input /videoplayback?sig=...)`）。排除 `<` 顺带让本规则
+# 不会二次改写自己产出的 `<redacted>`，幂等性不靠额外判断。
+_SENSITIVE_QUERY_PAIR_PATTERN = re.compile(r"""(?i)([?&])([a-z0-9_.%+~-]+)=([^\s&#"'<>)\]};|`]+)""")
+# `redact_url` 的 `urlencode` 会把标记串规范化成 `%3Credacted%3E`。带 scheme 的
+# http/https 路径本来就工作正常，本规则必须对它的产物零改动，否则同一个键在
+# `redact_text` 里会按有没有 scheme 给出两种拼写（既有测试也钉着这一份）。
+_ENCODED_REDACTED_QUERY_VALUE = quote_plus(_REDACTED).casefold()
+
+
+def _redact_query_pair(match: re.Match[str]) -> str:
+    separator, key, value = match.group(1), match.group(2), match.group(3)
+    if not _is_sensitive_query_key(unquote_plus(key)):
+        return match.group(0)
+    if value.casefold() == _ENCODED_REDACTED_QUERY_VALUE:
+        return match.group(0)
+    return f"{separator}{key}={_REDACTED}"
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
     type: str
@@ -238,11 +277,15 @@ def redact_url(value: str) -> str:
 def _redact_free_text(value: str) -> str:
     value = _SENSITIVE_HEADER_PATTERN.sub(lambda match: f"{match.group(1)}: {_REDACTED}", value)
     value = _USERINFO_PATTERN.sub(lambda match: f"{match.group(1)}{_REDACTED}@", value)
-    return _BEARER_PATTERN.sub(f"Bearer {_REDACTED}", value)
+    value = _BEARER_PATTERN.sub(f"Bearer {_REDACTED}", value)
+    # 必须排在 `redact_text` 的 `_URL_PATTERN` 之后（它在调用本函数前已经跑过）：
+    # 带 scheme 的 URL 由 `redact_url` 规范化，本规则只收不含 scheme 的残余形态。
+    return _SENSITIVE_QUERY_PAIR_PATTERN.sub(_redact_query_pair, value)
 
 
 def redact_text(value: str) -> str:
-    """对一段自由文本做完整脱敏：URL 中的 userinfo / 敏感 query，再是鉴权头、Bearer 与 userinfo。
+    """对一段自由文本做完整脱敏：URL 中的 userinfo / 敏感 query，再是鉴权头、Bearer 与 userinfo，
+    最后是不含 scheme 的 `路径?query`（只脱敏键名被 `_is_sensitive_query_key` 判为敏感的那些值）。
 
     两条持久化边界都已集中接入本函数，调用方不需要（也不应依赖自觉）逐处调用：
 
