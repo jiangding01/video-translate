@@ -479,7 +479,7 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
   2. **先拍板「cue 能不能被删、经由哪条命令」**。在这件事定下来之前，形态只能是 advisory（`review` 级，人看了自己处理），**`error` 形态不在选项里**（见 ⑤）。
   3. **确认零时长尾 token 的签名在 faster-whisper 上也复现**。目前**一份 faster-whisper 样本都没有**（那个 `faster` Job 实际是 mlx 产物）；若这是 mlx-whisper 特有的解码器行为，这条信号就只对一半用户成立。
 
-  **形态建议（将来真要做时）**：**`review` 级 + provenance 闸门**，只对 `provenance in {"asr", "asr_resegmented"}` 生效。先例是 `qa.py:291-302` 的 `low_timing_confidence`（同一处判定按 provenance 分 `warning` / `review` 两档）。闸门**不可省**：`check_subtitles` 是全仓 **8 个调用点**共用的同一个函数（`source_selection.py:104`、`pipeline/transcription.py:407` 与 `:565`、`pipeline/burnin.py:121`、`pipeline/semantic.py:97`、`pipeline/revision.py:336` 与 `:911`、`pipeline/translation.py:896`），**其中包含用户导入字幕的候选 QA**（`source_selection.py:104`），而用户字幕上一句「ご視聴ありがとうございました」是完全合法的内容，不该被任何启发式碰。**不做自动裁剪**：裁剪会改变 cue 数量与时间轴（约束 1），且在 n=1、0 负样本的证据下，误删合法结尾的代价远高于漏报一条幻觉。
+  **形态建议（将来真要做时）**：**`review` 级 + provenance 闸门**，只对 `provenance in {"asr", "asr_resegmented"}` 生效。先例是 `qa.py:291-302` 的 `low_timing_confidence`（同一处判定按 provenance 分 `warning` / `review` 两档）。闸门**不可省**：`check_subtitles` 是全仓 **8 个调用点**共用的同一个函数（**路径与所属函数在 2026-10-20 重新对账过**，因为 `transcription` 已拆成子包、原先写的两条路径已失效；行号会随无关改动漂移，所以这里一并记函数名：`source_selection.py:104` `evaluate_source_candidate`、`pipeline/transcription/shared.py:220` `_run_source_subtitle_qa`、`pipeline/transcription/local.py:312` `_process_adaptive_media`（对齐后 QA）、`pipeline/burnin.py:121` `_check_render_layout`、`pipeline/semantic.py:97` `_ensure_candidate_qa`、`pipeline/revision.py:336` `apply_source_review_fixes` 与 `:911` `_prepare_translation_revision`、`pipeline/translation.py:896` `_qa_and_render_translation`），**其中包含用户导入字幕的候选 QA**（`source_selection.py:104`），而用户字幕上一句「ご視聴ありがとうございました」是完全合法的内容，不该被任何启发式碰。**不做自动裁剪**：裁剪会改变 cue 数量与时间轴（约束 1），且在 n=1、0 负样本的证据下，误删合法结尾的代价远高于漏报一条幻觉。
 
   **已做（2026-10-18，前置条件 1 的前提）**：前置条件 1 要收集样本，而当时**那条最干净的信号在事后根本看不到**——`segment.py:296` 的 `words = [word for word in words if word.end_ms > word.start_ms]` 把零时长尾词**静默丢弃**，`source-cues.json` 里不留任何痕迹（`words.json` 虽然还留着原始词，但没有任何东西指出那里有异常，采样的人不知道该去看）。现已补上留痕：`segment_transcript` 在丢弃**尾部**零时长词时，往末条 cue 的 `warnings` 追加一条以 `TRAILING_ZERO_DURATION_WARNING_PREFIX`（`"dropped zero-duration trailing ASR words before segmentation"`）开头的记录，带词数、首尾毫秒、最大 probability 与被丢弃的文本。它**只是证据，不是门**：`check_subtitles` 不读它（与同文件的 `OVERLAP_SHIFT_WARNING` / `MINIMUM_DURATION_WARNING` 同属纯留痕），QA 结论一字不变——用真实素材回放核对过，52 条 cue 除新增的这一条 warning 外与已登记的 `source-cues.json` **逐字相同**，QA 仍是 `pass` / 零 issue。详见 CHANGELOG 的 Added 条目。
 - **P9 ASR 漏掉开头 6s 旁白。** 复现确认是**模型召回问题，不是 XVT 的缺陷**（同一段音频换参数仍漏）。登记在此只因为它直接导致了 P4：源时间轴缺头，导入译文就对不上。无修复动作，供排查 P4 时参照。
@@ -533,6 +533,93 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
   红先：`tests/test_pipeline_transcription.py::TranscriptionPipelineTest::test_resume_keeps_the_translated_review_block_on_the_shared_qa_stage` 在修复前报 `AssertionError: <StageStatus.SUCCEEDED: 'succeeded'> != <StageStatus.AWAITING_INPUT: 'awaiting_input'>`。
 - **C4 `resegment` 的导入译文闸门是 config-only，与 `revision` 的双源不一致** — ✅ 已核验（真实命令双向实测），**判定为不该改，只登记**。`pipeline/resegment.py` 只问 `workflow.translation_subtitles`，`pipeline/revision.py` 的 `source_review_supported` 还问 `input_translation_subtitles` 这条 artifact 登记。实测对照：端到端导入 Job 上 `xvt resegment-translation` 以退出码 2 拒绝；原子导入 Job（`run --target-language` → `import-translation`）上它**跑完并退出 0**，6 条 `asr_resegmented` 源 cue 落盘，导入译文连同下游按失效闭包移出登记（7 条 `artifact_invalidated`，文件留在盘上），`status` 给 `retryable` / `steps: translate`——结果状态是**自洽的**，没有「旧译文被套回新时间轴」这类残留。两道闸门防的不是同一件事：`revision` 防的是用户亲手交的原文↔译文配对被改坏（artifact 在就危险，双源对），`resegment` 防的是持久化目标导致的自动重新导入复发循环（config 在才危险）。**收紧会新增一条没有出口的拒绝**：重分段要靠 `translated_cues` 量超宽，而唯一的「放弃导入译文」出口 `xvt drop-imported-translation` 会连 `translated_cues` 一起失效——实测 drop 之后 `resegment-translation` 立刻以「缺 `translated_cues`」退出码 2 失败，被拒的用户只剩「先整轮重译一遍才被允许重分段」。保持现状，理由写进 [恢复与回填契约](RECOVERY.md#重分段闸门为什么只看-config)。顺带更正两处文档：`docs/RECOVERY.md` 与 `HANDOFF.md` 此前都把 `resegment` 的闸门写成「config 或 artifact 双源」，那是错的。
+
+## 2026-10-20 #136 事后 review 的三条发现（D 系列，与上面的 F/O/P/B/C 编号无关）
+
+来源：#136（transcription 拆子包）合并后补做的一次 `check` 全面 review。代码侧零发现，
+三条全在文档与守卫上，**其中两条是 #136 自己制造的**。
+
+### D1 依赖方向守卫漏判包内→包根的 import（五类静默漏判 + 一类归因错） — ✅ 已实测，**已修**
+
+`tests/test_pipeline_imports.py::_intra_package_target` 原先在第一个匹配上就 `return`，
+且只认 `startswith("xvt.pipeline.")`（带尾点）。在 `transcription/shared.py` 里逐条注入下面
+六种写法、拿**拆包后未修的那版守卫**（`7648254`）跑 `tests/test_pipeline_imports.py`，结果是
+**五种守卫全绿（静默漏判），第六种会红但归因错**——不是六种全绿：
+
+| 写法 | 未修版守卫的实际表现 | `ruff` 是否兜住 |
+| --- | --- | --- |
+| `from xvt.pipeline import resegment` | **全绿**：`node.module` 是 `xvt.pipeline`，不带尾点，整条语句被跳过 | 否 |
+| `from xvt.pipeline import error_category` | **全绿**：同上；这条还是对包根 `__init__` 的反向依赖 | 否 |
+| `import xvt.pipeline` | **全绿**：同上 | 否 |
+| `from . import common` | **全绿**：相对 import 的 `node.module` 不带包前缀（`from . import x` 甚至是 `None`），两道守卫都看不见 | 否 |
+| `import xvt.pipeline.common, xvt.pipeline.transcription.resume` | **全绿**：只看第一个 alias，`common` 是条合法边，第二个 alias（反向边）被它掩盖 | **是**（`E401` + `I001`） |
+| `from xvt.pipeline.transcription import resume as _p` | **会红，但归因错**：拦是拦住了，边却被压扁成子包名，报 `transcription.shared -> transcription`，而真实边是 `-> transcription.resume`——照这条消息去查会查错模块 | 否 |
+
+末行两版守卫的断言消息逐字对照（同一条注入）：
+
+```
+未修版： AssertionError: transcription.shared 实际依赖了未在白名单声明的模块: {'transcription.shared -> transcription'}
+本轮后： AssertionError: transcription.shared 实际依赖了未在白名单声明的模块: {'transcription.shared -> transcription.resume'}
+```
+
+所以 `_resolve_module_path` 取**最长**前缀对末行的价值不是「把漏的补上」，而是**把归因改对**：
+压扁成子包名的那条消息会把人引到错的模块上。同一处还顺带消掉一个**误报**：
+`from xvt.pipeline.transcription import shared`（在 `shared.py` 里 import 自己）未修版同样
+报 `-> transcription`，而它根本不是依赖边；修后按自引用正确地不报。
+
+「ruff 是否兜住」那一列也是实测的（给每种写法造一个**真的用到了导入名**的文件再跑
+`ruff check --isolated --select E,F,I`，否则 F401 会把结论污染成「全都报错」）：只有多 alias
+那一条被 `E401` / `I001` 拦下，其余五种 ruff 全绿。所以守卫自己不能指望 ruff 兜底。
+
+**前五条不是 #136 引入的**：原实现（拆包前）在这五种写法上逐字同形，同样静默漏判。**末行
+那条归因错是 #136 自己的**——拆包前没有子包，这种写法还不存在；#136 为子包重写了解析函数，
+却把「取最短前缀」的压扁行为原样带了过来。更该被记住的是过程问题：#136 发现了「只看第一个
+alias」这个限制，只把它写进会话笔记的「观察，未改」，没有登记成条目——**知道一个守卫
+有洞而只写在过程笔记里，等于没写**。
+
+改法：`_intra_package_target` → `_intra_package_targets`，返回**集合**而不是首个匹配；
+新增 `_resolve_module_path` 按已知模块集合取最长前缀；`ImportFrom` 的被导入名也接到
+base 后面再查一次（末行那条归因错就修在这里）；包根与相对
+import 一律报成哨兵 `_PACKAGE_ROOT`，而白名单里没有也不该有这一项——`xvt/pipeline/__init__.py`
+import 了全部子模块，包内反向依赖它就是加载期循环的来源。函数级守卫同步补上相对 import。
+
+**红先证据**：先只做「改名 + 返回集合」的壳、内部仍走旧判定，当时的 8 条新测试里 **6 条报
+AssertionError**（另 2 条是负向控制：自引用与包外 import，本来就该绿）。第 9 条
+（`test_importing_oneself_through_the_subpackage_is_not_an_edge`）是本条记录被主干纠正后补的，
+钉的是上面那个误报，未修版上同样会红（断言消息即上面那条 `-> transcription`）。实装后 11 条全绿，
+再用真实文件逐条复测：上表六种写法 + 既有的「未声明反向边」「函数体内包内 import」
+「子模块 import subprocess」共 8 例，全部变红后还原（末行那条两版都红，复测要看的是**消息
+里那条边指向谁**，不是红不红）。白名单无需改动，反证了今天没有任何包内模块依赖包根。
+1071 → 1080（9 条新测试），子测试仍 312。
+
+**本条自己的记录出过一次错，一并记在这里。** 初版把六种写法并列写在一句「守卫**全绿**而
+反向边真实存在」底下。实际是前五行实测过、第六行只做了代码推断（读 `parts[2]` 的压扁逻辑
+就直接写成「漏判」），两者混在一起没有标注；主干独立注入复现后指出末行在未修版上**会红**，
+只是归因错。**这跟下面 D2/D3 批评 #136 的「顺手修正一个自己没核过的引用」是同一个毛病**，
+只是载体从代码引用换成了实测结论：**自己的发现清单也要像代码一样逐条实测对账，推断出来的
+行不能和实测出来的行并列而不标注**。
+
+### D2 F10 的代码引用被 #136 改成了「更自信的错」 — **已修**
+
+`docs/ARCH_IMPROVEMENT_PLAN.md` 的 F10 原先写 `pipeline/transcription.py:313` 直接读
+`job.config["source_strategy"]`。拆包前的 `:313` **是一个空行**，这个引用当时就是错的；
+#136 顺手把它改成「`transcription/local.py` 的 `_record_effective_engine` 一带」，而
+`_record_effective_engine` 只读写 `job.config["engine"]`，从不碰 `source_strategy`——
+把一个本来模糊的错引用变成了一个具体的错引用。已改为逐个核实过的四个真实读取点，并
+标明原引用的问题。教训与 D3 同源：搬移时顺手「修正」一个自己没核过的引用，比留着不动更糟。
+
+### D3 `check_subtitles` 八个调用点的路径清单失效 — **已修**
+
+「尾部幻觉 QA 门」条目的形态建议里列了全仓 8 个 `check_subtitles` 调用点的路径，用来论证
+provenance 闸门不可省。拆包后其中两条（原 `pipeline/transcription.py:407` 与 `:565`）已不
+存在。这不是历史叙述而是**将来真要动手时的清单**，所以路径失效有实际成本。已重新对账：
+8 个调用点的数量不变，路径与**所属函数名**一并记下（行号会随无关改动漂移，函数名不会）。
+
+**同族的两条已由 #137 替 #136 补上**（本条留作记录）：`ROADMAP.md` 的「②结构性重构」桶
+被 #136 清空了却没改，`REVIEW_FINDINGS` 末尾「O8 条目 (d) 登记的六条遗留里还剩五条」的
+计数也没随第 ⑥ 条划掉而更新。#136 的收尾只对账了 `transcription.py` 这个**字符串**的出现
+位置，没对账「哪些结论因为这次改动而变了」——与既往那条教训（收尾文档同步不能只补 review
+点名条目）是同一个形状，第二次犯。
 
 ## 观察（危害低，可不处理）
 

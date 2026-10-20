@@ -32,7 +32,7 @@
 | F7 | 每个 LLM 子步骤各自实现 checkpoint/fingerprint/恢复判定，`semantic.py` 1276 行中管道工程占大头 | `pipeline/semantic.py` 的 `_load/_write_*_checkpoint`、`_repair_chain_satisfied` 等 |
 | F8 | API 与 Agent 双路径在 polish/semantic/retranslate 各实现两遍编排 | Q5/Q6 各方案文档与实现 |
 | F9 | `_MIGRATIONS` 迁移机制已建成但为空、从未使用；stage 枚举冻结导致 `translate` 内部六个真实阶段只能靠 artifact 存在性反推 | `models.py:93` |
-| F10 | `job.config` 双轨：workflow 子配置已类型化，`source_strategy`、旧 `target_language` 仍是顶层裸键 | `pipeline/transcription/local.py` 的 `_record_effective_engine` 一带直接读 `job.config["source_strategy"]`（2026-10-20 拆包前为 `pipeline/transcription.py:313`） |
+| F10 | `job.config` 双轨：workflow 子配置已类型化，`source_strategy`、旧 `target_language` 仍是顶层裸键 | 直接读 `job.config["source_strategy"]` 的点现在是 `pipeline/transcription/local.py` 的 `_process_adaptive_media`（`:199`）与 `_finish_subtitle_job`（`:558`）、`pipeline/transcription/resume.py` 的 `_recover_source_selection`（`:85`）与 `pipeline/transcription/remote.py` 的 `_acquire_remote_job`（`:474`）。原条目写的 `pipeline/transcription.py:313` **当时就指在一个空行上**，拆包时没核就照搬了，2026-10-20 修正 |
 | F11 | 测试用 `unittest.mock.patch` 打模块级函数补丁，patch 目标绑定模块内部结构，纯搬移重构时曾多次失效 | `tests/test_pipeline_translation.py` 等；`translation_provider` 的 `opener` 参数已是 DI 先例 |
 | F12 | 人工修订要求用户手编 review JSON 的 `items[].text`，而 SRT 才是字幕行业通用可编辑格式 | Q6.1a/b 流程 |
 | F13 | `transcription.py` 等存在 150–250 行长函数（`_process_adaptive_media` 299–551 等） | `pipeline/transcription/local.py`（2026-10-20 拆包前为 `pipeline/transcription.py:299`） |
