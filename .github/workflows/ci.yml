@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, codex/ci-cjk-fonts]  # TEMP: 无 PR 时也能跑真实 CI，取证后回退
+    branches: [main]
   pull_request:
 
 concurrency:
