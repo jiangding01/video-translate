@@ -131,7 +131,7 @@
 
 恢复计划现在在这个状态下归 `manual_fix`，首选命令是 `xvt rebuild-source JOB --strategy asr`（它把 `align_subtitles` 置为 `false` 并优先复用 checksum 有效的 words/audio checkpoint，是真正能推进的出口；另一条出口是重新运行 `run` 调整对齐选项）。判定只看 Job 状态，不猜异常：媒体 Job、`align_subtitles is True`、未放行低置信、`subtitle_alignment` checksum 有效且其 `confidence` 低于 `minimum_alignment_confidence`，并且 **`word_transcript` 与 `input_subtitles` 两份对齐输入都 checksum 有效**。缺任一输入时重跑可能得到不同置信度，不能断言「必然失败」，那种 Job 仍按既有的转写 checkpoint 恢复处理。批处理侧 `manual_fix` 记为 `failed` 并保留恢复指令，不再反复重试一条注定失败的 `continue`。
 
-**已知未覆盖的相邻情形**：`--align-subtitles` 还有第二种失败——对齐本身置信度达标，但对齐后的字幕 QA 出 error 级问题（报错点名「rerun without `--align-subtitles`」）。它同样让 `continue` 每次失败，但那条路径的 QA 报告不落盘，Job 状态里没有任何证据能证明「必然失败」，因此刻意不改它的分类（照 AGENTS 的口径：判不准就不动分类）。要给它出口得先把那次对齐后 QA 的结论登记成 artifact。
+**已知未覆盖的相邻情形**：`--align-subtitles` 还有第二种失败——对齐本身置信度达标，但对齐后的字幕 QA 出 error 级问题（报错点名「rerun without `--align-subtitles`」）。它同样让 `continue` 每次失败（实测连跑两次 stderr 逐字相同、退出码都是 2）。**此前挡住它的前置条件现在已经不成立**：那次对齐后 QA 的结论已经登记为 `aligned_subtitle_qa` artifact（`aligned-subtitle-qa.json`，checksum 有效，`xvt verify` 会逐条校验），Job 状态里因此已经有可判定的证据。**但分类仍然一字未改**，仍是「存在 checksum 有效的转写 checkpoint，可以从断点继续」+ `primary_command=xvt continue`：登记这份报告的那次改动只补证据、不碰任何恢复判定，改分类是独立一项（照置信度门那条的范式：只读谓词从 artifact + config 纯推导，归 `manual_fix` 并给 `rebuild-source --strategy asr` 这类真正能推进的出口）。在那之前，用户能拿到的是明细而不是出口。
 
 ### 已存译文套不回重建后的源时间轴
 

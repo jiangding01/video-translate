@@ -657,9 +657,9 @@ uv run --no-sync xvt run "/path/to/video.mp4" \
   --language en
 ```
 
-只有确认字幕存在整体偏移或漂移时，才使用 `--align-subtitles`。该模式会额外运行 Whisper 并写入 `artifacts/alignment.json`。
+只有确认字幕存在整体偏移或漂移时，才使用 `--align-subtitles`。该模式会额外运行 Whisper 并写入 `artifacts/alignment.json` 与 `artifacts/aligned-subtitle-qa.json`（对齐后字幕 QA 报告，两份都是 checksum 登记的产物）。对齐后 QA 出 error 级问题时强制对齐会失败，那份报告逐条列出是哪些 cue 的哪些 issue，不必重跑一遍去猜；`--allow-low-confidence-alignment` 不放行这类问题。
 
-强制对齐是 fail-closed 的：对齐结果置信度低于阈值时失败（可用 `--allow-low-confidence-alignment` 显式放行），对齐后的字幕 QA 出现 error 级问题时同样失败，且 `--allow-low-confidence-alignment` 不放行这一类问题。此时去掉 `--align-subtitles` 会**保留源字幕原有时间轴**（不是回退到 ASR 分段）；确实需要按语音重建时间轴时，请改用 `--source-strategy asr`（不能与 `--align-subtitles` 同用），或先修复源字幕本身。
+强制对齐是 fail-closed 的：对齐结果置信度低于阈值时失败（可用 `--allow-low-confidence-alignment` 显式放行），对齐后的字幕 QA 出现 error 级问题时同样失败，且 `--allow-low-confidence-alignment` 不放行这一类问题。后一种失败请读 `aligned-subtitle-qa.json`：它在算出之后、任何判定之前就落盘登记，所以**失败的 Job 上也一定有**，逐条给出是哪个 cue 的哪个 issue 码。此时去掉 `--align-subtitles` 会**保留源字幕原有时间轴**（不是回退到 ASR 分段）；确实需要按语音重建时间轴时，请改用 `--source-strategy asr`（不能与 `--align-subtitles` 同用），或先修复源字幕本身。
 
 ### 3. 纯字幕文件工作流
 
@@ -973,6 +973,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 | `bilingual.ass` | 带独立中英样式的字幕 |
 | `preview.ass`、`preview.mp4` | 短片段预览字幕和视频 |
 | `qa.json`、`qa-translated.json` | 字幕 QA 报告 |
+| `aligned-subtitle-qa.json` | 对齐后字幕 QA 报告（只在跑过 `--align-subtitles` 或自动对齐的 Job 上出现） |
 | `burned.mp4` | 烧录视频 |
 
 **按 Job 登记表取产物，不要按固定文件名取。** 上表是典型命名，不是契约：产物的有效性只认 Job 登记表里的内容 checksum（`xvt status --json` 的 `recovery_plan.reusable_artifacts`、`job.json` 的 `artifacts[]`，`xvt verify` 逐项复核）。两类情况会让固定路径取到错误内容：

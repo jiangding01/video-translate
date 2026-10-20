@@ -119,6 +119,33 @@ def test_source_selection_dependencies_are_directional() -> None:
     )
 
 
+def test_aligned_subtitle_qa_dependencies_are_directional() -> None:
+    """对齐后 QA 报告派生自对齐结果与媒体边界，并参与源选择决策。
+
+    它与 ``SOURCE_CANDIDATE_QA`` 同构：都是「候选能不能用」的判定依据，因此同样是
+    ``SOURCE_CUES`` 的上游而不是下游——报告讲的是对齐候选，那套 cue 可能被采用也
+    可能被回落 ASR 顶掉。反过来钉住它不在 ``downstream_of(SOURCE_CUES)`` 里，
+    `resegment` / 源文修订的失效闭包才不会把一份仍然成立的对齐证据顺手抹掉。
+    """
+
+    assert DERIVES_FROM[ArtifactKind.ALIGNED_SUBTITLE_QA] == frozenset(
+        {
+            ArtifactKind.SUBTITLE_ALIGNMENT,
+            ArtifactKind.MEDIA_INFO,
+        }
+    )
+    assert ArtifactKind.ALIGNED_SUBTITLE_QA in DERIVES_FROM[ArtifactKind.SOURCE_CUES]
+    assert ArtifactKind.ALIGNED_SUBTITLE_QA not in downstream_of(ArtifactKind.SOURCE_CUES)
+    # 对齐输入失效时报告必须一起失效，否则留下一份讲不清现状的旧证据。
+    for root in (
+        ArtifactKind.SUBTITLE_ALIGNMENT,
+        ArtifactKind.MEDIA_INFO,
+        ArtifactKind.INPUT_SUBTITLES,
+        ArtifactKind.WORD_TRANSCRIPT,
+    ):
+        assert ArtifactKind.ALIGNED_SUBTITLE_QA in downstream_of(root), root
+
+
 def test_rendered_invalidation_matches_legacy() -> None:
     computed = {kind.value for kind in downstream_of(ArtifactKind.TRANSLATED_CUES)}
     assert computed == LEGACY_RENDERED_INVALIDATION
