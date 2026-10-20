@@ -405,6 +405,7 @@ class EndToEndTest(unittest.TestCase):
                 f"issues={issue_codes} qa_reports={len(qa_reports)} ass={len(ass_renders)} "
                 f"renders={[event.data.get('detail') for event in render_runs]}"
             )
+            print(f"[observe] {decision}")  # TEMP: CI 取证用，取证后回退
 
             # 两腿都走的记账与复用无关：译文 QA 的 stage_started 只有收尾腿发（烧录腿的
             # `_check_render_layout` 不发），译文渲染的 detail=translated 同理只有渲染腿发。
