@@ -830,9 +830,9 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
 
     from xvt.pipeline.retranslate import cue_retranslation_waiting
 
-    # 延迟导入，避开 workflow → recovery → workflow 的循环。下面两处原子 Job 的
-    # 「等待优先」让路（qa_blocked 让路与「润色候选有效」让路）共用这一份谓词。
-    from xvt.workflow import agent_full_translation_waiting
+    # 延迟导入，避开 workflow → recovery → workflow 的循环。下面原子 Job 的「等待优先」让路
+    # （qa_blocked、「润色候选有效」，以及与 newest 组合的语义等待让路）共用这一份谓词。
+    from xvt.workflow import agent_full_translation_waiting, full_translation_request_is_newest
 
     # 必须排在 qa_blocked 之前。术语死锁（阻断的 error 全是 glossary_violation）的出口
     # 就是 retranslate-cues，用户按引导跑完 Agent 模式的重译后 SUBTITLE_QA 仍停在
@@ -961,7 +961,19 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         agent_translate_and_polish_waiting,
     )
 
-    if agent_semantic_review_waiting(job):
+    # 语义等待让路：用户在语义等待态上又开了一轮整轮 Agent 翻译时，语义报告仍然 checksum
+    # 有效，但它挂着的是已被取代的那份候选；照 apply-semantic-review 回填会静默作废新一轮，
+    # 并留下残留死循环。必须同时要求「整轮请求是最新的有效在途请求」：正常的语义等待上
+    # `agent_full_translation_waiting` 恒为真（manifest 有效 + TRANSLATE 仍 awaiting），只用
+    # 这个裸谓词会把正常语义等待也让掉，推荐 apply-translation 重放初译后回到一模一样的状态
+    # （零推进死循环）。与 plan_advance_steps 满足度早退闸门是同一份组合判定。
+    # 注意下面「润色候选有效」那道闸门必须保持裸谓词，不能也加 newest：语义报告失效的形态里
+    # 登记次序上 semantic_qa 仍在 batches 之后，加了会倒退。
+    full_round_supersedes_semantic = agent_full_translation_waiting(
+        job
+    ) and full_translation_request_is_newest(job)
+
+    if not full_round_supersedes_semantic and agent_semantic_review_waiting(job):
         return plan(
             "awaiting_input",
             "任务正在等待 Agent 语义校对与一次修复结果回填。",
@@ -969,7 +981,7 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             report_paths=(str(valid_artifacts["translation_semantic_qa"]),),
         )
 
-    if semantic_review_waiting(job):
+    if not full_round_supersedes_semantic and semantic_review_waiting(job):
         report_kind = (
             "translation_semantic_qa_reviewed"
             if "translation_semantic_qa_reviewed" in valid_artifacts

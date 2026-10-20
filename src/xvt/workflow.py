@@ -1000,14 +1000,23 @@ _SUPERSEDED_BY_FULL_TRANSLATION: tuple[str, ...] = (
 )
 
 
-def _full_translation_request_is_newest(job: Job) -> bool:
-    """整轮 ``translation_batches`` 是否是最后登记的那份在途请求。
+def full_translation_request_is_newest(job: Job) -> bool:
+    """整轮 ``translation_batches`` 是否是**有效**在途请求里最后登记的那份。
 
     ``add_artifact`` 先按 kind 去重再追加，因此 ``job.artifacts`` 的相对次序就是各
     kind 最后一次登记的先后（与 ``pipeline.retranslate._newer_full_translation_request``
     同一个判据，方向相反）。用它把「整轮等待」与润色 / 语义 / 局部重译的等待分开：
     这三类的 manifest 与报告在译文被改写时不会被失效闭包带走，残留文件照样 checksum
     有效，只看「stage 在等输入 + 整轮 manifest 有效」会把它们的等待盖成整轮等待。
+
+    只有 checksum **有效**的取代 kind 才参与「登记更晚即取代」：所有取代类等待（重译 /
+    润色 / 语义）的等待谓词都要求自身 artifact 有效，登记仍在但文件已失效的取代 kind
+    背后不可能挂着活等待，却会因为登记次序更晚而压制本判定，把一次有效、可回填的整轮
+    等待盖成「完成」。有效性只认内容 checksum（不可破坏约束 9 的精神），登记次序只用来
+    在**有效**的在途请求之间定先后。
+
+    单点实现：``plan_advance_steps`` 的满足度早退闸门与 ``recovery`` 原子 Job 的语义等待
+    让路都以这里为准，新增调用点不要就地重造。
     """
 
     kinds = [artifact.kind for artifact in job.artifacts]
@@ -1016,7 +1025,8 @@ def _full_translation_request_is_newest(job: Job) -> bool:
     except ValueError:
         return False
     return all(
-        kind not in kinds or kinds.index(kind) < index for kind in _SUPERSEDED_BY_FULL_TRANSLATION
+        kind not in kinds or kinds.index(kind) < index or valid_artifact_path(job, kind) is None
+        for kind in _SUPERSEDED_BY_FULL_TRANSLATION
     )
 
 
@@ -1057,7 +1067,7 @@ def plan_advance_steps(job: Job, config: WorkflowConfig) -> tuple[str, ...]:
     if (
         translation_satisfied
         and agent_full_translation_waiting(job)
-        and _full_translation_request_is_newest(job)
+        and full_translation_request_is_newest(job)
     ):
         return ("await_agent_translation",)
 
