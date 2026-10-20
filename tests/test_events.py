@@ -518,6 +518,165 @@ class EventPayloadContractTest(unittest.TestCase):
             with self.subTest(sample=sample):
                 self.assertEqual(sample, redact_text(sample))
 
+    def test_schemeless_signed_query_values_are_redacted(self) -> None:
+        """不带 scheme 的 `路径?query` 里的签名参数必须脱敏。
+
+        `_URL_PATTERN` 要求 `https?://`、`_USERINFO_PATTERN` 要求 `scheme://`，
+        yt-dlp / urllib3 的失败消息里那种「只有路径 + query」的签名 URL 两条都够不着
+        （2026-10-18 实测原样返回，`SECRETSIG123` 明文落进事件与 `job.json`）。
+
+        口径刻意收窄到「键名被 `_is_sensitive_query_key` 判为敏感」的那些
+        `key=value` 的**值**——不是对任意 `?k=v` 形状整体脱敏。期望值写全串而不是
+        只查子串：路径、非敏感参数与尾随诊断文本必须原样保留。
+        """
+        # name: (原文, 期望脱敏结果, 必须消失的凭据片段)
+        cases = {
+            "bare_path_query": (
+                "unable to download video data: /videoplayback?sig=SECRETSIG123&id=abc",
+                "unable to download video data: /videoplayback?sig=<redacted>&id=abc",
+                "SECRETSIG123",
+            ),
+            "urllib3_connection_pool": (
+                "HTTPSConnectionPool(host='r1.googlevideo.com', port=443): "
+                "/videoplayback?sig=SECRET&key=yt6",
+                "HTTPSConnectionPool(host='r1.googlevideo.com', port=443): "
+                "/videoplayback?sig=<redacted>&key=<redacted>",
+                "SECRET",
+            ),
+            "protocol_relative": (
+                "//r1.googlevideo.com/videoplayback?sig=SECRETSIG123",
+                "//r1.googlevideo.com/videoplayback?sig=<redacted>",
+                "SECRETSIG123",
+            ),
+            "parenthesised_query": (
+                "ffmpeg failed (input /videoplayback?signature=LEAKSIG&itag=22)",
+                "ffmpeg failed (input /videoplayback?signature=<redacted>&itag=22)",
+                "LEAKSIG",
+            ),
+            "quoted_query": (
+                "yt-dlp: '/videoplayback?X-Goog-Signature=LEAKSIG&expire=1' returned 403",
+                "yt-dlp: '/videoplayback?X-Goog-Signature=<redacted>&expire=1' returned 403",
+                "LEAKSIG",
+            ),
+            "schemeless_authority_with_token": (
+                "api.example.com/v1/chat?access_token=sk-LEAK123 returned 401",
+                "api.example.com/v1/chat?access_token=<redacted> returned 401",
+                "sk-LEAK123",
+            ),
+            # 顺带收口的既有遗漏：非 http scheme 的 query 此前完全不脱敏
+            # （`redact_url` 只认 http/https，`_USERINFO_PATTERN` 只管 `@` 之前）。
+            "non_http_scheme_query": (
+                "proxy socks5://host/p?token=LEAKTOK failed",
+                "proxy socks5://host/p?token=<redacted> failed",
+                "LEAKTOK",
+            ),
+            "non_http_scheme_userinfo_and_query": (
+                "socks5://u:pw@host/p?token=LEAKTOK",
+                "socks5://<redacted>@host/p?token=<redacted>",
+                "LEAKTOK",
+            ),
+            # 键名在判定前按 `parse_qsl` 的口径解码一次，否则 `%73ig` 绕过三层匹配。
+            "percent_encoded_key": (
+                "/v.mp4?%73ig=LEAKSIG&itag=22",
+                "/v.mp4?%73ig=<redacted>&itag=22",
+                "LEAKSIG",
+            ),
+            "non_sensitive_keys_survive": (
+                "/videoplayback?itag=22&expire=1764000000&lang=en",
+                "/videoplayback?itag=22&expire=1764000000&lang=en",
+                None,
+            ),
+        }
+        for name, (sample, expected, leak) in cases.items():
+            with self.subTest(case=name):
+                redacted = redact_text(sample)
+
+                self.assertEqual(expected, redacted)
+                if leak is not None:
+                    self.assertNotIn(leak, redacted, f"{name} 漏出 {leak!r}: {redacted!r}")
+                    # 事件边界必须与自由文本边界共用同一判定。
+                    self.assertNotIn(
+                        leak,
+                        create_event(
+                            EventType.COMMAND_FAILED,
+                            **error_event_fields("dependency_or_process", sample),
+                        ).to_json(),
+                    )
+                # 幂等：`set_stage` 脱敏后事件分支会再脱敏一次，两条出口必须一致。
+                self.assertEqual(redacted, redact_text(redacted))
+
+    def test_schemeless_query_redaction_does_not_touch_benign_text(self) -> None:
+        """窄口径的唯一风险是误伤，因此反向守卫用真实形状逐字钉住。
+
+        `?k=v` / `k=v` 这个形状在 ffmpeg 滤镜串、yt-dlp 格式选择器、QA 消息与普通
+        日志散文里到处都是。断言落在 `原文 == redact_text(原文)` 上（不是「不含某
+        子串」这种弱断言），任何一条被改写都说明口径超出了「键名命中策展名单」。
+        """
+        untouched = (
+            # ffmpeg 滤镜串（burn.py / render.py / doctor.py 的真实取值）
+            "-vf ass=filename=/path/x.ass",
+            "ass=filename=measure.ass:alpha=1,extractplanes=a,bbox=min_val=0",
+            "scale=640:360",
+            "subtitles=f.srt:force_style='Fontsize=24'",
+            "[0:v]scale=640:360[v];[v]ass=filename=f.ass[out]",
+            "-map 0:v:0 -map 0:a? -c:v h264_videotoolbox -b:v 5M",
+            "drawtext=text='a=b':fontcolor=white:x=(w-text_w)/2",
+            # yt-dlp 格式选择器与参数（download.py 的真实取值）
+            "bv*+ba/b",
+            "-f 'bestvideo[height<=1080]+bestaudio'",
+            "--convert-subs srt",
+            "-f bestaudio/best --format-sort-force -S lang,res",
+            "--cookies-from-browser chrome",
+            # 普通散文与日志
+            "cue_count=52",
+            "status=failed",
+            "exit=2",
+            "width=161 limit=492",
+            "bilingual_overflow_risk: cue 3 width=161 limit=492",
+            "really? x=1",
+            "retry 1/3 && continue",
+            "ffmpeg exited with code 1 (signal=none, timeout=False)",
+            "frame= 12 fps=25 q=28.0 size=128kB time=00:00:00.48 bitrate=2185.5kbits/s",
+            # 键名只是**看起来**像凭据：子串/分段规则本就不该命中
+            "/v.mp4?monkey=plain&keyword=plain&author=plain&design=plain&signal=plain",
+            "/v.mp4?assignment=plain&designation=plain&keywords=plain",
+            # 已脱敏文本不得被二次改写（幂等的另一半）
+            "/videoplayback?sig=<redacted>&id=abc",
+            "download failed: https://cdn.example.com/v.mp4?sig=%3Credacted%3E&itag=22",
+        )
+        for sample in untouched:
+            with self.subTest(sample=sample):
+                self.assertEqual(sample, redact_text(sample))
+
+    def test_schemeless_and_http_query_redaction_agree_on_the_same_key(self) -> None:
+        """两条路径（`redact_url` 规范化 vs 自由文本规则）判定必须一致。
+
+        同一个键在带 scheme 与不带 scheme 两种形态下都必须被脱敏（或都不脱敏），
+        否则「有没有 scheme」就成了凭据能否泄漏的开关。标记串的拼写两条不同
+        （`%3Credacted%3E` vs `<redacted>`）是刻意的：带 scheme 那条经
+        `urlencode` 规范化，本次修复不动它。
+        """
+        sensitive = ("sig", "signature", "X-Goog-Signature", "access_token", "auth_key", "key")
+        benign = ("itag", "monkey", "author", "design", "signal", "expires")
+        for query_key in sensitive:
+            with self.subTest(key=query_key, verdict="sensitive"):
+                tail = f"/v.mp4?{query_key}=LEAKVALUE&itag=22"
+                with_scheme = redact_text(f"failed: https://cdn.example.com{tail}")
+                without_scheme = redact_text(f"failed: cdn.example.com{tail}")
+
+                self.assertNotIn("LEAKVALUE", with_scheme)
+                self.assertNotIn("LEAKVALUE", without_scheme)
+                self.assertIn("itag=22", with_scheme)
+                self.assertIn("itag=22", without_scheme)
+        for query_key in benign:
+            with self.subTest(key=query_key, verdict="benign"):
+                tail = f"/v.mp4?{query_key}=plainvalue&itag=22"
+                with_scheme = redact_text(f"failed: https://cdn.example.com{tail}")
+                without_scheme = redact_text(f"failed: cdn.example.com{tail}")
+
+                self.assertIn("plainvalue", with_scheme, f"{query_key} 带 scheme 时被误伤")
+                self.assertIn("plainvalue", without_scheme, f"{query_key} 不带 scheme 时被误伤")
+
     def test_no_bare_category_or_message_kwargs_in_create_event_calls(self) -> None:
         """AST 扫描全部生产模块：create_event(...) 调用不得直接传入裸
         category=/message= 关键字参数（必须通过 error_event_fields(...) 展开），
