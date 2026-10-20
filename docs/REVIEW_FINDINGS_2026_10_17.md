@@ -75,7 +75,13 @@
 
 已修：原子 Job 没有 `plan_advance_steps`，改用等价条件——`TRANSLATE` 停在 `AWAITING_INPUT` 且 `translation_batches` checksum 有效时放行，由后面既有的原子等待分支给出 `apply-translation` 引导；manifest 已经不在的等待态残留不放行。
 
-**本轮新发现的相邻缺口（未修）**：polished 原子 Job 在同一状态下，让路后会先命中「润色候选有效，可以重新执行原子翻译命令继续语义校对」那条 retryable 分支（它排在原子等待分支之前），推荐的 `translate --translation-quality polished` 同样会盖掉刚写入的 manifest。这是原子分支内部的判定顺序问题，不属于 qa_blocked 让路，需单独决策。
+**本轮新发现的相邻缺口** → ✅ **已实测确认并已修（2026-10-20）**。原文的判断成立，但触发条件与危害形态都要更正：
+
+- **判定顺序的位置**：`recovery.py` 的原子段里，「润色候选有效，可以重新执行原子翻译命令继续语义校对」那条 `retryable` 在既有的原子等待分支**之前**。两者同时成立的根因是 `prepare_agent_translation` 只把 `TRANSLATE` 置为 `awaiting_input`，**不失效** `translation_polished_cues`。
+- **触发条件比原文窄**：它**不是**跟在 qa_blocked 让路后面。该分支的前两条（`agent_semantic_review_waiting` / `semantic_review_waiting`）会先接住绝大多数状态——后者只要 `translation_candidate_qa_issues` 非空就为真，所以原文设想的「术语死锁 → 改跑整轮 translate」实测落在 `semantic_review_waiting`，走不到这条分支。真正能走到它的前提是 `semantic_review_target(job)` 为 **None**（语义报告缺失或 checksum 失效），再叠上「polished 候选有效 + `TRANSLATE` 停在等待态且 manifest 有效」。
+- **危害比原文更具体**。原文说「同样会盖掉刚写入的 manifest」——**在 Agent 模式下 manifest 被原样重写（逐字相同），fingerprint 不变**，所以不是无条件作废。实测两层后果：① 命令**零推进**。`_cmd_translate` 在 `run_translation` 返回 `mode == "agent"` 时直接早退，润色与语义校对腿根本不执行，`status` 的分类与推荐逐轮不变（实测 job.json 只多了一次 `translation_batches` 的重新登记与时间戳刷新），形成没有出口的循环，而真正能推进的 `apply-translation` 从头到尾不出现在导航里。② 用户当初**显式传过 `--batch-size`（或 `--glossary`）**时才真的作废：原子 Job 的策略与 batch size 不回退 Job 内快照（见 F2 条目末句），推荐命令省掉这些参数，重写把 `batch_size` 2 → 25、`fingerprint` `ee66afe6…` → `7a1fddfc…`，手里准备好的响应随即被 `apply-translation` 以 `translation response fingerprint does not match the current manifest` 拒收；而那条报错自己的恢复导航又给出同一条命令。
+- **修法**：该分支额外要求 `not workflow.agent_full_translation_waiting(job)`——与原子 `qa_blocked` 让路**共用同一份谓词**，不另造条件（该谓词的函数内延迟导入一并收成一处）。让路后由原子等待分支给出 `apply-translation`。实测复验：同一状态下 `status` 改为 `awaiting_input` + `apply-translation`，照它回填后 Job 推进到语义校对等待，manifest 逐字未动。三条新测试全程只用真实 CLI（纯字幕输入 + `--provider agent`，零网络零 API），其中两条把恢复计划吐出来的命令 `shlex.split` 后原样喂回 `main()`，第三条是反证（`TRANSLATE` 不在等待态时原分支照旧生效）。
+- **相邻的已知遗漏（未修，需单独决策）**：原子分支的两条语义等待**不**判「整轮请求是不是最新的那一份」。端到端侧有 `workflow._full_translation_request_is_newest` + `_SUPERSEDED_BY_FULL_TRANSLATION`（`translation_semantic_qa` 在列）做这件事，原子侧没有对应判定，于是语义等待态下再开一轮整轮 `translate` 时 `status` 仍指向已被取代的 `apply-semantic-review`（2026-10-20 实测）。它不改写在途 manifest、手里的整轮响应事后仍能回填，危害低于本条，但口径与端到端侧不一致。
 
 ### F5 `workflow.py` 逐字复制 pipeline 的 3 个函数 — ✅ 已核验，**已修（本轮）**
 
@@ -494,8 +500,8 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 
 ## 未验证（△ 低置信，动手前先复现）
 
-- 局部重译回填内容与原文逐字相同时，残留 manifest 可能造成一次误报等待。
-- `workflow.py` 注释里描述的「`target_language` 为 None 的补翻」路径疑似不可达。
+- ~~局部重译回填内容与原文逐字相同时，残留 manifest 可能造成一次误报等待。~~ **○ 已实测证伪（2026-10-20），零代码改动。** 真实 CLI 跑完整条链路（纯字幕 + `--provider agent`，零网络零 API）：`retranslate-cues --cue N --provider agent` → 回填一份与现有译文**逐字相同**的内容 → `apply-cue-retranslation`。静态推断的前半对了——残留 `cue_retranslation_batches` 确实仍登记且 checksum 有效，`translated_cues` 的 checksum 也确实逐字不变（实测 `3f4a41da…` 前后相同），所以 `cue_retranslation_waiting` 的第三、四条件**都仍然成立**。但结论错了：第一条件独自就够。`apply-cue-retranslation` 经 `finalize_translation` 把 `TRANSLATE` 置 `succeeded`，谓词立即判否。两种路径都验了——普通路径 QA 通过，`status` 给 `complete`、`continue` 正常收敛（退出码 0）；术语死锁路径（相同译文仍违反术语表、`SUBTITLE_QA` 仍 `failed`）给 `manual_fix` + `retranslate-cues --cue 3`，`advance_steps` 为空。**两种都不是等待**，没有误报。谓词 docstring 里「三者任一都足以让谓词判否」这句本来就覆盖了这一情形，本条属于读 docstring 时漏看了条件一。
+- ~~`workflow.py` 注释里描述的「`target_language` 为 None 的补翻」路径疑似不可达。~~ **○ 已实测确认不可达（2026-10-20）；但那是过期注释，不是死码，已只改注释。** 分支本体（`_advance_workflow` 里的 `waiting_step == "await_cue_retranslation"`）**是活的**：普通带目标语言的 Job 实测会走到它（`status` 报 `steps: await_cue_retranslation`），删掉会让局部重译等待落进下面那条被 `goals.needs_translation` 守卫的分支，被报成 `translation requires Agent input` 并给出整轮等待的产物清单——message 与 artifact 集合都错。不可达的是注释给出的**理由**：`run` 一定会落 `config.workflow`（实测不给 `--target-language` 时也写，只是 `target_language: null`），而 `run_translation` / `prepare_agent_translation` 都以 `target language must match the persisted workflow goal` 拒绝目标语言与快照不符的调用（实测退出码 2），所以这种 Job 永远拿不到 `translated_cues`，`retranslate-cues` 自己也以 `job has no translated_cues artifact` 退出（退出码 2）。`workflow_goals` 的 `needs_translation` 就是 `bool(config.target_language)`，因此当前可达的 Job 上「首步是 `await_cue_retranslation`」与 `needs_translation` 同真同假，这条分支与上面 `waiting_step` 里 `or first_step == "await_cue_retranslation"` 的放宽都不再需要那个理由。考古：阻挡该场景的守卫落在 `d6ee9c7`（2026-07-26），注释写于 `37e476b`（2026-08-29）——**写下时就已经过期**。处理方式按「确认不可达才删」的纪律选了保守的一侧：保留两处代码（它们挡的是 message/artifact 差异），把注释改成说明真实理由并显式记下那个场景今天不成立。
 - ~~yt-dlp 的 ProxyError 消息若带不含 scheme 的 `/videoplayback?sig=...`，脱敏可能不命中。~~ **○ 已实测证实（2026-10-18），未修。** `redact_text("unable to download video data: /videoplayback?sig=SECRETSIG123&id=abc")` 原样返回；`HTTPSConnectionPool(host='r1.googlevideo.com', port=443): /videoplayback?sig=SECRET&key=yt6` 与协议相对形式 `//host/videoplayback?sig=...` 同样不命中。根因与 O3 同类：`_URL_PATTERN` 要求 `https?://`，`_USERINFO_PATTERN` 要求 `scheme://`，不带 scheme 的路径+query 两条都够不着。**刻意未随本轮修**：要兜住它就得对「不含 scheme 的 `路径?query`」整体脱敏，而 `?k=v` 形状在 ffmpeg 滤镜串、yt-dlp 格式选择器和普通散文里都出现，误伤面远大于 userinfo 那条（userinfo 有 `scheme://` 这个强前缀做锚点，它没有）。危害面也低于 O3：签名 URL 的 `sig` 有短时效，且 yt-dlp 的常见失败消息带完整 scheme（那条已命中）。要修应单独立项，并先把「哪些真实消息会出现不带 scheme 的签名路径」取证齐全。
 
 ## 本次 review 的覆盖盲区
@@ -518,6 +524,6 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 5. ~~**去重**：F5。~~ 已修（本轮）。
 6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
 
-**剩余未处理**：O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」与「未验证」两节。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。
+**剩余未处理**：O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」一节。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。
