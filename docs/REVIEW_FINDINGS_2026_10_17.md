@@ -175,7 +175,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | **已修（本轮）**，见下方 O6 条目 |
 | O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | **已修（本轮）**，见下方 O7 条目 |
-| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**；副本部分 2026-10-20 已裁定：分段侧收敛为 `_segmentation_config`，对齐侧刻意不抽（B/C 冻结的 legacy 路径），遗留六条登记留主干拍板，见下方 O8 条目 |
+| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**；副本部分 2026-10-20 已裁定：分段侧收敛为 `_segmentation_config`，对齐侧刻意不抽（B/C 冻结的 legacy 路径），遗留六条中第 ③ 条（回落分支 ALIGN 留 RUNNING）已于 2026-10-20 修复，其余五条登记留主干拍板，见下方 O8 条目 |
 | O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | **已修（本轮）**，四处逐条核实后改，见下方 O9 条目 |
 | O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | **已修（本轮）**，见下方 O10 条目 |
 | O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | **已修（本轮）**，见下方 O11 条目 |
@@ -213,7 +213,17 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 
 1. C 的对齐段对 `load_subtitles` / `align_source_cues` 自身抛出的异常无记账，ALIGN 可能留 RUNNING（legacy-only）。
 2. C 向 `load_subtitles` 传 `source_language` 原值，`"auto"` 不转 `None`（A/B 会转），cue 元数据会带字面量 `"auto"`（legacy-only）。
-3. A 的回落分支中 `segment_transcript` 失败时 `current_stage` 已切到 SEGMENT，ALIGN 留 RUNNING（现代路径，错误路径上的 stage 终态残留，与 96d38f8 容忍 RUNNING 残留的既有口径相邻）。
+3. ~~A 的回落分支中 `segment_transcript` 失败时 `current_stage` 已切到 SEGMENT，ALIGN 留 RUNNING（现代路径，错误路径上的 stage 终态残留，与 96d38f8 容忍 RUNNING 残留的既有口径相邻）。~~ **2026-10-20 已修**（分支 `codex/align-terminal-state-on-fallback`）。
+
+   **实证复现用真实 `xvt run`**（离线替身 yt-dlp + 替身 `mlx_whisper`，xvt 本体与 `job.json` 全走真实代码）：自动策略 + 平台人工字幕（第 3 条越出媒体时长 → 候选 QA error → 选择对齐）+ 词级时间戳全为零时长的 ASR 结果。对齐照样算得出来（文本能匹配）但对齐后 QA 出 error，于是回落 ASR；`segment_transcript` 过滤零时长词后无词可分段，`not cues` 抛 `RuntimeError`。修复前 `job.json`：`align` 为 `{"status": "running", "completed_at": null, "error": null}`，`segment` 为 `{"status": "failed", "error": "transcription produced no subtitle cues"}`；终端只有 `[进行中] 对齐字幕`，没有收尾行。
+
+   **修法取 (b)：在回落分支里、交棒给 SEGMENT 之前落 ALIGN 终态**，并把原先整段末尾那一行无条件的 `set_stage(ALIGN, SUCCEEDED)` 并进已有的 `if selected_kind == "aligned_subtitles":` 块（该块本就负责「采用对齐 → SEGMENT SKIPPED」的记账，`selected_kind` 在三条分支里分别是 `aligned_subtitles` / `aligned_subtitles` / `asr`，恰好互斥，不会重复记）。依据是**终态应该落在该阶段的决策完成时，而不是该决策的后果执行完之后**：对齐这一步确实完成了（算出 alignment、落盘两份产物、做出「不采用」判定），只是结果没被采用。
+
+   **否掉另外两个候选的理由。** (a)「把那行提到 if/elif/else 之前」会让强制对齐的两处 `raise`（置信度门、对齐后 QA error 门）发生在 ALIGN 已标 `succeeded` 之后，外层 except 把它覆写成 `failed`，在同一个 stage 上造出 #116 刚修过的「先完成后失败」形态（#116 的修法还只是渲染层给失败行加一句「重新进入后失败」，把这个形态重新造出来等于让那句注解去解释一个本不该出现的翻转）；且 (a) 在回落路径上的效果与 (b) 完全相同，纯粹多付一个回归。(c)「在外层 except 里补救」要在记账**边界**里加「`current_stage` 是 SEGMENT 而 ALIGN 仍 RUNNING 就一并收口」的特例，等于在失败处理器里写一条**成功**记录；而且它只修错误路径，成功路径上 ALIGN 终态仍然落得过晚，还与 96d38f8 裁定过的「except 里刻意不扫 RUNNING 的 stage」（恢复路径上可能留着上一次中断的 RUNNING）相冲突。
+
+   **用户可见变化**（故 CHANGELOG 已记）：`recovery.py` 的 `current_stage = active or failed[-1]` 优先取第一个 RUNNING/AWAITING_INPUT 的 stage，所以修复前 `xvt status --json` 的 `recovery_plan.current_stage` 是 `align`（指向一个其实已经做完的阶段），修复后是真正失败的 `segment`，`completed_stages` 多出 `align`；恢复分类仍是 `retryable`。
+
+   **事件顺序确有变化且仅此一处**：回落路径上 `align` 的 `stage_completed` 由「`segment` 收尾之后」前移到「`segment` 开工之前」。既有测试零变红、既有断言零改动（全仓无一处断言 align/segment 的事件顺序，协议快照里 `align` 出现 0 次）。新增 4 条测试：回落成功的顺序、回落后分段失败的终态与失败归属、强制对齐被拒时 `align` 只有 `started → failed`（反证 (a)）、对齐被采用时 `align` 收尾紧接 `segment` 跳过且 `segment` 从不开工。`1067 → 1071 passed`，子测试仍 312，协议快照零 diff。
 4. C 对空 cue 无前置拦截，`allow_low_confidence_alignment=True` 时可能写出空 source-cues（legacy-only，下游 SUBTITLE_QA 仍兜底）。
 5. B 的对齐段（含置信度门）没有任何测试覆盖。
 6. `transcription.py` 已达 2055 行（本轮加 helper 与冻结注释后为 2062 行），突破了 O8 自己写的「突破 2000 行再按三簇拆」阈值，拆分另行立项。
@@ -613,6 +623,6 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 5. ~~**去重**：F5。~~ 已修（本轮）。
 6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 已于 2026-10-20 做完，见上方 O1 条目。
 
-**剩余未处理**：O8 条目 (d) 登记的六条遗留（副本部分已于 2026-10-20 裁定收尾，遗留留主干拍板），以及「观察」一节里尚未处理的几条。O1 与 O9 / O10 / O11、O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
+**剩余未处理**：O8 条目 (d) 登记的六条遗留里还剩五条（副本部分已于 2026-10-20 裁定收尾；第 ③ 条「回落分支 ALIGN 留 RUNNING」已于 2026-10-20 修复，其余五条留主干拍板），以及「观察」一节里尚未处理的几条。O1 与 O9 / O10 / O11、O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小（O1 已于 2026-10-20 做完，实测确认两条链路在中间三步上**已无逐字重复可搬**，建议由「降级」进一步改为**关闭** Phase 5，理由见上方 O1 条目 (f)，仍未拍板）；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

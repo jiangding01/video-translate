@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from xvt.align import AlignmentResult
 from xvt.download import RemoteMediaInfo
+from xvt.events import Event
 from xvt.job_store import create_job, get_job_file, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, StageName, StageStatus, Transcript, Word
@@ -944,6 +945,106 @@ class TranscriptionPipelineTest(unittest.TestCase):
                 json.loads(Path(selection.path).read_text())["selected_kind"],
                 "aligned_subtitles",
             )
+
+    def _stage_event_sequence(self, events: list[Event], stage: str) -> list[str]:
+        return [
+            f"{event.type}:{event.data['status']}"
+            for event in events
+            if event.type.startswith("stage_") and event.data.get("stage") == stage
+        ]
+
+    def _forced_alignment_events(
+        self,
+        root: Path,
+        *,
+        media_duration_ms: int,
+    ) -> list[Event]:
+        """`--align-subtitles` 的强制对齐腿，带事件记录。
+
+        `media_duration_ms` 决定对齐后 QA 是否出 error：5000 时干净（对齐被采用），
+        1000 时第 1 条 cue 越出媒体（`outside_media`，QA error 门拒绝）。
+        """
+
+        media = root / "input.mp4"
+        media.write_bytes(b"video")
+        subtitles = root / "source.srt"
+        subtitles.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+        media_info = MediaInfo(
+            str(media), media_duration_ms, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+        )
+        transcript = Transcript(
+            language="en",
+            engine="mlx",
+            words=(Word("Hello", 1500, 2200, 0.9),),
+        )
+
+        def run_ffmpeg(args, **_kwargs):
+            Path(args[-1]).write_bytes(b"audio")
+            return CommandResult(tuple(args), 0, "", "")
+
+        events: list[Event] = []
+        with (
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+        ):
+            try:
+                run_local_transcription(
+                    media,
+                    root,
+                    subtitles=subtitles,
+                    align_subtitles=True,
+                    event_sink=events.append,
+                )
+            except ValueError:
+                pass
+        return events
+
+    def test_forced_alignment_rejection_never_records_align_as_succeeded(self) -> None:
+        """强制对齐被对齐后 QA error 门拒绝时，ALIGN 只有 `started → failed`。
+
+        这是对「把 ALIGN 终态提到 if/elif/else 之前」那种改法的反证：提前标成功会被外层
+        except 覆写成 failed，在同一个 stage 上造出 #116 修过的「先完成后失败」形态。
+        约束 4 不受影响：这道门仍然必须失败。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            events = self._forced_alignment_events(Path(directory), media_duration_ms=1_000)
+
+        self.assertEqual(
+            self._stage_event_sequence(events, "align"),
+            ["stage_started:running", "stage_failed:failed"],
+        )
+        # 回落分段不属于强制对齐腿：SEGMENT 一个事件都不该有。
+        self.assertEqual(self._stage_event_sequence(events, "segment"), [])
+
+    def test_accepted_alignment_records_align_then_skips_segment(self) -> None:
+        """对齐被采用时的事件序列不变：ALIGN 收尾紧接 SEGMENT 跳过，SEGMENT 从不开工。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            events = self._forced_alignment_events(Path(directory), media_duration_ms=5_000)
+
+        self.assertEqual(
+            self._stage_event_sequence(events, "align"),
+            ["stage_started:running", "stage_completed:succeeded"],
+        )
+        self.assertEqual(
+            self._stage_event_sequence(events, "segment"),
+            ["stage_completed:skipped"],
+        )
+        stage_events = [
+            (event.data["stage"], event.data["status"])
+            for event in events
+            if event.type.startswith("stage_") and event.data.get("stage") in {"align", "segment"}
+        ]
+        self.assertEqual(
+            stage_events,
+            [
+                ("align", "running"),
+                ("align", "succeeded"),
+                ("segment", "skipped"),
+            ],
+        )
 
     def test_forced_alignment_rejects_error_level_post_alignment_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

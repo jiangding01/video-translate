@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from xvt.align import AlignmentResult
 from xvt.download import RemoteMediaInfo
+from xvt.events import Event
 from xvt.job_store import create_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import StageName, StageStatus, Transcript, Word
@@ -187,6 +188,154 @@ class SourceSelectionPipelineTest(unittest.TestCase):
         self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SUCCEEDED)
         self.assertEqual(job.stages[StageName.SEGMENT].status, StageStatus.SUCCEEDED)
         self.assertEqual(job.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+
+    def _stage_event_sequence(self, events: list[Event], stage: str) -> list[str]:
+        return [
+            f"{event.type}:{event.data['status']}"
+            for event in events
+            if event.type.startswith("stage_") and event.data.get("stage") == stage
+        ]
+
+    def test_alignment_fallback_records_align_before_handing_over_to_segment(self) -> None:
+        """回落 ASR 的那一支：ALIGN 的终态在对齐决策做完时落下，早于 SEGMENT 开工。
+
+        对齐这一步确实**完成了**（算出 alignment、落盘两份产物、做出「不采用」判定），
+        只是结果没被采用。终态落在决策完成那一刻，后续回落分段再失败也不会让 ALIGN
+        永久停在 `running`。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[Event] = []
+            job = self._run_alignment_fallback(root, events=events)
+
+        self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SUCCEEDED)
+        self.assertEqual(job.stages[StageName.SEGMENT].status, StageStatus.SUCCEEDED)
+        self.assertEqual(
+            self._stage_event_sequence(events, "align"),
+            ["stage_started:running", "stage_completed:succeeded"],
+        )
+        align_done = next(
+            index
+            for index, event in enumerate(events)
+            if event.type == "stage_completed" and event.data.get("stage") == "align"
+        )
+        segment_started = next(
+            index
+            for index, event in enumerate(events)
+            if event.type == "stage_started" and event.data.get("stage") == "segment"
+        )
+        self.assertLess(align_done, segment_started)
+
+    def test_alignment_fallback_segmentation_failure_still_closes_align(self) -> None:
+        """回落 ASR 后分段失败时，ALIGN 不得停在 `running`——Job 要能解释自己的状态。
+
+        `segment_transcript` 在这里真的抛出：ASR 词级时间戳全为零时长，过滤后无词可
+        分段，于是 `not cues` 触发 `RuntimeError`。此时失败归属仍只属于 SEGMENT。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[Event] = []
+            with self.assertRaisesRegex(RuntimeError, "produced no subtitle cues"):
+                self._run_alignment_fallback(root, events=events, zero_duration_words=True)
+            job_file = next((root / "jobs").glob("*/job.json"))
+            data = json.loads(job_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["stages"]["align"]["status"], "succeeded")
+        self.assertIsNotNone(data["stages"]["align"]["completed_at"])
+        self.assertIsNone(data["stages"]["align"]["error"])
+        # 失败归属不变：只有 SEGMENT 记 FAILED，且带原始原因。
+        self.assertEqual(data["stages"]["segment"]["status"], "failed")
+        self.assertEqual(
+            data["stages"]["segment"]["error"],
+            "transcription produced no subtitle cues",
+        )
+        self.assertEqual(
+            self._stage_event_sequence(events, "align"),
+            ["stage_started:running", "stage_completed:succeeded"],
+        )
+        self.assertEqual(
+            self._stage_event_sequence(events, "segment"),
+            ["stage_started:running", "stage_failed:failed"],
+        )
+
+    def _run_alignment_fallback(
+        self,
+        root: Path,
+        *,
+        events: list[Event],
+        zero_duration_words: bool = False,
+    ):
+        """自动策略下「平台人工字幕 QA 失败 → 对齐 → 对齐未被采用 → 回落 ASR」。
+
+        `zero_duration_words` 让 ASR 词级时间戳全为零时长：对齐照样算得出来（文本能
+        匹配），但 `segment_transcript` 过滤零时长词后无词可分段而抛出。
+        """
+
+        remote_info = RemoteMediaInfo("abc", "Example", 3_000, "https://youtu.be/abc", ("en",), ())
+
+        def download_subtitles(_url, output_directory, **_kwargs):
+            path = Path(output_directory) / "source.en.srt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # 第 3 条越出媒体时长：候选 QA 为 error，auto 策略因此选择对齐。
+            path.write_text(
+                "1\n00:00:00,000 --> 00:00:00,800\nFirst.\n\n"
+                "2\n00:00:00,900 --> 00:00:01,700\nSecond.\n\n"
+                "3\n00:00:02,600 --> 00:00:04,000\nThird.\n",
+                encoding="utf-8",
+            )
+            return path
+
+        def download_media(_url, output_directory, **_kwargs):
+            path = Path(output_directory) / "audio.m4a"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+            return path
+
+        media_info = MediaInfo(
+            path=str(root / "audio.m4a"),
+            duration_ms=3_000,
+            size_bytes=5,
+            format_name="m4a",
+            width=None,
+            height=None,
+            frame_rate=None,
+            video_codec=None,
+            audio_codec="aac",
+            has_video=False,
+            has_audio=True,
+        )
+        if zero_duration_words:
+            words = (Word("First.", 200, 200, 0.9), Word("Second.", 2000, 2000, 0.9))
+        else:
+            words = (Word("First.", 200, 900, 0.9), Word("Second.", 2000, 2700, 0.9))
+        transcript = Transcript(language="en", engine="mlx", words=words)
+
+        with (
+            patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+            patch(
+                "xvt.pipeline.transcription.download_remote_subtitles",
+                side_effect=download_subtitles,
+            ),
+            patch(
+                "xvt.pipeline.transcription.download_remote_media",
+                side_effect=download_media,
+            ),
+            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch(
+                "xvt.pipeline.transcription.run_command",
+                side_effect=self._write_normalized_audio,
+            ),
+            patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+        ):
+            return run_remote_transcription(
+                "https://youtu.be/abc",
+                root,
+                youtube_subtitles=True,
+                subtitle_language="en",
+                event_sink=events.append,
+            )
 
     def test_post_qa_alignment_fallback_persists_aligned_subtitle_qa_report(self) -> None:
         """自动回落 ASR 的那一支同样登记报告：`selection_reason` 之外要有 issue 明细。

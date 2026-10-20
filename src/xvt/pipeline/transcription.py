@@ -644,6 +644,17 @@ def _process_adaptive_media(
                 selected_kind = "aligned_subtitles"
                 selection_reason = "manual_subtitles_aligned"
             else:
+                # 对齐这一步到此已经做完：算出了 alignment、落盘了 alignment.json 与
+                # aligned-subtitle-qa.json、做出了「不采用」的判定。终态就落在决策完成
+                # 的这一刻，**早于**回落分段这项后续工作可能的失败——否则
+                # `segment_transcript` 抛出时 `current_stage` 已经交棒给 SEGMENT，
+                # 外层 except 只记 SEGMENT FAILED，ALIGN 永久停在 `running`，
+                # Job 状态解释不了自己。
+                #
+                # 刻意不把这行提到 if/elif/else **之前**：强制对齐的两道门（置信度门、
+                # 对齐后 QA error 门）就在上面抛出，提前标成功会被外层 except 覆写成
+                # failed，在同一个 stage 上造出 #116 修过的「先完成后失败」形态。
+                set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
                 current_stage = StageName.SEGMENT
                 set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
                 cues = segment_transcript(
@@ -661,8 +672,11 @@ def _process_adaptive_media(
                     if alignment.confidence < minimum_alignment_confidence
                     else "alignment_post_qa_failed"
                 )
-            set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
             if selected_kind == "aligned_subtitles":
+                # 采用对齐结果的两支（强制与自动）在这里落 ALIGN 终态并跳过 SEGMENT；
+                # 回落 ASR 的那一支已在交棒给 SEGMENT 之前自己落过。与紧随其后的
+                # SEGMENT 记账同一口径：谁走哪条分支，谁自己交出两个 stage 的终态。
+                set_stage(job, StageName.ALIGN, StageStatus.SUCCEEDED, event_sink)
                 set_stage(job, StageName.SEGMENT, StageStatus.SKIPPED, event_sink)
         elif plan.action is SourceSelectionAction.ASR:
             set_stage(job, StageName.ALIGN, StageStatus.SKIPPED, event_sink)
