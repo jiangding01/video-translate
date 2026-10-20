@@ -168,7 +168,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 
 | 编号 | 内容 | 判断 |
 | --- | --- | --- |
-| O1 | `semantic.py` 三处 12 行逐字相同的终态收口 + 两处问题分拣重复，抽 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper | **值得做**，半天；是 Phase 5 的轻量替代，能吃掉其大部分收益 |
+| O1 | `semantic.py` 三处 12 行逐字相同的终态收口 + 两处问题分拣重复，抽 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper | **已修（本轮）**，条目描述逐处核实后属实（一处收口的差异点与原描述略有不同），见下方 O1 条目 |
 | O2 | policy 回退有 4 份、两派语义（`common.py` / `semantic_state.py` 回退顶层键，`workflow.py` / `translation.py` 回退默认值） | **已修（本轮）**，并且**不是整洁问题**——已复现为真实可达的术语死锁，见下方 O2 条目 |
 | O3 | `translation_provider.py` 的 `resolve_provider` 不拒绝带 userinfo/query 的 base_url；实测 `user:pw@host` 的凭据经 `InvalidURL` 消息泄露（消息不含 scheme，`redact_text` 的 URL 正则不命中）且随 `config.workflow` 永久落盘 | **已修（本轮）**，见下方 O3 条目 |
 | O4 | `paths.py` 的覆盖保护只认已登记 artifact；纯音频 Job 执行 `burn --output <job.input 的路径>` 会被 `ffmpeg -y` 静默覆盖原始媒体 | **已修（本轮）**，见下方 O4 条目 |
@@ -320,6 +320,28 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 **O7b 全仓无 subprocess / shell 守卫**。新增 `tests/test_subprocess_boundary.py`，四条 ast 守卫：① `src/xvt/` 下除 `process.py` 外不得 import `subprocess`；② 反向钉住 `process.py` 真的在用 `subprocess`（否则例外声明空转，守卫自己先烂掉）；③ 全仓**含 `process.py`** 不得出现 `shell=True` 关键字实参——参数数组是唯一执行形式，这条没有例外，`process.py` 的例外只针对 import；④ 不得调用 `os.system` / `os.popen`，它们只收 shell 字符串，只禁 `subprocess` 会把这条后门留着。用 ast 而非文本扫描，续行写法与注释/字符串字面量都影响不了判定；`setUp` 里有扫描文件数下限断言，防止扫描根指错后静默空过。自证：`doctor.py` 临时 `import subprocess`、`process.py` 的 `Popen` 临时加 `shell=True`、`doctor.py` 临时加 `os.system(...)`，三种变异各自只打红对应那一条（验完删除）。AGENTS 不可破坏约束 6 的措辞已同步写明这条守卫。
 
 **O7c `checksum=None → warn` 分支无测试**。清单的说法**属实，已独立复验**：把 `recovery.verify_artifact` 的 `"warn"` 改成 `"pass"`，全量 915 条 + 235 subtests 仍然全绿。新增 `tests/test_recovery.py::RecoveryTest::test_verify_job_warns_on_artifact_without_checksum`，除了钉住 verify 的三元结果（`warn` 不升级为 `fail`、`warning_count == 1`、message 与 `expected_checksum: null`），还钉住**下游后果**：`valid_artifact_path` 对这种 artifact 必须返回 `None`。后者才是真正的风险面——`verify_artifact` 同时是 `valid_artifact_path` 的判定来源，一旦退化成 `pass`，一个从未登记过内容 checksum 的文件就会被恢复链路当成有效产物复用，违反不可破坏约束 9。
+
+### O1 `semantic.py` 的终态收口与问题分拣重复 — ✅ 已核验，**已修（本轮）**
+
+**(a) 三处收口的核对结果（HEAD = 583bd2e 的行号）。** 条目描述属实，但差异点与清单原文略有不同，逐处核过：
+
+| 位置 | 所在函数 | 条件 | `mode` |
+| --- | --- | --- | --- |
+| :676-687 | `run_translation_semantic_review` 的 `reviewed_candidate` 分支 | `issues or blocking_qa_issues` | `mode` 变量 |
+| :737-748 | `run_translation_semantic_review` 的常规分支 | `issues or blocking_qa_issues` | `mode` 变量 |
+| :1070-1081 | `apply_agent_semantic_review` 收尾 | **`final_issues`** or `blocking_qa_issues` | 字面量 `"agent"` |
+
+前两处除缩进外**逐字相同**（机械对账：两块去缩进后 `diff` 为空）；第三处结构相同但两个名字不同。`final_issues` 与前两处的 `issues` 语义同一——都是「这一轮之后仍然挡着收口的语义 issue」：API 侧 `issues` 在 `if repairable:` 里被重新赋值为复审结果 `final_issues`，Agent 侧 `final_issues` 由 `_merge_issues(initial_issues, preserved_revision_issues)` 起算、有修复时整体替换为复审结果，所以同一个形参承接两者不改变判定。
+
+**(b) 两处分拣的位置与清单描述不同（清单指错，已更正）。** 清单把它写成「`_ensure_candidate_qa(...)` + `paths.append(candidate_qa_path)` 的配对（:733-734 与 :1068-1069）」，实测那对只有 2 行、且**不是分拣**。真正两处逐字重复的问题分拣在 :701-704 与 :944-947：按 `SEMANTIC_REPAIR_CATEGORIES` 取 `repairable`、按 `category == "source_suspect"` 取 `preserved`，只差输入变量名（`issues` / `initial_issues`）。`_ensure_candidate_qa` 全文件 4 个调用点中另两处形态不同，不属重复：:595 在 `paths` 列表创建之前（其结果随后成为 `paths` 的首项），:781 在 Agent manifest 准备期丢弃阻塞 issue（`_blocking_qa_issues`）。`translate.py:755` 也有一行同形的 `repairable` 过滤，但它在 `build_semantic_repair_batches` 内部、没有 `preserved` 配对，且跨模块抽取会让 `translate.py` 反向依赖 pipeline，刻意不动。
+
+**(c) 改法。** 两个 helper 都是 `semantic.py` 模块私有，**没有下移到 `semantic_state`**：`_conclude_semantic_review` 要 `set_stage`、要 `ensure_semantic_review_inputs` 写模板、要 `_finalize_candidate` 落盘与登记 artifact，按 AGENTS 对 `semantic_state` 的职责界定（零副作用叶子，不写盘不登记 artifact 不改 stage）它不该进那里；`_partition_issues` 虽是纯函数，但唯一消费者就是 `semantic.py` 自己，下移只会把一个私有名变成跨模块公共 API。三处调用的参数对应：`issues=issues` / `issues=issues` / `issues=final_issues`，`mode=mode` / `mode=mode` / `mode="agent"`，其余（`job`、`job_file`、`candidate_path`、`paths`、`blocking_qa_issues`、`event_sink`）在三处都是原地同名变量。`paths` 按原语义**原地 extend**（原代码就是先 `paths.extend(...)` 再 `tuple(paths)`），所以返回序列的顺序与内容不变。helper 体与原块去缩进后逐字一致。
+
+**(d) 残留的 2 行配对刻意不动。** `_ensure_candidate_qa` + `paths.append` 那对（现 :772-775 与 :1102-1103）看着可以并进 `_conclude_semantic_review`，但**那是行为变化**：API 侧只在 `if repairable:` 里重算候选 QA，不走修复时 `blocking_qa_issues` 来自远在 provider 解析之前的那次调用；把它挪进收口 helper 会在非修复路径上多跑一次 `_ensure_candidate_qa`，多一次 artifact 比对与可能的 `artifact_created`。
+
+**(e) 零行为变化的验证。** `1067 passed, 312 subtests`，与基线逐字一致；既有断言零改动；`tests/test_provider_protocol_snapshot.py` 零 diff（golden 文件未被改写，`git status` 只有源文件与文档），这是本条目的硬验收——`semantic.py` 在 provider 编排的快照路径上。CHANGELOG 未记（零用户可见变化，与 O8 两轮同口径）。
+
+**(f) 对「Phase 5 轻量替代」那句的回报。** 成立，但要说准：O1 吃掉的是语义链路**首尾两个决策点**（分拣、收口），它们现在各只有一份；Phase 5 原本要合的「初审 → 可修复？→ 修复 → 复审 → 确认/等待」里，中间三步在两条链路上的形态差异是**协议本质的**——API 侧是 `_run_review_phase` / `_run_repair_phase` 的逐批 provider 调用加 checkpoint 续跑，Agent 侧是对一份已回填响应做一次性解析校验（`agent_results` + `parse_semantic_repair_response` + `apply_semantic_repairs`），两者之间已无逐字重复可搬。再往下合需要先造一层「一轮 review 怎么取得」的抽象，为约 0 行重复引入一层间接，与 AGENTS「保持实现简单」相悖。**建议据此把 Phase 5 关闭（而非降级）**，仍留主干拍板。
 
 ## 2026-10-17 ASR 转写腿真实 E2E 验收发现（P 系列，与上面的 F/O 编号无关）
 
@@ -589,8 +611,8 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 3. ~~**N1 设计决策**：先定「确认是否绑定译文内容」，再动手。~~ 已定并已修（本轮）：确认绑定译文内容，载体是记录里早就落盘、只是没被读过的 `report_kind` / `report_checksum`。
 4. ~~**烧录判定收敛与 fail-closed 补洞**：F6 + O5 + F7 + O7。~~ 四条均已修：F6 / O5（上一轮，四阶段：改桩 → 真实状态测试 → 口径收敛 → 终检守卫），F7 / O7（本轮，与 F5 同一批「守卫与去重」）。
 5. ~~**去重**：F5。~~ 已修（本轮）。
-6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
+6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 已于 2026-10-20 做完，见上方 O1 条目。
 
-**剩余未处理**：O1，O8 条目 (d) 登记的六条遗留（副本部分已于 2026-10-20 裁定收尾，遗留留主干拍板），以及「观察」一节里尚未处理的几条。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
+**剩余未处理**：O8 条目 (d) 登记的六条遗留（副本部分已于 2026-10-20 裁定收尾，遗留留主干拍板），以及「观察」一节里尚未处理的几条。O1 与 O9 / O10 / O11、O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
 
-对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。
+对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小（O1 已于 2026-10-20 做完，实测确认两条链路在中间三步上**已无逐字重复可搬**，建议由「降级」进一步改为**关闭** Phase 5，理由见上方 O1 条目 (f)，仍未拍板）；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

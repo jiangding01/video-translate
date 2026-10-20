@@ -2,6 +2,18 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **O1 语义收口去重：`semantic.py` 抽出 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper**（分支 `codex/o1-semantic-conclude-helper`，未合并、未开 PR）。
+
+**① 核实结果。** 三处终态收口确认存在：`run_translation_semantic_review` 的 `reviewed_candidate` 分支（原 :676-687）与常规分支（原 :737-748）**去缩进后逐字相同**，`apply_agent_semantic_review` 收尾（原 :1070-1081）结构相同但条件用 `final_issues`、`mode` 是字面量 `"agent"`。两处问题分拣的位置**与 review 清单写的不同**：清单指的 `_ensure_candidate_qa` + `paths.append` 配对只有 2 行且不是分拣，真正重复的是 :701-704 与 :944-947 的 `repairable` / `preserved` 按类别过滤（只差输入变量名）。
+
+**② 做了什么。** 收口的 12 行抽成 `_conclude_semantic_review(job, job_file, candidate_path, paths, *, issues, blocking_qa_issues, mode, event_sink)`，差异点只有 `issues`（API 侧 `issues`，Agent 侧 `final_issues`——同一语义：这一轮后仍挡着收口的 issue）与 `mode`；分拣抽成 `_partition_issues(issues) -> (repairable, preserved)`。两个 helper 都留在 `semantic.py` 模块私有：`_conclude_semantic_review` 有 `set_stage` / 写模板 / 登记 artifact 三种副作用，按 AGENTS 对 `semantic_state`（零副作用叶子）的界定不该下移；`_partition_issues` 虽纯，唯一消费者就是本模块。
+
+**③ 零行为变化。** `1067 passed, 312 subtests`，与基线逐字一致；既有断言零改动；**协议快照零 diff**（`semantic.py` 在 provider 编排的快照路径上，这是本轮硬验收）。CHANGELOG 未记（零用户可见变化，与 O8 两轮同口径）。
+
+**④ 刻意未动。** `_ensure_candidate_qa` + `paths.append` 那对 2 行（现 :772-775 与 :1102-1103）并进收口 helper 会是**行为变化**：API 侧不走修复时 `blocking_qa_issues` 来自 provider 解析之前的那次调用，挪进去会多跑一次候选 QA。`translate.py:755` 那行同形的 `repairable` 过滤在 `build_semantic_repair_batches` 内部、无 `preserved` 配对，抽取还会让 `translate.py` 反向依赖 pipeline。
+
+**⑤ 对 Phase 5 的判断。** O1「吃掉 Phase 5 大部分收益」成立，但要说准：吃掉的是首尾两个决策点（分拣、收口）；中间三步（初审 / 修复 / 复审）的差异是协议本质的——API 逐批 provider 调用加 checkpoint 续跑 vs. Agent 对一份已回填响应一次性解析校验，两者间已无逐字重复可搬。**建议把 Phase 5 由「降级」改为「关闭」**，留主干拍板；REVIEW_FINDINGS 的 O1 条目 (f) 与 ROADMAP 已同步这条建议。
+
 2026-10-20 **O8 对齐/分段副本收尾：分段 preset 收敛为 `_segmentation_config`，对齐侧冻结不抽**（分支 `refactor/o8-align-segment-copies`，未合并、未开 PR）。
 
 **① 裁定。** `pipeline/transcription.py` 的三份「导入源字幕与 ASR 对齐」副本（A `_process_adaptive_media` / B `_process_acquired_media` / C `resume_job` 对齐分支）里，B 与 C 对现代 Job 不可达，仅为 v0.1.x 历史 Job（config 缺 `source_strategy`）保留；「对齐后 QA error 门只有 A 有」是 v0.2.0 source-selection 的刻意不对称（B/C 的 error 级 issue 由下游 `_run_source_subtitle_qa` fail-closed），不是漂移；三种失败记账的可观测结果已收敛。详细对账与证据链见 `docs/REVIEW_FINDINGS_2026_10_17.md` O8 条目。
@@ -569,7 +581,7 @@ media-qa.json
 
 ### Q1-Q6.1：字幕质量与自适应源字幕
 
-完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful。Q6.2 剩余的模型收敛实测需单独授权，因此先推进 R3.1：Phase 1 协议快照回归网、Phase 2 函数级 import 环消解、Phase 4a（translation + retranslate 批次循环单份化）、Phase 4b（polish 接入共享循环 + `TRANSLATION_FALLBACK` 收敛）与 Phase 4c（semantic 接入共享循环，Phase 4 收尾）均已于 2026-10-17 完成，四条链路至此共用 `run_provider_batches` 一份循环骨架；下一步是 Phase 5（语义链路编排单份化：初审 → 可修复？→ 修复 → 复审 → 确认/等待这套决策逻辑目前仍是各写各的）。
+完整方案已经过架构终审并落在 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。Q1–Q6.1 已按顺序完成：翻译传输可靠性 → 新 Job 自适应源字幕 → 已有 Job 源字幕重建 → 语义组翻译 → 可恢复字幕润色 → 语义校对与一次修复 → 人工修订与提示词加固。R2 CLI 收敛也已完成；polished Agent 主链真实 E2E 已完成且默认保持 standard + faithful。Q6.2 剩余的模型收敛实测需单独授权，因此先推进 R3.1：Phase 1 协议快照回归网、Phase 2 函数级 import 环消解、Phase 4a（translation + retranslate 批次循环单份化）、Phase 4b（polish 接入共享循环 + `TRANSLATION_FALLBACK` 收敛）与 Phase 4c（semantic 接入共享循环，Phase 4 收尾）均已于 2026-10-17 完成，四条链路至此共用 `run_provider_batches` 一份循环骨架；下一步原定 Phase 5（语义链路编排单份化：初审 → 可修复？→ 修复 → 复审 → 确认/等待这套决策逻辑此前各写各的），其轻量替代 O1 已于 2026-10-20 做完——「可修复？」与「确认/等待」两个决策点各收敛为一份模块私有 helper，中间三步的差异经实测确认是协议本质的，建议据此关闭 Phase 5（留主干拍板）。
 
 关键兼容性决定：不新增 `StageName`，Job schema 继续为 v1；润色和语义校对通过 artifact、事件和现有 stage 的细分状态表达。旧 Job 缺少新配置时保持当前平台字幕/单遍翻译行为。GUI 延后到本方案完成真实 E2E 验收之后。
 
@@ -605,7 +617,7 @@ media-qa.json
 - **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；局部重译是显式例外：`apply-cue-retranslation` 需要 `xvt apply` 拿不到的 cue ID 与目标语言，因此无论响应带不带 `task`（协议一致的重译响应只有 `fingerprint` + `items`，靠「有有效重译 manifest 且 `translate` 在等输入」识别）都以 `invalid_input` 报错并给出可复制的手工命令；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
 - **已完成**：R2.3 译文与源文修订 SRT 人工通道——两类 JSON 模板旁均写出同 fingerprint 的 `*-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前文本），可用任意字幕工具编辑；对应 `apply-*-review-fixes` 按后缀识别，统一入口 `xvt apply` 按固定文件名路由。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。JSON/SRT 汇聚为同一 `changes` 语义；旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出两种载体。
 - **已完成**：R2.4 两阶段——`relink-burned-output` 仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径；legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。恢复导航在其余静态条件满足、但已登记成品缺失或 checksum 失效时返回 `awaiting_input`，首选重新关联、备选显式重烧；建议仅表示可能可关联，relink 会复核源媒体内容。`batch-continue` 将该状态作为停止态，不自动重烧。媒体 QA、proof 或 fingerprint 无效仍为 `retryable`。polished 质量另加一条限制：只有语义候选已收尾（语义校对通过且 `translated_cues` 与最终候选一致）才给 relink 导航，否则 continue 的收尾会改写译文 cue、让刚关联的成品指纹失效。详见 [R2.4 技术方案](docs/R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
-- **待做**：R3.1 的 Phase 1/2/4a/4b/4c 已完成（四条链路共用 `run_provider_batches`）；Phase 5 按 review 建议降级为 O1 的两个纯搬移 helper，R3.2 建议延后或取消。Q6.2 剩余的模型收敛实测已于 2026-10-17 落槌移出近期计划（见 [路线图](ROADMAP.md) 的「暂不规划」）。polished Agent 主链 E2E 已通过，默认保持 standard + faithful。
+- **待做**：R3.1 的 Phase 1/2/4a/4b/4c 已完成（四条链路共用 `run_provider_batches`）；Phase 5 按 review 建议降级为 O1 的两个纯搬移 helper，**O1 已于 2026-10-20 做完**（见本文件顶部条目），据此建议关闭 Phase 5，留主干拍板；R3.2 建议延后或取消。Q6.2 剩余的模型收敛实测已于 2026-10-17 落槌移出近期计划（见 [路线图](ROADMAP.md) 的「暂不规划」）。polished Agent 主链 E2E 已通过，默认保持 standard + faithful。
 
 全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），2026-10-11 Agent 主链 polished E2E 已通过，默认决定继续保持 standard + faithful；多样本对照仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。
 
