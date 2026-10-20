@@ -25,6 +25,7 @@ class ArtifactKind(StrEnum):
     NORMALIZED_AUDIO = "normalized_audio"
     WORD_TRANSCRIPT = "word_transcript"
     SUBTITLE_ALIGNMENT = "subtitle_alignment"
+    ALIGNED_SUBTITLE_QA = "aligned_subtitle_qa"
     SOURCE_CANDIDATE_QA = "source_candidate_qa"
     SOURCE_CUES = "source_cues"
     SOURCE_SELECTION = "source_selection"
@@ -92,6 +93,11 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
     ArtifactKind.SUBTITLE_ALIGNMENT: frozenset(
         {ArtifactKind.WORD_TRANSCRIPT, ArtifactKind.INPUT_SUBTITLES}
     ),
+    # 对齐后字幕 QA 报告：对齐结果的 cue 与媒体边界共同决定对齐候选是否可采用。
+    # 与 SOURCE_CANDIDATE_QA 同构（候选级判定依据），因此是 SOURCE_CUES 的上游。
+    ArtifactKind.ALIGNED_SUBTITLE_QA: frozenset(
+        {ArtifactKind.SUBTITLE_ALIGNMENT, ArtifactKind.MEDIA_INFO}
+    ),
     # 源字幕候选质量报告：本地/远程字幕及媒体边界共同决定候选是否可采用。
     ArtifactKind.SOURCE_CANDIDATE_QA: frozenset(
         {
@@ -105,6 +111,7 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
             ArtifactKind.WORD_TRANSCRIPT,
             ArtifactKind.INPUT_SUBTITLES,
             ArtifactKind.SUBTITLE_ALIGNMENT,
+            ArtifactKind.ALIGNED_SUBTITLE_QA,
             ArtifactKind.TRANSLATION_RESEGMENTATION,
             ArtifactKind.DOWNLOADED_SUBTITLES,
             ArtifactKind.SOURCE_CANDIDATE_QA,

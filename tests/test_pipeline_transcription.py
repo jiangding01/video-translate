@@ -993,6 +993,156 @@ class TranscriptionPipelineTest(unittest.TestCase):
             data = json.loads(job_file.read_text())
             self.assertEqual(data["stages"]["align"]["status"], "failed")
 
+    def test_forced_alignment_failure_persists_aligned_subtitle_qa_report(self) -> None:
+        """强制对齐被 QA error 门拒绝时，对齐后 QA 报告必须留下可校验的产物。
+
+        约束 4 不受影响：落盘只是证据。失败仍然是失败——本测试同时钉住 `source_cues`、
+        `source_srt`、`subtitle_qa` 一个都没有登记，`align` 仍是 FAILED。
+        报告从磁盘上的 `job.json` 重新加载后仍在，证明登记发生在抛出之前。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            # 媒体时长短于对齐后的 cue：对齐结果高置信但触发 outside_media error。
+            media_info = MediaInfo(
+                str(media), 1000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello", 1500, 2200, 0.9),),
+            )
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                with self.assertRaisesRegex(ValueError, "error-level issues"):
+                    run_local_transcription(
+                        media,
+                        root,
+                        subtitles=subtitles,
+                        align_subtitles=True,
+                    )
+
+            job_file = next((root / "jobs").glob("*/job.json"))
+            job = load_job(job_file)
+            self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.FAILED)
+            kinds = {artifact.kind for artifact in job.artifacts}
+            self.assertIn("aligned_subtitle_qa", kinds)
+            self.assertFalse(kinds & {"source_cues", "source_srt", "subtitle_qa"})
+
+            report_path = valid_artifact_path(job, "aligned_subtitle_qa")
+            self.assertIsNotNone(report_path)
+            assert report_path is not None
+            self.assertEqual(report_path.name, "aligned-subtitle-qa.json")
+            artifact = next(item for item in job.artifacts if item.kind == "aligned_subtitle_qa")
+            self.assertEqual(artifact.checksum, file_checksum(report_path))
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["cue_count"], 1)
+            errors = [issue for issue in report["issues"] if issue["severity"] == "error"]
+            self.assertEqual(
+                [(issue["code"], issue["cue_id"]) for issue in errors],
+                [("outside_media", 1)],
+            )
+
+    def test_accepted_alignment_persists_report_without_changing_outcome(self) -> None:
+        """对齐被接受时行为一字不变，报告只是多一份与 `qa.json` 同内容的证据。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("Hello", 500, 1400, 0.9),),
+            )
+
+            def run_ffmpeg(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"audio")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with (
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+                patch("xvt.pipeline.transcription.transcribe_audio", return_value=transcript),
+            ):
+                job = run_local_transcription(
+                    media,
+                    root,
+                    subtitles=subtitles,
+                    align_subtitles=True,
+                )
+
+            self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SUCCEEDED)
+            self.assertEqual(job.stages[StageName.SEGMENT].status, StageStatus.SKIPPED)
+            self.assertEqual(job.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+            self.assertEqual(job.stages[StageName.RENDER].status, StageStatus.SUCCEEDED)
+
+            cues_path = valid_artifact_path(job, "source_cues")
+            self.assertIsNotNone(cues_path)
+            assert cues_path is not None
+            cues = json.loads(cues_path.read_text(encoding="utf-8"))
+            self.assertEqual([cue["start_ms"] for cue in cues], [500])
+            self.assertEqual([cue["provenance"] for cue in cues], ["aligned"])
+
+            aligned_report_path = valid_artifact_path(job, "aligned_subtitle_qa")
+            source_report_path = valid_artifact_path(job, "subtitle_qa")
+            self.assertIsNotNone(aligned_report_path)
+            self.assertIsNotNone(source_report_path)
+            assert aligned_report_path is not None and source_report_path is not None
+            # 采用对齐结果时两份报告检查的是同一批 cue，内容必须逐字相同。
+            self.assertEqual(
+                json.loads(aligned_report_path.read_text(encoding="utf-8")),
+                json.loads(source_report_path.read_text(encoding="utf-8")),
+            )
+            self.assertNotEqual(aligned_report_path, source_report_path)
+
+    def test_subtitle_source_without_alignment_registers_no_aligned_report(self) -> None:
+        """没跑对齐的 Job 不得凭空多出这份报告：它只在对齐真的跑过时存在。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            subtitles = root / "source.srt"
+            subtitles.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+                encoding="utf-8",
+            )
+            media_info = MediaInfo(
+                str(media), 5000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+
+            with patch("xvt.pipeline.transcription.probe_media", return_value=media_info):
+                job = run_local_transcription(media, root, subtitles=subtitles)
+
+            self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SKIPPED)
+            self.assertNotIn("aligned_subtitle_qa", {artifact.kind for artifact in job.artifacts})
+
     def test_remote_pipeline_downloads_audio_then_reuses_local_processing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

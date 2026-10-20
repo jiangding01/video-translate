@@ -21,6 +21,7 @@ from xvt.pipeline import (
     run_subtitle_transcription,
 )
 from xvt.process import CommandResult
+from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.workflow import continue_workflow
 
 
@@ -186,6 +187,112 @@ class SourceSelectionPipelineTest(unittest.TestCase):
         self.assertEqual(job.stages[StageName.ALIGN].status, StageStatus.SUCCEEDED)
         self.assertEqual(job.stages[StageName.SEGMENT].status, StageStatus.SUCCEEDED)
         self.assertEqual(job.stages[StageName.SUBTITLE_QA].status, StageStatus.SUCCEEDED)
+
+    def test_post_qa_alignment_fallback_persists_aligned_subtitle_qa_report(self) -> None:
+        """自动回落 ASR 的那一支同样登记报告：`selection_reason` 之外要有 issue 明细。
+
+        这里走真实的 `align_source_cues`：前两条 cue 匹配到词级时间戳，第三条匹配不上
+        而被按拟合出的 scale 投影到媒体之外，于是对齐置信度够但对齐后 QA 有 error，
+        `alignment_accepted` 为假、源选择回落 ASR。此时 `subtitle_qa` 讲的是 ASR cue，
+        对齐候选为什么被拒只有这份报告说得清。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote_info = RemoteMediaInfo(
+                "abc", "Example", 3_000, "https://youtu.be/abc", ("en",), ()
+            )
+
+            def download_subtitles(_url, output_directory, **_kwargs):
+                path = Path(output_directory) / "source.en.srt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "1\n00:00:00,000 --> 00:00:00,800\nFirst.\n\n"
+                    "2\n00:00:00,900 --> 00:00:01,700\nSecond.\n\n"
+                    # 超出媒体时长：候选 QA 为 error，自动策略因此选择对齐。
+                    "3\n00:00:02,600 --> 00:00:04,000\nThird.\n",
+                    encoding="utf-8",
+                )
+                return path
+
+            def download_media(_url, output_directory, **_kwargs):
+                path = Path(output_directory) / "audio.m4a"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"audio")
+                return path
+
+            media_info = MediaInfo(
+                path=str(root / "audio.m4a"),
+                duration_ms=3_000,
+                size_bytes=5,
+                format_name="m4a",
+                width=None,
+                height=None,
+                frame_rate=None,
+                video_codec=None,
+                audio_codec="aac",
+                has_video=False,
+                has_audio=True,
+            )
+            transcript = Transcript(
+                language="en",
+                engine="mlx",
+                words=(Word("First.", 200, 900, 0.9), Word("Second.", 2000, 2700, 0.9)),
+            )
+
+            with (
+                patch("xvt.pipeline.transcription.inspect_remote", return_value=remote_info),
+                patch(
+                    "xvt.pipeline.transcription.download_remote_subtitles",
+                    side_effect=download_subtitles,
+                ),
+                patch(
+                    "xvt.pipeline.transcription.download_remote_media",
+                    side_effect=download_media,
+                ),
+                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch(
+                    "xvt.pipeline.transcription.run_command",
+                    side_effect=self._write_normalized_audio,
+                ),
+                patch(
+                    "xvt.pipeline.transcription.transcribe_audio",
+                    return_value=transcript,
+                ),
+            ):
+                job = run_remote_transcription(
+                    "https://youtu.be/abc",
+                    root,
+                    youtube_subtitles=True,
+                    subtitle_language="en",
+                )
+                selection = self._selection(job)
+
+                self.assertEqual(selection["selected_kind"], "asr")
+                self.assertEqual(selection["reason"], "alignment_post_qa_failed")
+
+                report_path = valid_artifact_path(job, "aligned_subtitle_qa")
+                self.assertIsNotNone(report_path)
+                assert report_path is not None
+                artifact = next(
+                    item for item in job.artifacts if item.kind == "aligned_subtitle_qa"
+                )
+                self.assertEqual(artifact.checksum, file_checksum(report_path))
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                self.assertEqual(report["status"], "failed")
+                errors = [issue for issue in report["issues"] if issue["severity"] == "error"]
+                self.assertEqual(
+                    [(issue["code"], issue["cue_id"]) for issue in errors],
+                    [("outside_media", 3)],
+                )
+                # 源腿的 qa.json 讲的是最终采用的 ASR cue，不是被拒的对齐候选。
+                source_report_path = valid_artifact_path(job, "subtitle_qa")
+                self.assertIsNotNone(source_report_path)
+                assert source_report_path is not None
+                self.assertNotEqual(
+                    json.loads(source_report_path.read_text(encoding="utf-8")),
+                    report,
+                )
 
     def test_valid_manual_candidate_keeps_remote_fast_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
