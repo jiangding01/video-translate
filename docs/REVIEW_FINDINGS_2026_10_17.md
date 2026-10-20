@@ -190,7 +190,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 
 改法：删掉两个恒真 `if` 与其后不可达的 `return _process_acquired_media(...)`，并在原地留注释写明「Job 由本函数创建所以键必然存在，旧 Job 只从 resume 入口进」。零行为变化，未新增测试（没有可观测的行为差异可断言），全量测试零变红。
 
-**「对齐/分段规则 3–4 份副本」2026-10-20 已裁定并收尾**（分支 `refactor/o8-align-segment-copies`）。三份对齐副本现位置：A=`_process_adaptive_media`（对齐段 :585 区域）、B=`_process_acquired_media`（对齐段 :802 区域）、C=`resume_job` 的对齐分支（现 :1801 区域；上一版表格写的 :1653 是旧行号，已勘误）。
+**「对齐/分段规则 3–4 份副本」2026-10-20 已裁定并收尾**（分支 `refactor/o8-align-segment-copies`）。三份对齐副本现位置：A=`_process_adaptive_media`（对齐段 :585 区域）、B=`_process_acquired_media`（对齐段 :802 区域）、C=`resume_job` 的对齐分支（现 :1801 区域）。
 
 **(a) 三份副本对账结论。**
 
@@ -204,6 +204,8 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 - **「对齐后 QA error 门只有 A 有」是刻意不对称，不是漂移。** 该门属于 v0.2.0 source-selection 特性（回落 ASR、`selection_reason`、`aligned-subtitle-qa.json`）；B/C 没有回落机制（legacy 语义），error 级 issue 并不放行：三份副本的最终 cue 都汇入同一个 `_run_source_subtitle_qa`，`complete_qa_stage` 对 error 级 fail-closed（约束 4 满足），差异只是失败归属（ALIGN vs SUBTITLE_QA）、专用报告与回落能力。
 - **三种失败记账方式的可观测结果已收敛**：三处都落 ALIGN FAILED、同文案带数值、category 同为 `workflow`、同发 `stage_failed`。A/B 的边界记账（外层 except + `current_stage`）与 C 的调用点手写 `set_stage` 是两种既定风格（HANDOFF 2026-10-18 有裁定记录），不统一。
 - **对齐侧不抽公共函数**：B/C 冻结后「防同步漂移」的收益为零（它们本就不该跟 A 的现代语义同步），抽取只会碰冻结路径。只在 B/C 加了冻结注释。
+
+**(b) 行号勘误。** 上一版表格把 C 写为 :1653 起（`resume_job` :1533），是旧行号；本轮对账时 C 的对齐分支在 :1801 区域，分段调用点为 :644 / :668 / :825 / :1834 / :1889（旧表写 :537 / :561 / :717 / :1679 / :1734）。
 
 **(c) 分段侧已收敛。** 原先 5 处逐字相同的 `segmentation_config_for_preset(str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET)))` 现统一为模块私有 helper `_segmentation_config(job)`。其中 4 处是真分段调用；第 5 处（`rebuild_source`）**不是分段，是 fail-fast 预校验**（返回值丢弃，目的是改动 Job 前对未知 preset 提前失败），已在原地补注释。零行为变化。
 
