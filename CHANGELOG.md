@@ -59,6 +59,7 @@
 
 ### Documentation
 
+- README 的环境要求与 AGENTS 的验证命令一节写明**字幕字体是行宽 QA 的前置条件**：缺能渲染目标语言全部字形的字体时，libass 报 `failed to find any fallback with glyph`，`measure_bilingual_line_widths` 抛错，`qa.check_subtitles` **静默降级**到保守显示单位上限（只记一条 `layout_measurement_unavailable` warning），烧录照旧进行、测试照旧全绿。Linux 上中日韩需要 `fonts-noto-cjk` 一类包（`render.font_for_language` 在非 darwin / 非 win32 上要 `Noto Sans CJK SC` / `JP` / `KR`，其余语言要 `DejaVu Sans`），macOS 用系统自带的 Hiragino。CI 的 Linux 侧据此补装字体，并在两个平台新增一步能力断言（`.github/scripts/verify_layout_measurement.py`，本地同样可跑）：对 zh-CN / ja / en 各真的调一次测量并断言报告自己的 `layout["measurement"] == "measured"`，而不是 `fc-list | grep cjk` 这类代理指标。**产品行为零改动**（`src/` 未改，降级规则本身不变）：变的是 Linux CI 上行宽 QA 从一直降级变成真实测量，于是 `run` / `continue` 烧录腿复用渲染腿布局 QA 的那条分支在两个平台上都被验到。
 - README、`xvt run --help` / `xvt batch --help`、架构说明与事件契约补齐 `--engine` 的后端回退行为，此前四处都没有记载。
 - README 与架构说明写明**产物以 Job 登记表为准，不要按固定文件名取**：源文修订会把 `source_cues` / `source_srt` / `subtitle_qa` 重新指向 `source-reviewed-*` 命名的文件，`rebuild-source` / `resegment-translation` 会把下游产物移出登记表，两种情况下带旧内容的 `source.srt`、`translated.srt`、`bilingual.*`、`qa-translated.json` 都仍留在 `artifacts/` 下。这些残留是恢复证据，刻意不删除；按固定路径读取的脚本会拿到旧内容。
 - 恢复契约新增「强制对齐置信度不足的死循环出口」一节，写明判定条件与为什么缺任一对齐输入时不能断言必然失败。

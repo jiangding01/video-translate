@@ -112,11 +112,6 @@ jobs:
       - name: Test (pytest)
         run: uv run --no-sync pytest -q -rs
 
-      # TEMP（取证用，取证后回退）：-s 让那条 E2E 测试把 measurement 与各计数打进日志，
-      # 用来逐字证明 Linux 上真的走了 measured 那一路、复用分支真的执行了。
-      - name: Observe burn reuse decision (TEMP)
-        run: uv run --no-sync pytest -q -s tests/test_e2e.py::EndToEndTest::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass
-
       - name: CLI smoke test
         run: uv run --no-sync xvt --help
 

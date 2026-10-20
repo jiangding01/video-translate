@@ -2,6 +2,22 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **CI 的 Linux 侧补装字幕字体，两个平台都断言 libass 真的能测量行宽（#128 顺带取证出的既有盲区已修）**（分支 `codex/ci-cjk-fonts`，未合并、未开 PR；`src/` 零改动、测试零改动）。
+
+**① 盲区回顾。** CI 的 Linux 侧只 `apt-get install -y ffmpeg`，全历史没装过任何字幕字体，而 `render.font_for_language` 在非 darwin / 非 win32 上给 zh / ja / ko 要 `Noto Sans CJK SC` / `JP` / `KR`。缺字体 → libass `failed to find any fallback with glyph` → `measure_bilingual_line_widths` 抛 `ValueError` → `qa.check_subtitles` **静默降级**到保守显示单位上限（只记一条 `layout_measurement_unavailable` warning）。于是 Linux 上行宽 QA 从未真正测量过，而既有测试一条都看不见（涉及行宽的用例全部打桩了测量函数）。直接代价：#128 的 `_reusable_rendered_layout` 的「可复用」分支在 CI 上只有 macOS 在验。
+
+**② 字体包与家族名先核实再动手（CI 日志逐字取证，不靠记忆）。** `fonts-noto-cjk` 一个包就提供 SC / JP / KR / TC 四个家族，**且含 Bold 面**（原先担心 Bold 在 `fonts-noto-cjk-extra` 里、要靠 libass 合成假粗，实测不是）：`Noto Sans CJK SC -> NotoSansCJK-Regular.ttc: "Noto Sans CJK SC" "Regular"`、`Noto Sans CJK SC:bold -> NotoSansCJK-Bold.ttc: "Noto Sans CJK SC" "Bold"`，JP / KR 同形；非 CJK 回退 `DejaVu Sans -> DejaVuSans.ttf: "DejaVu Sans" "Book"`。所以 `font_for_language` 要的家族名 fontconfig 全部解析得到，**`src/` 一行没改**。macOS 侧不加步骤：系统自带的 Hiragino Sans GB / Hiragino Sans / Helvetica 正是 darwin 上要的三个（CI 日志里那一步打出来的就是这三个名字）。
+
+**③ 能力断言写成什么、为什么不写 `fc-list | grep -i cjk`。** 新脚本 `.github/scripts/verify_layout_measurement.py`（两个平台都跑，不带 `if`）对 zh-CN / ja / en —— 本仓库测试里真实用到的三种目标语言 —— 各真的调一次 `render.measure_bilingual_line_widths`（缺字形/缺 ffmpeg 都从这里抛，带原始异常），再走真实消费者 `qa.check_subtitles` 一遍，断言报告自己的 `layout["measurement"] == "measured"` 且无 `layout_measurement_unavailable`，并把家族名与量出的宽度/上限打进日志。`fc-list | grep` 是代理指标，与上一轮 macOS libass 事故（比对有没有 ffmpeg 可执行文件而不是有没有 `ass` 滤镜）同类：「字体包在盘上」≠「fontconfig 解析得到那个家族」≠「libass 量得出包围盒」。**顺序约束**（脚本 import xvt，必须排在 `Sync dependencies` 之后，不能像 ffmpeg 那两步一样提到最前）写进了步骤名 `Verify libass can measure subtitle line widths (must stay after Sync dependencies)` 与紧邻注释。
+
+**④ 验证方式：CI 绿不构成证据，另取两道。** 那条 E2E 按 `measurement` 分两路断言，两路都绿，所以单看绿灯说明不了 Linux 走了哪一路。取证手段：(a) 能力断言步骤本身就是证据——Ubuntu 上 `platform: linux` / `[zh-CN] font_for_language -> 'Noto Sans CJK SC'` / `[zh-CN] measured cue=1 role=target width=161 limit=492` / `[zh-CN] report measurement='measured' status='pass' issues=[]`（ja、en 同形）；(b) 临时取证步骤（已回退）用 `pytest -s` 把那条 E2E 的判定行打出来，Ubuntu 3.11 / 3.13 与 macOS 两版全是 `[observe] measurement='measured' status='pass' issues=[] qa_reports=1 ass=1 renders=['source', 'translated']`，即走的是 `measured` 那一路、**复用分支真的执行了**（两份产物各 1 次、`RENDER` 2 次），不再是 fail-closed 拒绝。另加一步纯观测的 `fc-match` 输出（永久保留，不做断言）。run 39373901091 四条 check 全绿、`1064 passed, 265 subtests` 四个 job 一致、零 skip。
+
+**⑤ 顺带说明：无 PR 时 CI 不会跑。** `on.push.branches` 只有 `main`，`workflow_dispatch` 未配置（`gh workflow run` 实测 HTTP 422）。为满足「不开 PR 也要真实 CI 验证」，取证期间临时把本分支加进 `on.push.branches`，取证后与临时 `pytest -s` 步骤、E2E 里那行临时 `print` 一起回退。最终状态与取证时的差异**只有这三处移除**，字体安装步与能力断言步逐字相同。
+
+**⑥ 耗时。** Ubuntu job 73s（基线 run 39373062466）→ 86s / 83s，多出来的是装字体 8–9s + 能力断言 2s（含临时取证步 1s）；`fc-cache -f` 在同一步内。pytest 本身 38.25s → 42.19s(3.11) / 38.52s(3.13)，真实测量带来的增量在噪声级。macOS 不变（装 `ffmpeg-full` 仍是大头，137s）。
+
+**遗留（如实登记）**：(a) `font_for_language` 给 ko 要 `Noto Sans CJK KR`（包已提供、`fc-match` 已解析到，但没进能力断言）、给 ar / fa / ur 要 `Noto Sans Arabic`（**未安装**，Linux 上这三种语言仍会降级）；本仓库测试里没有这些目标语言的用例，刻意不扩张安装面，将来有用例时要同时装 `fonts-noto-core` 并把语言加进脚本的 `CASES`。(b) **既有测试仍然一条都不断言真实测量成立**，涉及行宽的用例照旧打桩；这件事由 CI 那一步能力断言兜住，不由测试兜住——换句话说本地 `pytest` 全绿仍不能说明本机能测量，要跑那条脚本。(c) 产品行为零改动：用户机器上缺字体照旧降级，只是 README / AGENTS 现在写明了这件事。文档已同步：AGENTS（验证命令一节）、README（环境要求）、CHANGELOG（Documentation）、REVIEW_FINDINGS（那条观察标为 ✅ 已修并附 CI 逐字证据与未覆盖语言）。
+
 2026-10-20 **工作流烧录腿复用渲染腿的布局 QA 与 ASS，不再重算一遍（review 清单「`apply --continue` 把 QA 与渲染做了两遍」已修，但原条目的归因被实证更正）**（分支 `codex/apply-continue-no-double-render`，PR #128，未合并）。
 
 **① 实证先于动手，原条目的机制写错了。** 真实 CLI 逐步复现（纯字幕源 + `--provider agent --translation-quality polished`，零网络零 API；媒体为 `ffmpeg -f lavfi` 合成的 640×360 视频）：
