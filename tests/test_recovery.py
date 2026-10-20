@@ -2031,7 +2031,7 @@ class PendingTranslationImportDeadEndTest(unittest.TestCase):
 
         with (
             patch("xvt.pipeline.common.probe_media", return_value=media_info),
-            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.local.probe_media", return_value=media_info),
         ):
             self.assertEqual(
                 main(
@@ -2054,10 +2054,10 @@ class PendingTranslationImportDeadEndTest(unittest.TestCase):
 
         with (
             patch("xvt.pipeline.common.probe_media", return_value=media_info),
-            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
-            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.resume.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.local.run_command", side_effect=run_ffmpeg),
             patch(
-                "xvt.pipeline.transcription.transcribe_audio",
+                "xvt.pipeline.transcription.local.transcribe_audio",
                 return_value=Transcript(language="en", engine="mlx", words=words),
             ),
         ):
@@ -3063,10 +3063,10 @@ class AlignmentPostQaDeadlockExitTest(unittest.TestCase):
 
         with (
             patch("xvt.pipeline.common.probe_media", return_value=media_info),
-            patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
-            patch("xvt.pipeline.transcription.run_command", side_effect=run_ffmpeg),
+            patch("xvt.pipeline.transcription.local.probe_media", return_value=media_info),
+            patch("xvt.pipeline.transcription.local.run_command", side_effect=run_ffmpeg),
             patch(
-                "xvt.pipeline.transcription.transcribe_audio",
+                "xvt.pipeline.transcription.local.transcribe_audio",
                 return_value=Transcript(language="en", engine="mlx", words=self._WORDS),
             ),
         ):
@@ -3118,7 +3118,7 @@ class AlignmentPostQaDeadlockExitTest(unittest.TestCase):
             # `continue` 连跑两次：退出码与 Job 状态都不变，导航零推进。
             with (
                 patch("xvt.pipeline.common.probe_media", return_value=media_info),
-                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.local.probe_media", return_value=media_info),
             ):
                 for _ in range(2):
                     self.assertEqual(main(["continue", str(job_file)]), 2)
@@ -3154,7 +3154,7 @@ class AlignmentPostQaDeadlockExitTest(unittest.TestCase):
 
             with (
                 patch("xvt.pipeline.common.probe_media", return_value=media_info),
-                patch("xvt.pipeline.transcription.probe_media", return_value=media_info),
+                patch("xvt.pipeline.transcription.resume.probe_media", return_value=media_info),
             ):
                 self.assertEqual(main(argv[1:]), 0)
 

@@ -62,7 +62,7 @@ flowchart LR
 | `batch.py` | 目录输入快照、串行 Job 编排、失败隔离、原子汇总报告和批量恢复 |
 | `workflow.py` | 端到端目标编排：Goals → `plan_advance_steps` → 执行；等待/继续语义和烧录派生指纹 |
 | `workflow_config.py` | 持久化 `job.config["workflow"]` 的类型化模型与唯一读写边界（`WorkflowConfig`、目标语言解析、烧录指纹清除） |
-| `pipeline/` | 业务主链包：`common` 共享记账、`review` QA 与人工确认、`revision` 人工译文修订、`transcription` 转写、恢复与显式源重建、`translation` 翻译与收尾、`polish` 可恢复润色、`semantic` 语义校对与一次修复、`retranslate` 局部重译、`resegment` 重分段、`burnin` 预览与烧录；`__init__` 仅 re-export 公共入口 |
+| `pipeline/` | 业务主链包：`common` 共享记账、`review` QA 与人工确认、`revision` 人工译文修订、`transcription` 转写、恢复与显式源重建（子包：`shared` 三簇共用记账 / `local` 本地输入腿 / `remote` 远程获取腿 / `resume` resume 与 rebuild / `dispatch` 输入分派）、`translation` 翻译与收尾、`polish` 可恢复润色、`semantic` 语义校对与一次修复、`retranslate` 局部重译、`resegment` 重分段、`burnin` 预览与烧录；`__init__` 仅 re-export 公共入口 |
 | `job_store.py` / `models.py` | 任务模型、原子持久化、schema 和 checksum |
 | `download.py` / `media.py` | yt-dlp 获取、ffprobe 媒体检查 |
 | `transcribe.py` | MLX Whisper、faster-whisper 引擎适配；后端缺失时的引擎回退与 `transcription_fallback` 留痕 |

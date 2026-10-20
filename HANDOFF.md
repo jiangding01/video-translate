@@ -2,6 +2,24 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **`pipeline/transcription.py` 按长函数治理约定（F13）拆成子包**（分支 `refactor/split-transcription-module`，纯搬移，零行为变化，CHANGELOG 未记）。
+
+**① 为什么现在做。** F13 的约定写的是「`transcription.py` 若突破 2000 行，按『本地转写 / 远程获取 / resume 与 rebuild』三簇拆分模块」。它当时 2076 行，阈值已破，这条也作为 O8 条目 (d) 的第 6 条遗留登记着。
+
+**② 实际落成五个子模块，不是三个。** 三簇之外还需要两块：`shared` 是零兄弟依赖的叶子（候选 QA 登记、源选择记账、源字幕 QA、SRT 渲染与 `_segmentation_config` 被三簇共用，先例是 `semantic_state`）；`dispatch` 只放 `run_transcription`（它同时依赖 local 与 remote，塞进任一簇都会造出依赖环）。纯字幕输入腿（`run_subtitle_transcription` / `_finish_subtitle_job`）不属于三簇任何一簇，按「本地输入」归进 `local`。包内方向 `shared ← local ← remote ← resume`、`dispatch ← {local, remote}`，无环。各模块 266 / 683 / 602 / 564 / 101 行。
+
+**③ 分两步，各自独立验证过。** 第一步只做 `git mv transcription.py transcription/__init__.py`（文件内容一字未动，`xvt.pipeline.transcription.X` 照旧解析得到同一批名字，所以测试里的 `mock.patch` 目标全部仍然有效，零测试改动）；第二步才逐簇抽离。这是为了把「搬移本身」和「patch 目标漂移」分成两个可独立回退的事实。
+
+**④ 零行为变化用机械手段核验，不靠读代码下结论。** 脚本把五个子模块的 29 个顶层块按原顺序拼回，与拆分前的文件逐字比对，全等（唯一例外是一句注释：`_finish_resumed_source` 的 docstring 原写「同文件的姐妹终结函数 `_finish_subtitle_job`」，搬移后 `_finish_subtitle_job` 落在 `local`，这句话不再成立，改为点名模块；核验脚本把它列进白名单并打印出该处 diff，而不是放宽比对）；再逐个核对每个子模块里每个自由名字的绑定来源与拆分前一致，这一条专门防「import 搬漏或搬错」——函数体一字不差但绑到了别的对象，测试不一定抓得到。测试侧同样核验：把 `mock.patch` 目标里的子模块段去掉后重新 `ruff format`，与 `main` 版本逐字相同，即改动只有 patch 目标与格式回流，**断言零改动**（`git diff main -- tests/` 里没有任何被删除的 `assert` 行）。
+
+**⑤ patch 目标漂移是这轮唯一的真工作量。** `from x import y` 的绑定是按模块的，搬完以后 `xvt.pipeline.transcription.probe_media` 这类目标必须指向**真正执行那次调用的子模块**。好消息是它 fail loud：目标模块没有该属性就直接 `AttributeError`，指错模块就会让真函数跑起来而当场炸掉，所以可以靠测试迭代定位而不是靠猜。共改 223 处，其中需要区分 `local` 与 `resume` 的是 `probe_media` / `transcribe_audio` / `segment_transcript` / `align_source_cues`——`resume_job` 与 `rebuild_source` 自己也直接调这几个（不只是委派给 `_process_adaptive_media`），这正是「嵌套调用链决定 patch 目标」的那类坑。
+
+**⑥ 三类跨文件守卫逐个确认没有静默缩扫。** `tests/test_pipeline_imports.py` 原先用 `PIPELINE_DIR.glob("*.py")` 且按文件名排除 `__init__.py`，转包后会把整个子包**漏掉**（它恰好同时少一项，所以只改白名单就能"修绿"——这正是要避免的修法），已改成 `rglob` + 点号模块名并在白名单里声明子包内部的依赖边；`tests/test_subprocess_boundary.py` 本来就是 `rglob`，不用改；`tests/test_cli_command_tables.py` 从 `build_parser()` 内省、不扫文件，没有扫描范围可缩。三条都用「故意在新子模块里加一条违规、确认守卫变红、再撤掉」实测过（反向 import、函数级包内 import、`import subprocess` 各一次），不是读代码推断。
+
+**⑦ 刻意没做的事。** `_process_adaptive_media` 仍是 270 行——F13 里「触碰长函数时顺手抽子函数」那半条约定继续有效，拆簇不等于拆函数，这一轮不混进任何函数级重构。两处冻结 legacy 路径（`remote._process_acquired_media`、`resume.resume_job` 的对齐分支）原样搬走并保留冻结注释，没有"顺手统一"。
+
+**⑧ 验证。** `ruff check` / `ruff format --check` 全绿，`pytest -q` 为 `1071 passed, 312 subtests`，与基线逐字一致（纯搬移不增减测试）；协议快照 golden 未被改写；`xvt --help` 正常。
+
 2026-10-20 **拍板关闭 R3.1 Phase 5、取消 R3.2，并改写 R3.3 的评估闸门**（分支 `docs/close-phase5-and-r32`，纯文档，`src/` 与 `tests/` 零改动）。
 
 **① Phase 5 关闭。** 依据是 O1（#132）做完后的实测：两条语义链路的首尾两个决策点（问题分拣、终态收口）已各收敛为一份 helper，中间三步（初审 / 修复 / 复审）的差异是协议本质的——API 侧逐批 provider 调用加 checkpoint 续跑，Agent 侧对一份已回填响应一次性解析校验，**已无逐字重复可搬**。再往下合要先造一层「一轮 review 怎么取得」的抽象去覆盖约 0 行重复，与 AGENTS「修改流程」第 6 条相悖。由原建议的「降级」改为关闭。

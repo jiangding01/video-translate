@@ -5,7 +5,7 @@ from pathlib import Path
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt" / "pipeline"
 
 # 声明的依赖白名单，见 AGENTS.md「代码结构」一节的依赖方向说明：
-# common ← review ← {transcription, translation, burnin}
+# common ← review ← {transcription.shared, translation, burnin}
 # common ← semantic_state ← {review, revision}
 # semantic 与 retranslate 依赖 translation；semantic 还依赖 review / revision / semantic_state
 # resegment 只依赖 common；burnin 依赖 common 与 review（共用 QA 放行谓词）
@@ -25,7 +25,26 @@ EXPECTED_DEPENDENCIES: dict[str, set[str]] = {
     "revision": {"common", "semantic_state"},
     "semantic": {"common", "review", "revision", "semantic_state", "translation"},
     "semantic_state": {"common"},
-    "transcription": {"common", "review"},
+    # transcription 在 2026-10-20 按 F13 约定拆成子包（本地转写 / 远程获取 /
+    # resume 与 rebuild，外加一个零兄弟依赖的 shared 叶子与一层入口分派）。
+    # 子包内部方向：shared ← local ← remote ← resume，dispatch ← {local, remote}。
+    "transcription": {
+        "transcription.dispatch",
+        "transcription.local",
+        "transcription.remote",
+        "transcription.resume",
+        "transcription.shared",
+    },
+    "transcription.dispatch": {"common", "transcription.local", "transcription.remote"},
+    "transcription.local": {"common", "transcription.shared"},
+    "transcription.remote": {"common", "transcription.local", "transcription.shared"},
+    "transcription.resume": {
+        "common",
+        "transcription.local",
+        "transcription.remote",
+        "transcription.shared",
+    },
+    "transcription.shared": {"common", "review"},
     "translation": {"common", "review"},
 }
 

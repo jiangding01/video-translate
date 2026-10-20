@@ -175,7 +175,7 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
 | O5 | `_advance_workflow` 发 `workflow_completed` 前无终检守卫 | **已修（本轮）**，与 F6 同一轮落地：先按 F6 的阶段 A 把 7 处桩改成构造真实产物状态，再在 `_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（`category="workflow"` / `ExitCode.WORKFLOW_ERROR`）并带上剩余步骤。阶段 A 做完后零既有测试变红。详见 F6 条目的「实际修法」 |
 | O6 | `_record_burn_fingerprint` 登记 v2 proof 不发事件，与约束 7 口径不一；proof 是 relink 的唯一授权凭据却在 JSONL 不可见 | **已修（本轮）**，见下方 O6 条目 |
 | O7 | 三个守卫缺口：`AWAIT_STEPS` 是手抄清单，缺「planner 返回的 `await_*` ⊆ `AWAIT_STEPS`」的 AST 守卫；全仓无「禁 `shell=True` / subprocess 必须走 `process.py`」守卫；`recovery.py` 的 `checksum=None → warn` 分支无测试（改成 pass 全绿） | **已修（本轮）**，见下方 O7 条目 |
-| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**；副本部分 2026-10-20 已裁定：分段侧收敛为 `_segmentation_config`，对齐侧刻意不抽（B/C 冻结的 legacy 路径），遗留六条中第 ③ 条（回落分支 ALIGN 留 RUNNING）已于 2026-10-20 修复，其余五条登记留主干拍板，见下方 O8 条目 |
+| O8 | `transcription.py` 两处首跑不可达分支可直接删（零行为变化）；对齐/分段规则有 3–4 份副本且已漂移；旧 Job 路径冻结即可，突破 2000 行再按「本地转写 / 远程获取 / resume 与 rebuild」三簇拆 | **死码部分已修（本轮）**；**三簇拆分 2026-10-20 已做**（拆成子包 `pipeline/transcription/`，五个子模块，零行为变化，见下方 O8 条目 (d) 第 6 条）；副本部分 2026-10-20 已裁定：分段侧收敛为 `_segmentation_config`，对齐侧刻意不抽（B/C 冻结的 legacy 路径），遗留六条中第 ③ 条（回落分支 ALIGN 留 RUNNING）已于 2026-10-20 修复，其余五条登记留主干拍板，见下方 O8 条目 |
 | O9 | 文档措辞：AGENTS「烧录成品缺失一律停 `awaiting_input`」比实现绝对（legacy proof 实为 retryable 会自动重烧，RECOVERY.md 才是准确口径）；RECOVERY.md「size+mtime 不承担有效性判定」不够准确（经指纹在 `_burn_satisfied` 实际起了证实作用：源媒体被同 size+mtime 的文件替换不会触发重烧，风险低但应如实写明）；AGENTS 模块表漏列 `errors` / `locking` / `cancellation` 等 7 个模块 | **已修（本轮）**，四处逐条核实后改，见下方 O9 条目 |
 | O10 | macOS CI 不装 ffmpeg，主力平台的真实烧录与字体集成测试全部静默 skip，只有 Linux 覆盖，且无人看 skip 数 | **已修（本轮）**，见下方 O10 条目 |
 | O11 | `cli.py` 一处 hint 用双引号包路径而非 `shlex.quote`（全仓唯一例外点） | **已修（本轮）**，见下方 O11 条目 |
@@ -226,7 +226,13 @@ HANDOFF 里「下一步是 Phase 4c」那句已在 PR #97 修正。**剩余**：
    **事件顺序确有变化且仅此一处**：回落路径上 `align` 的 `stage_completed` 由「`segment` 收尾之后」前移到「`segment` 开工之前」。既有测试零变红、既有断言零改动（全仓无一处断言 align/segment 的事件顺序，协议快照里 `align` 出现 0 次）。新增 4 条测试：回落成功的顺序、回落后分段失败的终态与失败归属、强制对齐被拒时 `align` 只有 `started → failed`（反证 (a)）、对齐被采用时 `align` 收尾紧接 `segment` 跳过且 `segment` 从不开工。`1067 → 1071 passed`，子测试仍 312，协议快照零 diff。
 4. C 对空 cue 无前置拦截，`allow_low_confidence_alignment=True` 时可能写出空 source-cues（legacy-only，下游 SUBTITLE_QA 仍兜底）。
 5. B 的对齐段（含置信度门）没有任何测试覆盖。
-6. `transcription.py` 已达 2055 行（本轮加 helper 与冻结注释后为 2062 行），突破了 O8 自己写的「突破 2000 行再按三簇拆」阈值，拆分另行立项。
+6. ~~`transcription.py` 已达 2055 行（本轮加 helper 与冻结注释后为 2062 行），突破了 O8 自己写的「突破 2000 行再按三簇拆」阈值，拆分另行立项。~~ **2026-10-20 已做**（分支 `refactor/split-transcription-module`，当时 2076 行）。
+
+   拆成子包 `pipeline/transcription/`，**五个**子模块而不是三个：三簇（`local` 本地转写 / `remote` 远程获取 / `resume` resume 与 rebuild）之外还要一个零兄弟依赖的 `shared` 叶子（候选 QA 登记、源选择记账、源字幕 QA、SRT 渲染与 `_segmentation_config` 被三簇共用，先例是 `semantic_state`），以及一层 `dispatch`（`run_transcription` 只做输入类型分派，同时依赖 local 与 remote，放进任一簇都会造出依赖环）。纯字幕输入腿（`run_subtitle_transcription` / `_finish_subtitle_job`）不属于三簇任何一簇，按「本地输入」归进 `local`。本条 (a) 表里的 B（`_process_acquired_media`）落在 `remote`、C（`resume_job` 对齐分支）落在 `resume`，两处冻结注释原样搬走。
+
+   **零行为变化用机械手段核验，不靠读代码下结论**：脚本把五个子模块的 29 个顶层块按原顺序拼回，与拆分前的文件逐字比对，全等（唯一例外是一句注释：`_finish_resumed_source` 的 docstring 原写「同文件的姐妹终结函数 `_finish_subtitle_job`」，搬移后 `_finish_subtitle_job` 落在 `local`，这句话不再成立，改为点名模块；核验脚本把它列进白名单并打印出该处 diff，而不是放宽比对）；再逐个核对每个子模块里每个自由名字的绑定来源与拆分前一致（避免 import 搬漏或搬错）。测试侧同样核验：把 `mock.patch` 目标里的子模块段去掉后重新 `ruff format`，与 `main` 版本逐字相同——即改动只有 patch 目标与格式回流，**断言零改动**。`1071 passed / 312 subtests` 与基线逐字一致，协议快照 golden 未被改写。
+
+   **守卫没有静默缩扫**：`tests/test_pipeline_imports.py` 原先用 `PIPELINE_DIR.glob("*.py")`，转包后会把整个子包漏掉，已改成 `rglob` + 点号模块名（`transcription.local`），白名单同时声明子包内部的依赖边；`tests/test_subprocess_boundary.py` 本来就是 `rglob`，不用改；`tests/test_cli_command_tables.py` 从 `build_parser()` 内省，不扫文件，无扫描范围可缩。三条都用「故意在新子模块里加一条违规、确认守卫变红、再撤掉」实测过（反向 import、函数级包内 import、`import subprocess` 各一次）。
 
 ### O9 四处文档措辞 — **已修（本轮）**
 

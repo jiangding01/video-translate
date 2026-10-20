@@ -32,10 +32,10 @@
 | F7 | 每个 LLM 子步骤各自实现 checkpoint/fingerprint/恢复判定，`semantic.py` 1276 行中管道工程占大头 | `pipeline/semantic.py` 的 `_load/_write_*_checkpoint`、`_repair_chain_satisfied` 等 |
 | F8 | API 与 Agent 双路径在 polish/semantic/retranslate 各实现两遍编排 | Q5/Q6 各方案文档与实现 |
 | F9 | `_MIGRATIONS` 迁移机制已建成但为空、从未使用；stage 枚举冻结导致 `translate` 内部六个真实阶段只能靠 artifact 存在性反推 | `models.py:93` |
-| F10 | `job.config` 双轨：workflow 子配置已类型化，`source_strategy`、旧 `target_language` 仍是顶层裸键 | `pipeline/transcription.py:313` 直接读 `job.config["source_strategy"]` |
+| F10 | `job.config` 双轨：workflow 子配置已类型化，`source_strategy`、旧 `target_language` 仍是顶层裸键 | `pipeline/transcription/local.py` 的 `_record_effective_engine` 一带直接读 `job.config["source_strategy"]`（2026-10-20 拆包前为 `pipeline/transcription.py:313`） |
 | F11 | 测试用 `unittest.mock.patch` 打模块级函数补丁，patch 目标绑定模块内部结构，纯搬移重构时曾多次失效 | `tests/test_pipeline_translation.py` 等；`translation_provider` 的 `opener` 参数已是 DI 先例 |
 | F12 | 人工修订要求用户手编 review JSON 的 `items[].text`，而 SRT 才是字幕行业通用可编辑格式 | Q6.1a/b 流程 |
-| F13 | `transcription.py` 等存在 150–250 行长函数（`_process_adaptive_media` 299–551 等） | `pipeline/transcription.py:299` |
+| F13 | `transcription.py` 等存在 150–250 行长函数（`_process_adaptive_media` 299–551 等） | `pipeline/transcription/local.py`（2026-10-20 拆包前为 `pipeline/transcription.py:299`） |
 | F14 | 真实 Job 复查：用户把导出到 Job 外的烧录成品移走后，`status` 误报"烧录尚未通过媒体 QA"（该 Job `media_qa=succeeded`），并推荐会触发完整重新编码的 `continue`；`verify` 的诊断（`artifact file is missing`）才是准确的 | `recovery.py:627` 将成品缺失与媒体 QA 未过合并为同一文案；2026-07-16/18 两个真实 Job 复现 |
 | F15 | 字幕 QA `needs_review` 经 `--acknowledge-subtitle-review` 确认并完成烧录后，`translate` stage 永久保留 `failed` 和过期错误文本（"run --acknowledge-subtitle-review"，实际已确认）；在含 PR #66 修复的 `ab28aff` 上对完整 Job 副本重跑 `continue` 仍不收口。PR #66 只覆盖语义复核确认路径，字幕 QA 确认路径是同类问题的未扫兄弟实例 | 2026-08-01 polished 真实 Job（`20260801T104038Z-5376f3bb`）复现；`recovery` 判定 complete 而 stage 行显示 failed，两轨矛盾与 F14 同族 |
 
@@ -170,6 +170,8 @@ R3.1 已完成（Phase 5 于 2026-10-20 关闭），**R3.2 已于 2026-10-20 取
 ## 长函数治理约定（F13，持续性而非专项）
 
 不安排专项重构。约定：后续任何 PR 触碰 `_process_adaptive_media`、`_acquire_remote_job`、`run_translation`、`apply_agent_semantic_review` 等 150 行以上函数时，顺手按阶段抽出子函数；`transcription.py` 若突破 2000 行，按"本地转写 / 远程获取 / resume 与 rebuild"三簇拆分模块（复用纯搬移四步经验）。
+
+**三簇拆分已于 2026-10-20 执行完毕**（`transcription.py` 当时 2076 行）。实际落成五个子模块而不是三个：三簇之外还需要一个**零兄弟依赖的 `shared` 叶子**（候选 QA 登记、源选择记账、源字幕 QA 与 SRT 渲染被三簇共用，先例是 `semantic_state`）和一层 `dispatch`（`run_transcription` 只做输入类型分派，同时依赖 local 与 remote，放进任一簇都会造出依赖环）。纯字幕输入腿（`run_subtitle_transcription` / `_finish_subtitle_job`）不属于三簇任何一簇，按"本地输入"归进 `local`。零行为变化，29 个顶层块逐字未动（唯一例外是一句失效注释的修正，见 REVIEW_FINDINGS 的 O8 条目 (d) 第 6 条）。本约定的其余部分（触碰长函数时顺手抽子函数）继续有效：`_process_adaptive_media` 仍是 270 行，拆簇不等于拆函数。
 
 ## 交付顺序建议
 

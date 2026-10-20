@@ -96,9 +96,9 @@ class RebuildSourceTest(unittest.TestCase):
             save_job(job)
 
             with (
-                patch("xvt.pipeline.transcription.transcribe_audio") as transcribe,
+                patch("xvt.pipeline.transcription.local.transcribe_audio") as transcribe,
                 patch(
-                    "xvt.pipeline.transcription.segment_transcript", wraps=segment_transcript
+                    "xvt.pipeline.transcription.local.segment_transcript", wraps=segment_transcript
                 ) as segment,
             ):
                 rebuild_source(job_file, strategy="asr")
@@ -129,7 +129,7 @@ class RebuildSourceTest(unittest.TestCase):
             job_file, _ = self._job_with_checkpoints(root, with_words=False)
             (root / "input.mp4").unlink()
             with patch(
-                "xvt.pipeline.transcription.transcribe_audio", return_value=self._transcript()
+                "xvt.pipeline.transcription.local.transcribe_audio", return_value=self._transcript()
             ) as transcribe:
                 rebuild_source(job_file, strategy="asr")
 
@@ -141,7 +141,7 @@ class RebuildSourceTest(unittest.TestCase):
             job_file, _ = self._job_with_checkpoints(root, with_words=True)
             (root / "input.mp4").unlink()
 
-            with patch("xvt.pipeline.transcription.transcribe_audio") as transcribe:
+            with patch("xvt.pipeline.transcription.local.transcribe_audio") as transcribe:
                 result = rebuild_source(job_file, strategy="asr")
 
             transcribe.assert_not_called()
@@ -157,7 +157,7 @@ class RebuildSourceTest(unittest.TestCase):
                 "https://youtu.be/example", Path(directory), {"source_strategy": "auto"}
             )
             job_file = get_job_file(job)
-            with patch("xvt.pipeline.transcription.resume_remote_transcription") as remote:
+            with patch("xvt.pipeline.transcription.resume.resume_remote_transcription") as remote:
                 with self.assertRaisesRegex(RuntimeError, "required artifacts"):
                     rebuild_source(job_file, strategy="asr", cookies_from_browser="chrome")
 
@@ -193,15 +193,15 @@ class RebuildSourceTest(unittest.TestCase):
                 Path(arguments[-1]).write_bytes(b"normalized")
 
             with (
-                patch("xvt.pipeline.transcription.inspect_remote") as inspect,
-                patch("xvt.pipeline.transcription.download_remote_media") as download,
+                patch("xvt.pipeline.transcription.remote.inspect_remote") as inspect,
+                patch("xvt.pipeline.transcription.remote.download_remote_media") as download,
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.resume.probe_media",
                     return_value=self._media_info(downloaded),
                 ),
-                patch("xvt.pipeline.transcription.run_command", side_effect=create_audio),
+                patch("xvt.pipeline.transcription.local.run_command", side_effect=create_audio),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ),
             ):
@@ -290,12 +290,12 @@ class RebuildSourceTest(unittest.TestCase):
 
             with (
                 patch(
-                    "xvt.pipeline.transcription.probe_media",
+                    "xvt.pipeline.transcription.resume.probe_media",
                     return_value=fresh_media_info,
                 ) as probe,
-                patch("xvt.pipeline.transcription.run_command", side_effect=create_audio),
+                patch("xvt.pipeline.transcription.local.run_command", side_effect=create_audio),
                 patch(
-                    "xvt.pipeline.transcription.transcribe_audio",
+                    "xvt.pipeline.transcription.local.transcribe_audio",
                     return_value=self._transcript(),
                 ),
             ):
@@ -318,7 +318,8 @@ class RebuildSourceTest(unittest.TestCase):
             save_job(job)
 
             with patch(
-                "xvt.pipeline.transcription.check_subtitles", side_effect=RuntimeError("qa failed")
+                "xvt.pipeline.transcription.shared.check_subtitles",
+                side_effect=RuntimeError("qa failed"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "qa failed"):
                     rebuild_source(job_file, strategy="asr")
