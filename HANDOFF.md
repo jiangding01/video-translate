@@ -2,6 +2,16 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **O8 对齐/分段副本收尾：分段 preset 收敛为 `_segmentation_config`，对齐侧冻结不抽**（分支 `refactor/o8-align-segment-copies`，未合并、未开 PR）。
+
+**① 裁定。** `pipeline/transcription.py` 的三份「导入源字幕与 ASR 对齐」副本（A `_process_adaptive_media` / B `_process_acquired_media` / C `resume_job` 对齐分支）里，B 与 C 对现代 Job 不可达，仅为 v0.1.x 历史 Job（config 缺 `source_strategy`）保留；「对齐后 QA error 门只有 A 有」是 v0.2.0 source-selection 的刻意不对称（B/C 的 error 级 issue 由下游 `_run_source_subtitle_qa` fail-closed），不是漂移；三种失败记账的可观测结果已收敛。详细对账与证据链见 `docs/REVIEW_FINDINGS_2026_10_17.md` O8 条目。
+
+**② 做了什么。** 5 处逐字相同的分段 preset 查询收敛为 `_segmentation_config(job)`（`rebuild_source` 那处是 fail-fast 预校验，返回值丢弃，已补注释）；B 的 docstring 与 C 的对齐分支加冻结注释。**对齐侧刻意不抽公共函数**：B/C 冻结后防同步漂移的收益为零，抽取只会碰冻结路径。
+
+**③ 零行为变化。** `1067 passed, 312 subtests`，前后一致；既有断言零改动，协议快照零 diff。CHANGELOG 未记（零用户可见变化，与 O8 死码那轮同）。
+
+**④ 遗留去向。** 本轮核实出的六条（C 对齐段异常无记账、C 的 `"auto"` 不转 `None`、A 回落分支 ALIGN 留 RUNNING、C 空 cue 无前置拦截、B 对齐段无测试、`transcription.py` 2055 行待拆）均刻意未修，登记在 REVIEW_FINDINGS O8 条目 (d)，留主干拍板。
+
 2026-10-20 **修掉不带 scheme 的签名 URL 脱敏漏整条 query（安全，约束 5）**（分支 `codex/redact-schemeless-query`，未合并、未开 PR）。
 
 **① 缺陷与它为什么躺了两天。** 2026-10-18 已实测证实、刻意未修：`redact_text("unable to download video data: /videoplayback?sig=SECRETSIG123&id=abc")` 原样返回，`HTTPSConnectionPool(host='r1.googlevideo.com', port=443): /videoplayback?sig=SECRET&key=yt6` 与协议相对的 `//host/videoplayback?sig=...` 同样不命中。根因：`_URL_PATTERN` 要求 `https?://`、`_USERINFO_PATTERN` 要求 `scheme://`，不带 scheme 的「路径 + query」两条都够不着，于是签名明文经 `create_event` 与 `pipeline.common.set_stage` 落进 `events.jsonl` 与 `job.json`。**当时不修的理由在宽口径下是对的**：要兜住它就得对整个「不含 scheme 的 `路径?query`」脱敏，而 `?k=v` 这个形状在 ffmpeg 滤镜串、yt-dlp 格式选择器和散文里到处都是。被忽略的是**仓库里已经有一个策展匹配器**可以把口径收窄得多。

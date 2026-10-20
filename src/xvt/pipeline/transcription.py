@@ -48,7 +48,7 @@ from xvt.pipeline.review import complete_qa_stage
 from xvt.process import run_command
 from xvt.qa import check_subtitles
 from xvt.recovery import valid_artifact_path
-from xvt.segment import segment_transcript, segmentation_config_for_preset
+from xvt.segment import SegmentationConfig, segment_transcript, segmentation_config_for_preset
 from xvt.source_selection import (
     SourceCandidateEvaluation,
     SourceCandidateKind,
@@ -80,6 +80,13 @@ class RebuildSourceResult:
     source_srt_path: Path
     qa_path: Path
     selection_path: Path
+
+
+def _segmentation_config(job: Job) -> SegmentationConfig:
+    """Job 分段 preset 的唯一查询点；未知 preset 抛 ValueError（调用方各自记账）。"""
+    return segmentation_config_for_preset(
+        str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
+    )
 
 
 def _candidate_from_job(job: Job) -> AcquiredSubtitleCandidate | None:
@@ -641,9 +648,7 @@ def _process_adaptive_media(
                 set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
                 cues = segment_transcript(
                     transcript,
-                    segmentation_config_for_preset(
-                        str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
-                    ),
+                    _segmentation_config(job),
                     media_duration_ms=media_info.duration_ms,
                 )
                 if not cues:
@@ -665,9 +670,7 @@ def _process_adaptive_media(
             set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             cues = segment_transcript(
                 transcript,
-                segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
-                ),
+                _segmentation_config(job),
                 media_duration_ms=media_info.duration_ms,
             )
             if not cues:
@@ -739,6 +742,13 @@ def _process_acquired_media(
     event_sink: EventSink | None,
     emit_job_completed: bool = True,
 ) -> Job:
+    """冻结的 legacy 路径：仅由 resume_remote_transcription 在 config 缺 source_strategy 时到达。
+
+    缺该键的只有 v0.1.x 创建的媒体 Job；现代 Job 的创建点都会写键并走
+    _process_adaptive_media。本函数刻意保持 legacy 语义：对齐后没有 QA error 门、
+    没有回落 ASR、不登记 source_selection / aligned_subtitle_qa；error 级 issue
+    由下游 _run_source_subtitle_qa 的 fail-closed 兜底。这是裁定后的刻意状态。
+    """
     job_directory = get_job_directory(job)
     artifacts_directory = job_directory / "artifacts"
     artifacts_directory.mkdir(parents=True, exist_ok=True)
@@ -822,9 +832,7 @@ def _process_acquired_media(
             set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
             cues = segment_transcript(
                 transcript,
-                segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
-                ),
+                _segmentation_config(job),
                 media_duration_ms=media_info.duration_ms,
             )
             if not cues:
@@ -1788,6 +1796,8 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         add_artifact(job, "word_transcript", transcript_path, event_sink)
         set_stage(job, StageName.TRANSCRIBE, StageStatus.SUCCEEDED, event_sink)
 
+    # 此分支仅缺 source_strategy 的旧 Job（v0.1.x）可达，刻意冻结 legacy 语义：
+    # 无对齐后 QA error 门、无回落 ASR；error 级 issue 由下游 _run_source_subtitle_qa 兜底。
     if job.config.get("align_subtitles"):
         subtitle_path = valid_artifact_path(job, "input_subtitles")
         if subtitle_path is None:
@@ -1831,9 +1841,7 @@ def resume_job(job_file: str | Path, *, event_sink: EventSink | None = None) -> 
         try:
             cues = segment_transcript(
                 transcript,
-                segmentation_config_for_preset(
-                    str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
-                ),
+                _segmentation_config(job),
                 media_duration_ms=media_info.duration_ms,
             )
         except ValueError as error:
@@ -1886,9 +1894,8 @@ def rebuild_source(
     if source_language is not None and not isinstance(source_language, str):
         raise ValueError("source_language must be a string or null")
     language = None if source_language in {None, "auto"} else str(source_language)
-    segmentation_config_for_preset(
-        str(job.config.get("segmentation_preset", DEFAULT_SEGMENTATION_PRESET))
-    )
+    # fail-fast 预校验：返回值丢弃，只为在改动 Job 之前对未知 preset 提前失败。
+    _segmentation_config(job)
     minimum_alignment_confidence_value = job.config.get(
         "minimum_alignment_confidence", DEFAULT_MIN_ALIGNMENT_CONFIDENCE
     )
