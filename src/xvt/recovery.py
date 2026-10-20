@@ -492,6 +492,54 @@ def _alignment_confidence_deadlock(job: Job, valid_artifacts: dict[str, Path]) -
     return float(confidence) < float(minimum)
 
 
+def _alignment_post_qa_deadlock(job: Job, valid_artifacts: dict[str, Path]) -> Path | None:
+    """强制对齐的**对齐后字幕 QA error 门**是否已经把 Job 锁死在「continue 必然再次失败」上。
+
+    成立时返回那份登记在册的 ``aligned_subtitle_qa`` 报告路径（供 ``report_paths`` 与
+    文案点名），否则返回 ``None``。
+
+    与上一条（置信度门）同一范式：只看 Job 状态，不猜运行期异常。``--align-subtitles``
+    固化在 ``job.config`` 里，重跑拿的是同一份 ``input_subtitles`` 与同一份
+    ``word_transcript``，对齐与对齐后 QA 都是确定性的，因此登记的报告里有 error 级 issue
+    就意味着下一次 ``continue`` 会撞上同一个退出码 2（实测连跑两次 stderr 逐字相同）。
+
+    两条与置信度门刻意不同的守卫：
+
+    - **不看** ``allow_low_confidence_alignment``。那个旗标只放行「低置信但 QA 干净」的
+      对齐，对齐后 QA 的 error 门在它之后无条件执行（见 ``pipeline.transcription``），
+      照抄那条守卫会让带旗标的 Job 继续卡在必然失败的 ``continue`` 上。
+    - 判据来自 ``aligned_subtitle_qa`` 这份报告本身，不是 ``subtitle_alignment``：
+      挡住对齐的就是报告里的 error 级 issue，而 ``pipeline.transcription`` 在抛出之前
+      就无条件落盘并登记这份报告，所以失败的 Job 上一定有它。
+
+    两份对齐输入仍然都必须 checksum 有效：缺了 ``word_transcript`` 时重跑会重新转写，
+    对齐结果可能不同，那种 Job 不能被断言成必然失败。
+
+    最后一条守卫比置信度门**多一道**：还要求 ``_source_can_be_rebuilt``。本条的唯一出口
+    就是 ``rebuild-source --strategy asr``，而 ``media_info`` 失效且本地媒体也不在盘上时
+    那条命令自己会以「source rebuild requires an available local media file」失败——
+    推荐一条跑不起来的命令正是这条判定要修的毛病，所以这里不留这个角。不成立时让既有
+    分类原样生效（那种 Job 的既有去向与本改动之前完全相同）。
+    """
+
+    if job.config.get("input_kind") == "subtitle":
+        return None
+    if job.config.get("align_subtitles") is not True:
+        # 自动策略下对齐后 QA 失败会回落 ASR 并正常产出 source_cues，不是死局。
+        return None
+    report_path = valid_artifacts.get("aligned_subtitle_qa")
+    if report_path is None:
+        return None
+    if not {"word_transcript", "input_subtitles"} <= valid_artifacts.keys():
+        return None
+    report = _load_qa_report(report_path)
+    if report is None or not _qa_report_has_errors(report):
+        return None
+    if not _source_can_be_rebuilt(job, valid_artifacts):
+        return None
+    return report_path
+
+
 def _source_selection_is_asr(job: Job, valid_artifacts: dict[str, Path]) -> bool:
     selection_path = valid_artifacts.get("source_selection")
     source_cues_path = valid_artifacts.get("source_cues")
@@ -797,6 +845,24 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
                 "强制对齐的置信度低于门限，重跑同一份字幕与转写只会得到同一个结果；"
                 "改用 ASR 重建源时间轴，或重新运行 run 调整对齐选项。",
                 primary_command=_job_command("rebuild-source", job_file, "--strategy", "asr"),
+            )
+        aligned_report_path = _alignment_post_qa_deadlock(job, valid_artifacts)
+        if aligned_report_path is not None:
+            # 强制对齐的第二道门。必须排在置信度门**之后**：两道门可以在同一个 Job 上
+            # 同时成立（置信度低且对齐后 QA 也有 error），而执行侧先抛置信度门，文案要
+            # 对得上先失败的那一条。也必须排在下面两条 retryable 之前，否则又是一条
+            # 「推荐必然失败的 continue」。出口只有一条真的能推进：rebuild-source 用
+            # ASR 重建时间轴（实测退出码 0，之后 Job 能走到 complete、verify 全项 PASS）。
+            # 想保留用户字幕的文本与原时间轴只能去掉 --align-subtitles 重新 run，那会
+            # 创建新 Job、推不动这一个，因此不进推荐位，只在文案里说明。
+            return plan(
+                "manual_fix",
+                "强制对齐的结果没过对齐后字幕 QA（有 error 级问题，明细见 "
+                "aligned-subtitle-qa.json），重跑同一份字幕与转写只会得到同一个结果；"
+                "改用 ASR 重建源时间轴，或去掉 --align-subtitles（保留源字幕原时间轴）"
+                "、修好源字幕后重新运行 run。",
+                primary_command=_job_command("rebuild-source", job_file, "--strategy", "asr"),
+                report_paths=(str(aligned_report_path),),
             )
         if subtitle_resumable:
             command = "continue" if workflow is not None else "resume"
