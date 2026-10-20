@@ -11,6 +11,7 @@ import pysubs2
 from ffmpeg_support import FFMPEG_REQUIREMENT, ffmpeg_can_render_ass
 
 from xvt.cli import main
+from xvt.events import EventType
 from xvt.job_store import get_job_file, load_job
 from xvt.media import probe_media
 from xvt.models import StageName, StageStatus, Transcript, Word
@@ -295,6 +296,156 @@ class EndToEndTest(unittest.TestCase):
             # 推荐的命令零重烧：成品内容与 mtime 都没动。
             self.assertEqual(file_checksum(burned), burned_checksum)
             self.assertEqual(burned.stat().st_mtime_ns, burned_mtime_ns)
+
+    def test_workflow_burn_reuses_the_rendered_layout_qa_and_ass(self) -> None:
+        """真实 Job 路径：烧录腿必须复用渲染腿刚产出的译文布局 QA 与双语 ASS。
+
+        这条刻意不打桩（零网络、零模型：源字幕与译文都由用户提供，FFmpeg 真跑）：
+        渲染腿与烧录腿都真的执行，产物真的落盘、artifact 真的登记、stage 真的推进。
+        按**事件计数**断言，而不是只断言产物存在——重复做功恰恰会把同一份产物算两遍，
+        逐字相同、状态正确，只有事件数会说出真话。
+        """
+
+        events: list = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            self._create_video(media)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            translated = root / "translated.srt"
+            translated.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\n你好，世界。\n",
+                encoding="utf-8",
+            )
+
+            result = run_workflow(
+                WorkflowOptions(
+                    input=str(media),
+                    output=root / "work",
+                    subtitles=source,
+                    translation_subtitles=translated,
+                    target_language="zh-CN",
+                    burn=True,
+                    hardware_encoding=False,
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(result.status, "completed")
+            job = load_job(result.job_file)
+            self.assertIs(job.stages[StageName.BURN].status, StageStatus.SUCCEEDED)
+            self.assertIs(job.stages[StageName.MEDIA_QA].status, StageStatus.SUCCEEDED)
+
+            translated_qa_runs = [
+                event
+                for event in events
+                if event.type == EventType.STAGE_STARTED.value
+                and event.data.get("stage") == StageName.SUBTITLE_QA.value
+                and event.data.get("detail") == "translated"
+            ]
+            translated_renders = [
+                event
+                for event in events
+                if event.type == EventType.STAGE_STARTED.value
+                and event.data.get("stage") == StageName.RENDER.value
+                and event.data.get("detail") == "translated"
+            ]
+            render_runs = [
+                event
+                for event in events
+                if event.type == EventType.STAGE_STARTED.value
+                and event.data.get("stage") == StageName.RENDER.value
+            ]
+            qa_reports = [
+                event
+                for event in events
+                if event.type == EventType.ARTIFACT_CREATED.value
+                and event.data.get("kind") == "translated_subtitle_qa"
+            ]
+            ass_renders = [
+                event
+                for event in events
+                if event.type == EventType.ARTIFACT_CREATED.value
+                and event.data.get("kind") == "bilingual_ass"
+            ]
+
+            self.assertEqual(len(translated_qa_runs), 1)
+            self.assertEqual(len(qa_reports), 1)
+            self.assertEqual(len(translated_renders), 1)
+            self.assertEqual(len(ass_renders), 1)
+            # 源腿渲染（detail=source）之后只应再有译文渲染这一次。
+            self.assertEqual(len(render_runs), 2)
+
+    def test_apply_continue_still_blocks_on_failing_translated_subtitle_qa(self) -> None:
+        """约束 4 的反证：复用不得让一次本该拦住的译文 QA 被跳过。
+
+        术语表要求 ``world`` 译成 ``世界``，回填的译文故意违反它——``glossary_violation``
+        是 error 级，译文 QA 判 ``failed``。``xvt apply --continue`` 必须就此失败，
+        既不渲染、也不烧录，更不能因为「上一次布局结果可以复用」而放行。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            self._create_video(media)
+            source = root / "source.srt"
+            source.write_text(
+                "1\n00:00:00,200 --> 00:00:01,500\nHello world.\n",
+                encoding="utf-8",
+            )
+            glossary = root / "glossary.json"
+            glossary.write_text(
+                json.dumps({"terms": [{"source": "world", "target": "世界"}]}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                main(
+                    [
+                        "run",
+                        str(media),
+                        "--output",
+                        str(root / "work"),
+                        "--subtitles",
+                        str(source),
+                        "--target-language",
+                        "zh-CN",
+                        "--provider",
+                        "agent",
+                        "--glossary",
+                        str(glossary),
+                        "--burn",
+                        "--software",
+                    ]
+                ),
+                0,
+            )
+
+            job_file = next((root / "work" / "jobs").glob("*/job.json"))
+            manifest = json.loads(
+                (job_file.parent / "artifacts" / "translation-batches.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            cue_ids = [item["id"] for batch in manifest["batches"] for item in batch["items"]]
+            response = root / "response.json"
+            response.write_text(
+                json.dumps({"items": [{"id": cue_id, "text": "你好 地球"} for cue_id in cue_ids]}),
+                encoding="utf-8",
+            )
+
+            self.assertNotEqual(main(["apply", str(job_file), str(response), "--continue"]), 0)
+
+            job = load_job(job_file)
+            self.assertIs(job.stages[StageName.SUBTITLE_QA].status, StageStatus.FAILED)
+            self.assertIsNot(job.stages[StageName.BURN].status, StageStatus.SUCCEEDED)
+            kinds = {item.kind for item in job.artifacts}
+            self.assertNotIn("burned_video", kinds)
+            self.assertNotIn("bilingual_ass", kinds)
 
     def test_real_audio_normalization_with_mocked_asr_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

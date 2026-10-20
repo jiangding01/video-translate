@@ -11,9 +11,10 @@ from unittest.mock import patch
 from xvt.errors import UserInputError
 from xvt.job_store import create_job, load_job, save_job
 from xvt.media import MediaInfo
-from xvt.models import Artifact, Cue, StageStatus
+from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline import burn_translated_job, preview_translated_job
 from xvt.recovery import file_checksum
+from xvt.render import AssStyleOptions
 
 _QA_KIND = "translated_subtitle_qa"
 
@@ -290,7 +291,13 @@ class BurnPreviewPipelineTest(unittest.TestCase):
                 preview_translated_job(job_file)
 
     def _run_burn(
-        self, job_file: Path, artifacts: Path, media: Path, *, persist_workflow_qa: bool = False
+        self,
+        job_file: Path,
+        artifacts: Path,
+        media: Path,
+        *,
+        persist_workflow_qa: bool = False,
+        event_sink=None,
     ):
         input_info = MediaInfo(
             str(media), 2000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
@@ -317,7 +324,9 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             patch("xvt.pipeline.burnin.probe_media", side_effect=[input_info, output_info]),
             patch("xvt.pipeline.burnin.burn_subtitles", side_effect=burn),
         ):
-            return burn_translated_job(job_file, persist_workflow_qa=persist_workflow_qa)
+            return burn_translated_job(
+                job_file, persist_workflow_qa=persist_workflow_qa, event_sink=event_sink
+            )
 
     def test_burn_rejects_failed_translated_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -727,6 +736,290 @@ class BurnPreviewPipelineTest(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertIn("output has no audio stream", report["issues"])
         self.assertIn("output dimensions differ from source video", report["issues"])
+
+    def _register_rendered_layout(
+        self,
+        job,
+        artifacts: Path,
+        *,
+        video_width: int = 1920,
+        video_height: int = 1080,
+        measurement: str = "measured",
+        options: AssStyleOptions | None = None,
+        widths: list[list] | None = None,
+        status: str = "pass",
+        issues: list[dict] | None = None,
+    ) -> tuple[Path, Path]:
+        """补上「渲染腿已经跑完」的 Job 状态：带 layout 块的 QA 报告 + 已登记的 ASS。
+
+        `layout` 的字段名与 `qa.check_subtitles` 实际落盘的一致，烧录腿的复用判定
+        读的就是这一块。
+        """
+
+        resolved = options or AssStyleOptions()
+        layout = {
+            "version": 1,
+            "video_width": video_width,
+            "video_height": video_height,
+            "target_font": resolved.target_font,
+            "source_font": resolved.source_font,
+            "style_options": asdict(resolved),
+            "measurement": measurement,
+        }
+        if widths is not None:
+            layout["widths"] = widths
+        qa_path = artifacts / "qa-translated.json"
+        qa_path.write_text(
+            json.dumps(
+                {
+                    "status": status,
+                    "cue_count": 1,
+                    "issues": issues or [],
+                    "layout": layout,
+                }
+            ),
+            encoding="utf-8",
+        )
+        ass_path = artifacts / "bilingual.ass"
+        ass_path.write_text("[Script Info]\n", encoding="utf-8")
+        job.artifacts = [
+            artifact
+            for artifact in job.artifacts
+            if artifact.kind not in {_QA_KIND, "bilingual_ass"}
+        ]
+        job.artifacts.append(Artifact(_QA_KIND, str(qa_path), file_checksum(qa_path)))
+        job.artifacts.append(Artifact("bilingual_ass", str(ass_path), file_checksum(ass_path)))
+        for stage in (StageName.SUBTITLE_QA, StageName.RENDER):
+            job.stages[stage].status = StageStatus.SUCCEEDED
+        return qa_path, ass_path
+
+    def test_workflow_burn_reuses_the_rendered_layout_qa_and_ass(self) -> None:
+        """渲染腿已按同一画幅与样式测过：烧录腿不得再做一次 libass 行宽测量。"""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            qa_path, ass_path = self._register_rendered_layout(job, artifacts)
+            job_file = save_job(job)
+            before_qa = qa_path.read_bytes()
+            before_ass = ass_path.read_bytes()
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_not_called()
+            self.assertEqual(qa_path.read_bytes(), before_qa)
+            self.assertEqual(ass_path.read_bytes(), before_ass)
+            persisted = load_job(job_file)
+            self.assertIs(persisted.stages[StageName.BURN].status, StageStatus.SUCCEEDED)
+            self.assertIs(persisted.stages[StageName.MEDIA_QA].status, StageStatus.SUCCEEDED)
+
+    def test_workflow_burn_refuses_to_reuse_a_layout_from_another_frame_size(self) -> None:
+        """复用必须绑定画幅：报告测的是别的画幅时照旧现场重测（fail closed）。"""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            self._register_rendered_layout(job, artifacts, video_width=1280, video_height=720)
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
+            layout = json.loads((artifacts / "qa-translated.json").read_text(encoding="utf-8"))[
+                "layout"
+            ]
+            self.assertEqual((layout["video_width"], layout["video_height"]), (1920, 1080))
+
+    def test_workflow_burn_refuses_to_reuse_a_layout_from_other_fonts(self) -> None:
+        """复用必须绑定 ASS 样式：报告按别的字体测过时照旧现场重测。"""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            self._register_rendered_layout(
+                job, artifacts, options=AssStyleOptions(target_font="Other Font")
+            )
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
+
+    def test_workflow_burn_refuses_to_reuse_an_unmeasured_layout(self) -> None:
+        """测量失败回退保守规则的报告不复用：重测有机会拿到真实行宽。"""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            self._register_rendered_layout(job, artifacts, measurement="unavailable")
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
+
+    def test_workflow_burn_refuses_to_reuse_when_cues_leave_the_burn_media(self) -> None:
+        """媒体时长没有记进报告，所以就地重判：cue 越出本次烧录媒体时拒绝复用。
+
+        `outside_media` 是 error 级，重测必然判 failed，烧录照旧被拦住。
+        """
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            translated_path = artifacts / "translated-cues.json"
+            translated_path.write_text(
+                json.dumps(
+                    [
+                        asdict(
+                            Cue(
+                                1,
+                                0,
+                                9000,
+                                "Hello",
+                                target_text="你好",
+                                source_language="en",
+                                target_language="zh-CN",
+                            )
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            job.artifacts = [
+                artifact for artifact in job.artifacts if artifact.kind != "translated_cues"
+            ]
+            job.artifacts.append(
+                Artifact("translated_cues", str(translated_path), file_checksum(translated_path))
+            )
+            self._register_rendered_layout(job, artifacts)
+            job_file = save_job(job)
+
+            with (
+                patch("xvt.pipeline.burnin.burn_subtitles") as burn,
+                self.assertRaises(RuntimeError),
+            ):
+                self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            measure.assert_called_once()
+            burn.assert_not_called()
+            self.assertIs(
+                load_job(job_file).stages[StageName.SUBTITLE_QA].status, StageStatus.FAILED
+            )
+
+    def test_workflow_burn_refuses_to_reuse_an_acknowledged_needs_review_report(self) -> None:
+        """只复用 `pass` / `warning`：已确认的 `needs_review` 照旧现场重测重渲。
+
+        刻意保留的代价：那条路径的放行来自存档确认，`complete_qa_stage` 要为它发一条
+        `subtitle_review_acknowledged`（「这次放行依据哪条确认」的唯一事件证据），而布局
+        确认正是约束 4 点名要绑定的东西。省下的一次测量不值这笔。
+        """
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            qa_path, _ass_path = self._register_rendered_layout(
+                job,
+                artifacts,
+                status="needs_review",
+                issues=[
+                    {
+                        "code": "bilingual_overflow_risk",
+                        "severity": "review",
+                        "cue_id": 1,
+                        "message": "line may overflow",
+                    }
+                ],
+            )
+            job.artifacts = [artifact for artifact in job.artifacts if artifact.kind != _QA_KIND]
+            job.artifacts.append(Artifact(_QA_KIND, str(qa_path), file_checksum(qa_path)))
+            _acknowledge_review_issues(job, artifacts, [["line_too_wide", 1]])
+            # 真实确认通道绑定被确认那份报告的 layout；带 layout 块的报告必须一并记下，
+            # 否则 `review_gate_satisfied` 以「布局不同」拒绝放行。
+            job.config["subtitle_review_acknowledgment"]["layout"] = json.loads(
+                qa_path.read_text(encoding="utf-8")
+            )["layout"]
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
+            self.assertEqual(json.loads(qa_path.read_text(encoding="utf-8"))["status"], "pass")
+
+    def test_atomic_burn_never_reuses_the_rendered_layout(self) -> None:
+        """原子 `xvt burn` 可以覆盖持久化目标之外的媒体与字体，必须现场校验。"""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            self._register_rendered_layout(job, artifacts)
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
 
     def _burn_ready_job(self, root: Path, media: Path):
         job = create_job(str(media), root)

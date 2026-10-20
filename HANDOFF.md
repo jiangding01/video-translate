@@ -2,6 +2,22 @@
 
 更新时间：2026-10-20
 
+2026-10-20 **工作流烧录腿复用渲染腿的布局 QA 与 ASS，不再重算一遍（review 清单「`apply --continue` 把 QA 与渲染做了两遍」已修，但原条目的归因被实证更正）**（分支 `codex/apply-continue-no-double-render`，未合并、未开 PR）。
+
+**① 实证先于动手，原条目的机制写错了。** 真实 CLI 逐步复现（纯字幕源 + `--provider agent --translation-quality polished`，零网络零 API；媒体为 `ffmpeg -f lavfi` 合成的 640×360 视频）：
+- **纯字幕 Job（无媒体、不烧录）上根本没有第二遍。** `xvt apply JOB SEMANTIC_RESPONSE --continue` 的事件流里 `SUBTITLE_QA`(`detail=translated`) 与 `RENDER` 各一次，`continue` 腿只有 `workflow_started` + `workflow_completed`。原因：语义收尾后 `_translation_satisfied` 为真，`_ensure_translation` 根本不被调用，`semantic.py::_finalize_candidate` 那道复用短路**轮不到上场**（主会话提示里怀疑「短路没命中」，实证是「短路不参与」）。
+- **第二遍只在 `--burn` 的 Job 上出现，发起者是烧录段不是翻译段。** 同一条 `apply --continue`：渲染腿 `translation.py::_qa_and_render_translation` 产出 `translated_subtitle_qa` / `translated_srt` / `bilingual_srt` / `bilingual_ass`；随后 `workflow_started` → 第二条 `artifact_created translated_subtitle_qa` → `stage_completed subtitle_qa` → `stage_started render`（无 `detail`）→ 第二条 `bilingual_ass` → `burn`。第二次来自 `burnin.py::burn_translated_job` 的 `_check_render_layout(..., persist=True)` 与紧随的 `save_bilingual_ass`。
+- **与 polished / 语义校对 / `apply --continue` 都无关**：`standard` 质量、以及 `run_workflow(translation_subtitles=…, burn=True)` 都复现同一第二遍。真正条件是「译文渲染腿与烧录腿在同一条命令里相继执行且画幅已知」。原条目设想的 A（语义收尾只推进不渲染）因此不适用——渲染腿产出的恰是 `_translation_satisfied` 要求的交付物。
+- **产物逐字相同、Job 状态正确属实**：先只 `apply` 记 SHA-256，再单独 `continue` 跑完烧录，`qa-translated.json`(`2f217e06…`) 与 `bilingual.ass`(`2393a5b8…`) `diff` 为空。代价的贵处是 `render.measure_bilingual_line_widths` 又起一个 ffmpeg 进程、cue 数 × 2 帧过 `ass` 滤镜 + `bbox`，按 cue 数线性增长。
+
+**② 修法（等价于方向 B，落在正确的衔接处：渲染腿产出、烧录腿复用）。** `pipeline/burnin.py` 新增只读判定 `_reusable_rendered_layout(job, translated, media_info, options) -> Path | None`。工作流烧录腿（`persist_workflow_qa=True`）判定可复用时沿用已登记的两份产物，不重测、不重写 `qa-translated.json`、不重渲 `bilingual.ass`、不重记 `RENDER`。条件 fail closed：两个 stage 都 `succeeded` → 两份产物 checksum 有效（都在 `downstream_of(translated_cues)` 闭包里，译文一变登记就被摘）→ 报告**自己**的 `layout` 块 `measurement == "measured"` 且 `video_width` / `video_height` / `style_options` 与本次实参全等（绑定的是测量时的真实输入，手改 `job.json` 字体绕不过去）→ 媒体时长已知且全部 cue 落在时长内（时长没记进报告，所以**就地重判**：它只影响 error 级的 `outside_media`）。术语表不比对（两腿都调 `required_glossary_terms(job)`，同 Job 必然同值）。另**刻意只复用 `pass` / `warning` 的报告**：已确认的 `needs_review` 放行来自存档确认，`complete_qa_stage` 要为它发一条 `subtitle_review_acknowledged`（唯一的「依据哪条确认」事件证据），复用会把它省掉，而布局确认正是约束 4 点名要绑定的东西。**原子 `xvt burn` / `xvt preview` 一字未改**。
+
+**③ 约束 4 没被削弱。** 放行判定仍排在复用判定**之前**：`_assert_translated_qa_gate` 对同一份报告跑 `review_gate_satisfied`（与 `complete_qa_stage` 同口径），`failed` 或未确认的 `needs_review` 在那里就抛 `RuntimeError`，烧录一帧都不开始。复用只省掉一次结论必然相同的重算。
+
+**④ 验证。** 新增 9 条测试（1055 → 1064，子测试 265 不变）。红先逐字：`tests/test_e2e.py::…::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` → `AssertionError: 2 != 1`；`tests/test_pipeline_burnin.py::…::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` → `AssertionError: Expected 'measure_bilingual_line_widths' to not have been called. Called 1 times.`。另 7 条是反证/边界：约束 4 反证（术语违规译文走 `xvt apply --continue` 仍非零退出、`SUBTITLE_QA=failed`、`bilingual_ass` / `burned_video` 都未登记）、换画幅不复用、换字体不复用、测量降级（`measurement="unavailable"`）不复用、cue 越出本次烧录媒体不复用且 QA 照旧判 failed、已确认的 `needs_review` 报告不复用、原子 `burn` 永不复用。**既有断言零改动、既有测试零变红、协议快照零 diff**（快照场景都是纯字幕 Job，不烧录）。修复后真实 `apply --continue` 重跑：第二遍事件消失，四份产物 SHA-256 与修复前逐字相同，`status` 为 `complete`、`xvt verify` 全项 PASS。
+
+**遗留（如实记录）**：(a) `xvt preview` 每次都做一次完整 libass 测量（`persist=False`），它是独立命令、不构成一条命令内的第二遍，本批未动；(b) 原子 `xvt burn` 在渲染腿已产出等价布局时同样会重测一遍，这是刻意保留的既有行为（该命令可覆盖媒体与字体）；(c) 译文 QA 停在 `needs_review` / `failed` 的阻断路径上，`finalize_translation` 与随后的恢复导航各读一次报告，不涉及重复测量。文档已按「全分支对账」同步：RECOVERY（新一节「烧录腿复用渲染腿的布局 QA 与 ASS」）、AGENTS（约束 4 + `pipeline` 表格 `burnin` 条目）、README（行宽 QA 段）、CHANGELOG、REVIEW_FINDINGS（该条目标为已修并写入机制更正）。
+
 2026-10-20 **强制对齐被「对齐后字幕 QA」拒绝时的死循环出口（同类缺陷第 9 次）**（分支 `codex/alignment-post-qa-deadlock`，未合并、未开 PR）。关闭上一条 #125 登记的遗留。
 
 **① 缺口先实证，真实 CLI 零插桩。** `ffmpeg -f lavfi` 合成 3.89s 视频 + `say` 配音，源字幕三条可匹配 cue 挤在 0–1.4s 外加一条音频里没说的尾句，一次命中：`xvt run … --subtitles … --align-subtitles --target-language zh-CN --provider agent` 退出码 2，`stages.align` 为 `failed`，`alignment.json` 的 `confidence=0.75`（≥ 门限 0.55，**置信度门没参与**）、`scale=2.598`，尾句被推到 3631–4930ms 而 `media.json` 的 duration 是 3894ms，`aligned-subtitle-qa.json` 里 `status=failed` + `outside_media`(error, cue 4) + `low_timing_confidence`(review, cue 4)。`status` 归 `retryable`、`next: xvt continue`、`report_paths: []`。**`continue` 连跑两次退出码都是 2、stdout/stderr 逐字相同**（`diff` 无输出），失败输出里自荐的还是刚失败的那一条。

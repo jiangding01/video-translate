@@ -496,7 +496,19 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
   `/Users/x/My %%(title)s videos/source.%(ext)s` → `/Users/x/My %(title)s videos/source.mp4`。
 - ~~`relink` 在源媒体缺失时误报 "fingerprint is stale"。~~ **已修（2026-10-18，B1）**，见上方 B 系列。
 - ~~`repair_polish_draft` 的 `manual_fix` 没有给出可执行命令（依赖 F2 修复后补）。~~ **已修（2026-10-18，C 系列 C1）**，见下方 C 系列。
-- **○ 已复现（polished 真实 E2E 验收）：`xvt apply JOB RESPONSE --continue` 在一条命令内把译文 QA 与渲染做了两遍。** 语义收尾先产出一次完整的译文 QA + 渲染产物，紧接着的 `continue` 腿又从同一份 cue 重算一次，结果逐字相同、Job 状态正确，纯属重复做功（纯字幕 Job 上只是几十毫秒，长片 + 已知画幅的 libass 行宽测量会明显变贵）。**本轮刻意未修**：要动语义收尾与 `continue` 腿的衔接（谁负责渲染、谁只负责推进），风险大于收益，需要单独立项并补「收尾产物被 `continue` 复用而不重算」的测试。
+- ~~**○ 已复现（polished 真实 E2E 验收）：`xvt apply JOB RESPONSE --continue` 在一条命令内把译文 QA 与渲染做了两遍。** 语义收尾先产出一次完整的译文 QA + 渲染产物，紧接着的 `continue` 腿又从同一份 cue 重算一次……需要单独立项并补「收尾产物被 `continue` 复用而不重算」的测试。~~
+  **○ 已修（2026-10-20），但原条目把机制写错了，先更正再记修法。**
+
+  **现象成立，归因不成立。** 2026-10-20 用真实 CLI 逐步复现（纯字幕源 + `--provider agent` + `--translation-quality polished`，零网络零 API；媒体为本机 ffmpeg 合成的 640×360 视频）：
+  - **纯字幕 Job（无媒体、不烧录）上根本没有第二遍。** `xvt apply JOB SEMANTIC_RESPONSE --continue` 的事件流里 `SUBTITLE_QA`（`detail=translated`）与 `RENDER` 各只有一次，`translated_subtitle_qa` / `translated_srt` / `bilingual_srt` 各一条 `artifact_created`，`continue` 腿只发了 `workflow_started` + `workflow_completed`。原因是语义收尾跑完后 `_translation_satisfied` 为真，`_ensure_translation` 根本不会被调用——`pipeline/semantic.py::_finalize_candidate` 的那道复用短路甚至轮不到上场。
+  - **第二遍只在 `--burn` 的 Job 上出现，而且发起者不是 `continue` 腿的翻译段，是烧录段。** 同一条 `apply --continue` 的事件流：渲染腿 `stage_started subtitle_qa(detail=translated)` → `artifact_created translated_subtitle_qa` → `stage_started render(detail=translated)` → `translated_srt` / `bilingual_srt` / `bilingual_ass`；随后 `workflow_started` → `artifact_created translated_subtitle_qa`（第二条）→ `stage_completed subtitle_qa` → `stage_started render`（无 `detail`）→ `artifact_created bilingual_ass`（第二条）→ `stage_completed render` → `burn`。第一次来自 `pipeline/translation.py::_qa_and_render_translation`（`finalize_translation` 收尾），第二次来自 `pipeline/burnin.py::burn_translated_job` 里的 `_check_render_layout(..., persist=True)` 与紧随的 `save_bilingual_ass`。
+  - **与 polished、与语义校对、与 `apply --continue` 都无关。** 把质量换成 `standard`、同样 `--provider agent --burn`，`apply --continue` 的事件流出现一模一样的第二遍；换成 `run_workflow(translation_subtitles=..., burn=True)` 也一样。真正的触发条件是「译文渲染腿与烧录腿在同一条命令里相继执行，且画幅已知」——与原条目写的「语义收尾与 `continue` 腿的衔接（谁负责渲染、谁只负责推进）」不是同一件事，也因此原条目设想的 A/B 两个方向都不适用：渲染腿产出的是 `_translation_satisfied` 要求的交付物，不能让它只推进不渲染。
+  - **产物逐字相同、Job 状态正确这两条属实。** 先只 `apply`（不带 `--continue`）记下 `qa-translated.json` / `bilingual.ass` 的 SHA-256，再单独 `continue` 跑完烧录，两份文件 `diff` 为空、SHA-256 不变（`2f217e06…` / `2393a5b8…`）。
+  - **代价比「几十毫秒」更具体**：第二遍的贵处是 `render.measure_bilingual_line_widths` 又起一个 ffmpeg 进程，让 cue 数 × 2 帧过 `ass` 滤镜 + `bbox` 取包围盒，按 cue 数线性增长；重渲 ASS 本身可以忽略。
+
+  **修法（方向等价于原条目的 B，但落在正确的衔接处：渲染腿产出、烧录腿复用）**：`pipeline/burnin.py` 新增只读判定 `_reusable_rendered_layout`，工作流烧录腿（`persist_workflow_qa=True`）判定可复用时直接沿用已登记的 `translated_subtitle_qa` 与 `bilingual_ass`，不重测、不重写、不重渲、不重记 `RENDER`。复用条件 fail closed，绑定的是**报告自己的 `layout` 块**（`measurement == "measured"` + `video_width` / `video_height` / `style_options` 与本次烧录实参全等），媒体时长则就地重判（它只影响 error 级的 `outside_media`，报告里没记）。刻意只复用 `pass` / `warning` 的报告，已确认的 `needs_review` 照旧重测——那条放行要留下 `subtitle_review_acknowledged`。约束 4 不受影响：`_assert_translated_qa_gate` 的放行判定排在复用判定之前，`failed` 或未确认的 `needs_review` 在那里就拦住。原子 `xvt burn` / `xvt preview` 一字未改。
+
+  红先：`tests/test_e2e.py::EndToEndTest::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` 在修复前报 `AssertionError: 2 != 1`（`translated_subtitle_qa` 的 `artifact_created` 数），`tests/test_pipeline_burnin.py::BurnPreviewPipelineTest::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` 报 `AssertionError: Expected 'measure_bilingual_line_widths' to not have been called. Called 1 times.`。约束 4 的反证由 `tests/test_e2e.py::EndToEndTest::test_apply_continue_still_blocks_on_failing_translated_subtitle_qa` 钉住（术语违规译文走 `xvt apply --continue` 仍以非零退出码失败，`SUBTITLE_QA` 为 `failed`，`bilingual_ass` / `burned_video` 都没有登记）。契约见 [恢复与回填契约](RECOVERY.md#烧录腿复用渲染腿的布局-qa-与-ass)。
 - ~~`translation.py` 的 `agent_translation_polish_*` 与 `polish.py` 的同名前缀谓词含义相反，建议改名 `agent_translate_and_polish_*`。~~ **已修（2026-10-18）**：`translation.py` 那组四个谓词
   （`_waiting` / `_started` / `_progress_ready` / `_core_satisfied`）判定的是 `task=translate_and_polish` 的一次成型，
   已改名为 `agent_translate_and_polish_*`，与它们读的 manifest task 对齐；`polish.py` 的
@@ -534,6 +546,6 @@ http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'
 5. ~~**去重**：F5。~~ 已修（本轮）。
 6. ~~之后再谈 O1（Phase 5 轻量替代）与 O2（并入 R3.4，必须排在 Q7 之前）。~~ O2 已修（本轮，连同 O4 / O6 一批）；O1 仍未做。
 
-**剩余未处理**：O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」一节。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
+**剩余未处理**：O1，O8 里「对齐/分段规则 3–4 份副本」的结构性重构（核实属实，定位见 O8 条目），以及「观察」一节里尚未处理的几条。O9 / O10 / O11 与 O8 的死码部分已修（本轮）。「观察」一节里的「`apply --continue` 把译文 QA 与渲染做了两遍」已于 2026-10-20 实证定位并修复——**归因与原条目不同**（第二遍来自烧录腿、与 polished 与语义收尾无关），详见该条目下的更正。**「未验证」一节（2026-10-20）已全部处理**：三条分别为实测证实未修（签名 URL 脱敏，刻意不随本轮修）、实测证伪（局部重译逐字相同回填）、实测确认不可达但只改注释（`target_language` 为 None 的补翻）。F4 条目末尾那条相邻缺口同日已修，并在那里登记了一条新的未修遗漏（原子侧语义等待不判「整轮请求是否最新」）。
 
 对既有计划的建议（来自 review，主干部分认同）：**Phase 5 降级**——做完 O1 后剩余差异是「API 逐批 checkpoint」与「Agent 一次性回填」的协议本质不同，硬合一份编排风险高收益小；**R3.2 延后、大概率取消**——它要解决的规划器/执行器对齐问题可用上述低成本替代，完整缓存框架与 AGENTS 第 6 条冲突。这两条是建议，未拍板。

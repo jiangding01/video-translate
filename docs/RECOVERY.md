@@ -388,6 +388,24 @@ legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重�
 
 刻意保留的差异：`_burn_satisfied` 要求成品**有效**而 relink 资格要求成品**已失效**；`_burn_satisfied` 不要求 `translated_cues` 有效（译文满足度单独判），relink 两处要求；`_burn_satisfied` 对「无 proof artifact 或 proof 文档不是 v2」的 legacy Job 只认指纹匹配即判完成，relink 一律要求 checksum 有效的 v2 proof。
 
+### 烧录腿复用渲染腿的布局 QA 与 ASS
+
+译文渲染腿（`pipeline.translation._qa_and_render_translation`）与工作流烧录腿（`pipeline.burnin.burn_translated_job`，`persist_workflow_qa=True`）此前各自算一遍同一件事：同一条 `run` / `continue` 里译文刚落盘，渲染腿按持久化目标测一次 libass 行宽、写 `qa-translated.json` 并渲出 `bilingual.ass`，紧接着烧录腿按同一份目标把两件事原样再做一遍。产物逐字相同、Job 状态正确，纯属重复做功——代价是**每次烧录多一次整轮 libass 测量**（`measure_bilingual_line_widths` 起一个 ffmpeg 进程，渲染 cue 数 × 2 帧过 `ass` 滤镜 + `bbox`），长片上按 cue 数线性增长。
+
+现在烧录腿在 `_reusable_rendered_layout` 判定可复用时直接沿用已登记的两份产物：不重测、不重写 `qa-translated.json`、不重渲 `bilingual.ass`、不重记 `RENDER`（它已经是 `succeeded`）。**全部条件成立才复用，否则照旧现场重测重渲（fail closed）**：
+
+- `SUBTITLE_QA` 与 `RENDER` 两个 stage 都是 `succeeded`；
+- 报告 status 是 `pass` 或 `warning`。**已确认的 `needs_review` 刻意不复用**：那条路径的放行来自存档确认，`complete_qa_stage` 要为它发一条 `subtitle_review_acknowledged`（「这次放行依据哪条确认」的唯一事件证据），而布局确认正是约束 4 点名要绑定的东西，省下的一次测量不值这笔；
+- `translated_subtitle_qa` 与 `bilingual_ass` 都 checksum 有效（两者都在 `downstream_of(TRANSLATED_CUES)` 的失效闭包里，译文一变登记当场被摘掉，复用不到旧产物）；
+- 报告**自己**的 `layout` 块里 `measurement == "measured"`、`video_width` / `video_height` / `style_options` 与本次烧录真正要用的画幅和 `AssStyleOptions` 完全一致——画幅与字体的绑定取自那份报告被测量时的真实输入，不是「当前配置碰巧长这样」的推断，手改 `job.json` 的字体也绕不过去；
+- 本次烧录媒体的时长已知，且全部 cue 都落在时长内。媒体时长没有记进报告，所以这一项不推断而**就地重判**：时长在整份报告里只影响 `outside_media`（error 级）一条，按本次媒体重算一次即可，时长未知（0）时拒绝复用。
+
+术语表不参与比对：两腿都调 `required_glossary_terms(job)`，同一个 Job 必然同值，且该判定与画幅、字体、媒体一概无关。
+
+**约束 4 不因此松动。** 放行判定仍在复用判定**之前**执行：`_assert_translated_qa_gate` 对同一份报告跑 `review_gate_satisfied`（与 `complete_qa_stage` 同口径），`failed` 或未确认的 `needs_review` 在那里就以 `RuntimeError` 拦住，烧录一帧都不会开始。复用只省掉一次**结论必然相同**的重算，不省掉任何一次判定。
+
+**原子 `xvt burn` 不复用**（`persist_workflow_qa=False`）：它可以覆盖持久化目标之外的媒体、字体与编码参数，必须按本次实参现场校验，而且它从不紧跟在渲染腿之后，本来就没有第二遍可省。`xvt preview` 同理不变。
+
 ### status 的成本边界
 
 普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum；内容 checksum 只在烧录落证、relink 校验，以及**指纹快路径已判不匹配**后的回退判定（见「指纹不匹配时的源媒体内容 checksum 回退」）时计算。后者不削弱这条边界：快路径命中时一次额外的读都没有，而快路径不命中的那条分支本来就要整段重编码。
