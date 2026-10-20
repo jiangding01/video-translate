@@ -31,23 +31,59 @@ EXPECTED_DEPENDENCIES: dict[str, set[str]] = {
 
 
 def _intra_package_target(node: ast.AST, module_name: str) -> str | None:
-    """从单条 import 语句里解出它依赖的其他 ``xvt.pipeline.X`` 模块名。"""
+    """从单条 import 语句里解出它依赖的其他 pipeline 模块名（点号形式）。
+
+    返回值是去掉 ``xvt.pipeline.`` 前缀后的模块名，子包成员形如
+    ``transcription.local``。解析时按 ``_module_name`` 给出的实际模块集合取最长
+    匹配前缀，所以 ``from xvt.pipeline.transcription.local import X`` 解出的是
+    ``transcription.local`` 而不是 ``transcription``——否则子包内部的依赖边会被
+    压扁成一条「transcription 依赖自己」而静默消失。
+    """
     if isinstance(node, ast.ImportFrom):
-        if node.module and node.module.startswith("xvt.pipeline."):
-            target = node.module.split(".")[2]
-            if target != module_name:
-                return target
+        candidates = [node.module or ""]
     elif isinstance(node, ast.Import):
-        for alias in node.names:
-            if alias.name.startswith("xvt.pipeline."):
-                parts = alias.name.split(".")
-                if len(parts) >= 3 and parts[2] != module_name:
-                    return parts[2]
+        candidates = [alias.name for alias in node.names]
+    else:
+        return None
+    known = _known_modules()
+    for name in candidates:
+        if not name.startswith("xvt.pipeline."):
+            continue
+        suffix = name[len("xvt.pipeline.") :]
+        target = suffix if suffix in known else suffix.rsplit(".", 1)[0]
+        if target in known and target != module_name:
+            return target
     return None
 
 
+def _module_name(path: Path) -> str:
+    """把 pipeline 包内的文件路径映射成白名单里用的点号模块名。
+
+    ``transcription/local.py`` → ``transcription.local``；
+    ``transcription/__init__.py`` → ``transcription``；
+    包根 ``__init__.py`` → ``""``（不参与白名单）。
+    """
+    parts = list(path.relative_to(PIPELINE_DIR).with_suffix("").parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _known_modules() -> frozenset[str]:
+    return frozenset(_module_name(path) for path in _all_pipeline_files()) - {""}
+
+
+def _all_pipeline_files() -> list[Path]:
+    """包目录下的全部 ``*.py``（含子包与各级 ``__init__.py``）。
+
+    刻意用 ``rglob``：``transcription`` 在 2026-10-20 拆成子包，``glob("*.py")``
+    会把整个子包静默漏掉，守卫范围缩小而测试照样全绿。
+    """
+    return sorted(PIPELINE_DIR.rglob("*.py"))
+
+
 def _pipeline_modules() -> list[Path]:
-    return [path for path in sorted(PIPELINE_DIR.glob("*.py")) if path.name != "__init__.py"]
+    return [path for path in _all_pipeline_files() if _module_name(path) != ""]
 
 
 def _module_dependencies(path: Path) -> set[str]:
@@ -59,7 +95,7 @@ def _module_dependencies(path: Path) -> set[str]:
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     deps: set[str] = set()
-    module_name = path.stem
+    module_name = _module_name(path)
     for node in tree.body:
         target = _intra_package_target(node, module_name)
         if target is not None:
@@ -93,7 +129,7 @@ def _nested_intra_package_imports(path: Path) -> list[tuple[str, int]]:
 
 
 def _actual_dependencies() -> dict[str, set[str]]:
-    return {path.stem: _module_dependencies(path) for path in _pipeline_modules()}
+    return {_module_name(path): _module_dependencies(path) for path in _pipeline_modules()}
 
 
 class PipelineImportDirectionTest(unittest.TestCase):
@@ -132,8 +168,8 @@ class PipelineImportDirectionTest(unittest.TestCase):
         review ⇄ semantic 与 revision ⇄ semantic 两个环已经消掉。再出现函数体内的
         `from xvt.pipeline.*` 就意味着有人重新引入了循环而不是修正依赖方向。
         """
-        # 这里刻意扫描包目录下全部 *.py（含 __init__.py），范围比依赖白名单更宽。
-        modules = sorted(PIPELINE_DIR.glob("*.py"))
+        # 这里刻意扫描包目录下全部 *.py（含各级 __init__.py 与子包），范围比依赖白名单更宽。
+        modules = _all_pipeline_files()
         self.assertGreaterEqual(
             len(modules),
             len(EXPECTED_DEPENDENCIES) + 1,
