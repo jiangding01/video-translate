@@ -1,6 +1,16 @@
 # 项目交接说明
 
-更新时间：2026-10-18
+更新时间：2026-10-20
+
+2026-10-20 **恢复导航收尾三件：polished 原子 Job 的判定顺序缺口已修（同类缺陷第 8 次）；另两条「未验证」条目一条证伪、一条判为过期注释**（分支 `codex/atomic-polished-ordering`，未合并、未开 PR）。三件都先实证再动手。
+
+**① 主菜：polished 原子 Job 让「润色候选有效」盖掉在途整轮 Agent 等待 —— 危害确认，已修。** `recovery.py` 原子段里那条 `retryable` 排在既有的原子等待分支之前，根因是 `prepare_agent_translation` 只置 `TRANSLATE=awaiting_input` 而**不失效** `translation_polished_cues`。**清单原文的触发条件和危害形态都要更正**：(a) 它不是跟在 qa_blocked 让路后面——前两条语义等待分支（尤其 `semantic_review_waiting`，只要候选 QA 有 issue 就为真）会先接住术语死锁那类状态，真正的前提是 `semantic_review_target` 为 **None**（语义报告缺失/失效）；(b) 原文说「同样会盖掉刚写入的 manifest」，实测 Agent 模式下 manifest 被**原样重写、fingerprint 不变**，所以不是无条件作废。确认的危害是两层：**零推进死循环**（`_cmd_translate` 在 `mode == "agent"` 时早退，润色与语义腿根本不跑，`status` 分类与推荐逐轮不变，而真正能推进的 `apply-translation` 从头到尾不出现在导航里），以及**用户显式传过 `--batch-size` / `--glossary` 时真的作废**——原子 Job 的策略与 batch size 不回退 Job 快照，推荐命令省掉这些参数，实测 `batch_size` 2 → 25、`fingerprint` `ee66afe6…` → `7a1fddfc…`，准备好的响应被 `apply-translation` 以 `translation response fingerprint does not match the current manifest` 拒收，而那条报错自己又给出同一条命令。**修法**：该分支额外要求 `not workflow.agent_full_translation_waiting(job)`，与原子 `qa_blocked` 让路共用同一份谓词（顺带把那处函数内延迟导入收成一处）。**相邻的已知遗漏（未修、需单独决策）**：原子侧两条语义等待不判「整轮请求是否最新」，端到端侧的 `_full_translation_request_is_newest` + `_SUPERSEDED_BY_FULL_TRANSLATION` 在原子侧没有对应物，于是语义等待态下再开一轮整轮 `translate` 时 `status` 仍指向已被取代的 `apply-semantic-review`（实测）；它不改写在途 manifest、响应事后仍能回填，危害低于本条。
+
+**② 「局部重译回填逐字相同内容造成一次误报等待」—— 证伪，零代码改动。** 残留 manifest 确实仍 checksum 有效，`translated_cues` 的 checksum 也确实**逐字不变**（实测 `3f4a41da…` 前后相同，`cue_retranslation_waiting` 的第三、四条件都仍然成立）——静态推断这一半是对的。但第一条件独自就够：`apply-cue-retranslation` 经 `finalize_translation` 把 `TRANSLATE` 置 `succeeded`，谓词立即判否。普通路径（QA 通过）与术语死锁路径（QA 仍 `failed`）两种都实测过，`status` 分别是 `complete` 与 `manual_fix` + `retranslate-cues`，**都不是等待**，`continue` 正常收敛退出 0。
+
+**③ `workflow.py` 注释里的「`target_language` 为 None 的补翻」路径 —— 不可达，但那是过期注释而不是死码，只改注释。** 分支本体（`waiting_step == "await_cue_retranslation"`）**是活的**：普通带目标语言的 Job 实测会走到它，删掉会让局部重译等待落进下面那条分支、被报成 "translation requires Agent input" 并给出整轮等待的产物清单。不可达的是注释给的**理由**：`run` 一定会落 `config.workflow`，而 `run_translation` / `prepare_agent_translation` 都以 `target language must match the persisted workflow goal` 拒绝（实测退出码 2），所以 `workflow.target_language` 为 null 的 Job 永远拿不到 `translated_cues`，`retranslate-cues` 自己也以 `job has no translated_cues artifact` 退出。`needs_translation` 就是 `bool(config.target_language)`，当前可达的 Job 上两者同真同假。顺带一条考古：阻挡该场景的守卫落在 `d6ee9c7`（2026-07-26），而这条注释写于 `37e476b`（2026-08-29）——**写下时就已经过期**。
+
+测试 1029 → 1032（新增 3 条，其中 2 条红先、1 条是反向守卫；子测试 263 不变），**既有断言零改动、既有测试零变红**，协议快照零 diff。三条新测试全程只用真实 CLI（纯字幕输入 + `--provider agent`，零网络零 API），其中两条把恢复计划吐出来的命令 `shlex.split` 后原样喂回 `main()` 并断言 Job 真的推进。**遗留**：① 里点名的原子侧「整轮请求是否最新」判定缺口未修。
 
 2026-10-18 **P7 禁則処理（kinsoku shori）落地；但 P7 原条目点名的两个例子一个都没修好，且判定不该用启发式去修**（分支 `codex/cjk-line-break-rules`，未合并、未开 PR）。**原记录的机制归因与「禁则能挡住 `ど|んなに`」的预期都被实测推翻。**
 

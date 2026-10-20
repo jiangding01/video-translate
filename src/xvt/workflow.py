@@ -1470,9 +1470,21 @@ def _advance_workflow(
                 )
             raise RuntimeError(guidance.message)
 
-    # 必须排在下面那条被 goals.needs_translation 守卫的等待分支之前：局部重译可以发生在
-    # workflow.target_language 为 None 的 Job 上（run 时没给目标语言，后来用原子
-    # translate 补翻），那种 Job 走不进 needs_translation 分支，会一路落到「已完成」。
+    # 必须排在下面那条被 goals.needs_translation 守卫的等待分支之前：局部重译等待要的是
+    # 自己的 message 与 artifact 集合（``retranslating=True``），落进下面那条分支会被报成
+    # "translation requires Agent input" 并给出整轮等待的产物清单。
+    #
+    # 本条与上面 ``waiting_step`` 里 ``or first_step == "await_cue_retranslation"`` 的
+    # 放宽，原先都记着另一条理由：「局部重译可以发生在 workflow.target_language 为 None 的
+    # Job 上（run 时没给目标语言，后来用原子 translate 补翻）」。**那条理由今天不成立**
+    # （2026-10-20 实测）：``run`` 一定会落 ``config.workflow``，而
+    # ``run_translation`` / ``prepare_agent_translation`` 都以
+    # "target language must match the persisted workflow goal" 拒绝目标语言与快照不符的
+    # 调用（退出码 2），所以这种 Job 永远拿不到 ``translated_cues``，
+    # ``retranslate-cues`` 自己也以 "job has no translated_cues artifact" 退出。
+    # needs_translation 就是 ``bool(config.target_language)``，因此当前可达的 Job 上
+    # 两者同真同假。保留这条分支与那处放宽是为了上面那个 message/artifact 的差异，
+    # 不是为了那个不可达的场景。
     if waiting_step == "await_cue_retranslation":
         return _emit_waiting(
             job=job,

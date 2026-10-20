@@ -112,6 +112,19 @@
 
 `SUBTITLE_QA` 停在 `failed` / `awaiting_input` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的 Agent 等待而复位。端到端 Job 先问 planner（首步是正式等待步骤就改走工作流恢复分支）；原子 Job 没有 planner，改用 planner 内部的同一份谓词 `workflow.agent_full_translation_waiting`（`TRANSLATE` 停在 `awaiting_input` 且 `translation_batches` checksum 有效）跳过 `qa_blocked`，由原子等待分支给出 `apply-translation` 引导。否则术语死锁后改跑 `translate --provider agent` 的用户会继续拿到 `retranslate-cues`，照做会盖掉刚写入的整轮 manifest。manifest 已经不在的等待态残留不放行，QA 引导照旧生效。
 
+### polished 原子 Job 的「润色候选有效」让路
+
+原子分支内部还有一条同判据的让路，位置在「润色候选有效，可以重新执行原子翻译命令继续语义校对」那条 `retryable` 上。它排在既有的原子等待分支**之前**，而两者在同一个状态上同时成立：`prepare_agent_translation` 只把 `TRANSLATE` 置为 `awaiting_input`，**不失效** `translation_polished_cues`，所以「润色候选仍有效」与「整轮 Agent 翻译正在等回填」可以叠在一起（典型路径：polished 原子 Job 回填过一轮、语义报告缺失或失效，用户又开了一轮整轮 `translate --provider agent`）。
+
+不让路时 `status` 推荐的是 `xvt translate JOB --target-language LANG --translation-quality polished`，而它在这个状态下**不会**继续语义校对：Agent 模式下 `run_translation` 走到 `prepare_agent_translation` 就返回，`_cmd_translate` 后面的润色与语义校对腿根本不执行。后果有两层：
+
+- 命令零推进。manifest 被原样重写一遍（内容逐字相同），`status` 的分类与推荐逐轮不变，形成一个没有出口的循环；真正能推进的 `apply-translation` / `xvt apply` 从头到尾不出现在导航里。
+- 用户当初显式传过 `--batch-size`（或 `--glossary`）时更糟。原子 Job 的策略与 batch size **不**回退 Job 内的快照（见上文「翻译策略与批次大小的回退」），重写会把 manifest 的 `batch_size` 与 `fingerprint` 一起改掉，手里那份已经准备好的响应随即被 `apply-translation` 的指纹校验拒收（`translation response fingerprint does not match the current manifest`），一次本可回填的等待变成要重新回填。
+
+因此该分支额外要求 `not workflow.agent_full_translation_waiting(job)`——与上面 `qa_blocked` 让路**同一份谓词**，不另造条件。让路后由原子等待分支给出 `apply-translation` 引导；`TRANSLATE` 不在等待态、或 manifest 已经不在的等待态残留，本分支照旧生效（后者不让路正是因为那种状态下没有任何响应能回填）。
+
+**相邻的已知遗漏（未修，需单独决策）**：原子分支的两条语义等待（`agent_semantic_review_waiting` / `semantic_review_waiting`）排在更前面，它们**不**判「整轮请求是不是最新的那一份」。端到端侧有 `workflow._full_translation_request_is_newest` + `_SUPERSEDED_BY_FULL_TRANSLATION`（`translation_semantic_qa` 在列）做这件事，原子侧没有对应判定，于是语义等待态下再开一轮整轮 `translate` 时，`status` 仍指向已被取代的 `apply-semantic-review`（2026-10-20 实测）。它不改写在途 manifest，手里的整轮响应事后仍能回填，因此危害低于本条，但口径与端到端侧不一致。
+
 ### 强制对齐置信度不足的死循环出口
 
 `--align-subtitles` 与 `--allow-low-confidence-alignment` 都固化在 `job.config` 里，置信度门不过时 `ALIGN` 记 `failed`、`source_cues` 缺失，但转写 checkpoint 全在。此前这种 Job 落到「存在 checksum 有效的转写 checkpoint，可以从断点继续」，首选命令是 `continue`，`alternative_commands` 为空——而 `continue` 拿的是同一份 `input_subtitles` 与同一份 `word_transcript`，对齐是确定性的，每次都复现同一个退出码 2，用户没有任何出口。

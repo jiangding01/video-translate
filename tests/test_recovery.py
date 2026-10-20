@@ -2209,3 +2209,230 @@ class PendingTranslationImportDeadEndTest(unittest.TestCase):
             assert missing is not None
             self.assertNotEqual(missing, mismatch)
             self.assertIn(str(config.translation_subtitles), missing)
+
+
+class AtomicPolishedTranslationWaitPrecedenceTest(unittest.TestCase):
+    """polished 原子 Job：「润色候选有效」分支不得盖掉在途整轮 Agent 等待。
+
+    ``_build_recovery_plan`` 的原子段里，「润色候选有效，可以重新执行原子翻译命令继续
+    语义校对」排在既有的原子等待分支之前。两者在同一个状态上同时成立——
+    ``prepare_agent_translation`` 只置 ``TRANSLATE=awaiting_input``，不失效
+    ``translation_polished_cues``——于是 ``status`` 推荐的是 ``xvt translate``，而它在
+    Agent 模式下只会把 manifest 原样重写一遍（零推进的死循环），用户当初显式传过
+    ``--batch-size`` 时还会把 manifest 的 batch size 与 fingerprint 一起改掉，手里
+    那份准备好的响应随之作废。真正能推进的是 ``apply-translation``。
+    """
+
+    _SOURCE = (
+        "1\n00:00:00,000 --> 00:00:02,000\nHello world.\n\n"
+        "2\n00:00:02,500 --> 00:00:04,500\nThis is a test subtitle.\n\n"
+        "3\n00:00:05,000 --> 00:00:07,000\nThe quick brown fox jumps.\n"
+    )
+
+    def setUp(self) -> None:
+        # `apply-translation` 在原子 polished Job 上会接着跑语义校对，而 resolve_provider
+        # 的 base_url / model / API Key 三项都能从环境变量里取。开发机或 CI 配齐这三项时
+        # 这条链路会真的发网络请求，因此这里把它们清空，整条链路钉在 Agent 模式。
+        patcher = patch.dict(
+            "os.environ",
+            {
+                "XVT_TRANSLATION_BASE_URL": "",
+                "XVT_TRANSLATION_MODEL": "",
+                "XVT_TRANSLATION_API_KEY": "",
+            },
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _atomic_polished_job(self, root: Path) -> Path:
+        """真实 CLI 跑出一个 polished 原子 Job，停在整轮 Agent 翻译等待上。
+
+        零网络零 API：纯字幕输入 + ``--provider agent``。原子 Job（没有持久化
+        ``config.workflow``）只能由旧版本 xvt 落盘，这里按仓库既有做法（见
+        ``tests/test_pipeline_semantic.py``）把 workflow 目标摘掉、改写成顶层键。
+        """
+
+        source = root / "src.srt"
+        source.write_text(self._SOURCE, encoding="utf-8")
+        output = root / "out"
+        with redirect_stdout(StringIO()):
+            self.assertEqual(
+                main(
+                    [
+                        "run",
+                        str(source),
+                        "--output",
+                        str(output),
+                        "--target-language",
+                        "zh-CN",
+                        "--translation-quality",
+                        "polished",
+                        "--provider",
+                        "agent",
+                    ]
+                ),
+                0,
+            )
+        job_file = next(output.rglob("job.json"))
+        job = load_job(job_file)
+        workflow = job.config.pop("workflow")
+        job.config["target_language"] = workflow["target_language"]
+        job.config["translation_quality"] = workflow["translation_quality"]
+        save_job(job)
+        return job_file
+
+    def _agent_response(self, job_file: Path, path: Path) -> Path:
+        """按当前 manifest 生成一份合法回填响应（绑定它的 fingerprint）。"""
+
+        manifest_path = valid_artifact_path(load_job(job_file), "translation_batches")
+        assert manifest_path is not None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload = {
+            "items": [
+                {"id": item["id"], "text": f"译文第{item['id']}句。"}
+                for batch in manifest["batches"]
+                for item in batch["items"]
+            ],
+            "job_id": manifest["job_id"],
+            "task": manifest["task"],
+            "task_version": manifest["task_version"],
+            "fingerprint": manifest["fingerprint"],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def _drop_semantic_report(self, job_file: Path) -> None:
+        """语义报告失效：``semantic_review_target`` 变 None，两条语义等待分支都让位。
+
+        现实对应「产物被删 / 磁盘损坏 / 语义校对在落盘前中断」，恢复侧只认内容
+        checksum，文件不在就等于没有这份报告。
+        """
+
+        report = valid_artifact_path(load_job(job_file), "translation_semantic_qa")
+        assert report is not None
+        report.unlink()
+
+    def _apply_recommended_command(self, plan, response: Path) -> None:
+        """把恢复计划吐出来的那条命令原样喂回 CLI，只替换 RESPONSE 占位符。"""
+
+        self.assertEqual(plan.category, "awaiting_input")
+        self.assertIsNone(plan.primary_command)
+        self.assertEqual(len(plan.prerequisite_commands), 1, plan.prerequisite_commands)
+        argv = shlex.split(plan.prerequisite_commands[0])
+        self.assertEqual(argv[:2], ["xvt", "apply-translation"])
+        self.assertEqual(argv[3], "RESPONSE")
+        self.assertEqual(argv[4:], ["--target-language", "zh-CN"])
+        argv[3] = str(response)
+        with redirect_stdout(StringIO()):
+            self.assertEqual(main(argv[1:]), 0)
+
+    def _semantic_wait_reached(self, job_file: Path) -> bool:
+        plan = build_recovery_plan(job_file)
+        return plan.category == "awaiting_input" and any(
+            "apply-semantic-review" in command for command in plan.prerequisite_commands
+        )
+
+    def test_pending_round_keeps_its_manifest_and_its_prepared_response(self) -> None:
+        """用户显式 ``--batch-size`` 重开一轮：推荐命令不得改掉 manifest 指纹。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._atomic_polished_job(root)
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "apply-translation",
+                            str(job_file),
+                            str(self._agent_response(job_file, root / "round1.json")),
+                            "--target-language",
+                            "zh-CN",
+                        ]
+                    ),
+                    0,
+                )
+            self._drop_semantic_report(job_file)
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "translate",
+                            str(job_file),
+                            "--target-language",
+                            "zh-CN",
+                            "--provider",
+                            "agent",
+                            "--batch-size",
+                            "2",
+                        ]
+                    ),
+                    0,
+                )
+            manifest_path = valid_artifact_path(load_job(job_file), "translation_batches")
+            assert manifest_path is not None
+            pending = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["batch_size"], 2)
+            response = self._agent_response(job_file, root / "round2.json")
+
+            self._apply_recommended_command(build_recovery_plan(job_file), response)
+
+            # manifest 一字未动，Job 真的推进到了语义校对等待。
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), pending)
+            self.assertTrue(self._semantic_wait_reached(job_file))
+
+    def test_already_applied_manifest_is_not_a_zero_progress_loop(self) -> None:
+        """同一道闸门的第二种形态：manifest 已回填过，推荐命令必须仍能推进。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._atomic_polished_job(root)
+            response = self._agent_response(job_file, root / "round1.json")
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "apply-translation",
+                            str(job_file),
+                            str(response),
+                            "--target-language",
+                            "zh-CN",
+                        ]
+                    ),
+                    0,
+                )
+            self._drop_semantic_report(job_file)
+
+            self._apply_recommended_command(build_recovery_plan(job_file), response)
+
+            self.assertTrue(self._semantic_wait_reached(job_file))
+
+    def test_polished_candidate_branch_still_fires_without_a_pending_wait(self) -> None:
+        """反证：闸门只拦在途等待，``TRANSLATE`` 不在等待态时原分支一字不变地生效。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._atomic_polished_job(root)
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "apply-translation",
+                            str(job_file),
+                            str(self._agent_response(job_file, root / "round1.json")),
+                            "--target-language",
+                            "zh-CN",
+                        ]
+                    ),
+                    0,
+                )
+            self._drop_semantic_report(job_file)
+            job = load_job(job_file)
+            job.stages[StageName.TRANSLATE].status = StageStatus.SUCCEEDED
+            save_job(job)
+
+            plan = build_recovery_plan(job_file)
+
+            self.assertEqual(plan.category, "retryable")
+            self.assertIn("润色候选有效", plan.reason)
+            assert plan.primary_command is not None
+            self.assertIn("--translation-quality polished", plan.primary_command)

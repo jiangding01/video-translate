@@ -830,6 +830,10 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
 
     from xvt.pipeline.retranslate import cue_retranslation_waiting
 
+    # 延迟导入，避开 workflow → recovery → workflow 的循环。下面两处原子 Job 的
+    # 「等待优先」让路（qa_blocked 让路与「润色候选有效」让路）共用这一份谓词。
+    from xvt.workflow import agent_full_translation_waiting
+
     # 必须排在 qa_blocked 之前。术语死锁（阻断的 error 全是 glossary_violation）的出口
     # 就是 retranslate-cues，用户按引导跑完 Agent 模式的重译后 SUBTITLE_QA 仍停在
     # FAILED——译文 QA 要等回填后才重跑。排在后面时 qa_blocked 分支会把这段等待重报成
@@ -878,9 +882,7 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
         # `translate --provider agent` 开了新的整轮请求。继续按 qa_blocked 处理会推荐
         # retranslate-cues，照做会盖掉刚写入的整轮 manifest。放行后由下面既有的原子等待
         # 分支给出 apply-translation 引导；manifest 已经不在时（等待态残留）不放行，
-        # QA 引导照旧生效。延迟导入同上，避开 workflow → recovery → workflow 的循环。
-        from xvt.workflow import agent_full_translation_waiting
-
+        # QA 引导照旧生效。
         if agent_full_translation_waiting(job):
             qa_blocked = False
     if qa_blocked:
@@ -993,10 +995,20 @@ def _build_recovery_plan(job_or_file: Job | str | Path) -> RecoveryPlan:
             ),
         )
 
+    # 第三条「等待优先」让路，与上面 qa_blocked 的那条同一个判据、同一份谓词。
+    # prepare_agent_translation 只把 TRANSLATE 置为等待，不失效 translation_polished_cues，
+    # 所以「润色候选有效」与「整轮 Agent 翻译正在等回填」在同一个状态上同时成立。本分支排在
+    # 原子等待分支之前，不让路就会推荐 `translate --translation-quality polished`：Agent 模式
+    # 下它只是把同一份 manifest 原样重写，状态与推荐逐轮不变（零推进的死循环），而用户当初
+    # 显式传过 `--batch-size`（或 `--glossary`）时，重写还会改掉 manifest 的 batch size 与
+    # fingerprint——手里那份准备好的响应被 `apply-translation` 的指纹校验拒收，一次本可回填
+    # 的等待变成要重新回填。让路后由下面既有的原子等待分支给出 apply-translation 引导；
+    # manifest 已经不在的等待态残留不让路（谓词的第二个条件），本分支照旧生效。
     if (
         job.config.get("translation_quality") == "polished"
         and "translation_polished_cues" in valid_artifacts
         and not semantic_review_approved(job)
+        and not agent_full_translation_waiting(job)
     ):
         target = shlex.quote(target_language) if target_language else "LANGUAGE"
         return plan(
