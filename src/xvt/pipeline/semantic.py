@@ -178,6 +178,20 @@ def _merge_issues(
     return validate_unique_issues(merged)
 
 
+def _partition_issues(
+    issues: tuple[SemanticIssue, ...],
+) -> tuple[tuple[SemanticIssue, ...], tuple[SemanticIssue, ...]]:
+    """把一轮语义 review 的 issue 按类别分成「可定向修复」与「必须保留」两份。
+
+    ``source_suspect`` 指向源文而非译文，定向修复改不动它，必须原样带进下一轮报告
+    （见 ``_merge_issues``）。两份子集按 ``SEMANTIC_REPAIR_CATEGORIES`` 的定义互斥，
+    但不保证覆盖全部输入——类别合法性由 ``validate_unique_issues`` 之前的解析保证。
+    """
+    repairable = tuple(issue for issue in issues if issue.category in SEMANTIC_REPAIR_CATEGORIES)
+    preserved = tuple(issue for issue in issues if issue.category == "source_suspect")
+    return repairable, preserved
+
+
 def _invalidate_semantic_downstream(job: Job, root: ArtifactKind) -> None:
     invalidated = downstream_of(root)
     job.artifacts = [artifact for artifact in job.artifacts if artifact.kind not in invalidated]
@@ -531,6 +545,36 @@ def _finalize_candidate(
     )
 
 
+def _conclude_semantic_review(
+    job: Job,
+    job_file: str | Path,
+    candidate_path: Path,
+    paths: list[Path],
+    *,
+    issues: tuple[SemanticIssue, ...],
+    blocking_qa_issues: tuple[dict[str, Any], ...],
+    mode: str,
+    event_sink: EventSink | None,
+) -> SemanticRunResult:
+    """语义校对各条路径的共同终态收口。
+
+    仍有语义 issue 或阻塞性候选 QA issue 时停在 ``awaiting_input`` 等人工处理，
+    否则收口候选译文。``paths`` 原地追加人工输入模板，与收口前已登记的产物同序返回。
+    """
+    if issues or blocking_qa_issues:
+        set_stage(
+            job,
+            StageName.TRANSLATE,
+            StageStatus.AWAITING_INPUT,
+            event_sink,
+            extras={"phase": "semantic_review"},
+        )
+        paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
+        return SemanticRunResult("awaiting_review", mode, tuple(paths))
+    rendered = _finalize_candidate(job, candidate_path, event_sink)
+    return SemanticRunResult("completed", mode, (*paths, *rendered))
+
+
 def semantic_review_approved(job: Job) -> bool:
     target = semantic_review_target(job)
     if target is None:
@@ -673,18 +717,16 @@ def run_translation_semantic_review(
                 review_scope=review_scope,
             )
             paths.append(report_path)
-            if issues or blocking_qa_issues:
-                set_stage(
-                    job,
-                    StageName.TRANSLATE,
-                    StageStatus.AWAITING_INPUT,
-                    event_sink,
-                    extras={"phase": "semantic_review"},
-                )
-                paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
-                return SemanticRunResult("awaiting_review", mode, tuple(paths))
-            rendered = _finalize_candidate(job, candidate_path, event_sink)
-            return SemanticRunResult("completed", mode, (*paths, *rendered))
+            return _conclude_semantic_review(
+                job,
+                job_file,
+                candidate_path,
+                paths,
+                issues=issues,
+                blocking_qa_issues=blocking_qa_issues,
+                mode=mode,
+                event_sink=event_sink,
+            )
         report_path, issues = _run_review_phase(
             job,
             resolved,
@@ -698,10 +740,7 @@ def run_translation_semantic_review(
             event_sink=event_sink,
         )
         paths.append(report_path)
-        repairable = tuple(
-            issue for issue in issues if issue.category in SEMANTIC_REPAIR_CATEGORIES
-        )
-        preserved = tuple(issue for issue in issues if issue.category == "source_suspect")
+        repairable, preserved = _partition_issues(issues)
         if repairable:
             repair_path, repaired_path = _run_repair_phase(
                 job,
@@ -734,18 +773,16 @@ def run_translation_semantic_review(
                 job, candidate_path, event_sink
             )
             paths.append(candidate_qa_path)
-        if issues or blocking_qa_issues:
-            set_stage(
-                job,
-                StageName.TRANSLATE,
-                StageStatus.AWAITING_INPUT,
-                event_sink,
-                extras={"phase": "semantic_review"},
-            )
-            paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
-            return SemanticRunResult("awaiting_review", mode, tuple(paths))
-        rendered = _finalize_candidate(job, candidate_path, event_sink)
-        return SemanticRunResult("completed", mode, (*paths, *rendered))
+        return _conclude_semantic_review(
+            job,
+            job_file,
+            candidate_path,
+            paths,
+            issues=issues,
+            blocking_qa_issues=blocking_qa_issues,
+            mode=mode,
+            event_sink=event_sink,
+        )
     except Exception as error:
         set_stage(
             job,
@@ -941,10 +978,7 @@ def apply_agent_semantic_review(
         [issue for value in initial_results.values() for issue in value]
     )
     review_only = manifest.get("task") == "semantic_review_only"
-    repairable = tuple(
-        issue for issue in initial_issues if issue.category in SEMANTIC_REPAIR_CATEGORIES
-    )
-    preserved = tuple(issue for issue in initial_issues if issue.category == "source_suspect")
+    repairable, preserved = _partition_issues(initial_issues)
     final_issues = _merge_issues(initial_issues, preserved_revision_issues)
     repair_state = None
     if repairable and not review_only:
@@ -1067,18 +1101,16 @@ def apply_agent_semantic_review(
         paths.extend((repair_path, repaired_path, final_path))
     candidate_qa_path, blocking_qa_issues = _ensure_candidate_qa(job, candidate_path, event_sink)
     paths.append(candidate_qa_path)
-    if final_issues or blocking_qa_issues:
-        set_stage(
-            job,
-            StageName.TRANSLATE,
-            StageStatus.AWAITING_INPUT,
-            event_sink,
-            extras={"phase": "semantic_review"},
-        )
-        paths.extend(ensure_semantic_review_inputs(job_file, event_sink=event_sink))
-        return SemanticRunResult("awaiting_review", "agent", tuple(paths))
-    rendered = _finalize_candidate(job, candidate_path, event_sink)
-    return SemanticRunResult("completed", "agent", (*paths, *rendered))
+    return _conclude_semantic_review(
+        job,
+        job_file,
+        candidate_path,
+        paths,
+        issues=final_issues,
+        blocking_qa_issues=blocking_qa_issues,
+        mode="agent",
+        event_sink=event_sink,
+    )
 
 
 def complete_acknowledged_semantic_review(
