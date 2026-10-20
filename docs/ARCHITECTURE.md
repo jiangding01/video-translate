@@ -10,7 +10,7 @@
 
 `pipeline.common.translation_qa_context` 统一候选 QA、修订预检与译文收尾的媒体、字体和术语上下文；显式 workflow 媒体优先，否则使用 checksum 有效的媒体产物。`render` 共用 ASS 样式构造，单次 FFmpeg/libass 调用测量每条源文、译文的可见宽度及描边。`qa` 将实际超宽判为 review，实际容纳得下的建议字数超限仅 warning；测量失败回退保守规则。报告的 `layout` 保存画幅、样式及测量结果，确认记录同时绑定该上下文。
 
-人工修订先经只读解析与完整候选 QA，再由正式 apply 写修订产物和失效下游。`--check` 复用同一入口但不获取执行锁、不写文件、不调用模型。烧录对实际媒体和字体重跑 QA；原子烧录与预览的布局检查只读，不覆盖正式 QA artifact 或更新字幕 QA stage；此前发生的远程媒体获取仍正常持久化。`workflow._ensure_burn` 显式启用 `persist_workflow_qa`，仅按持久化目标执行的烧录保存布局 QA 并更新字幕 QA stage。此路径不改变 cue ID 或时间轴，不新增 stage、artifact kind 或事件类型。
+人工修订先经只读解析与完整候选 QA，再由正式 apply 写修订产物和失效下游。`--check` 复用同一入口但不获取执行锁、不写文件、不调用模型。烧录对实际媒体和字体校验布局：工作流烧录腿先由只读判定 `pipeline.burnin._reusable_rendered_layout` 比对**报告自己的 `layout` 块**所记的画幅与 ASS 样式，并按本次媒体就地重判时长（时长未落进报告，它只影响 error 级的 `outside_media`），全等且报告 status 为 `pass` / `warning` 时直接复用渲染腿已登记的 `translated_subtitle_qa` 与 `bilingual_ass`，否则现场重新测量并重新渲染（fail closed；已确认的 `needs_review` 刻意不复用，以保留 `subtitle_review_acknowledged` 这条放行依据的事件证据）。放行判定（`_assert_translated_qa_gate` → `review_gate_satisfied`）排在复用判定之前，复用只省掉一次结论必然相同的重算。原子烧录与预览的布局检查只读、不复用，不覆盖正式 QA artifact 或更新字幕 QA stage；此前发生的远程媒体获取仍正常持久化。`workflow._ensure_burn` 显式启用 `persist_workflow_qa`，仅按持久化目标执行的烧录保存布局 QA 并更新字幕 QA stage。此路径不改变 cue ID 或时间轴，不新增 stage、artifact kind 或事件类型。
 
 ## 设计目标
 

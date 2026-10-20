@@ -146,6 +146,78 @@ def _check_render_layout(
         )
 
 
+def _reusable_rendered_layout(
+    job: Job,
+    translated: list[Cue],
+    media_info: MediaInfo,
+    options: AssStyleOptions,
+) -> Path | None:
+    """工作流烧录腿能否原样复用渲染腿已产出的译文布局 QA 与双语 ASS。
+
+    返回可复用的 `bilingual.ass` 路径；任一条件不成立返回 ``None``，烧录腿照旧
+    重新测量并重新渲染（fail closed）。
+
+    为什么可以复用：译文布局 QA 只由 cue 内容、画幅、ASS 样式、媒体时长与术语表
+    五项输入决定（`qa.check_subtitles`），同输入重算逐字相同（确定性报告，无时间戳）。
+    五项逐一有据：
+
+    - **cue 内容**：`translated` 来自 checksum 有效的 `translated_cues`，而
+      `translated_subtitle_qa` / `bilingual_ass` 都在 `downstream_of(TRANSLATED_CUES)`
+      的失效闭包里——译文一变，这两条登记当场被摘掉，这里就复用不到。
+    - **画幅与 ASS 样式**：取自报告**自己**的 `layout` 块（`video_width` /
+      `video_height` / `style_options` 自 Q4 起就落盘），因此是那份报告被测量时的
+      真实输入，不是「现在的配置碰巧长这样」的推断。手改 `job.json` 字体也绕不过去。
+    - **媒体时长**：报告没有记它，所以不推断**就地重判**——时长在整份报告里只影响
+      `outside_media` 这一条（error 级），直接按本次烧录真正要用的 `media_info`
+      重算一次，越界即拒绝复用；时长未知（0 / None）时同样拒绝，那时 `check_subtitles`
+      的判定与报告里那次不可比。
+    - **术语表**：两腿都调 `required_glossary_terms(job)`，同一个 Job 必然同值，
+      且该判定与画幅、字体、媒体一概无关。
+
+    约束 4 不因复用而松动：`_assert_translated_qa_gate` 在本函数之前就已经对**同一份**
+    报告跑过 `review_gate_satisfied`（与 `complete_qa_stage` 同口径），`failed` 或未确认
+    的 `needs_review` 在那里就抛错了。复用只省掉一次**结论必然相同**的重算。
+
+    刻意只复用 `pass` / `warning` 的报告，**已确认的 `needs_review` 不复用**（它照旧
+    重测重渲）：那条路径上 `complete_qa_stage` 会按存档确认发 `subtitle_review_acknowledged`，
+    复用会把这条留痕一起省掉——它是「这次放行依据哪条确认」的唯一事件证据，而布局确认
+    恰恰是约束 4 点名要绑定的东西。省下的测量不值这笔。
+    """
+
+    if job.stages[StageName.SUBTITLE_QA].status is not StageStatus.SUCCEEDED:
+        return None
+    if job.stages[StageName.RENDER].status is not StageStatus.SUCCEEDED:
+        return None
+    qa_path = valid_artifact_path(job, "translated_subtitle_qa")
+    ass_path = valid_artifact_path(job, "bilingual_ass")
+    if qa_path is None or ass_path is None:
+        return None
+    try:
+        report = json.loads(qa_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict) or report.get("status") not in {"pass", "warning"}:
+        return None
+    layout = report.get("layout")
+    if not isinstance(layout, dict):
+        return None
+    # 测量失败回退过保守规则的报告不复用：那份结论是降级来的，重测有机会拿到真实行宽。
+    if layout.get("measurement") != "measured":
+        return None
+    if (layout.get("video_width"), layout.get("video_height")) != (
+        media_info.width,
+        media_info.height,
+    ):
+        return None
+    if layout.get("style_options") != asdict(options):
+        return None
+    if not media_info.duration_ms:
+        return None
+    if any(cue.start_ms < 0 or cue.end_ms > media_info.duration_ms for cue in translated):
+        return None
+    return ass_path
+
+
 def preview_translated_job(
     job_file: str | Path,
     *,
@@ -377,14 +449,25 @@ def burn_translated_job(
             raise ValueError("burn-in requires a video stream with known dimensions")
 
         translated = load_cues(translated_cues_path)
-        _check_render_layout(
-            job,
-            translated,
-            media_info,
-            AssStyleOptions(target_font=target_font, source_font=source_font),
-            event_sink,
-            persist=persist_workflow_qa,
+        style_options = AssStyleOptions(target_font=target_font, source_font=source_font)
+        # 工作流烧录腿与译文渲染腿按同一份持久化目标跑同一份 cue：渲染腿刚测过的布局
+        # QA 与刚写出的 ASS 可以原样复用，不必再做一次 libass 行宽测量。原子
+        # `xvt burn` 不走这条（`persist_workflow_qa=False`）：它可以覆盖持久化目标之外
+        # 的媒体与字体，必须按本次实参现场校验，而且它从不紧跟在渲染腿之后。
+        reused_ass = (
+            _reusable_rendered_layout(job, translated, media_info, style_options)
+            if persist_workflow_qa
+            else None
         )
+        if reused_ass is None:
+            _check_render_layout(
+                job,
+                translated,
+                media_info,
+                style_options,
+                event_sink,
+                persist=persist_workflow_qa,
+            )
         # 路径校验放在 RENDER/BURN 记账之前，避免错误输出先留下半成品 stage 状态。
         artifacts_directory = get_job_directory(job) / "artifacts"
         ass_path = artifacts_directory / "bilingual.ass"
@@ -403,16 +486,20 @@ def burn_translated_job(
             label="burn output",
         )
 
-        set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
-        ass_path = save_bilingual_ass(
-            translated,
-            ass_path,
-            video_width=media_info.width,
-            video_height=media_info.height,
-            options=AssStyleOptions(target_font=target_font, source_font=source_font),
-        )
-        add_artifact(job, "bilingual_ass", ass_path, event_sink)
-        set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        if reused_ass is None:
+            set_stage(job, current_stage, StageStatus.RUNNING, event_sink)
+            ass_path = save_bilingual_ass(
+                translated,
+                ass_path,
+                video_width=media_info.width,
+                video_height=media_info.height,
+                options=style_options,
+            )
+            add_artifact(job, "bilingual_ass", ass_path, event_sink)
+            set_stage(job, current_stage, StageStatus.SUCCEEDED, event_sink)
+        else:
+            # 复用时 RENDER 已经是 SUCCEEDED，重新记账只会把同一个事实再说一遍。
+            ass_path = reused_ass
 
         current_stage = StageName.BURN
         set_stage(job, current_stage, StageStatus.RUNNING, event_sink)

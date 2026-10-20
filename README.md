@@ -62,7 +62,7 @@ xvt batch-continue BATCH.json
 
 人工译文修订可先运行 `xvt apply JOB REVIEW --check`（或显式 `apply-translation-review-fixes ... --check`）。预检校验 JSON/SRT 身份、时间轴、译文完整性、术语和行宽，返回结构化 QA；有效退出 0，无效退出 2。它不写 Job、产物或锁文件，不调用翻译 API，也不执行语义复查；`--check` 不能与 `--continue` 合用。正式提交共享同一预检，仍有译文 QA 阻断项时拒绝保存，修好后再运行 `xvt apply JOB REVIEW --continue`。
 
-译文的行宽 QA 在已知画幅时使用 FFmpeg/libass，按最终 ASS 字体、字号和描边测量。超过建议字数但实际放得下时只给 warning；实际超出可用宽度时仍需处理。中文 36 显示单位仍是建议值。无画幅或测量失败时保留原有保守限制，测量失败另有 warning。语义校对、时间轴和术语规则保持有效；不要为满足字数建议删掉原文信息。预览与烧录也检查所选媒体、字体；换画幅或字体后不能复用旧布局确认。原子 `burn` / `preview` 的临时布局检查不覆盖正式 QA，检查失败后仍可按原目标 `continue`；`run` / `continue` 保存工作流目标的布局 QA。
+译文的行宽 QA 在已知画幅时使用 FFmpeg/libass，按最终 ASS 字体、字号和描边测量。超过建议字数但实际放得下时只给 warning；实际超出可用宽度时仍需处理。中文 36 显示单位仍是建议值。无画幅或测量失败时保留原有保守限制，测量失败另有 warning。语义校对、时间轴和术语规则保持有效；不要为满足字数建议删掉原文信息。预览与烧录也检查所选媒体、字体；换画幅或字体后不能复用旧布局确认。原子 `burn` / `preview` 的临时布局检查不覆盖正式 QA，检查失败后仍可按原目标 `continue`；`run` / `continue` 保存工作流目标的布局 QA。同一条 `run` / `continue` 里译文渲染腿已经按这套画幅与字体测过时，烧录腿直接复用那份 `qa-translated.json` 与 `bilingual.ass`，不再做第二次 libass 行宽测量（画幅、字体、媒体时长任一不同，上一次测量降级到保守规则，或那份报告是靠确认放行的 `needs_review`，都照旧现场重测）。原子 `xvt burn` 不复用：它可以覆盖持久化目标之外的媒体与字体，必须按本次实参现场校验。
 
 <!-- cli-reference:start -->
 
