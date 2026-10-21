@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件适用于项目根目录及全部子目录。先阅读本文件，再按受影响面选读：进行中的工作与下一步看 [HANDOFF.md](HANDOFF.md)；工作流、恢复或回填改动看 [架构说明](docs/ARCHITECTURE.md) 与 [恢复与回填契约](docs/RECOVERY.md)；用户可见行为看 [README.md](README.md) 与 `xvt --help`；范围与优先级看 [路线图](ROADMAP.md)。
+本文件适用于项目根目录及全部子目录。先阅读本文件，再按受影响面选读：进行中的工作与下一步看 [HANDOFF.md](HANDOFF.md)；工作流、恢复或回填改动看 [架构说明](docs/ARCHITECTURE.md) 与 [恢复与回填契约](docs/RECOVERY.md)；用户可见行为看 [README.md](README.md) 与 `xvt --help`；范围与优先级看 [路线图](ROADMAP.md)。HANDOFF 的历史条目在 [HANDOFF 历史档案](docs/HANDOFF_ARCHIVE.md)，**那份只用 `rg` / `grep` 按需检索，不要整份读入上下文**。
 
 ## 项目定位
 

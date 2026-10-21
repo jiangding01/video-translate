@@ -3014,7 +3014,8 @@ class AlignmentPostQaDeadlockTest(unittest.TestCase):
 class AlignmentPostQaDeadlockExitTest(unittest.TestCase):
     """自证推荐命令真能推进：全程真实 CLI，只打桩 ffprobe / ffmpeg 抽音 / ASR 模型。
 
-    实证基线（真实媒体 + 真实 mlx-whisper，见 HANDOFF）：`xvt run … --align-subtitles`
+    实证基线（真实媒体 + 真实 mlx-whisper，见 docs/HANDOFF_ARCHIVE.md 的 2026-10-20）：
+    `xvt run … --align-subtitles`
     退出码 2，`status` 给 `retryable` + `continue`，连跑两次 `continue` 退出码都是 2 且
     stderr 逐字相同；`xvt rebuild-source --strategy asr` 退出码 0 后 Job 走到 complete、
     `xvt verify` 全项 PASS。本测试把同一条链路搬进默认测试套件。

@@ -1151,7 +1151,8 @@ class BatchBilingualAssDeliverableTest(unittest.TestCase):
 class BatchQaBlockedCueRetranslationTest(unittest.TestCase):
     """SUBTITLE_QA 停在 failed、旁边挂着有效局部重译 manifest 的条目必须停在 awaiting_input。
 
-    契约见 HANDOFF：continue 不宣告完成，batch-continue 停在该条目并给出回填引导。
+    契约见 docs/RECOVERY.md 的「等待项绝不自动推进」：continue 不宣告完成，
+    batch-continue 停在该条目并给出回填引导。
     这两个状态完全可以同时为真——术语死锁的出口就是 retranslate-cues，回填前译文
     QA 不会重跑，所以 SUBTITLE_QA 不会自动复位。旧行为把它按 qa_blocked 处理，条目
     被记成 failed，用户手里那份 manifest 反而没人认。
