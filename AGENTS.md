@@ -94,7 +94,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 6. 保持实现简单。不要为尚未确认的 GUI、队列、多租户、数据库或插件体系预留抽象层。
 7. 行为变化必须补测试。涉及 FFmpeg、字体、yt-dlp、翻译提供方、恢复逻辑或安全边界时，至少覆盖一个失败或边界场景。
 8. **协议快照不得被重构改写**：`tests/test_provider_protocol_snapshot.py` 冻结 provider 编排的事件序列、artifact 内容 checksum、manifest 键序与 fingerprint，golden 在 `tests/fixtures/provider-protocol-snapshot.json`。重构期间它出现 diff，一律回退改动而不是更新期望值；只有刻意的协议变更才允许重新生成 golden，且必须同步 Changelog 与相关文档。
-9. CLI 参数、默认行为、artifact、事件或安全边界变化后，同步检查 README、架构、恢复契约、Changelog、Roadmap、Skill 和 HANDOFF。
+9. CLI 参数、默认行为、artifact、事件或安全边界变化后，同步检查 README、架构、恢复契约、Changelog、Roadmap、Skill 和 HANDOFF。**同步 HANDOFF 不等于往里堆**：它 ≤ 200 行且 ≤ 32KB，单条日期条目 ≤ 2KB，超出就把最旧的条目滚进 [HANDOFF 历史档案](docs/HANDOFF_ARCHIVE.md)（按日期倒序，插在对应日期分组最前面）。实证过程、否决记录、复现数据属于 `docs/REVIEW_FINDINGS_*.md` 或对应专项方案，HANDOFF 条目只留结论、影响和链接。这条由 `tests/test_handoff_budget.py` 强制，不是自觉——2026-10 期间它曾在 4 天内从 61KB 涨到 240KB。
 10. **提交前硬门槛（不可跳过）**：
     1. 对照 diff 做一遍代码 review（正确性、边界、与既有语义一致性、安全边界、文档是否漏改）。
     2. 有问题先修再测；未修干净不得 `git commit`。
