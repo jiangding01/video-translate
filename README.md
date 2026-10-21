@@ -943,7 +943,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
   --output "/path/to/bilingual.mp4"
 ```
 
-默认优先 VideoToolbox，仅在出现明确的硬件编码器错误（硬件编码器不可用或繁忙）时回退 libx264。使用 `--software` 可直接指定软件编码。远程作业未传 `--media` 时会下载视频流；本地音频作业则必须通过 `--media` 提供视频。
+默认优先 VideoToolbox，仅在 FFmpeg 报出已知的硬件编码器错误（会话创建失败、编码器打开失败、硬件繁忙、编码器不支持该质量参数等，判据是 `burn.py` 的 `HARDWARE_ENCODER_ERRORS` 特征串）时回退 libx264；字幕文件、路径或滤镜错误一律原样失败，不回退。使用 `--software` 可直接指定软件编码。远程作业未传 `--media` 时会下载视频流；本地音频作业则必须通过 `--media` 提供视频。
 
 烧录和预览把 `bilingual.ass` / `preview.ass` 作为 `-vf ass=filename=...` 传给 FFmpeg，字幕路径按 filtergraph 的两层规则转义，因此 Job 目录（由 `--output` 决定）路径中的单引号、逗号、分号、方括号和冒号都不影响烧录，例如 `--output "/Users/me/Tom's Videos"` 可正常工作。
 

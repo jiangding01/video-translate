@@ -26,6 +26,8 @@ MAX_BYTES = 32 * 1024
 MAX_ENTRY_BYTES = 2 * 1024
 
 ENTRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# 条目的终止边界：下一条日期条目，或下一个 markdown 标题。
+BOUNDARY_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|#{1,6}\s)")
 
 OVERFLOW_HINT = (
     f"超出的部分请滚进 {ARCHIVE_HINT}（按日期倒序，插在对应日期分组最前面）；"
@@ -35,11 +37,22 @@ OVERFLOW_HINT = (
 
 
 def _entries(lines):
-    """把以 YYYY-MM-DD 开头的日期条目切出来，返回 [(起始行号, 文本)]。"""
-    starts = [i for i, line in enumerate(lines) if ENTRY_RE.match(line)]
+    """把以 YYYY-MM-DD 开头的日期条目切出来，返回 [(起始行号, 文本)]。
+
+    边界取「下一条日期条目」与「下一个 markdown 标题」里先到的那个，条目不会越过
+    章节标题把无关内容吃进来。这条边界是 2026-10-21 的 review 实测出来的：当时边界
+    一路吃到文件末尾，HANDOFF 里一句碰巧以日期开头的正文（R 系列那句「2026-08-02 的
+    全量审查……」）把整个「## 接手步骤」节吞了进去，往那一节加 212 字节就会让守卫
+    指着那句正文报「条目超长，请滚进档案」——既认错了对象，也给了一条对它无意义的
+    指示。`tests/test_events.py` 的同类守卫本来就是按 markdown 标题切块的。
+    """
     out = []
-    for n, start in enumerate(starts):
-        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+    for start, line in enumerate(lines):
+        if not ENTRY_RE.match(line):
+            continue
+        end = start + 1
+        while end < len(lines) and not BOUNDARY_RE.match(lines[end]):
+            end += 1
         out.append((start + 1, "\n".join(lines[start:end]).rstrip("\n")))
     return out
 
@@ -79,6 +92,53 @@ class HandoffBudgetTest(unittest.TestCase):
                     MAX_ENTRY_BYTES,
                     f"HANDOFF.md 第 {line_no} 行起的日期条目 {size / 1024:.1f}KB，"
                     f"超过单条 {MAX_ENTRY_BYTES // 1024}KB 上限。{OVERFLOW_HINT}",
+                )
+
+
+class EntryBoundaryTest(unittest.TestCase):
+    """条目边界本身的回归保护。
+
+    原先只验了「超标会红」，漏了另一半：**不该红的时候不能红**。一个会在错误时机、
+    以错误理由变红的守卫比没有更糟，它只会训练人去绕过它。
+    """
+
+    def test_entry_stops_at_next_heading(self):
+        """无关章节变长不得把日期条目撑爆——这正是 2026-10-21 实测到的误报。"""
+        lines = [
+            "2026-08-02 一句碰巧以日期开头的正文。",
+            "",
+            "## 接手步骤",
+            "",
+            "填充" * 2000,
+        ]
+        entries = _entries(lines)
+        self.assertEqual(len(entries), 1)
+        line_no, body = entries[0]
+        self.assertEqual(line_no, 1)
+        self.assertNotIn("填充", body)
+        self.assertLessEqual(len(body.encode("utf-8")), MAX_ENTRY_BYTES)
+
+    def test_entry_stops_at_next_dated_entry(self):
+        """同一节里相邻的两条条目仍然各算各的。"""
+        lines = [
+            "2026-10-20 第一条。",
+            "正文一。",
+            "2026-10-19 第二条。",
+            "正文二。",
+        ]
+        entries = _entries(lines)
+        self.assertEqual([line_no for line_no, _ in entries], [1, 3])
+        self.assertNotIn("第二条", entries[0][1])
+        self.assertNotIn("正文二", entries[0][1])
+
+    def test_real_handoff_entries_do_not_swallow_sections(self):
+        """真实 HANDOFF 上没有任何条目跨越章节标题。"""
+        lines = HANDOFF.read_text(encoding="utf-8").split("\n")
+        for line_no, body in _entries(lines):
+            with self.subTest(line=line_no):
+                self.assertFalse(
+                    [x for x in body.split("\n")[1:] if x.startswith("#")],
+                    f"第 {line_no} 行起的条目吃进了章节标题",
                 )
 
 
