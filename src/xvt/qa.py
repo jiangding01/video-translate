@@ -20,6 +20,7 @@ from xvt.textwidth import (
     display_width_limit,
     display_width_review_limit,
     is_cjk_language,
+    is_japanese_or_korean,
     reading_speed_limit,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "display_width_limit",
     "display_width_review_limit",
     "is_cjk_language",
+    "is_japanese_or_korean",
     "reading_speed_limit",
 ]
 

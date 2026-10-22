@@ -9,11 +9,17 @@ def is_cjk_language(language: str | None) -> bool:
     return bool(language and language.casefold().startswith(("zh", "ja", "ko")))
 
 
+def is_japanese_or_korean(language: str | None) -> bool:
+    return bool(language and language.casefold().startswith(("ja", "ko")))
+
+
 def character_limit(language: str | None) -> int:
     return 18 if is_cjk_language(language) else 64
 
 
 def reading_speed_limit(language: str | None) -> int:
+    if is_japanese_or_korean(language):
+        return 13
     return 9 if is_cjk_language(language) else 20
 
 
