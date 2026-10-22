@@ -7,6 +7,12 @@ from typing import Any
 from xvt.models import Cue
 from xvt.process import CommandError
 from xvt.render import AssStyleOptions, measure_bilingual_line_widths
+from xvt.segment import (
+    TARGET_WRAP_MAX_LINES,
+    target_wrap_binding,
+    target_wrap_limit,
+    wrap_overflowing_target,
+)
 from xvt.subtitles import normalize_display_text
 from xvt.textwidth import (
     character_limit,
@@ -69,6 +75,22 @@ def _contains_glossary_term(text: str, term: str) -> bool:
     return normalized_term in normalized_text
 
 
+# 译文整段超宽、经 ``segment.wrap_overflowing_target`` 切成两行后都放得下时的 issue code。
+TARGET_WRAPPED_CODE = "target_wrapped"
+# 尝试过换行仍要 review 时追加在文案末尾；前缀 ``line width N exceeds M`` 不变，
+# ``candidate_qa.overflow_limits`` 照旧能解析（D5）。
+_WRAP_ATTEMPTED_SUFFIX = f" after wrapping into {TARGET_WRAP_MAX_LINES} lines"
+
+
+def _wrapped_warning(lines: tuple[str, ...]) -> tuple[str, str, str]:
+    widest = max(display_width(line) for line in lines)
+    return (
+        "warning",
+        f"target wrapped into {len(lines)} lines (widest {widest} display units)",
+        TARGET_WRAPPED_CODE,
+    )
+
+
 def _overflow_risk(
     text: str,
     language: str | None,
@@ -77,30 +99,68 @@ def _overflow_risk(
     video_width: int | None,
     video_height: int | None,
     rendered_width: tuple[int, int] | None = None,
-) -> tuple[str, str] | None:
-    widths = [display_width(normalize_display_text(text))]
+) -> tuple[str, str, str | None] | None:
+    """返回 ``(severity, message, code)``；``code`` 为 ``None`` 时由调用方按语境定。
+
+    源文永不换行，判定与换行引入前逐字相同。译文整段超过 ``target_wrap_limit`` 时
+    先按同一个入口切成两行：切得开且放得下记 ``target_wrapped`` warning，切不开或
+    libass 实测仍超限才 review（文案带 ``after wrapping`` 后缀）。整段不超限的译文
+    不进换行，报告字节与换行引入前逐字相同（D6）。
+    """
+
+    normalized = normalize_display_text(text)
+    widths = [display_width(normalized)]
     soft_limit = display_width_limit(language)
+    if role == "target":
+        hard_limit = target_wrap_limit(language, video_width=video_width, video_height=video_height)
+    else:
+        hard_limit = display_width_review_limit(
+            language,
+            video_width=video_width,
+            video_height=video_height,
+        )
+    wrap_attempted = role == "target" and widths[0] > hard_limit
+    wrapped = (
+        wrap_overflowing_target(
+            normalized, language, video_width=video_width, video_height=video_height
+        )
+        if wrap_attempted
+        else None
+    )
+    suffix = _WRAP_ATTEMPTED_SUFFIX if wrap_attempted else ""
     if rendered_width is not None:
+        # libass 量的是 render 按同一入口切好之后的事件，宽度天然是最宽那行。
         width, limit = rendered_width
         if width > limit:
-            return "review", f"{role} line width {width} exceeds {limit} ASS pixels"
+            return "review", f"{role} line width {width} exceeds {limit} ASS pixels{suffix}", None
+        if wrapped:
+            return _wrapped_warning(wrapped)
         if widths[0] > soft_limit:
             return (
                 "warning",
                 f"{role} line width {widths[0]} exceeds preferred {soft_limit} display units; "
                 "rendered line fits",
+                None,
             )
         return None
-    hard_limit = display_width_review_limit(
-        language,
-        video_width=video_width,
-        video_height=video_height,
-    )
     if widths[0] > hard_limit:
-        return "review", f"{role} line width {widths[0]} exceeds {hard_limit} display units"
+        if wrapped:
+            widest = max(display_width(line) for line in wrapped)
+            if widest <= hard_limit:
+                return _wrapped_warning(wrapped)
+            return (
+                "review",
+                f"{role} line width {widest} exceeds {hard_limit} display units{suffix}",
+                None,
+            )
+        return (
+            "review",
+            f"{role} line width {widths[0]} exceeds {hard_limit} display units{suffix}",
+            None,
+        )
     if widths[0] > soft_limit:
         message = f"{role} line width {widths[0]} exceeds preferred {soft_limit} display units"
-        return "warning", message
+        return "warning", message, None
     return None
 
 
@@ -114,14 +174,13 @@ def target_overflow_cue_ids(
     for cue in cues:
         if not cue.target_text:
             continue
-        overflow = _overflow_risk(
-            cue.target_text,
-            cue.target_language,
-            "target",
-            video_width=video_width,
-            video_height=video_height,
+        # 整段超过 target_wrap_limit 的 cue（进入过换行分支）一律计入，无论最终是
+        # target_wrapped 还是 review：libass 实测仍超像素的 cue 在 QA 里是 review，
+        # 重切必须能处理它，不能成为 no-op。
+        limit = target_wrap_limit(
+            cue.target_language, video_width=video_width, video_height=video_height
         )
-        if overflow and overflow[0] == "review":
+        if display_width(normalize_display_text(cue.target_text)) > limit:
             overflow_ids.append(cue.id)
     return tuple(overflow_ids)
 
@@ -149,6 +208,8 @@ def check_subtitles(
             "source_font": render_options.source_font,
             "style_options": asdict(render_options),
             "measurement": "unavailable",
+            # 绑定译文换行算法：烧录腿只复用 wrap 绑定一致的报告（D4）。
+            "wrap": target_wrap_binding(),
         }
         try:
             measured = measure_bilingual_line_widths(
@@ -242,9 +303,9 @@ def check_subtitles(
                 ),
             ):
                 if overflow:
-                    severity, message = overflow
+                    severity, message, code = overflow
                     issues.append(
-                        SubtitleIssue("bilingual_overflow_risk", severity, cue.id, message)
+                        SubtitleIssue(code or "bilingual_overflow_risk", severity, cue.id, message)
                     )
         else:
             overflow = _overflow_risk(
@@ -255,7 +316,7 @@ def check_subtitles(
                 video_height=video_height,
             )
             if overflow:
-                severity, message = overflow
+                severity, message, _code = overflow
                 issues.append(SubtitleIssue("line_too_wide", severity, cue.id, message))
 
         units_per_second = _reading_units(text, language) / (duration_ms / 1000)

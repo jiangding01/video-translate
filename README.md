@@ -986,7 +986,9 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 这些残留文件是刻意保留的恢复证据，不会被自动删除。按固定路径读取产物的脚本请改读 Job 登记表，或先用 `xvt verify JOB` 确认。
 
-双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 固定为“译文一行 + 原文一行”。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的单行限制。
+双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 为“译文一到两行 + 原文一行”；译文只在整段超显示上限时才切成两行（见下）。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的每行上限（36 个显示单位）。
+
+译文整段超过显示上限时，QA 与 ASS 写出会先按禁则确定性地把它切成最多 2 行（`segment.wrap_target_lines`，行首行尾禁则不得违反），两行都不超限就通过并在报告里记一条 `target_wrapped` warning；切不开（单个词或字、只能违禁才切得开）或切完仍超限才像以前一样要求复核，文案仍以 `target line width N exceeds M display units` 开头，后缀为 ` after wrapping into 2 lines`。ASS 写出与 libass 行宽测量使用同一份切分，QA 量的就是烧出去的；cue 的 ID、起止时间和数量不变，`translated.srt` / `bilingual.srt` 不换行，源文也不换行。
 
 烧录完成后会做媒体 QA，结果写入 `media-qa.json`：检查输出有视频流；源媒体有音频时输出也必须有音频流；输出若有音频，编码必须是 AAC；输出分辨率必须与源视频一致；输出时长与源媒体的偏差不得超过 500ms。任一项不满足则报告为 `failed`，任务以失败收口，不宣告完成。
 
@@ -1005,7 +1007,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 uv run --no-sync xvt resegment-translation "/path/to/job.json"
 ```
 
-该命令只按语义优先边界重切超宽 cue，不会按字符拆旧译文；它会重建 `source-cues.json` 和 `source.srt`，使旧翻译批次、译文、QA、ASS 与烧录产物失效，并写入 `translation-resegmentation.json` 审计报告。端到端 Job 随后执行 `xvt continue JOB`，原子 Job 则按提示重新执行 `xvt translate`。用户导入的源字幕没有 ASR 词级时间戳，命令会拒绝改写其时间轴。
+该命令只按语义优先边界重切超宽 cue，不会按字符拆旧译文；这里的「超宽」指整段译文超过显示上限的 cue，不论是否已被换行。它会重建 `source-cues.json` 和 `source.srt`，使旧翻译批次、译文、QA、ASS 与烧录产物失效，并写入 `translation-resegmentation.json` 审计报告。端到端 Job 随后执行 `xvt continue JOB`，原子 Job 则按提示重新执行 `xvt translate`。用户导入的源字幕没有 ASR 词级时间戳，命令会拒绝改写其时间轴。
 
 ## 恢复与诊断
 

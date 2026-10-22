@@ -25,6 +25,8 @@ import sys
 from xvt.models import Cue
 from xvt.qa import check_subtitles
 from xvt.render import font_for_language, measure_bilingual_line_widths
+from xvt.segment import wrap_overflowing_target
+from xvt.textwidth import display_width
 
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 360
@@ -89,11 +91,66 @@ def verify(language: str, target_text: str) -> list[str]:
     return lines
 
 
+# 译文整段超过显示单位上限（zh 为 36）但切成两行放得下：libass 必须量的是 render
+# 按 `segment.wrap_overflowing_target` 切好的两行事件，报告给 `target_wrapped` 而不是
+# `bilingual_overflow_risk`。
+WRAP_CASE = ("zh-CN", "我们需要保留每个字幕的含义，但是也要保证每一行都清晰可读")
+
+
+def verify_wrapped(language: str, target_text: str) -> list[str]:
+    """量一条会被切成两行的译文：两行都放得下，必须真测且不判超宽。"""
+
+    lines = [f"[{language}/wrap] target display width {display_width(target_text)}"]
+    wrapped = wrap_overflowing_target(
+        target_text, language, video_width=VIDEO_WIDTH, video_height=VIDEO_HEIGHT
+    )
+    if wrapped is None or len(wrapped) != 2:
+        raise RuntimeError(f"[{language}/wrap] fixture is not wrapped into 2 lines: {wrapped}")
+    lines.append(f"[{language}/wrap] lines={list(wrapped)}")
+    cue = Cue(
+        1,
+        0,
+        4000,
+        "Hello world, width measurement.",
+        target_text=target_text,
+        target_language=language,
+        source_language="en",
+    )
+    report = check_subtitles(
+        [cue],
+        video_width=VIDEO_WIDTH,
+        video_height=VIDEO_HEIGHT,
+        require_translation=True,
+        measure_layout=True,
+    )
+    layout = report.layout
+    if not isinstance(layout, dict):
+        raise RuntimeError(f"[{language}/wrap] report has no layout block: {report}")
+    for cue_id, role, width, limit in layout.get("widths", []):
+        lines.append(
+            f"[{language}/wrap] measured cue={cue_id} role={role} width={width} limit={limit}"
+        )
+    codes = sorted({issue.code for issue in report.issues})
+    lines.append(
+        f"[{language}/wrap] report measurement={layout.get('measurement')!r} "
+        f"status={report.status!r} issues={codes}"
+    )
+    if layout.get("measurement") != "measured":
+        raise RuntimeError(
+            f"[{language}/wrap] layout measurement degraded to {layout.get('measurement')!r}"
+        )
+    if "target_wrapped" not in codes or "bilingual_overflow_risk" in codes:
+        raise RuntimeError(f"[{language}/wrap] expected target_wrapped without overflow: {codes}")
+    return lines
+
+
 def main() -> int:
     print(f"platform: {sys.platform}")
     for language, target_text in CASES:
         for line in verify(language, target_text):
             print(line)
+    for line in verify_wrapped(*WRAP_CASE):
+        print(line)
     print("libass really measured every language above; width QA is not running degraded.")
     return 0
 

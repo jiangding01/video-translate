@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from math import ceil
 
 from xvt.models import Cue, Transcript, Word
-from xvt.textwidth import display_width, display_width_limit
+from xvt.textwidth import (
+    display_width,
+    display_width_limit,
+    display_width_review_limit,
+    is_cjk_language,
+)
 
 SENTENCE_END = frozenset(".?!。？！…")
 SOFT_BREAK = frozenset(",;:，；：、")
@@ -122,10 +128,11 @@ KINSOKU_BREAK_PENALTY = 64
 def forbidden_break(previous: Word, following: Word) -> bool:
     """Would a line break between these two ASR words violate 禁則処理?
 
-    这是全仓关于「哪里**不许**切」的唯一判定。cue 边界有**三个**产出点——
+    这是全仓关于「哪里**不许**切」的唯一判定。切分有**四个**产出点——
     ``segment_transcript`` 主循环的句末/停顿/超时切、``_soft_cut`` 的标点让位切、
-    ``_partition_words`` 的宽度切——三处都走这一个谓词，不要在调用点另造一份
-    字符比较，否则规则只盖住一部分出口，比没有更糟。
+    ``_partition_words`` 的宽度切，以及 ``wrap_target_lines`` 的 cue 内译文展示换行
+    （它经 ``_partition_words`` 走一遍，切完再对每个边界硬性复核一遍）——四处都走
+    这一个谓词，不要在调用点另造一份字符比较，否则规则只盖住一部分出口，比没有更糟。
     """
 
     tail = previous.text.rstrip()
@@ -194,6 +201,101 @@ def _partition_words(
         boundaries = [0, *result[1][:-1]]
         return [words[start:end] for start, end in zip(boundaries, result[1])]
     return None
+
+
+# cue 内译文展示换行的绑定：算法或行数一变就升 ``version``，让旧 QA 报告的布局
+# 不再被烧录腿复用（``pipeline.burnin._reusable_rendered_layout``）。
+TARGET_WRAP_VERSION = 1
+TARGET_WRAP_MAX_LINES = 2
+
+# zh / ja 译文按字切（韩语走 _LATIN_WRAP_TOKEN 按空白分词），但 Latin / 数字连续段
+# （含段内空格，如 ``OpenAI GPT-5``）整体算一个 token 不拆；
+# 每个 token 吞掉尾随空白，``_text`` 拼回时原样还原。
+_CJK_WRAP_TOKEN = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9_.+'/&-]|\s+(?=[A-Za-z0-9]))*|\S)\s*")
+_LATIN_WRAP_TOKEN = re.compile(r"\S+\s*")
+
+
+def _wraps_by_character(language: str | None) -> bool:
+    """zh / ja 按字切；韩语词间有空格，与拉丁语系一样按空白分词。"""
+
+    return (
+        bool(language)
+        and is_cjk_language(language)
+        and not str(language).casefold().startswith("ko")
+    )
+
+
+def target_wrap_binding() -> dict[str, int]:
+    """QA 报告 ``layout["wrap"]`` 的唯一来源；qa 写入与 burnin 复用判定共用这一份。"""
+
+    return {"version": TARGET_WRAP_VERSION, "max_lines": TARGET_WRAP_MAX_LINES}
+
+
+def target_wrap_limit(
+    language: str | None,
+    *,
+    video_width: int | None = None,
+    video_height: int | None = None,
+) -> int:
+    """译文换行的显示单位上限：译文 QA、ASS 写出与 libass 测量三处同源取这一个值。"""
+
+    return display_width_review_limit(language, video_width=video_width, video_height=video_height)
+
+
+def wrap_target_lines(
+    text: str,
+    language: str | None,
+    *,
+    max_width: int,
+    max_lines: int = TARGET_WRAP_MAX_LINES,
+) -> tuple[str, ...] | None:
+    """把一段（已经 ``normalize_display_text`` 过的）译文确定性地切成 ``max_lines`` 行。
+
+    分词：zh / ja 按字切（Latin / 数字连续段整体算一个 token）；韩语与拉丁语系按
+    空白分词，边界只落在空格上，不会把一个词从中间劈开。
+    复用 ``_partition_words`` 的宽度 DP（禁则惩罚 + 句末/软标点/连接词代价 + 孤词
+    惩罚），每行显示宽度都不超过 ``max_width``。DP 里禁则只是罚分、无路可走时仍会
+    给出违禁切点，分段腿可以接受，展示换行不行：切完对每个边界再过一遍
+    ``forbidden_break``，违禁即返回 ``None``。切不开（行数不足、单 token、DP 无解）
+    同样返回 ``None``，调用方据此维持 review。
+    """
+
+    if max_lines < 2:
+        return None
+    pattern = _CJK_WRAP_TOKEN if _wraps_by_character(language) else _LATIN_WRAP_TOKEN
+    tokens = [Word(token, start_ms=0, end_ms=0) for token in pattern.findall(text.strip())]
+    if len(tokens) < max_lines:
+        return None
+    chunks = _partition_words(tokens, max_lines, max_width=max_width)
+    if chunks is None or len(chunks) != max_lines:
+        return None
+    for previous, following in zip(chunks, chunks[1:]):
+        if forbidden_break(previous[-1], following[0]):
+            return None
+    lines = tuple(_text(chunk).strip() for chunk in chunks)
+    if any(not line for line in lines):
+        return None
+    return lines
+
+
+def wrap_overflowing_target(
+    text: str,
+    language: str | None,
+    *,
+    video_width: int | None = None,
+    video_height: int | None = None,
+) -> tuple[str, ...] | None:
+    """整段译文超过 ``target_wrap_limit`` 时给出换行结果，不超限或切不开返回 ``None``。
+
+    ``text`` 必须已经过 ``normalize_display_text``（归一化在切分之前，否则会折掉
+    ``\\n``）。qa、``render.save_bilingual_ass`` 与 ``render.measure_bilingual_line_widths``
+    都只经这一个入口决定「切不切、怎么切」，QA 量的就是烧出去的。
+    """
+
+    limit = target_wrap_limit(language, video_width=video_width, video_height=video_height)
+    if display_width(text) <= limit:
+        return None
+    return wrap_target_lines(text, language, max_width=limit)
 
 
 def _split_by_width(words: list[Word], max_width: int) -> list[list[Word]]:
