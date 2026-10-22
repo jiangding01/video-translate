@@ -20,7 +20,9 @@ from xvt.textwidth import (
     display_width_limit,
     display_width_review_limit,
     is_cjk_language,
+    is_japanese_or_korean,
     reading_speed_limit,
+    reading_units,
 )
 
 __all__ = [
@@ -33,7 +35,9 @@ __all__ = [
     "display_width_limit",
     "display_width_review_limit",
     "is_cjk_language",
+    "is_japanese_or_korean",
     "reading_speed_limit",
+    "reading_units",
 ]
 
 
@@ -51,13 +55,6 @@ class SubtitleQaReport:
     cue_count: int
     issues: tuple[SubtitleIssue, ...]
     layout: dict[str, Any] | None = None
-
-
-def _reading_units(text: str, language: str | None) -> int:
-    compact = "".join(character for character in text if not character.isspace())
-    if is_cjk_language(language):
-        return len(compact)
-    return len(text.replace("\n", ""))
 
 
 def _contains_glossary_term(text: str, term: str) -> bool:
@@ -319,7 +316,7 @@ def check_subtitles(
                 severity, message, _code = overflow
                 issues.append(SubtitleIssue("line_too_wide", severity, cue.id, message))
 
-        units_per_second = _reading_units(text, language) / (duration_ms / 1000)
+        units_per_second = reading_units(text, language) / (duration_ms / 1000)
         limit = reading_speed_limit(language)
         if units_per_second > limit:
             issues.append(

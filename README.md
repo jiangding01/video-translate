@@ -990,6 +990,8 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 译文整段超过显示上限时，QA 与 ASS 写出会先按禁则确定性地把它切成最多 2 行（`segment.wrap_target_lines`，行首行尾禁则不得违反），两行都不超限就通过并在报告里记一条 `target_wrapped` warning；切不开（单个词或字、只能违禁才切得开）或切完仍超限才像以前一样要求复核，文案仍以 `target line width N exceeds M display units` 开头，后缀为 ` after wrapping into 2 lines`。ASS 写出与 libass 行宽测量使用同一份切分，QA 量的就是烧出去的；cue 的 ID、起止时间和数量不变，`translated.srt` / `bilingual.srt` 不换行，源文也不换行。
 
+字幕 QA 的 `reading_speed` 提醒按「阅读单位」每秒计：空白与标点不计，CJK 语言下 ASCII 字母与数字每个计半个单位（向上取整）；上限为 zh 9、ja / ko 13、其余语言 20 单位/秒。该口径只用于 QA 判定，翻译侧的 `max_target_characters` 预算仍按字符数计。
+
 烧录完成后会做媒体 QA，结果写入 `media-qa.json`：检查输出有视频流；源媒体有音频时输出也必须有音频流；输出若有音频，编码必须是 AAC；输出分辨率必须与源视频一致；输出时长与源媒体的偏差不得超过 500ms。任一项不满足则报告为 `failed`，任务以失败收口，不宣告完成。
 
 字幕文本里的字面花括号会被保留：`bilingual.ass` 渲染时把 cue 文本中的 `{` `}` 转义为 libass 的 `\{` `\}`，因此 `{x}`、`{0}` 一类占位符会正常显示，而 `{\an8}`、`{\pos(...)}` 只作为文本呈现、不会真的改变字幕位置或样式；`source.srt`、`translated.srt`、`bilingual.srt` 导出时同样原样保留花括号。导入端按字幕的实际格式分叉（判定依据是解析出的格式而不是文件后缀，`.srt` 后缀装着 ASS 内容仍按 ASS 处理）：

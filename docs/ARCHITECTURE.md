@@ -76,7 +76,7 @@ flowchart LR
 | `segment.py` | 词级结果转 cue，处理停顿、标点、长度和重叠；禁則処理（行首行尾禁则）的唯一谓词 `forbidden_break`，其切分出口共四个，第四个是展示用的 `wrap_target_lines`（译文超宽时在禁则内切成最多 2 行，切不开返回 `None`）；提供可持久化的 ASR 分段预设 |
 | `subtitles.py` / `align.py` | 字幕读写（SRT/VTT 导出保留字面 `{}`；导入侧 `load_subtitles` 按 pysubs2 解析出的实际格式而非文件后缀分叉：SRT/VTT 保留字面花括号、只剥 `{\…}` 形态的覆盖块，ASS/SSA 整段剥除）和已有字幕到 ASR 的顺序模糊对齐 |
 | `translate.py` / `translation_provider.py` | 确定性语义组、结构化术语表和翻译风格、按完整组装箱的翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填；默认 API 批次 25 个 cue、请求超时 180 秒 |
-| `textwidth.py` | 零依赖叶子：显示宽度与按语言/画幅的显示单位上限等六个纯宽度函数（`display_width`、`is_cjk_language`、`character_limit`、`display_width_limit`、`reading_speed_limit`、`display_width_review_limit`），`qa.py` 原名 re-export；依赖方向 `textwidth ← segment ← {qa, render}` |
+| `textwidth.py` | 零依赖叶子：显示宽度与按语言/画幅的显示单位上限等七个纯宽度/阅读函数（`display_width`、`is_cjk_language`、`character_limit`、`display_width_limit`、`reading_speed_limit`、`reading_units`、`display_width_review_limit`；另有 `is_japanese_or_korean` 供上限分档），`qa.py` 原名 re-export；依赖方向 `textwidth ← segment ← {qa, render}` |
 | `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
 | `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式（cue 文本的字面 `{}` 转义为 libass `\{` `\}`）、译文超宽先经 `segment.wrap_target_lines` 切成最多 2 行再以 `\N` 拼接，libass 行宽测量与 ASS 写出同源；分辨率自适应码率（不使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数）与安全的 FFmpeg 参数构造（filtergraph 路径两层转义）；`\N` 换行与 `{\rSource}` 样式切换是渲染器拼接的结构，不参与转义，反斜杠刻意不转义（ASS 无标准反斜杠转义，libass 原样输出未知序列） |
 | `paths.py` | 用户烧录/预览输出绝对路径校验与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact） |
@@ -182,7 +182,7 @@ Job 登记表是产物有效性的唯一依据，**不要按固定文件名取�
 - 相邻 cue 发生重叠时归一化边界，不允许翻译阶段改动时间。ASR 分段与字幕对齐共用 `segment.normalize_cue_boundaries`：默认按中点切开；中点无法给两条 cue 都留出正时长（严重重叠、完全嵌套、词时间戳回退）时把后一条推到前一条结束处（QA 的重叠判定为严格小于，边界相接合法），仍不足则补足 1ms 最小时长；尾部收口的 `min(padded_end, next_start, media_duration_ms)` 同样钳制回正时长。受影响 cue 记录 `warnings`，归一后以单调性自检 fail loudly，不把零/负时长时间轴交给 QA 变成误导性的 `invalid_timestamp`。对齐输出 cue 不与输入 cue 共享 `warnings` 列表。`warnings` 还承载一条**纯证据**记录：ASR 分段丢弃尾部非正时长词（`end_ms <= start_ms`，Whisper 偶发的解码器产物）时，末条 cue 追加一条以 `segment.TRAILING_ZERO_DURATION_WARNING_PREFIX` 开头的 warning，带词数、首尾毫秒、最大 probability 与被丢弃的文本。它**不参与任何 QA 判定**（`check_subtitles` 不读它，与上面两条边界 warning 同属留痕），只为「Whisper 尾部幻觉」这个待决策项留下可采样的证据，见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 P8。
 - 用户字幕路径应保留原字幕时间轴；ASR 只提供文本匹配和纠错依据。
 - 对齐跑过就一定留下两份可校验的产物：对齐结果本身（`alignment.json` / `subtitle_alignment`）与**对齐后字幕 QA 报告**（`aligned-subtitle-qa.json` / `aligned_subtitle_qa`）。报告在算出之后、任何分支判定之前就写盘并登记，因此 `--align-subtitles` 被对齐后 QA 的 error 门拒绝（该路径直接抛出、`ALIGN` 记 `failed`、没有 `source_cues` 也没有 `qa.json`）时，**是哪些 cue 的哪些 issue 挡住了对齐**仍然有产物说得清，不必重跑一遍去猜。自动策略回落 ASR 的那一支同样登记它：那时 `qa.json` 讲的是最终采用的 ASR cue，`source-selection.json` 的 `alignment_post_qa_failed` 只说了结论，明细只在这份报告里。它是**证据，不是门**——放行与阻断判定一字未改，报告落盘不会让任何一次 QA 失败变成通过。但它现在同时是**恢复导航的判据**：`recovery._alignment_post_qa_deadlock` 从这份报告里的 error 级 issue 纯推导出「强制对齐被对齐后 QA 拒绝」这个死局，把它从「推荐一条必然失败的 `continue`」改成 `manual_fix` + `rebuild-source --strategy asr`，并把报告路径带进 `recovery_plan.report_paths`。采用对齐结果时它与 `qa.json` 内容相同（同一批 cue、同一套媒体边界），刻意保留两份：一份讲对齐候选，一份讲最终源 cue，`rebuild-source` 之后两者去向不同。依赖图上它派生自 `subtitle_alignment` 与 `media_info`，并与 `source_candidate_qa` 同构地作为`source_cues` 的**上游**（候选级判定依据），因此 `resegment-translation` 与源文修订的失效闭包不会抹掉它。
-- 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。纯字幕 Job 没有媒体时长或画幅，只跳过这两类媒体相关检查，保留其余时间轴、文本、术语和阅读速度校验。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
+- 最终 QA 检查空 cue、负时长、重叠、越过媒体时长和缺失译文。纯字幕 Job 没有媒体时长或画幅，只跳过这两类媒体相关检查，保留其余时间轴、文本、术语和阅读速度校验（阅读单位忽略标点与空白，CJK 下 ASCII 字母数字计半个单位，仅用于 QA；翻译预算仍按字符数）。双语输出会先折叠每种语言内部的源换行，再按语言和画幅检查显示宽度。
 
 ## 下一阶段已批准架构
 

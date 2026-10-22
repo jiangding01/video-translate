@@ -24,6 +24,25 @@ class SubtitleQaTest(unittest.TestCase):
 
         self.assertEqual(overflow_ids, (2, 3))
 
+    def test_reading_speed_ignores_punctuation_and_halves_latin_in_cjk(self) -> None:
+        # 旧口径按去空白字符数计：「OpenAI GPT-5 发布了。」= 15，1.6s 内 9.4/s > 9，会报 warning。
+        # 新口径 = 8 个单位（Latin 半字、连字符与句号免费），5.0/s，不该红。
+        cues = [
+            Cue(
+                1,
+                0,
+                1600,
+                "OpenAI released GPT-5.",
+                source_language="en",
+                target_text="OpenAI GPT-5 发布了。",
+                target_language="zh-CN",
+            )
+        ]
+
+        report = check_subtitles(cues, media_duration_ms=3000, require_translation=True)
+
+        self.assertNotIn("reading_speed", [issue.code for issue in report.issues])
+
     def test_valid_subtitles_pass(self) -> None:
         cues = [Cue(1, 0, 2000, "Hello world", timing_confidence=0.9)]
 
