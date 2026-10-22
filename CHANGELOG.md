@@ -18,6 +18,8 @@
 
 ### Changed
 
+- **QA 的 `reading_speed` 阅读单位计数口径改细。** 此前 CJK 按去空白字符数、非 CJK 按含标点字符数计，标点与夹杂的英文数字都按整字算，对「OpenAI GPT-5 发布了。」这类 Latin 夹杂的译文偏严。现新增 `textwidth.reading_units`（`qa.py` re-export，原私有 `_reading_units` 删除）：忽略所有空白与标点（按 Unicode 类别 `P` / `Z` 判定），CJK 语言下 ASCII 字母与数字每个计 0.5、其余计 1，结果向上取整；非 CJK 每个非空白非标点字符计 1。口径对标 BaoCut。**只服务 QA 的 `reading_speed` 判定**：翻译侧预算 `max_target_characters` 仍按字符数计，协议与提示词不变；`reading_speed` 的严重度（warning）与文案不变，只是更少误报。
+
 - **日语 / 韩语的阅读速度上限从 9 字/秒放宽到 13 字/秒。** 原先 ja / ko 与 zh 共用 9 字/秒，对信息密度较低的假名与谚文偏紧，QA 的 `reading_speed` warning 偏多。现在 `reading_speed_limit` 对 ja / ko 返回 13，其余 CJK（zh）仍为 9，非 CJK 仍为 20（新增叶子函数 `textwidth.is_japanese_or_korean`，`qa.py` 同步 re-export）。**影响范围要如实说明：** 翻译侧预算 `max_target_characters = min(character_limit, 时长 × 阅读速度上限)`，而 `character_limit` 对 CJK 封顶 18，所以 ja / ko 只有时长 <2s 的 cue 预算被放宽（1.5s：13 → 18），≥2s 的 cue 预算本来就被 18 封顶、不变。QA 侧所有 ja / ko cue 的 `reading_speed` 门槛同步放宽。严重度与文案不变；在途 API checkpoint 里 ja / ko 的 `max_target_characters` 会因此变化，属预期。
 
 - **`--engine` 的后端回退不再静默。** 请求的 ASR 后端没有安装时仍然回退到另一个引擎（直接失败会把只装了一种后端的用户卡住），但这次替换现在看得见：普通输出打一行 `[回退] ASR 引擎：faster → mlx（…）`，JSONL 事件流多一条 `transcription_fallback`（带 `requested_engine` / `effective_engine` / `reason`），**实际生效的引擎也会写回 `job.config.engine`**——此前 `config` 说 `faster`、`words.json` 与进度事件说 `mlx`，Job 自己的记录自相矛盾，而 `status` 完全看不出来。`job.config.engine` 是改写而不是新增字段：它的唯一用途是「下次用哪个引擎」（`resume` / `rebuild-source` 都从它取值），加第二个字段会立刻产生两份互相漂移的口径；用户原本请求的引擎留在 JSONL 事件里。后端缺失以外的转写失败照旧直接失败，不回退、不发事件。
