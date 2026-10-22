@@ -15,6 +15,7 @@ from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline import burn_translated_job, preview_translated_job
 from xvt.recovery import file_checksum
 from xvt.render import AssStyleOptions
+from xvt.segment import target_wrap_binding
 
 _QA_KIND = "translated_subtitle_qa"
 
@@ -749,11 +750,12 @@ class BurnPreviewPipelineTest(unittest.TestCase):
         widths: list[list] | None = None,
         status: str = "pass",
         issues: list[dict] | None = None,
+        wrap: dict | None | object = ...,
     ) -> tuple[Path, Path]:
         """补上「渲染腿已经跑完」的 Job 状态：带 layout 块的 QA 报告 + 已登记的 ASS。
 
         `layout` 的字段名与 `qa.check_subtitles` 实际落盘的一致，烧录腿的复用判定
-        读的就是这一块。
+        读的就是这一块。``wrap=None`` 模拟换行引入前、没有 ``wrap`` 键的旧报告。
         """
 
         resolved = options or AssStyleOptions()
@@ -766,6 +768,10 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             "style_options": asdict(resolved),
             "measurement": measurement,
         }
+        if wrap is ...:
+            layout["wrap"] = target_wrap_binding()
+        elif wrap is not None:
+            layout["wrap"] = wrap
         if widths is not None:
             layout["widths"] = widths
         qa_path = artifacts / "qa-translated.json"
@@ -893,6 +899,34 @@ class BurnPreviewPipelineTest(unittest.TestCase):
 
             self.assertTrue(result.exists())
             measure.assert_called_once()
+
+    def test_workflow_burn_refuses_to_reuse_a_layout_without_wrap_binding(self) -> None:
+        """换行引入前的旧报告没有 ``layout["wrap"]``：它量的是单行译文，不复用（D4）。"""
+
+        for wrap in (None, {"version": 0, "max_lines": 2}):
+            with (
+                self.subTest(wrap=wrap),
+                tempfile.TemporaryDirectory() as directory,
+                patch(
+                    "xvt.qa.measure_bilingual_line_widths",
+                    return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+                ) as measure,
+            ):
+                root = Path(directory)
+                media = root / "input.mp4"
+                media.write_bytes(b"video")
+                job, artifacts = self._burn_ready_job(root, media)
+                self._register_rendered_layout(job, artifacts, wrap=wrap)
+                job_file = save_job(job)
+
+                result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+                self.assertTrue(result.exists())
+                measure.assert_called_once()
+                layout = json.loads((artifacts / "qa-translated.json").read_text(encoding="utf-8"))[
+                    "layout"
+                ]
+                self.assertEqual(layout["wrap"], target_wrap_binding())
 
     def test_workflow_burn_refuses_to_reuse_when_cues_leave_the_burn_media(self) -> None:
         """媒体时长没有记进报告，所以就地重判：cue 越出本次烧录媒体时拒绝复用。

@@ -41,7 +41,9 @@ class ResegmentTranslationTest(unittest.TestCase):
                                 0,
                                 2000,
                                 "This subtitle needs splitting",
-                                target_text="长" * 19,
+                                # 每个切点都违反行首禁则，展示换行切不开，仍是 review；
+                                # 宽度只够切成两段，保持原用例的分段数。
+                                target_text="ー" * 19,
                                 target_language="zh-CN",
                             )
                         )
@@ -146,7 +148,7 @@ class ResegmentTranslationTest(unittest.TestCase):
                                 0,
                                 2000,
                                 "This subtitle needs splitting",
-                                target_text="长" * 19,
+                                target_text="长" * 40,
                                 target_language="zh-CN",
                             )
                         )
@@ -220,7 +222,7 @@ class ResegmentTranslationTest(unittest.TestCase):
                                 0,
                                 2000,
                                 "Imported",
-                                target_text="长" * 19,
+                                target_text="长" * 40,
                                 target_language="zh-CN",
                             )
                         )

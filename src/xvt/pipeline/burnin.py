@@ -35,6 +35,7 @@ from xvt.pipeline.review import complete_qa_stage, review_gate_satisfied
 from xvt.qa import check_subtitles
 from xvt.recovery import atomic_translated_qa_rebuild_command, valid_artifact_path
 from xvt.render import AssStyleOptions, save_bilingual_ass
+from xvt.segment import target_wrap_binding
 from xvt.workflow_config import get_workflow_config
 
 _WORKFLOW_QA_GATE_GUIDANCE = (
@@ -157,9 +158,9 @@ def _reusable_rendered_layout(
     返回可复用的 `bilingual.ass` 路径；任一条件不成立返回 ``None``，烧录腿照旧
     重新测量并重新渲染（fail closed）。
 
-    为什么可以复用：译文布局 QA 只由 cue 内容、画幅、ASS 样式、媒体时长与术语表
-    五项输入决定（`qa.check_subtitles`），同输入重算逐字相同（确定性报告，无时间戳）。
-    五项逐一有据：
+    为什么可以复用：译文布局 QA 只由 cue 内容、画幅、ASS 样式、译文换行算法、媒体时长
+    与术语表六项输入决定（`qa.check_subtitles`），同输入重算逐字相同（确定性报告，无
+    时间戳）。六项逐一有据：
 
     - **cue 内容**：`translated` 来自 checksum 有效的 `translated_cues`，而
       `translated_subtitle_qa` / `bilingual_ass` 都在 `downstream_of(TRANSLATED_CUES)`
@@ -167,6 +168,9 @@ def _reusable_rendered_layout(
     - **画幅与 ASS 样式**：取自报告**自己**的 `layout` 块（`video_width` /
       `video_height` / `style_options` 自 Q4 起就落盘），因此是那份报告被测量时的
       真实输入，不是「现在的配置碰巧长这样」的推断。手改 `job.json` 字体也绕不过去。
+    - **译文换行算法**：报告 `layout["wrap"]` 必须等于当前 `segment.target_wrap_binding()`。
+      换行引入前的旧报告没有这个键，它量的是单行译文，而现在烧出去的是两行，一律不复用
+      （fail closed），烧录腿照旧重测重渲。
     - **媒体时长**：报告没有记它，所以不推断**就地重判**——时长在整份报告里只影响
       `outside_media` 这一条（error 级），直接按本次烧录真正要用的 `media_info`
       重算一次，越界即拒绝复用；时长未知（0 / None）时同样拒绝，那时 `check_subtitles`
@@ -210,6 +214,8 @@ def _reusable_rendered_layout(
     ):
         return None
     if layout.get("style_options") != asdict(options):
+        return None
+    if layout.get("wrap") != target_wrap_binding():
         return None
     if not media_info.duration_ms:
         return None

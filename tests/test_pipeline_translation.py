@@ -1502,14 +1502,15 @@ class TranslationRevisionInvalidationTest(unittest.TestCase):
         self.assertEqual(continue_workflow(job_file).status, "completed")
 
     def _over_wide_translation(self) -> str:
-        """稳定落在 needs_review 的译文：CJK 显示宽度越过硬阈值即为 review 级。
+        """稳定落在 needs_review 的译文：CJK 显示宽度超过两行硬阈值之和，换行也救不回。
 
         纯字幕 Job 没有画幅，``check_subtitles`` 不做 ASS 实测，判定只依赖
         ``display_width``，因此不受宿主机字体与 FFmpeg 影响。
         """
 
-        text = "超长译文" * 5
-        self.assertGreater(display_width(text), display_width_review_limit("zh-CN"))
+        text = "超长译文" * 10
+        # 换行之后两行都放不下才仍是 review（切得开的会降为 target_wrapped warning）。
+        self.assertGreater(display_width(text), 2 * display_width_review_limit("zh-CN"))
         return text
 
     def test_needs_review_retranslation_invalidates_stale_rendered_subtitles(self) -> None:

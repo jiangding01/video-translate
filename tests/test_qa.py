@@ -1,19 +1,28 @@
+import json
 import unittest
+from dataclasses import asdict
+from unittest.mock import patch
 
+from xvt.candidate_qa import overflow_limits
 from xvt.models import Cue
 from xvt.qa import check_subtitles, target_overflow_cue_ids
+from xvt.segment import target_wrap_binding
 
 
 class SubtitleQaTest(unittest.TestCase):
-    def test_target_overflow_ids_only_include_hard_limit_violations(self) -> None:
+    def test_target_overflow_ids_include_every_cue_that_entered_wrapping(self) -> None:
         cues = [
             Cue(1, 0, 2000, "Short", target_text="短" * 18, target_language="zh-CN"),
-            Cue(2, 2000, 4000, "Long", target_text="长" * 19, target_language="zh-CN"),
+            # 40 字切不开仍是 review；19 字能换行成 target_wrapped。两者整段都超过
+            # target_wrap_limit、进入过换行分支，都计入，否则「能切开但 libass 实测仍超
+            # 像素」的 cue 在 QA 里是 review、在 resegment-translation 里却成了 no-op。
+            Cue(2, 2000, 4000, "Long", target_text="长" * 40, target_language="zh-CN"),
+            Cue(3, 4000, 6000, "Wraps", target_text="长" * 19, target_language="zh-CN"),
         ]
 
         overflow_ids = target_overflow_cue_ids(cues)
 
-        self.assertEqual(overflow_ids, (2,))
+        self.assertEqual(overflow_ids, (2, 3))
 
     def test_valid_subtitles_pass(self) -> None:
         cues = [Cue(1, 0, 2000, "Hello world", timing_confidence=0.9)]
@@ -203,6 +212,147 @@ class SubtitleQaTest(unittest.TestCase):
         )
 
         self.assertEqual(report.status, "needs_review")
+
+
+def _bilingual_cue(target_text: str, *, source_text: str = "Short source", **kwargs) -> Cue:
+    return Cue(
+        1,
+        0,
+        6000,
+        source_text,
+        target_text=target_text,
+        source_language="en",
+        target_language=kwargs.pop("target_language", "zh-CN"),
+        timing_confidence=0.9,
+        **kwargs,
+    )
+
+
+class TargetWrapQaTest(unittest.TestCase):
+    def test_wrappable_target_is_a_target_wrapped_warning(self) -> None:
+        report = check_subtitles([_bilingual_cue("长" * 19)], require_translation=True)
+
+        self.assertEqual(report.status, "warning")
+        self.assertEqual(
+            [(issue.code, issue.severity, issue.message) for issue in report.issues],
+            [
+                (
+                    "target_wrapped",
+                    "warning",
+                    "target wrapped into 2 lines (widest 20 display units)",
+                )
+            ],
+        )
+        self.assertNotIn("bilingual_overflow_risk", {issue.code for issue in report.issues})
+
+    def test_unfittable_target_stays_review_and_limits_still_parse(self) -> None:
+        report = check_subtitles([_bilingual_cue("长" * 40)], require_translation=True)
+
+        self.assertEqual(report.status, "needs_review")
+        (issue,) = report.issues
+        self.assertEqual(issue.code, "bilingual_overflow_risk")
+        self.assertEqual(
+            issue.message,
+            "target line width 80 exceeds 36 display units after wrapping into 2 lines",
+        )
+        self.assertEqual(overflow_limits(issue.message), (80, 36))
+
+    def test_rendered_overflow_after_wrapping_stays_review(self) -> None:
+        with patch(
+            "xvt.qa.measure_bilingual_line_widths",
+            return_value={(1, "target"): (530, 492), (1, "source"): (27, 492)},
+        ):
+            report = check_subtitles(
+                [_bilingual_cue("长" * 19)],
+                video_width=1920,
+                video_height=1080,
+                require_translation=True,
+                measure_layout=True,
+            )
+
+        self.assertEqual(report.status, "needs_review")
+        (issue,) = report.issues
+        self.assertEqual(issue.code, "bilingual_overflow_risk")
+        self.assertEqual(
+            issue.message,
+            "target line width 530 exceeds 492 ASS pixels after wrapping into 2 lines",
+        )
+        self.assertEqual(overflow_limits(issue.message), (530, 492))
+        self.assertEqual(report.layout["wrap"], target_wrap_binding())
+
+    def test_rendered_fit_after_wrapping_is_a_target_wrapped_warning(self) -> None:
+        with patch(
+            "xvt.qa.measure_bilingual_line_widths",
+            return_value={(1, "target"): (300, 492), (1, "source"): (27, 492)},
+        ):
+            report = check_subtitles(
+                [_bilingual_cue("长" * 19)],
+                video_width=1920,
+                video_height=1080,
+                require_translation=True,
+                measure_layout=True,
+            )
+
+        self.assertEqual(report.status, "warning")
+        self.assertEqual([issue.code for issue in report.issues], ["target_wrapped"])
+        self.assertEqual(report.layout["wrap"], {"version": 1, "max_lines": 2})
+
+    def test_kinsoku_violating_only_break_stays_review(self) -> None:
+        # 两行各 18 字的上限下唯一放得下的切点落在 `」` 之前：不切，维持 review。
+        text = "长" * 18 + "」" + "长" * 17
+        report = check_subtitles([_bilingual_cue(text)], require_translation=True)
+
+        self.assertEqual(report.status, "needs_review")
+        (issue,) = report.issues
+        self.assertEqual(issue.code, "bilingual_overflow_risk")
+        self.assertEqual(overflow_limits(issue.message), (72, 36))
+        self.assertTrue(issue.message.endswith(" after wrapping into 2 lines"))
+
+    def test_source_overflow_never_wraps_and_keeps_its_message(self) -> None:
+        source = "word " * 20 + "end"
+        bilingual = check_subtitles(
+            [_bilingual_cue("你好", source_text=source)], require_translation=True
+        )
+        self.assertEqual(
+            [(issue.code, issue.severity, issue.message) for issue in bilingual.issues],
+            [
+                (
+                    "bilingual_overflow_risk",
+                    "review",
+                    "source line width 103 exceeds 72 display units",
+                )
+            ],
+        )
+
+        monolingual = check_subtitles(
+            [Cue(1, 0, 6000, source, source_language="en", timing_confidence=0.9)]
+        )
+        self.assertEqual(
+            [(issue.code, issue.severity, issue.message) for issue in monolingual.issues],
+            [("line_too_wide", "review", "source line width 103 exceeds 72 display units")],
+        )
+
+    def test_report_bytes_for_cues_within_limit_are_unchanged(self) -> None:
+        """D6 回归守卫：整段不超限的 cue 不进换行，报告字节与换行引入前逐字相同。"""
+
+        report = check_subtitles([_bilingual_cue("你好世界")], require_translation=True)
+
+        self.assertEqual(report.issues, ())
+        self.assertIsNone(report.layout)
+        self.assertEqual(
+            json.dumps(asdict(report), sort_keys=True),
+            '{"cue_count": 1, "issues": [], "layout": null, "status": "pass"}',
+        )
+
+        preferred = check_subtitles(
+            [_bilingual_cue("x" * 70, target_language="en")], require_translation=True
+        )
+        self.assertEqual(
+            json.dumps(asdict(preferred), sort_keys=True),
+            '{"cue_count": 1, "issues": [{"code": "bilingual_overflow_risk", '
+            '"cue_id": 1, "message": "target line width 70 exceeds preferred 64 display units", '
+            '"severity": "warning"}], "layout": null, "status": "warning"}',
+        )
 
 
 if __name__ == "__main__":

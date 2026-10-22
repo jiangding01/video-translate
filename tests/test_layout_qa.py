@@ -48,7 +48,7 @@ class LayoutQaTest(unittest.TestCase):
         self.assertIn("530 exceeds 492 ASS pixels", report.issues[0].message)
 
     def test_measurement_failure_keeps_conservative_blocker(self):
-        cue = Cue(1, 0, 4000, "Hello", target_text="字幕" * 15, target_language="zh-CN")
+        cue = Cue(1, 0, 4000, "Hello", target_text="字幕" * 20, target_language="zh-CN")
         with patch(
             "xvt.qa.measure_bilingual_line_widths",
             side_effect=CommandError(CommandResult(("ffmpeg",), 127, "", "missing")),
@@ -63,6 +63,26 @@ class LayoutQaTest(unittest.TestCase):
         self.assertEqual(report.status, "needs_review")
         self.assertEqual(report.layout["measurement"], "unavailable")
         self.assertIn("layout_measurement_unavailable", {i.code for i in report.issues})
+
+    def test_measurement_failure_still_wraps_by_display_units(self):
+        # 测量失败回退显示单位规则时，换行照常按同一入口判定：两行放得下即 target_wrapped。
+        cue = Cue(1, 0, 4000, "Hello", target_text="字幕" * 15, target_language="zh-CN")
+        with patch(
+            "xvt.qa.measure_bilingual_line_widths",
+            side_effect=CommandError(CommandResult(("ffmpeg",), 127, "", "missing")),
+        ):
+            report = check_subtitles(
+                [cue],
+                video_width=640,
+                video_height=360,
+                require_translation=True,
+                measure_layout=True,
+            )
+        self.assertEqual(report.status, "warning")
+        self.assertEqual(report.layout["measurement"], "unavailable")
+        self.assertEqual(
+            {i.code for i in report.issues}, {"layout_measurement_unavailable", "target_wrapped"}
+        )
 
     def test_narrow_layout_and_custom_font_are_used(self):
         options = AssStyleOptions(target_font="Custom")
@@ -110,7 +130,7 @@ class LayoutQaTest(unittest.TestCase):
         self.assertGreater(widths[(1, "target")][0], widths[(1, "target")][1])
 
     def test_missing_glyph_cannot_qualify_for_relaxed_width(self):
-        cue = Cue(1, 0, 4000, "Hello", target_text="测" * 25, target_language="zh-CN")
+        cue = Cue(1, 0, 4000, "Hello", target_text="测" * 40, target_language="zh-CN")
         stderr = (
             "fontselect: failed to find any fallback with glyph 0x6D4B\n"
             "n:0 pts:0 x1:32 x2:364 y1:1 y2:2 w:333 h:2\n"

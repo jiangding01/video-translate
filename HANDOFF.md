@@ -45,7 +45,7 @@
 
 ## 已知限制
 
-- 翻译后的目标文本若超过硬显示阈值仍由 QA 阻断；自动重切并重新翻译尚未实现。
+- 译文超硬显示阈值时，能按禁则切成最多 2 行的已由确定性换行自动放行（记 `target_wrapped` warning）；切不开或切完仍超的仍由 QA 阻断。libass 像素驱动的二分换行与重译缩短未实现（方案见 [docs/TARGET_LINE_WRAP_PLAN.md](docs/TARGET_LINE_WRAP_PLAN.md)）。
 - 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；Agent 主链真实 E2E 已通过，但默认切换仍需多样本质量与成本对照。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。

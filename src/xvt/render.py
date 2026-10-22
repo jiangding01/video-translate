@@ -10,6 +10,7 @@ import pysubs2
 
 from xvt.models import Cue
 from xvt.process import run_command
+from xvt.segment import wrap_overflowing_target
 from xvt.subtitles import normalize_display_text
 
 
@@ -33,6 +34,24 @@ def escape_ass_text(text: str) -> str:
     """
 
     return text.replace("{", "\\{").replace("}", "\\}")
+
+
+def _target_ass_text(cue: Cue, *, video_width: int, video_height: int) -> str:
+    """译文的 ASS 事件文本：归一化 → 超限才换行 → 逐行转义 → ``\\N`` 拼接。
+
+    ASS 写出与 libass 测量共用这一份，和 ``qa._overflow_risk`` 一样只经
+    ``segment.wrap_overflowing_target`` 决定切不切、怎么切，QA 量的就是烧出去的。
+    整段不超限（或切不开）时与换行引入前逐字相同。
+    """
+
+    normalized = normalize_display_text(cue.target_text or "")
+    lines = wrap_overflowing_target(
+        normalized, cue.target_language, video_width=video_width, video_height=video_height
+    )
+    if lines is None:
+        return escape_ass_text(normalized)
+    # `\N` 是这里刻意拼接的换行结构，不参与转义。
+    return "\\N".join(escape_ass_text(line) for line in lines)
 
 
 def font_for_language(language: str | None, platform_name: str | None = None) -> str:
@@ -151,7 +170,11 @@ def measure_bilingual_line_widths(
                     start=index * 1000,
                     end=(index + 1) * 1000,
                     style=name,
-                    text=escape_ass_text(normalize_display_text(text)),
+                    text=(
+                        _target_ass_text(cue, video_width=video_width, video_height=video_height)
+                        if role == "target"
+                        else escape_ass_text(normalize_display_text(text))
+                    ),
                 )
             )
     if not entries:
@@ -219,7 +242,7 @@ def save_bilingual_ass(
     for cue in cues:
         if not cue.target_text:
             raise ValueError(f"cue {cue.id} has no translated text")
-        target_text = escape_ass_text(normalize_display_text(cue.target_text))
+        target_text = _target_ass_text(cue, video_width=video_width, video_height=video_height)
         source_text = escape_ass_text(normalize_display_text(cue.source_text))
         # `\N` 与 `{\rSource}` 是这里刻意拼接的换行与样式切换结构，不参与转义。
         text = f"{target_text}\\N{{\\rSource}}{source_text}"

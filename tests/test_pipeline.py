@@ -149,7 +149,7 @@ class PipelineTest(unittest.TestCase):
                 0,
                 5000,
                 "Short source",
-                target_text="这是一条明显超过单行显示宽度限制的中文字幕",
+                target_text="这是一条明显超过单行显示宽度限制的中文字幕" * 2,
                 source_language="en",
                 target_language="zh-CN",
             )
