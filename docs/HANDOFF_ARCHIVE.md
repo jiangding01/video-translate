@@ -1,0 +1,692 @@
+# HANDOFF 历史档案
+
+> 本文件是 2026-10-21 从 [HANDOFF.md](../HANDOFF.md) 搬出的历史条目，按日期倒序排列，**只供 `rg` / `grep` 考古，不要整份读入上下文**。
+>
+> 文中的「本文件」「本文件顶部」「顶部条目」一律指写下该条目时的 `HANDOFF.md`，不是本档案。
+>
+> 未来从 HANDOFF 滚出的条目插在对应日期分组的最前面；没有该日期时新建一个日期分组并插在最前。
+
+## 日期目录
+
+- [2026-10-20](#2026-10-20)（14 条）
+- [2026-10-18](#2026-10-18)（13 条）
+- [2026-10-17](#2026-10-17)（19 条）
+- [2026-10-11](#2026-10-11)（3 条）
+- [2026-10-04](#2026-10-04)（1 条）
+
+## 2026-10-20
+
+2026-10-20 **给 B（`_process_acquired_media`）的对齐段补测试覆盖（O8 条目 (d) 第 ⑤ 条）**（分支 `test/cover-acquired-media-alignment`，纯补测试，`src/` 零改动，CHANGELOG 未记）。
+
+**① 条目的措辞实测后收紧了。** 「B 的对齐段没有任何测试覆盖」对整个 B 不成立，对对齐段成立。`pytest-cov` / `coverage` 都没装，用 `sys.settrace` 自己量（仪器先用「已知会执行 / 已知不会执行」各一处自证）：补前 B 的 73 条可执行语句命中 **34** 条——既有的 `test_old_remote_job_without_source_strategy_uses_legacy_subtitle_path` 已覆盖「导入字幕、不对齐」那条主干。真正为零的是**对齐段本体**（10 条语句）：**0/10 → 9/10**，缺的 1 条是多行 `if (` 的起始行（条件两个操作数都命中，属行号归属不是缺口）。B 全身 34/73 → **61/73**。
+
+**② 「用真实命令造状态」这条规矩在这里只能半守，原因写清。** `src/` 里三个 `create_job` 调用点的 config 字面量**都写 `source_strategy`**，所以**没有任何 CLI 命令能造出到得了 B 的 Job**——这正是 B 只对 v0.1.x 历史 Job 可达的原因。Job 只能用 `create_job` 传缺键 config 来造（仍是真实创建与持久化路径，不是手搓 `job.json`），与既有那条 legacy 测试同口径。**推进全部走真实命令**：`main(["continue", …])` → `continue_workflow` → 远程 Job 缺 `source_cues` 且无转写 checkpoint → `resume_remote_transcription` → 缺键 → B，每条用例都断言真实退出码。顺带核实另两条入口都到不了 B：`resume_job` 的委派写在 `"source_strategy" in job.config` 分支**里面**，`rebuild_source` 在委派前就把键写成 `asr`。
+
+**③ 四条用例。** ① 门放行（文本逐词对得上 → 真实 `align_source_cues` 给 confidence 1.0）→ 退出码 0、ALIGN succeeded、`source_cues` 用**对齐后**时间轴（`1200-1800` / `2600-3200`，导入原本 `0-1000` / `2000-3000`），且不登记 `source_selection` / `aligned_subtitle_qa`（legacy 语义坐实）；② 门拒绝 → 退出码 2、ALIGN failed 文案带实测数值 `(0.000 < 0.550)`、`subtitle_alignment` 仍在册（门之前就落盘）而 `source_cues` 不在；③ `allow_low_confidence_alignment` 放行 confidence 0 → 退出码 0、时间轴保持原样、QA 因 `low_timing_confidence` 停 `awaiting_input`；④ **(a) 裁定的那处刻意不对称有了反证**：喂一条越出媒体时长的 cue，B 的 ALIGN 照样 succeeded（它没有对齐后 QA error 门），由 `_run_source_subtitle_qa` 在 SUBTITLE_QA 上 fail closed，退出码 4、报告里有 `outside_media` / `error`——约束 4 没被这处不对称破坏。
+
+**④ 红先用变异检验，注入点按 AST 定位。** 这轮不改 `src/`，没有「修复前」可跑，所以红先的做法是临时改坏 B 的对齐段。注入点全部按 **AST 节点的精确 span** 定位、注入后 `ast.parse` 一遍确认语法合法——#136 那轮按行号注入两次落进多行签名中间，`SyntaxError` 让测试变红，**红的原因不对等于没验**。五种变异（置信度比较反向、忽略 `allow_low_confidence_alignment` 短路、删 ALIGN 成功记账、不登记 `subtitle_alignment`、不采用对齐后时间轴）各让对应用例变红，四条用例都被至少一种杀掉；验完 `remote.py` 与注入前逐字相同。
+
+**⑤ 刻意没做。** 发现 B 还有未覆盖的部分（ASR-only 分段分支 `169-178`、三处输入校验 `raise`、`205` 的 `job_completed` 事件——最后那条从 B 的唯一入口结构性不可达，因为 `resume_remote_transcription` 固定传 `emit_job_completed=False`），都不在第 ⑤ 条范围内，没有顺手扩。写测试过程中**没有发现 B 的真缺陷**（它的 legacy 语义与文档描述一致）。O8(d) 剩下的 ①②④ 三条 legacy-only 按要求未碰。
+
+**⑥ 验证。** `ruff check` / `ruff format --check` 全绿，`pytest -q` 为 `1084 passed, 312 subtests`（1080 + 4 条新测试），`src/` 与协议快照 golden 均零 diff，`git diff main -- tests/` 里无删除断言，`xvt --help` 正常。
+
+2026-10-20 **#136 的事后 review：补掉依赖方向守卫整类漏判，修正两处失效的代码引用**（分支 `fix/doc-refs-and-import-guard-hole`，D1/D2/D3，详见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 D 系列）。
+
+**① 为什么有这一轮。** #136 合并后补做了一次 `check` 全面 review。**代码侧零发现**，而且是机械证据：给 12 个被 `mock.patch` 的外部算子在源模块上套计数器，拆包前后跑全量，真函数调用次数**逐字相同**（probe_media 24、transcribe_audio 2、check_subtitles 746……）——任何一处 patch 从有效变成无效，真函数都会跑起来而让计数上升；再统计每个 patch 目标的实际命中率，299 次装载 / 40 次空载 / 265 次调用，前后也完全一致，且没有任何「装了但该目标一次都没截到调用」的纯空目标。两道都干净，所以 223 处 patch 目标改写没有制造静默失效。
+
+**② 三条发现全在文档与守卫上，其中两条是 #136 自己制造的。** D1 是依赖方向守卫的整类漏判（见下）；D2 是 F10 的代码引用被 #136 改成了「更自信的错」（原 `transcription.py:313` 本来就指在空行上，#136 顺手改成「`_record_effective_engine` 一带」，而那个函数只读写 `job.config["engine"]`）；D3 是「尾部幻觉 QA 门」形态建议里 8 个 `check_subtitles` 调用点的路径清单失效——那不是历史叙述而是将来动手时的清单，已重新对账并改为「路径 + 所属函数名」（行号漂移、函数名不漂移）。
+
+**③ D1 的六种写法：五类静默漏判 + 一类归因错。** `_intra_package_target` 原先在第一个匹配上就 `return`，且只认带尾点的 `startswith("xvt.pipeline.")`。在 `transcription/shared.py` 里逐条注入、拿拆包后未修的那版守卫（`7648254`）跑，结果是**五绿一红**：`from xvt.pipeline import resegment` / `from xvt.pipeline import error_category` / `import xvt.pipeline` / `from . import common` / `import xvt.pipeline.common, xvt.pipeline.transcription.resume` 五条**全绿**（整条语句被跳过，或第一个 alias 是合法边把第二个掩盖了）；第六条 `from xvt.pipeline.transcription import resume as _p` **会红，但归因错**——报 `transcription.shared -> transcription`，真实边是 `-> transcription.resume`，照这条消息去查会查错模块。所以取最长前缀对第六条的价值是**把归因改对**，不是补一个漏判；它还顺带消掉一个误报（在 `shared.py` 里 `from xvt.pipeline.transcription import shared` 自引用，未修版也报 `-> transcription`，修后正确地不报）。原实现（拆包前）在前五种写法上逐字同形，所以那五条静默漏判都是**先于 #136** 的；第六条的归因错（解出子包而非子模块）则是 **#136 自己的**——拆包前没有子包，这种写法还不存在，#136 为子包重写了解析函数却把「取最短前缀」的压扁行为带了过来。「ruff 是否兜底」也实测过：只有多 alias 那条被 `E401` / `I001` 拦下，其余五种 ruff 全绿（测的时候要让导入名真的被用到，否则 F401 会把结论污染成「全都报错」）。更该记住的是过程问题：#136 发现了「只看第一个 alias」这个限制，只把它写进会话笔记的「观察，未改」而没有登记成条目——**知道一个守卫有洞而只写在过程笔记里，等于没写**。
+
+**③-b 这条记录自己出过一次错。** 初版把六种写法并列写在一句「守卫**全绿**而反向边真实存在」底下：前五行是实测的，第六行只做了代码推断（读 `parts[2]` 的压扁逻辑就写成「漏判」），混在一起没有标注。主干独立注入复现后指出末行在未修版上**会红**、只是归因错，已改。**这跟下面 D2/D3 批评 #136 的「顺手修正一个自己没核过的引用」是同一个毛病**，只是载体从代码引用换成了实测结论——**自己的发现清单也要像代码一样逐条实测对账，推断出来的行不能和实测出来的行并列而不标注**。
+
+**④ 修法与红先。** `_intra_package_target` → `_intra_package_targets` 返回**集合**；新增 `_resolve_module_path` 按已知模块集合取最长前缀；`ImportFrom` 的被导入名也接到 base 后再查一次（覆盖 `from xvt.pipeline.transcription import shared` 的真实边是子模块而非子包）；包根与相对 import 一律报成哨兵 `_PACKAGE_ROOT`，白名单里没有也不该有这一项（包根 `__init__` import 了全部子模块，包内反向依赖它就是加载期循环的来源）；函数级守卫同步补相对 import。**红先取的是诚实的红**：先只做「改名 + 返回集合」的壳、内部仍走旧判定，当时的 8 条新测试里 **6 条报 AssertionError**（第 9 条钉误报的测试是本条被主干纠正后补的），另 2 条是负向控制（自引用、包外 import）本来就绿——如果直接加新函数再跑，8 条都会是 `NameError`，那种红不是证据。实装后再用真实文件逐条复测 8 例违规全部变红并还原。白名单无需改动，反证了今天没有任何包内模块依赖包根。
+
+**⑤ 同族两条由 #137 替 #136 补上**（留作记录）：`ROADMAP.md` 的「②结构性重构」桶被 #136 清空却没改，`REVIEW_FINDINGS` 末尾「六条遗留里还剩五条」的计数也没随第 ⑥ 条划掉而更新。#136 的收尾只对账了 `transcription.py` 这个**字符串**的出现位置，没对账「哪些结论因为这次改动而变了」——与既往「收尾文档同步不能只补 review 点名条目」是同一个形状，第二次犯。
+
+**⑥ 验证。** `ruff check` / `ruff format --check` 全绿，`pytest -q` 为 `1080 passed, 312 subtests`（+9 条新测试，子测试数不变），协议快照零 diff，`xvt --help` 正常。CHANGELOG 未记（零用户可见变化）。
+
+2026-10-20 **`pipeline/transcription.py` 按长函数治理约定（F13）拆成子包**（分支 `refactor/split-transcription-module`，纯搬移，零行为变化，CHANGELOG 未记）。
+
+**① 为什么现在做。** F13 的约定写的是「`transcription.py` 若突破 2000 行，按『本地转写 / 远程获取 / resume 与 rebuild』三簇拆分模块」。它当时 2076 行，阈值已破，这条也作为 O8 条目 (d) 的第 6 条遗留登记着。
+
+**② 实际落成五个子模块，不是三个。** 三簇之外还需要两块：`shared` 是零兄弟依赖的叶子（候选 QA 登记、源选择记账、源字幕 QA、SRT 渲染与 `_segmentation_config` 被三簇共用，先例是 `semantic_state`）；`dispatch` 只放 `run_transcription`（它同时依赖 local 与 remote，塞进任一簇都会造出依赖环）。纯字幕输入腿（`run_subtitle_transcription` / `_finish_subtitle_job`）不属于三簇任何一簇，按「本地输入」归进 `local`。包内方向 `shared ← local ← remote ← resume`、`dispatch ← {local, remote}`，无环。各模块 266 / 683 / 602 / 564 / 101 行。
+
+**③ 分两步，各自独立验证过。** 第一步只做 `git mv transcription.py transcription/__init__.py`（文件内容一字未动，`xvt.pipeline.transcription.X` 照旧解析得到同一批名字，所以测试里的 `mock.patch` 目标全部仍然有效，零测试改动）；第二步才逐簇抽离。这是为了把「搬移本身」和「patch 目标漂移」分成两个可独立回退的事实。
+
+**④ 零行为变化用机械手段核验，不靠读代码下结论。** 脚本把五个子模块的 29 个顶层块按原顺序拼回，与拆分前的文件逐字比对，全等（唯一例外是一句注释：`_finish_resumed_source` 的 docstring 原写「同文件的姐妹终结函数 `_finish_subtitle_job`」，搬移后 `_finish_subtitle_job` 落在 `local`，这句话不再成立，改为点名模块；核验脚本把它列进白名单并打印出该处 diff，而不是放宽比对）；再逐个核对每个子模块里每个自由名字的绑定来源与拆分前一致，这一条专门防「import 搬漏或搬错」——函数体一字不差但绑到了别的对象，测试不一定抓得到。测试侧同样核验：把 `mock.patch` 目标里的子模块段去掉后重新 `ruff format`，与 `main` 版本逐字相同，即改动只有 patch 目标与格式回流，**断言零改动**（`git diff main -- tests/` 里没有任何被删除的 `assert` 行）。
+
+**⑤ patch 目标漂移是这轮唯一的真工作量。** `from x import y` 的绑定是按模块的，搬完以后 `xvt.pipeline.transcription.probe_media` 这类目标必须指向**真正执行那次调用的子模块**。好消息是它 fail loud：目标模块没有该属性就直接 `AttributeError`，指错模块就会让真函数跑起来而当场炸掉，所以可以靠测试迭代定位而不是靠猜。共改 223 处，其中需要区分 `local` 与 `resume` 的是 `probe_media` / `transcribe_audio` / `segment_transcript` / `align_source_cues`——`resume_job` 与 `rebuild_source` 自己也直接调这几个（不只是委派给 `_process_adaptive_media`），这正是「嵌套调用链决定 patch 目标」的那类坑。
+
+**⑥ 三类跨文件守卫逐个确认没有静默缩扫。** `tests/test_pipeline_imports.py` 原先用 `PIPELINE_DIR.glob("*.py")` 且按文件名排除 `__init__.py`，转包后会把整个子包**漏掉**（它恰好同时少一项，所以只改白名单就能"修绿"——这正是要避免的修法），已改成 `rglob` + 点号模块名并在白名单里声明子包内部的依赖边；`tests/test_subprocess_boundary.py` 本来就是 `rglob`，不用改；`tests/test_cli_command_tables.py` 从 `build_parser()` 内省、不扫文件，没有扫描范围可缩。三条都用「故意在新子模块里加一条违规、确认守卫变红、再撤掉」实测过（反向 import、函数级包内 import、`import subprocess` 各一次），不是读代码推断。
+
+**⑦ 刻意没做的事。** `_process_adaptive_media` 仍是 270 行——F13 里「触碰长函数时顺手抽子函数」那半条约定继续有效，拆簇不等于拆函数，这一轮不混进任何函数级重构。两处冻结 legacy 路径（`remote._process_acquired_media`、`resume.resume_job` 的对齐分支）原样搬走并保留冻结注释，没有"顺手统一"。
+
+**⑧ 验证。** `ruff check` / `ruff format --check` 全绿，`pytest -q` 为 `1071 passed, 312 subtests`，与基线逐字一致（纯搬移不增减测试）；协议快照 golden 未被改写；`xvt --help` 正常。
+
+2026-10-20 **拍板关闭 R3.1 Phase 5、取消 R3.2，并改写 R3.3 的评估闸门**（分支 `docs/close-phase5-and-r32`，纯文档，`src/` 与 `tests/` 零改动）。
+
+**① Phase 5 关闭。** 依据是 O1（#132）做完后的实测：两条语义链路的首尾两个决策点（问题分拣、终态收口）已各收敛为一份 helper，中间三步（初审 / 修复 / 复审）的差异是协议本质的——API 侧逐批 provider 调用加 checkpoint 续跑，Agent 侧对一份已回填响应一次性解析校验，**已无逐字重复可搬**。再往下合要先造一层「一轮 review 怎么取得」的抽象去覆盖约 0 行重复，与 AGENTS「修改流程」第 6 条相悖。由原建议的「降级」改为关闭。
+
+**② R3.2 取消，理由比原 review 建议更强。** 原建议是「延后、大概率取消」，依据是「低成本替代够用 + 缓存框架与保持简单冲突」。本轮给出的更硬的依据是：R3.2 最大的卖点「`plan_advance_steps` 与 `_advance_workflow` 的人工对齐义务消失」**实证不成立**。本轮「`status` 推荐一条必然失败的命令」同类缺陷修了 **9 次**，三侧（planner / executor / recovery）不一致确实是根因，但每一次的内容都是「Job 处在一个没有任何自动步骤能推进的状态」（导入译文套不回重建后的时间轴、润色草稿需人工修复、强制对齐被对齐后 QA 拒绝、源媒体搬家、烧录成品失联……）——**内容寻址缓存一条都挡不住**，键算得再对那一步照样执行不了。真正消掉这类缺陷的是本轮确立的做法：只读纯谓词 → 落进 `build_recovery_plan`（不是只改 `continue`，因为 recovery 只读、失败发生在 `set_stage` 之前）→ 文案与执行侧逐字共用 → 端到端测试必须把推荐命令原样喂回 `main()` 并断言 Job 真的推进了。另一条卖点「上游变化后下游自然失效」则已由 `artifacts.downstream_of` 的主动失效闭包承担，且它写在一处、可审计，换成「键不匹配即自然失效」会把失效判据散进每个步骤的键构造里。R3.2 原方案折进 `<details>` 存档，未删字节。
+
+**③ 保留 R3.2 的一小块，不随它作废。** 「`_ensure_translation` 的等待分支基本是防御性死码、文案与规划器不同，执行器应改为按 `advance_steps[0]` 分派」原登记为「R3.2 的低成本替代点」，现独立成小项留在 REVIEW_FINDINGS「观察」一节——它要消除的是**文案与判定在两侧各写一份**，与缓存无关。
+
+**④ R3.3 的评估闸门必须改写（否则悬空）。** 原闸门是「待 R3.1/R3.2 落地后重新评估，若状态反推代码已明显缩减则降级或取消」，R3.2 取消后前半条不再可用。按后半条就地评估：状态反推代码**并未缩减**，`translate` 的六个子阶段至今仍由 `semantic_review_waiting` / `_repair_chain_satisfied` 等函数从 artifact 存在性反推（R3.1 收敛的是批次循环，不碰状态表示），所以 R3.3 **前提依然成立、保持待评估**，仍默认可取消，并给了新的触发条件：出现一次能归因到「子阶段状态只能从 artifact 存在性反推」的真实缺陷即立项。交付顺序第 4 档与风险节的「R3.1/R3.2 红线」一并据此改写——Q7 现在可直接设计，新增模型步骤按既有 `run_provider_batches` + fingerprint checkpoint 接入。
+
+**⑤ 顺带更正一处指向不清的引用。** REVIEW_FINDINGS 原文写「完整缓存框架与 AGENTS 第 6 条冲突」，但「不可破坏的约束」第 6 条讲的是外部命令必须以参数数组执行，与本项无关；实际指的是「修改流程」第 6 条（不为尚未确认的需求预留抽象层），已改为明确写法并注明更正。
+
+**⑥ 零代码改动。** `ruff check` / `ruff format --check` / `pytest -q`（1071 passed, 312 subtests）全绿，CHANGELOG 未记（无用户可见变化，与既往纯文档轮同口径）。
+
+2026-10-20 **对齐回落 ASR 后分段失败时 ALIGN 不再永久停在 `running`（O8 条目 (d) 第 ③ 条）**（分支 `codex/align-terminal-state-on-fallback`，PR #133，已合并）。
+
+**① 实证复现用真实 `xvt run`，不手搓 `job.json`。** 只替掉两个外部依赖：PATH 上放一个离线替身 `yt-dlp`（`--dump-single-json` 回报带 `subtitles: {"en": ...}` 的元数据，字幕下载写出第 3 条越出媒体时长的 SRT，媒体下载拷一份 ffmpeg 现场合成的 3s 静音 m4a），`PYTHONPATH` 上放一个替身 `mlx_whisper`（`transcribe` 返回**词级时间戳全为零时长**的两个词）。xvt 本体、`job.json`、ffmpeg/ffprobe 全走真实路径。**为什么这么构造**：`else:` 回落分支要求 `plan.action is ALIGN` 且 `align_subtitles` 为假，而 `plan_source_selection` 只在「自动策略 + 平台**人工**字幕候选 + 候选 QA 有 error」时给出 ALIGN——所以必须是远程 Job，候选 QA 要出 error（第 3 条 `outside_media`）。对齐照样算得出来（文本能匹配、置信度够）但对齐后 QA 仍有 error，`alignment_accepted` 为假、回落 ASR；`segment_transcript` 把零时长词全部过滤掉后 `not words` 返回 `[]`，`not cues` 抛 `RuntimeError`。这条比「未知 preset」可靠：`--segmentation-preset` 在 argparse 层就有 `choices`，`xvt run` 根本传不进未知 preset。
+
+**修复前**（逐字）：`align` = `{"status": "running", "started_at": "...", "completed_at": null, "error": null}`，`segment` = `{"status": "failed", "completed_at": "...", "error": "transcription produced no subtitle cues"}`；终端只打出 `[进行中] 对齐字幕`，再没有收尾行。**修复后**：`align` = `{"status": "succeeded", "completed_at": "...", "error": null}`，`segment` 的失败归属与文案一字未改；终端多出 `[完成] 对齐字幕`。
+
+**② 取 (b)：终态落在对齐决策做完的那一刻。** 在回落分支里、交棒 `current_stage = SEGMENT` **之前**落 `set_stage(ALIGN, SUCCEEDED)`，并把原先整段末尾那行无条件的 `set_stage(ALIGN, SUCCEEDED)` 并进已有的 `if selected_kind == "aligned_subtitles":` 块——该块本就负责「采用对齐 → SEGMENT SKIPPED」的记账，`selected_kind` 在三条分支里分别是 `aligned_subtitles` / `aligned_subtitles` / `asr`，恰好互斥，不会重复记也不会漏记，且沿用了文件里已有的同一套 idiom（而不是新造一个标志位）。**否掉 (a)**：把那行提到 if/elif/else 之前，会让强制对齐的两处 `raise` 发生在 ALIGN 已标 `succeeded` 之后、被外层 except 覆写成 `failed`，正是 #116 刚修过的「同一 stage 先完成后失败」形态（#116 的修法只是渲染层给失败行加一句「重新进入后失败」，重新造出这个形态等于让那句注解去解释一个本不该出现的翻转）；而 (a) 在回落路径上的效果与 (b) 完全相同，纯粹多付一个回归。**否掉 (c)**：要在记账**边界**的 except 里加「`current_stage` 是 SEGMENT 而 ALIGN 仍 RUNNING 就一并收口」的特例，等于在失败处理器里写一条**成功**记录；它只修错误路径、成功路径上终态仍落得过晚，还与 96d38f8 裁定过的「except 里刻意不扫 RUNNING 的 stage」（恢复路径上可能留着上一次中断的 RUNNING）相冲突。
+
+**③ 事件顺序确有变化，且仅此一处。** 回落路径上 `align` 的 `stage_completed` 由「`segment` 收尾之后」前移到「`segment` 开工之前」。**既有测试零变红、既有断言零改动**：全仓没有一处断言 align/segment 的事件顺序，协议快照里 `align` 出现 0 次（实际跑过，零 diff）。新增 4 条测试：回落成功的事件顺序、回落后分段失败的终态与失败归属、强制对齐被拒时 `align` 只有 `stage_started → stage_failed`（反证 (a)，约束 4 不受影响）、对齐被采用时 `align` 收尾紧接 `segment` 跳过且 `segment` 从不开工。`1067 → 1071 passed`，子测试仍 312。
+
+**④ 用户可见变化，CHANGELOG 已记。** `recovery.py` 的 `current_stage = active or failed[-1]` 优先取第一个 RUNNING/AWAITING_INPUT 的 stage，所以修复前 `xvt status --json` 的 `recovery_plan.current_stage` 是 `align`（指向一个其实已经做完的阶段），修复后是真正失败的 `segment`，`completed_stages` 多出 `align`；恢复分类仍是 `retryable`，退出码与恢复建议一字未改。实测两侧 `status --json` 已对账。
+
+**⑤ 对主干判断的两处更正。** (一) 任务描述给的复现配方是「媒体 Job + **用户源字幕**」，这条走不到缺陷现场：用户字幕（`SourceCandidateKind.USER`）在自动策略下只会得到 `SourceSelectionAction.SUBTITLES`，要进对齐必须显式 `--align-subtitles`，而那会进 `if align_subtitles:` 的强制腿、不是出事的 `else:` 回落腿。缺陷现场只有「自动策略 + 平台人工字幕 + 候选 QA error」一条进路，即**远程 Job**。(二) 硬门槛 2 要求「回落后分段成功」的事件序列也不得变，这与 (b) 自身的代价（主干在候选 (b) 里已点明「ALIGN succeeded 从 SEGMENT 之后挪到 SEGMENT 之前」）直接冲突，不可能同时满足；按主干在门槛 4 里的指示如实回报：顺序确实变了，但没有任何既有断言因此变红。
+
+2026-10-20 **O1 语义收口去重：`semantic.py` 抽出 `_conclude_semantic_review` / `_partition_issues` 两个纯搬移 helper**（分支 `codex/o1-semantic-conclude-helper`，PR #132，已合并）。
+
+**① 核实结果。** 三处终态收口确认存在：`run_translation_semantic_review` 的 `reviewed_candidate` 分支（原 :676-687）与常规分支（原 :737-748）**去缩进后逐字相同**，`apply_agent_semantic_review` 收尾（原 :1070-1081）结构相同但条件用 `final_issues`、`mode` 是字面量 `"agent"`。两处问题分拣的位置**与 review 清单写的不同**：清单指的 `_ensure_candidate_qa` + `paths.append` 配对只有 2 行且不是分拣，真正重复的是 :701-704 与 :944-947 的 `repairable` / `preserved` 按类别过滤（只差输入变量名）。
+
+**② 做了什么。** 收口的 12 行抽成 `_conclude_semantic_review(job, job_file, candidate_path, paths, *, issues, blocking_qa_issues, mode, event_sink)`，差异点只有 `issues`（API 侧 `issues`，Agent 侧 `final_issues`——同一语义：这一轮后仍挡着收口的 issue）与 `mode`；分拣抽成 `_partition_issues(issues) -> (repairable, preserved)`。两个 helper 都留在 `semantic.py` 模块私有：`_conclude_semantic_review` 有 `set_stage` / 写模板 / 登记 artifact 三种副作用，按 AGENTS 对 `semantic_state`（零副作用叶子）的界定不该下移；`_partition_issues` 虽纯，唯一消费者就是本模块。
+
+**③ 零行为变化。** `1067 passed, 312 subtests`，与基线逐字一致；既有断言零改动；**协议快照零 diff**（`semantic.py` 在 provider 编排的快照路径上，这是本轮硬验收）。CHANGELOG 未记（零用户可见变化，与 O8 两轮同口径）。
+
+**④ 刻意未动。** `_ensure_candidate_qa` + `paths.append` 那对 2 行（现 :772-775 与 :1102-1103）并进收口 helper 会是**行为变化**：API 侧不走修复时 `blocking_qa_issues` 来自 provider 解析之前的那次调用，挪进去会多跑一次候选 QA。`translate.py:755` 那行同形的 `repairable` 过滤在 `build_semantic_repair_batches` 内部、无 `preserved` 配对，抽取还会让 `translate.py` 反向依赖 pipeline。
+
+**⑤ 对 Phase 5 的判断。** O1「吃掉 Phase 5 大部分收益」成立，但要说准：吃掉的是首尾两个决策点（分拣、收口）；中间三步（初审 / 修复 / 复审）的差异是协议本质的——API 逐批 provider 调用加 checkpoint 续跑 vs. Agent 对一份已回填响应一次性解析校验，两者间已无逐字重复可搬。**建议把 Phase 5 由「降级」改为「关闭」**，留主干拍板；REVIEW_FINDINGS 的 O1 条目 (f) 与 ROADMAP 已同步这条建议。
+
+2026-10-20 **O8 对齐/分段副本收尾：分段 preset 收敛为 `_segmentation_config`，对齐侧冻结不抽**（分支 `refactor/o8-align-segment-copies`，PR #131，已合并）。
+
+**① 裁定。** `pipeline/transcription.py` 的三份「导入源字幕与 ASR 对齐」副本（A `_process_adaptive_media` / B `_process_acquired_media` / C `resume_job` 对齐分支）里，B 与 C 对现代 Job 不可达，仅为 v0.1.x 历史 Job（config 缺 `source_strategy`）保留；「对齐后 QA error 门只有 A 有」是 v0.2.0 source-selection 的刻意不对称（B/C 的 error 级 issue 由下游 `_run_source_subtitle_qa` fail-closed），不是漂移；三种失败记账的可观测结果已收敛。详细对账与证据链见 `docs/REVIEW_FINDINGS_2026_10_17.md` O8 条目。
+
+**② 做了什么。** 5 处逐字相同的分段 preset 查询收敛为 `_segmentation_config(job)`（`rebuild_source` 那处是 fail-fast 预校验，返回值丢弃，已补注释）；B 的 docstring 与 C 的对齐分支加冻结注释。**对齐侧刻意不抽公共函数**：B/C 冻结后防同步漂移的收益为零，抽取只会碰冻结路径。
+
+**③ 零行为变化。** `1067 passed, 312 subtests`，前后一致；既有断言零改动，协议快照零 diff。CHANGELOG 未记（零用户可见变化，与 O8 死码那轮同）。
+
+**④ 遗留去向。** 本轮核实出的六条（C 对齐段异常无记账、C 的 `"auto"` 不转 `None`、A 回落分支 ALIGN 留 RUNNING、C 空 cue 无前置拦截、B 对齐段无测试、`transcription.py` 2055 行待拆）当时均刻意未修，登记在 REVIEW_FINDINGS O8 条目 (d)，留主干拍板。**其中第 ③ 条（A 回落分支 ALIGN 留 RUNNING）已于 2026-10-20 修复**，见本文件最新一条；其余五条仍留主干拍板。
+
+2026-10-20 **修掉不带 scheme 的签名 URL 脱敏漏整条 query（安全，约束 5）**（分支 `codex/redact-schemeless-query`，PR #130，已合并）。
+
+**① 缺陷与它为什么躺了两天。** 2026-10-18 已实测证实、刻意未修：`redact_text("unable to download video data: /videoplayback?sig=SECRETSIG123&id=abc")` 原样返回，`HTTPSConnectionPool(host='r1.googlevideo.com', port=443): /videoplayback?sig=SECRET&key=yt6` 与协议相对的 `//host/videoplayback?sig=...` 同样不命中。根因：`_URL_PATTERN` 要求 `https?://`、`_USERINFO_PATTERN` 要求 `scheme://`，不带 scheme 的「路径 + query」两条都够不着，于是签名明文经 `create_event` 与 `pipeline.common.set_stage` 落进 `events.jsonl` 与 `job.json`。**当时不修的理由在宽口径下是对的**：要兜住它就得对整个「不含 scheme 的 `路径?query`」脱敏，而 `?k=v` 这个形状在 ffmpeg 滤镜串、yt-dlp 格式选择器和散文里到处都是。被忽略的是**仓库里已经有一个策展匹配器**可以把口径收窄得多。
+
+**② 窄口径：复用 `_is_sensitive_query_key`，不重造名单。** 只脱敏「键名已被 `_is_sensitive_query_key`（精确名单 → 子串 → 分段整词三层）判为敏感」的那些 `key=value` 的**值**，与有没有 scheme 无关。误伤面从「任何 `?k=v` 形状」收窄到「键名命中策展名单」：`scale=640:360`、`ass=filename=...`、`bv*+ba/b`、`width=161 limit=492` 不命中，`sig=` / `signature=` / `token=` / `X-Goog-Signature=` 命中即脱敏。**加在哪一层**：`_SENSITIVE_QUERY_PAIR_PATTERN` + `_redact_query_pair` 挂在 `_redact_free_text` 末尾（即 `redact_text` 的 `_URL_PATTERN` 之后——带 scheme 的 URL 先被 `redact_url` 规范化，本规则只收残余形态）。**只动 `events.py` 这一个脱敏边界，没有在任何调用点补 `redact_text`**；上一轮已核实 `process.py` 的 `_redact_command` 不该改（它不是持久化出口，`create_event` 才是），本轮未动。
+
+**③ 边界怎么划（三处都有实测依据）。** **分隔符只认 `?` 与 `&`**，与 `redact_url` 依赖的 `parse_qsl`（Python 3.10 起不再按 `;` 切分）同口径——两条路径的切分必须一致，否则「有没有 scheme」就成了凭据能否泄漏的开关。**键名判定前 `unquote_plus` 一次**，与 `parse_qsl` 的解码一致（`%73ig` → `sig`，否则绕过三层匹配；已作为 subtest 钉住）。**值的终止边界**：空白、`&`（下一个参数）、`#`（fragment）、引号、反引号、`<` `>`、右括号 `)` `]` `}`、`;`、`|`。第二个样本整段被 `HTTPSConnectionPool(...)` 包着、query 跟在 `: ` 后面——括号在 query **之前**闭合，所以它只需要 `&` 和行尾两个终止符；真正要右括号的是 `ffmpeg failed (input /videoplayback?sig=...)` 这种形态，已单独取样。排除 `<` 顺带让规则不会二次改写自己产出的 `<redacted>`，**幂等性不靠额外判断**。
+
+**④ 带 scheme 的 http/https 逐字未变，且这一点是既有测试在钉。** `redact_url` 的 `urlencode` 把标记串规范化成 `%3Credacted%3E`，新规则显式跳过「值已经是该形态」的 pair。**变异验证**：删掉这个跳过 → `tests/test_batch.py::test_failure_message_is_redacted_in_report`、`::test_waiting_message_is_redacted_in_report`、`tests/test_process.py::test_run_command_redacts_secrets_from_events_only` 三条**既有**断言立刻变红（它们 `assertIn("%3Credacted%3E", ...)`）。两条路径对同一个键的**判定**一致（敏感键都脱敏、良性键都保留，12 个 subtest 钉住），只是标记串拼写不同（`%3Credacted%3E` vs `<redacted>`）——刻意保留的既有行为，不构成矛盾。
+
+**⑤ 顺带收口一条已登记的遗漏。** 2026-10-18 条目末尾的遗留 (a)「非 http scheme 的 query 仍完全不脱敏」（`socks5://host/p?token=abc` 原样）本轮一并关闭，修法不是放宽 `_URL_PATTERN`（那会让 `urlunsplit` 规范化去改写 socks/ftp/rtmp 文本，正是上轮判定风险过大的那条路），而是本规则与 scheme 无关。
+
+**⑥ 误伤实测（不靠推理）。** 把 `src/xvt` 与 `tests/` 的全部字符串字面量、`tests/fixtures/` 全部行、全仓 Markdown 全部行共 **8408 条**取出来，逐条比对修复前后的 `redact_text`：**只有 8 条变化**，全是本次新增的测试样本与 review/HANDOFF 里**描述这个 bug 的散文**（`...?sig=SECRETSIG123` 被脱敏）。**真实 ffmpeg 滤镜串（`ass=filename=measure.ass:alpha=1,extractplanes=a,bbox=min_val=0`、`scale=640:360`、`force_style='Fontsize=24'`、`[0:v]...[v];[v]...`、`-map 0:a?`）、yt-dlp 格式选择器（`bv*+ba/b`、`bestvideo[height<=1080]+bestaudio`、`-S lang,res`）、QA 消息（`width=161 limit=492`）、日志散文（`cue_count=52`、`status=failed`、`exit=2`、`frame= 120 fps= 24 ... bitrate=...`）零误伤。** 另有 29 条不在仓库语料里的真实形状逐条 `assertEqual(原文, redact_text(原文))`，其中 25 条进了测试。**幂等**：同一次 8408 条扫描里 `redact_text(redact_text(s)) != redact_text(s)` 的有 **0** 条；三条新测试每个 case 另外单独断言一次。
+
+**⑦ 已知代价（可接受，fail-closed）。** 散文里紧跟 `?` 的敏感键名会被脱敏：`What?key=value` → `What?key=<redacted>`、`see docs#anchor?key=v` → `...?key=<redacted>`。两者都不是真实日志/命令形状（8408 条语料零命中），且与带 scheme 那条**口径一致**——`key` 本就在 `_SENSITIVE_QUERY_KEYS` 里，`redact_url` 一直在脱敏 `?key=`，既有测试 `test_signed_url_query_keys_are_redacted_across_providers` 就钉着它。**仍未覆盖**：query 被 HTML 转义成 `&amp;sig=...` 时第二个及其后的 pair 不命中。刻意不收——要收就得把 `;` 当分隔符，而 `parse_qsl` 不这么切，加进来会让「有没有 scheme」在 `;` 上给出不同结果，正是本条要消除的那类不对称；yt-dlp / ffmpeg 不做 HTML 转义，无已知真实来源。
+
+**⑧ 红先证据（逐字）。** 备份 `src/xvt/events.py` 与 `tests/test_events.py` 到 scratchpad，先只加测试：`12 failed, 3 passed`，含 `AssertionError: 'unable to download video data: /videoplayback?sig=<redacted>&id=abc' != 'unable to download video data: /videoplayback?sig=SECRETSIG123&id=abc'`、`"HTTP[36 chars].com', port=443): /videoplayback?sig=<redacted>&key=<redacted>" != "HTTP[36 chars].com', port=443): /videoplayback?sig=SECRET&key=yt6"`、`'//r1.googlevideo.com/videoplayback?sig=<redacted>' != '//r1.googlevideo.com/videoplayback?sig=SECRETSIG123'`、`'ffmpeg failed (input /videoplayback?signature=<redacted>&itag=22)' != 'ffmpeg failed (input /videoplayback?signature=LEAKSIG&itag=22)'`、`'api.example.com/v1/chat?access_token=<redacted> returned 401' != 'api.example.com/v1/chat?access_token=sk-LEAK123 returned 401'`，以及一致性测试的 6 条 `AssertionError: 'LEAKVALUE' unexpectedly found in 'failed: cdn.example.com/v.mp4?sig=LEAKVALUE&itag=22'`（`sig` / `signature` / `X-Goog-Signature` / `access_token` / `auth_key` / `key`）。后补的三条用例（非 http scheme query ×2、`%73ig` 百分号编码键）同样对修复前的模块逐条验红。反向守卫 `test_schemeless_query_redaction_does_not_touch_benign_text` **修前就绿**，正是「口径没有外溢」的反证。
+
+**⑨ 验证。** `1064 passed, 265 subtests` → `1067 passed, 312 subtests`（新增 3 条测试 / 47 个 subtest，增量 = 新增测试数）。`ruff check`、`ruff format --check`、`pytest -q`、`xvt --help`（退出码 0）全绿。**既有断言零改动、既有测试零变红**，协议快照零 diff（`tests/test_provider_protocol_snapshot.py` 8 passed，golden 文件无 diff）。文档已同步：CHANGELOG（`[Unreleased]` 新增 `### Security` 一条）、`docs/REVIEW_FINDINGS_2026_10_17.md`（「未验证」节那条从「实测证实、未修」改为已修，并写明窄口径的理由、边界划法、误伤实测与已知代价）、本文件（新条目 + 2026-10-18 条目的遗留 (a)/(b) 标记为已修）。**AGENTS 约束 5 未改**：它说的是「签名 URL 不得原样写入事件」与「脱敏在边界集中做，事件走 `create_event`、`job.json` 走 `set_stage`」——本次修复是让那条约束**真的成立**，没有改动边界架构或新增出口，措辞仍然准确。
+
+2026-10-20 **CI 的 Linux 侧补装字幕字体，两个平台都断言 libass 真的能测量行宽（#128 顺带取证出的既有盲区已修）**（分支 `codex/ci-cjk-fonts`，PR #129，已合并；`src/` 零改动、测试零改动）。
+
+**① 盲区回顾。** CI 的 Linux 侧只 `apt-get install -y ffmpeg`，全历史没装过任何字幕字体，而 `render.font_for_language` 在非 darwin / 非 win32 上给 zh / ja / ko 要 `Noto Sans CJK SC` / `JP` / `KR`。缺字体 → libass `failed to find any fallback with glyph` → `measure_bilingual_line_widths` 抛 `ValueError` → `qa.check_subtitles` **静默降级**到保守显示单位上限（只记一条 `layout_measurement_unavailable` warning）。于是 Linux 上行宽 QA 从未真正测量过，而既有测试一条都看不见（涉及行宽的用例全部打桩了测量函数）。直接代价：#128 的 `_reusable_rendered_layout` 的「可复用」分支在 CI 上只有 macOS 在验。
+
+**② 字体包与家族名先核实再动手（CI 日志逐字取证，不靠记忆）。** `fonts-noto-cjk` 一个包就提供 SC / JP / KR / TC 四个家族，**且含 Bold 面**（原先担心 Bold 在 `fonts-noto-cjk-extra` 里、要靠 libass 合成假粗，实测不是）：`Noto Sans CJK SC -> NotoSansCJK-Regular.ttc: "Noto Sans CJK SC" "Regular"`、`Noto Sans CJK SC:bold -> NotoSansCJK-Bold.ttc: "Noto Sans CJK SC" "Bold"`，JP / KR 同形；非 CJK 回退 `DejaVu Sans -> DejaVuSans.ttf: "DejaVu Sans" "Book"`。所以 `font_for_language` 要的家族名 fontconfig 全部解析得到，**`src/` 一行没改**。macOS 侧不加步骤：系统自带的 Hiragino Sans GB / Hiragino Sans / Helvetica 正是 darwin 上要的三个（CI 日志里那一步打出来的就是这三个名字）。
+
+**③ 能力断言写成什么、为什么不写 `fc-list | grep -i cjk`。** 新脚本 `.github/scripts/verify_layout_measurement.py`（两个平台都跑，不带 `if`）对 zh-CN / ja / en —— 本仓库测试里真实用到的三种目标语言 —— 各真的调一次 `render.measure_bilingual_line_widths`（缺字形/缺 ffmpeg 都从这里抛，带原始异常），再走真实消费者 `qa.check_subtitles` 一遍，断言报告自己的 `layout["measurement"] == "measured"` 且无 `layout_measurement_unavailable`，并把家族名与量出的宽度/上限打进日志。`fc-list | grep` 是代理指标，与上一轮 macOS libass 事故（比对有没有 ffmpeg 可执行文件而不是有没有 `ass` 滤镜）同类：「字体包在盘上」≠「fontconfig 解析得到那个家族」≠「libass 量得出包围盒」。**顺序约束**（脚本 import xvt，必须排在 `Sync dependencies` 之后，不能像 ffmpeg 那两步一样提到最前）写进了步骤名 `Verify libass can measure subtitle line widths (must stay after Sync dependencies)` 与紧邻注释。
+
+**④ 验证方式：CI 绿不构成证据，另取两道。** 那条 E2E 按 `measurement` 分两路断言，两路都绿，所以单看绿灯说明不了 Linux 走了哪一路。取证手段：(a) 能力断言步骤本身就是证据——Ubuntu 上 `platform: linux` / `[zh-CN] font_for_language -> 'Noto Sans CJK SC'` / `[zh-CN] measured cue=1 role=target width=161 limit=492` / `[zh-CN] report measurement='measured' status='pass' issues=[]`（ja、en 同形）；(b) 临时取证步骤（已回退）用 `pytest -s` 把那条 E2E 的判定行打出来，Ubuntu 3.11 / 3.13 与 macOS 两版全是 `[observe] measurement='measured' status='pass' issues=[] qa_reports=1 ass=1 renders=['source', 'translated']`，即走的是 `measured` 那一路、**复用分支真的执行了**（两份产物各 1 次、`RENDER` 2 次），不再是 fail-closed 拒绝。另加一步纯观测的 `fc-match` 输出（永久保留，不做断言）。run 39373901091 四条 check 全绿、`1064 passed, 265 subtests` 四个 job 一致、零 skip。
+
+**⑤ 顺带说明：无 PR 时 CI 不会跑。** `on.push.branches` 只有 `main`，`workflow_dispatch` 未配置（`gh workflow run` 实测 HTTP 422）。为满足「不开 PR 也要真实 CI 验证」，取证期间临时把本分支加进 `on.push.branches`，取证后与临时 `pytest -s` 步骤、E2E 里那行临时 `print` 一起回退。最终状态与取证时的差异**只有这三处移除**，字体安装步与能力断言步逐字相同。
+
+**⑥ 耗时。** Ubuntu job 73s（基线 run 39373062466）→ 86s / 83s，多出来的是装字体 8–9s + 能力断言 2s（含临时取证步 1s）；`fc-cache -f` 在同一步内。pytest 本身 38.25s → 42.19s(3.11) / 38.52s(3.13)，真实测量带来的增量在噪声级。macOS 不变（装 `ffmpeg-full` 仍是大头，137s）。
+
+**遗留（如实登记）**：(a) `font_for_language` 给 ko 要 `Noto Sans CJK KR`（包已提供、`fc-match` 已解析到，但没进能力断言）、给 ar / fa / ur 要 `Noto Sans Arabic`（**未安装**，Linux 上这三种语言仍会降级）；本仓库测试里没有这些目标语言的用例，刻意不扩张安装面，将来有用例时要同时装 `fonts-noto-core` 并把语言加进脚本的 `CASES`。(b) **既有测试仍然一条都不断言真实测量成立**，涉及行宽的用例照旧打桩；这件事由 CI 那一步能力断言兜住，不由测试兜住——换句话说本地 `pytest` 全绿仍不能说明本机能测量，要跑那条脚本。(c) 产品行为零改动：用户机器上缺字体照旧降级，只是 README / AGENTS 现在写明了这件事。文档已同步：AGENTS（验证命令一节）、README（环境要求）、CHANGELOG（Documentation）、REVIEW_FINDINGS（那条观察标为 ✅ 已修并附 CI 逐字证据与未覆盖语言）。
+
+2026-10-20 **工作流烧录腿复用渲染腿的布局 QA 与 ASS，不再重算一遍（review 清单「`apply --continue` 把 QA 与渲染做了两遍」已修，但原条目的归因被实证更正）**（分支 `codex/apply-continue-no-double-render`，PR #128，已合并）。
+
+**① 实证先于动手，原条目的机制写错了。** 真实 CLI 逐步复现（纯字幕源 + `--provider agent --translation-quality polished`，零网络零 API；媒体为 `ffmpeg -f lavfi` 合成的 640×360 视频）：
+- **纯字幕 Job（无媒体、不烧录）上根本没有第二遍。** `xvt apply JOB SEMANTIC_RESPONSE --continue` 的事件流里 `SUBTITLE_QA`(`detail=translated`) 与 `RENDER` 各一次，`continue` 腿只有 `workflow_started` + `workflow_completed`。原因：语义收尾后 `_translation_satisfied` 为真，`_ensure_translation` 根本不被调用，`semantic.py::_finalize_candidate` 那道复用短路**轮不到上场**（主会话提示里怀疑「短路没命中」，实证是「短路不参与」）。
+- **第二遍只在 `--burn` 的 Job 上出现，发起者是烧录段不是翻译段。** 同一条 `apply --continue`：渲染腿 `translation.py::_qa_and_render_translation` 产出 `translated_subtitle_qa` / `translated_srt` / `bilingual_srt` / `bilingual_ass`；随后 `workflow_started` → 第二条 `artifact_created translated_subtitle_qa` → `stage_completed subtitle_qa` → `stage_started render`（无 `detail`）→ 第二条 `bilingual_ass` → `burn`。第二次来自 `burnin.py::burn_translated_job` 的 `_check_render_layout(..., persist=True)` 与紧随的 `save_bilingual_ass`。
+- **与 polished / 语义校对 / `apply --continue` 都无关**：`standard` 质量、以及 `run_workflow(translation_subtitles=…, burn=True)` 都复现同一第二遍。真正条件是「译文渲染腿与烧录腿在同一条命令里相继执行且画幅已知」。原条目设想的 A（语义收尾只推进不渲染）因此不适用——渲染腿产出的恰是 `_translation_satisfied` 要求的交付物。
+- **产物逐字相同、Job 状态正确属实**：先只 `apply` 记 SHA-256，再单独 `continue` 跑完烧录，`qa-translated.json`(`2f217e06…`) 与 `bilingual.ass`(`2393a5b8…`) `diff` 为空。代价的贵处是 `render.measure_bilingual_line_widths` 又起一个 ffmpeg 进程、cue 数 × 2 帧过 `ass` 滤镜 + `bbox`，按 cue 数线性增长。
+
+**② 修法（等价于方向 B，落在正确的衔接处：渲染腿产出、烧录腿复用）。** `pipeline/burnin.py` 新增只读判定 `_reusable_rendered_layout(job, translated, media_info, options) -> Path | None`。工作流烧录腿（`persist_workflow_qa=True`）判定可复用时沿用已登记的两份产物，不重测、不重写 `qa-translated.json`、不重渲 `bilingual.ass`、不重记 `RENDER`。条件 fail closed：两个 stage 都 `succeeded` → 两份产物 checksum 有效（都在 `downstream_of(translated_cues)` 闭包里，译文一变登记就被摘）→ 报告**自己**的 `layout` 块 `measurement == "measured"` 且 `video_width` / `video_height` / `style_options` 与本次实参全等（绑定的是测量时的真实输入，手改 `job.json` 字体绕不过去）→ 媒体时长已知且全部 cue 落在时长内（时长没记进报告，所以**就地重判**：它只影响 error 级的 `outside_media`）。术语表不比对（两腿都调 `required_glossary_terms(job)`，同 Job 必然同值）。另**刻意只复用 `pass` / `warning` 的报告**：已确认的 `needs_review` 放行来自存档确认，`complete_qa_stage` 要为它发一条 `subtitle_review_acknowledged`（唯一的「依据哪条确认」事件证据），复用会把它省掉，而布局确认正是约束 4 点名要绑定的东西。**原子 `xvt burn` / `xvt preview` 一字未改**。
+
+**③ 约束 4 没被削弱。** 放行判定仍排在复用判定**之前**：`_assert_translated_qa_gate` 对同一份报告跑 `review_gate_satisfied`（与 `complete_qa_stage` 同口径），`failed` 或未确认的 `needs_review` 在那里就抛 `RuntimeError`，烧录一帧都不开始。复用只省掉一次结论必然相同的重算。
+
+**④ 验证。** 新增 9 条测试（1055 → 1064，子测试 265 不变）。红先逐字：`tests/test_e2e.py::…::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` → `AssertionError: 2 != 1`；`tests/test_pipeline_burnin.py::…::test_workflow_burn_reuses_the_rendered_layout_qa_and_ass` → `AssertionError: Expected 'measure_bilingual_line_widths' to not have been called. Called 1 times.`。另 7 条是反证/边界：约束 4 反证（术语违规译文走 `xvt apply --continue` 仍非零退出、`SUBTITLE_QA=failed`、`bilingual_ass` / `burned_video` 都未登记）、换画幅不复用、换字体不复用、测量降级（`measurement="unavailable"`）不复用、cue 越出本次烧录媒体不复用且 QA 照旧判 failed、已确认的 `needs_review` 报告不复用、原子 `burn` 永不复用。**既有断言零改动、既有测试零变红、协议快照零 diff**（快照场景都是纯字幕 Job，不烧录）。修复后真实 `apply --continue` 重跑：第二遍事件消失，四份产物 SHA-256 与修复前逐字相同，`status` 为 `complete`、`xvt verify` 全项 PASS。
+
+**⑤ CI 分叉与一条顺带取证出来的既有盲区。** 首次 CI（PR #128）macOS 两版通过、ubuntu-latest 两版都在 `qa_reports` 报 `AssertionError: 2 != 1`（`1 failed, 1063 passed`，零 skip，`ass` 滤镜在 Ubuntu 上是有的）。**不是复用判定的 bug**：Ubuntu 那份报告的 `layout["measurement"]` 不是 `measured`、且带着 `layout_measurement_unavailable`，也就是行宽测量真的抛了错、`qa.check_subtitles` 真的回退到保守上限，复用判定**正确地 fail closed 拒绝** → 烧录腿重测重渲（这部分由改形后的测试在 CI 上断言）。机制是强指向但未逐字取证：CI 的 Linux 侧只 `apt-get install -y ffmpeg`、**从未装过字幕字体**（`git log -p .github/workflows/ci.yml` 全历史零 font/noto/cjk），而 `render.font_for_language` 在非 darwin/非 win32 上给 zh 要 `Noto Sans CJK SC`，缺字体时 libass 报 `failed to find any fallback with glyph` → `ValueError`；但报告只记结论不记抛错原因，「是缺字形而非别的 `CommandError` / `OSError`」没有 CI 侧的逐字证据（本机 Docker daemon 未运行，没在 Linux 容器里回放）。本机把 `xvt.qa.measure_bilingual_line_widths` 打成缺字形失败，逐项复刻了 Ubuntu 的事件签名（`workflow completed`、报告 `warning` + 唯一 issue `layout_measurement_unavailable`、`subtitle_qa(detail=translated)` 1 次、`render` 3 次（`source` / `translated` / 无 detail）、两份产物各 2 次）。
+
+因此那条 E2E 测试改成**读报告自己的 `measurement` 再分两路断言确定计数**，不放宽、不 skip：`measured` → 两份产物各 1 次、`RENDER` 2 次；非 `measured` → 各 2 次、`RENDER` 3 次，**并且**断言报告里带着 `layout_measurement_unavailable`（这条把「为什么没复用」钉死在降级上）。断言消息里打出 `measurement` / `status` / issue 列表 / 各计数，CI 上一行就能看出判定依据。变异检验：强制 `_reusable_rendered_layout` 返回 `None` 而测量成立，测试报 `2 != 1 : measurement='measured' …`——降级那一路没有盖住真 bug。**既有断言零改动**（改的是本分支上一轮自己加的那条测试的断言结构）、协议快照零 diff。
+
+顺带取证出的既有盲区（**本轮刻意未修，只登记**）：**Ubuntu CI 上行宽测量一直是失败的，那条路径从未真正测量过**，且既有测试一条都看不见——涉及行宽的用例（`test_layout_qa.py` / `test_pipeline_burnin.py` / `test_candidate_layout_guard.py` / `test_revision_preflight.py` / `test_workflow.py`）全部 patch 掉了测量函数，E2E 里真实测量在跑但短译文在降级的保守规则下照样放行。要修是给 CI 的 Linux 侧装 `fonts-noto-cjk` 并加一步能力断言（与 `ffmpeg-full` 那步同形），属于另一件事，已写进 REVIEW_FINDINGS 的「观察」一节。**没有新增 `ffmpeg_can_measure_bilingual_layout()` 探针**：探针只能用另一组输入（文本、字体随 `target_language` 变）再探一次，与真实调用可能不一致——那正是「门控 ≠ 真实前置条件」这一类事故的来源；而且探针的用处是 `skipUnless`，会把降级那条真实行为跳过、CI 照样全绿。直接读那份报告的实际结论更准也更便宜。
+
+**遗留（如实记录）**：(a) `xvt preview` 每次都做一次完整 libass 测量（`persist=False`），它是独立命令、不构成一条命令内的第二遍，本批未动；(b) 原子 `xvt burn` 在渲染腿已产出等价布局时同样会重测一遍，这是刻意保留的既有行为（该命令可覆盖媒体与字体）；(c) 译文 QA 停在 `needs_review` / `failed` 的阻断路径上，`finalize_translation` 与随后的恢复导航各读一次报告，不涉及重复测量。文档已按「全分支对账」同步：RECOVERY（新一节「烧录腿复用渲染腿的布局 QA 与 ASS」）、AGENTS（约束 4 + `pipeline` 表格 `burnin` 条目）、README（行宽 QA 段）、CHANGELOG、REVIEW_FINDINGS（该条目标为已修并写入机制更正）。
+
+2026-10-20 **强制对齐被「对齐后字幕 QA」拒绝时的死循环出口（同类缺陷第 9 次）**（分支 `codex/alignment-post-qa-deadlock`，PR #127，已合并）。关闭上一条 #125 登记的遗留。
+
+**① 缺口先实证，真实 CLI 零插桩。** `ffmpeg -f lavfi` 合成 3.89s 视频 + `say` 配音，源字幕三条可匹配 cue 挤在 0–1.4s 外加一条音频里没说的尾句，一次命中：`xvt run … --subtitles … --align-subtitles --target-language zh-CN --provider agent` 退出码 2，`stages.align` 为 `failed`，`alignment.json` 的 `confidence=0.75`（≥ 门限 0.55，**置信度门没参与**）、`scale=2.598`，尾句被推到 3631–4930ms 而 `media.json` 的 duration 是 3894ms，`aligned-subtitle-qa.json` 里 `status=failed` + `outside_media`(error, cue 4) + `low_timing_confidence`(review, cue 4)。`status` 归 `retryable`、`next: xvt continue`、`report_paths: []`。**`continue` 连跑两次退出码都是 2、stdout/stderr 逐字相同**（`diff` 无输出），失败输出里自荐的还是刚失败的那一条。
+
+**② 出口实证：`rebuild-source --strategy asr` 真能救。** 同一个 Job 上实测退出码 0，`align` 转 `skipped`、`source_cues` 登记、`align_subtitles` 置 `false`，`status` 回到 `retryable` + `translate` 步；`continue` → Agent manifest → `xvt apply … --continue` 后 Job `complete`、`xvt verify` 15 项全 PASS。
+
+**③ 另两条出口核实为「不能进推荐位」。** 报错点名的三条里 ① 去掉 `--align-subtitles`、② `--source-strategy asr` 都是 `run` 的旗标（创建新 Job，推不动这一个；`align_subtitles` 固化在 `job.config`，除 `rebuild-source` 外没有命令会翻它）；③「fix the source subtitles」**在既有 Job 上没有受支持的入口**：`prepare-source-review` 实测以 `source review requires valid source cues` 退出码 2 拒绝（源 cue 还没产出），而且**改用户原始字幕文件也不起作用**——`_candidate_from_job` 优先取 Job 内 checksum 有效的 `input_subtitles` 副本，实测把源 srt 的尾句删掉后 `continue` 仍复现同一个失败（只有把 Job 内副本一起删掉——没有任何命令会这么做——才会回退读 `config["subtitles"]`）。所以 `alternative_commands` 刻意为空，①③ 只写进 `reason`。
+
+**④ 修法。** 新增只读谓词 `recovery._alignment_post_qa_deadlock(job, valid_artifacts) -> Path | None`，成立时返回那份报告路径。守卫链：不是纯字幕 Job → `align_subtitles is True` → `aligned_subtitle_qa` checksum 有效 → 报告里有 error 级 issue（复用 `_qa_report_has_errors`，不另造解析）→ `word_transcript` 与 `input_subtitles` 都 checksum 有效 → `_source_can_be_rebuilt`（比置信度门**多的一道**：`media_info` 失效且本地媒体不在盘上时 `rebuild-source` 自己会失败，不留「推荐一条跑不起来的命令」这个角；刻意不回头给置信度门补这道守卫）。**刻意不照抄置信度门的 `allow_low_confidence_alignment` 守卫**（该旗标放行不了 QA error 门，代码注释已写明），**判定排在 `_alignment_confidence_deadlock` 之后**（两道门能同时成立，执行侧先抛置信度门）。归 `manual_fix` + `primary_command=rebuild-source --strategy asr` + `report_paths=(aligned-subtitle-qa.json,)`；`reason` 点名文件名。`report_paths` 带上是因为该字段本来就不是 `SUBTITLE_QA` stage 专属（局部重译 manifest、语义 QA 报告都在 `TRANSLATE` stage 用它），`status` 与命令失败导航都按 `verbose` 渲染 `report:` 行。
+
+**⑤ 验证。** 新增 11 条测试（1044 → 1055，子测试 263 → 265），其中 5 条红先（逐字失败：`'retryable' != 'manual_fix'` ×3、`'aligned-subtitle-qa.json' not found in '存在 checksum 有效的转写 checkpoint，可以从断点继续。'`、`['xvt','continue'] != ['xvt','rebuild-source']`），6 条是反证/边界（只有 warning 的报告、缺任一对齐输入、`allow_low_confidence_alignment=True` 仍判死、两门同时成立时置信度文案不被抢、`align_subtitles` 非 True、纯字幕 Job、重建跑不起来的 Job 不被指向 `rebuild-source`）。端到端自证测试把 `primary_command` 原样 `shlex.split` 后喂回 `main()`，断言 Job 走到 `complete` 且 `verify` 全 PASS；另一条先连跑两次 `continue` 断言退出码 2 且 Job 状态零变化。**既有断言零改动、既有测试零变红，协议快照零 diff。** 顺手更正了 `test_alignment_above_the_threshold_is_not_treated_as_a_deadlock` 的 docstring（它写着「那条路径不落盘 QA 报告」，#125 之后已过期），断言一字未动。
+
+**遗留**：无新增。文档已按「全分支对账」同步 RECOVERY（新一节取代原「已知未覆盖的相邻情形」）、README（两处：对齐段 + `rebuild-source` 的推荐范围）、ARCHITECTURE（两处）、SKILL（两处）、CHANGELOG、REVIEW_FINDINGS（#125 条目下补「它解锁的导航缺口已修」）。
+
+2026-10-20 **「整轮请求是否最新」判据补两处缺口：失效的取代登记不再压制有效整轮等待（端到端），原子语义等待遇到更新的整轮请求时让路**（分支 `fix/full-translation-wait-newest-validity`，PR #126，已合并）。**修 1**：`workflow._full_translation_request_is_newest` 公有化为 `full_translation_request_is_newest`，只让 checksum 有效的取代 kind 参与「登记更晚即取代」。实测危害链：满足的端到端 Job → 第二轮整轮 `translate --provider agent` → `retranslate-cues` → 删 `cue-retranslation-batches.json`（登记仍在）→ `plan_advance_steps` 返回 `()`、`status` 报 complete、`continue` 发 `workflow_completed`、统一 `xvt apply` 退出码 2 拒收，而 `TRANSLATE` 仍 `awaiting_input` 且第二轮 manifest 完好。有效重译 manifest 更晚登记时仍取代整轮（`test_a_newer_cue_retranslation_request_still_wins` 与新对照用例守着）。**修 2**：`recovery.py` 原子段在 `agent_semantic_review_waiting` / `semantic_review_waiting` 之前以 `agent_full_translation_waiting and full_translation_request_is_newest` 让路，上一条 HANDOFF 登记的「相邻的已知遗漏」就此关闭；让路必须带 newest 条件（正常语义等待上裸谓词恒真，会造成零推进死循环），#124 的「润色候选有效」闸门保持裸谓词不动。新增 7 条测试（1032 → 1039，子测试 263 不变），红先，既有断言零改动，协议快照零 diff。遗留（如实记录）：原子 Job 走完 `apply-semantic-review` 到出成品后 `TRANSLATE` 阶段仍残留 `awaiting_input`（与 manifest 有效叠加使 `agent_full_translation_waiting` 为真，recovery 在成品齐全后仍报「等待翻译结果回填」），是既有表象，本批未动。
+
+2026-10-20 **对齐后 QA 报告（`aligned_report`）落盘为 `aligned_subtitle_qa` artifact —— review 清单最后一条「未修，独立立项」已修**（分支 `codex/persist-aligned-report`，PR #125，已合并）。
+
+**① 缺口先实证，确认成立。** `ffmpeg -f lavfi` 合成 3.72s 视频 + `say` 配音，源字幕用压缩时间轴（三条可匹配 cue 挤在 0–1.4s）外加一条音频里没说的尾句，真实 `xvt run … --subtitles … --align-subtitles` 一次命中：退出码 2，`stages.align` 落 `failed` 带那句通用错误文本，`artifacts/` 下六个文件里**没有任何一个**讲得出对齐后是哪条 cue 的哪个 issue——唯一带 issue 列表的 `source-candidate-qa.json` 讲的是**输入**字幕的原时间轴（8 条 `too_short` / `reading_speed` warning、零 error），`status --json` 的 `report_paths` 为 `[]`。要看出问题只能拿 `alignment.json` 里重定时后的 cue（第 4 条 3887–4967ms）去跟 `media.json` 的 3723ms 对账，正是条目说的「自己猜」。
+
+**② 回落 ASR 那一支「相对好些」的说法要收紧。** `selection_reason=alignment_post_qa_failed` 只是结论，明细同样丢了；更坑的是那一支的 `qa.json` 讲的是最终采用的 **ASR** cue、不是被拒的对齐候选，照它排查会看错对象。因此**两支都登记**，报告在 `check_subtitles` 之后、任何分支判定之前无条件落盘，「有没有这份报告」只对应「对齐真的跑过了」一个条件（与 `subtitle_alignment` 同一条件），不会出现「有时有有时没有」。该支只在远程 Job（下载到的人工候选 QA 失败 → 自动对齐）上可达，用真实 `align_source_cues` + 插桩下载/模型/ffmpeg 覆盖。
+
+**③ 落盘点与抛出路径。** 写在 `aligned_report = check_subtitles(...)` 紧后、两道门之前的直线代码里；`add_artifact` 自己 `save_job`，登记当场落到磁盘上的 `job.json`，不依赖后续收尾。实测失败 Job 的 `job.json` 里 `aligned_subtitle_qa` 在册，`xvt verify` 打 `PASS aligned_subtitle_qa: artifact is valid`。
+
+**④ 约束 4 核实不受影响。** 只加证据、不碰判定：修复后同一条命令仍是退出码 2、`ALIGN` 仍是 `failed`、错误文案一字未改，`source_cues` / `source_srt` / `subtitle_qa` 一个都没登记。**不新增事件类型**（`artifact_created` 的 `kind` 是自由字符串，`docs/EVENTS.md` 字段表无需改动）。**`DERIVES_FROM` 填法**：派生自 `subtitle_alignment` 与 `media_info`，并与 `source_candidate_qa` 同构地作为 `source_cues` 的**上游**——它讲的是对齐候选，那套 cue 可能被采用也可能被回落 ASR 顶掉。实测 `downstream_of(source_cues)` 仍是 30 个 kind、三条 legacy 闭包基线测试全绿，`downstream_of(subtitle_alignment|media_info|word_transcript|input_subtitles|normalized_audio|remote_info|source_video|downloaded_media)` 八个根都覆盖到新 kind；`rebuild-source` 那边是显式集合而非闭包，已同步加入（它本就显式失效 `subtitle_alignment`，留下报告会是讲不清现状的旧证据）。
+
+测试 1032 → 1037（新增 5 条，其中 3 条红先、2 条是反向守卫：对齐成功时行为不变、没跑对齐的 Job 不得凭空多出这份报告），子测试 263 不变，**既有断言零改动、既有测试零变红**，协议快照零 diff。**遗留**：`docs/RECOVERY.md` 里「强制对齐置信度不足的死循环出口」那条的相邻情形——对齐后 QA error 门失败仍归 `retryable` 并推荐必然失败的 `continue`（实测连跑两次 stderr 逐字相同）。**挡住它的前置条件（证据不落盘）现在已经解除**，但改分类是独立一项，本轮刻意没动，RECOVERY 该段已改写成现状。
+
+2026-10-20 **恢复导航收尾三件：polished 原子 Job 的判定顺序缺口已修（同类缺陷第 8 次）；另两条「未验证」条目一条证伪、一条判为过期注释**（分支 `codex/atomic-polished-ordering`，PR #124，已合并）。三件都先实证再动手。
+
+**① 主菜：polished 原子 Job 让「润色候选有效」盖掉在途整轮 Agent 等待 —— 危害确认，已修。** `recovery.py` 原子段里那条 `retryable` 排在既有的原子等待分支之前，根因是 `prepare_agent_translation` 只置 `TRANSLATE=awaiting_input` 而**不失效** `translation_polished_cues`。**清单原文的触发条件和危害形态都要更正**：(a) 它不是跟在 qa_blocked 让路后面——前两条语义等待分支（尤其 `semantic_review_waiting`，只要候选 QA 有 issue 就为真）会先接住术语死锁那类状态，真正的前提是 `semantic_review_target` 为 **None**（语义报告缺失/失效）；(b) 原文说「同样会盖掉刚写入的 manifest」，实测 Agent 模式下 manifest 被**原样重写、fingerprint 不变**，所以不是无条件作废。确认的危害是两层：**零推进死循环**（`_cmd_translate` 在 `mode == "agent"` 时早退，润色与语义腿根本不跑，`status` 分类与推荐逐轮不变，而真正能推进的 `apply-translation` 从头到尾不出现在导航里），以及**用户显式传过 `--batch-size` / `--glossary` 时真的作废**——原子 Job 的策略与 batch size 不回退 Job 快照，推荐命令省掉这些参数，实测 `batch_size` 2 → 25、`fingerprint` `ee66afe6…` → `7a1fddfc…`，准备好的响应被 `apply-translation` 以 `translation response fingerprint does not match the current manifest` 拒收，而那条报错自己又给出同一条命令。**修法**：该分支额外要求 `not workflow.agent_full_translation_waiting(job)`，与原子 `qa_blocked` 让路共用同一份谓词（顺带把那处函数内延迟导入收成一处）。**相邻的已知遗漏（✅ 已由 `fix/full-translation-wait-newest-validity` 修复，见上条）**：原子侧两条语义等待不判「整轮请求是否最新」，端到端侧的 `_full_translation_request_is_newest` + `_SUPERSEDED_BY_FULL_TRANSLATION` 在原子侧没有对应物，于是语义等待态下再开一轮整轮 `translate` 时 `status` 仍指向已被取代的 `apply-semantic-review`（实测）；它不改写在途 manifest、响应事后仍能回填，危害低于本条。
+
+**② 「局部重译回填逐字相同内容造成一次误报等待」—— 证伪，零代码改动。** 残留 manifest 确实仍 checksum 有效，`translated_cues` 的 checksum 也确实**逐字不变**（实测 `3f4a41da…` 前后相同，`cue_retranslation_waiting` 的第三、四条件都仍然成立）——静态推断这一半是对的。但第一条件独自就够：`apply-cue-retranslation` 经 `finalize_translation` 把 `TRANSLATE` 置 `succeeded`，谓词立即判否。普通路径（QA 通过）与术语死锁路径（QA 仍 `failed`）两种都实测过，`status` 分别是 `complete` 与 `manual_fix` + `retranslate-cues`，**都不是等待**，`continue` 正常收敛退出 0。
+
+**③ `workflow.py` 注释里的「`target_language` 为 None 的补翻」路径 —— 不可达，但那是过期注释而不是死码，只改注释。** 分支本体（`waiting_step == "await_cue_retranslation"`）**是活的**：普通带目标语言的 Job 实测会走到它，删掉会让局部重译等待落进下面那条分支、被报成 "translation requires Agent input" 并给出整轮等待的产物清单。不可达的是注释给的**理由**：`run` 一定会落 `config.workflow`，而 `run_translation` / `prepare_agent_translation` 都以 `target language must match the persisted workflow goal` 拒绝（实测退出码 2），所以 `workflow.target_language` 为 null 的 Job 永远拿不到 `translated_cues`，`retranslate-cues` 自己也以 `job has no translated_cues artifact` 退出。`needs_translation` 就是 `bool(config.target_language)`，当前可达的 Job 上两者同真同假。顺带一条考古：阻挡该场景的守卫落在 `d6ee9c7`（2026-07-26），而这条注释写于 `37e476b`（2026-08-29）——**写下时就已经过期**。
+
+测试 1029 → 1032（新增 3 条，其中 2 条红先、1 条是反向守卫；子测试 263 不变），**既有断言零改动、既有测试零变红**，协议快照零 diff。三条新测试全程只用真实 CLI（纯字幕输入 + `--provider agent`，零网络零 API），其中两条把恢复计划吐出来的命令 `shlex.split` 后原样喂回 `main()` 并断言 Job 真的推进。**遗留**：① 里点名的原子侧「整轮请求是否最新」判定缺口未修。
+
+## 2026-10-18
+
+2026-10-18 **P7 禁則処理（kinsoku shori）落地；但 P7 原条目点名的两个例子一个都没修好，且判定不该用启发式去修**（分支 `codex/cjk-line-break-rules`，PR #122，已合并）。**原记录的机制归因与「禁则能挡住 `ど|んなに`」的预期都被实测推翻。**
+
+**① `ん` 不是禁则字符——这是本轮最关键的更正。** `ん`（U+3093）的 Unicode `Line_Break` 是 **ID**（普通表意字符），JIS X 4051 / JLREQ 行頭禁則 cl-02..cl-11 里也没有它（cl-11 只收**小字**假名）。所以「ど|んなに」与「科学|的」**是同一类问题**：都是词法边界，禁则一个都挡不住。原条目（以及任务书里那份字符清单）在这一点上是错的。
+
+**② 机制也要更正两处。** (a)「跨词硬切」不成立：`_partition_words` 只在词边界之间切，没有任何按字符数盲切的地方。真正原因是 **mlx-whisper 对日文逐字出「词」**（515 个词、4 分钟音频），于是词边界恰好就是字边界。(b)「切点落在字符数而非语义边界」效果上对、归因不对：`_break_penalty` 的三组判据在无空格无标点的日文句中全不命中、一律返回 4，罚分退化成常数后唯一的区分项就是宽度均衡。
+
+**③ 这不是 `conservative` 独有的。** 同一份 `words.json` 回放三个预设：`conservative` 51 个边界里 16 个是宽度/时长驱动的硬切、12 个语言学上站不住；`balanced` / `compact` 各 10 个硬切、8 个站不住，而且 `人|の輪`、`でき|る`、`新|しい`、`暮ら|す`、`瞬|間` 这些坏切点**三个预设共有**。`conservative` 只是停顿阈值更长、合并出更多超宽 cue。**属切分算法质量，不是预设参数问题。**
+
+**④ 禁则在这份素材上 0 命中——做它不是为了修 P7。** 上表 12 个坏切点里禁则能挡的是 **0**。实证了六条不依赖分词器的候选规则，覆盖率最高的两条（「行首不留单个格助词」「送り仮名不切」）各 5/12，合起来仍漏 `科学|的`。**挡住那一类离不开词典**，而日文 `fugashi`+`unidic-lite` / `janome`、中文 `jieba` 中日各要一套、没有共用方案，与「本地优先、零 C 扩展叶子」冲突——**建议不引入，等拍板**。
+
+**⑤ 真正做掉的是另一个缺口：`segment.py` 此前压根没有「哪里不许切」的概念。** 行首可以是 `」`、`。`、`、`、`っ`、`ー`、`々`，行尾可以是 `「`。现补 `NO_LINE_START` / `NO_LINE_END` 与唯一谓词 `forbidden_break`，cue 边界的**三个**产出点全部接入（主循环的句末/停顿/超时切、`_soft_cut`、`_partition_words`）——中途发现只改宽度切会留两个洞，`。`+`」` 这个最常见的日文违规恰恰走主循环那条。形态是**罚分不是硬禁**，整行全是禁则字符时仍切得动。**代价如实记账**：shipped 宽度上限（CJK 36）上这份真实素材 0 命中，三个预设回放与已登记 `source-cues.json` **文本与时间轴逐字相同**；违规可达但要更窄的 `max_characters`（实测 16–28），而该字段没有 CLI 出口。所以它是**标准符合性兜底**，不是对 P7 症状的修复；仍然做，是因为它是确定性排版规则、无误伤概念、不需要语料标定（与 P8 的内容启发式不是一回事）。
+
+测试 1016 → 1029（新增 13 条，其中 10 条红先、3 条是反向守卫；子测试 263 不变），**既有断言零改动、既有测试零变红**，协议快照零 diff，翻译与渲染侧零改动。新增真实素材 fixture `tests/fixtures/asr-words-ja-katakana-run.json`（`words.json` sha256 `3021c236…` 的 `[476:495]` 切片，起始时间轴归零）。**遗留**：⑤ 的词法边界那一半（含 P7 点名的两个例子）未做，等拍板；一个未量化的改进方向是把「行首不留格助词」+「送り仮名不切」做成罚分（合计 9/12、零误伤），但那仍是启发式，照 P8 的纪律要先有多语料负样本。
+
+2026-10-18 **两条小修：`xvt resume` 不再抹掉译文腿的 QA 阻断；`resegment` 闸门判定为不该改**（分支 `codex/resume-bookkeeping-and-resegment-gate`，PR #121，已合并）。两条都先实证再动手，**两条既有记录的定性都被实测推翻了一半**。
+
+**① C3 的原定性不成立，但同一处另有一个真缺陷。** 原记录说 `repair_polish_draft` 状态下 `xvt resume` 把 `subtitle_qa` / `render` 推成 `succeeded`、`burn` / `media_qa` 推成 `skipped`「状态行从此说假话」。真实复现后逐个判定，**四个都是真话**：前两个是 `_finish_subtitle_job` 真的重跑了源字幕 QA、真的重渲染了 `source.srt`（stage 名被源腿与译文腿共用，这是 C1 那类歧义）；后两个在纯字幕 Job 上**永远**是真话——`--burn` 被 `WorkflowGoals` 拒、`burn` / `preview` 各有一道 `input_kind == "subtitle"` 拒，全仓唯一写 BURN 非复位值的地方在那道拒绝之后。**因此刻意没给 BURN / MEDIA_QA 补「与 TRANSLATE 同款」的守卫**：在这条路径上不可达，加了是零行为差异的死码。
+
+**但把复现换成「译文腿停在 QA 人工复核」，同一段代码就在说假话了。** `SUBTITLE_QA=awaiting_input` 且 `translated_subtitle_qa` 有效时跑 `resume`：stage 被源腿的通过改写成 `succeeded`，`recovery.subtitle_qa_failure_guidance` 按 stage 状态判「QA 还拦着吗」，于是导航从 `manual_fix` + `continue --acknowledge-subtitle-review`（唯一出口）降级成 `retryable` + 裸 `continue`，而那条 `continue` 实测只会重算译文 QA 再次停在 `awaiting_input`、Job 不前进——「推荐一条无法推进的命令」又一次。**确定性 QA 门没有被绕过**（`continue` 重算后照旧阻断，约束 4 成立），丢的是导航与状态行的真实性。媒体 Job 的 `_finish_resumed_source` 同病，已实测确认并一并修掉（修复前 `subtitle_qa=succeeded` / `retryable`，修复后 `awaiting_input` / `manual_fix`）。
+
+**修法只拦降级，不拦 resume 的本职。** 新增 `transcription._translated_leg_blocks_subtitle_qa`（判据与 `subtitle_qa_failure_guidance` 同口径：stage 停在 FAILED / AWAITING_INPUT 且译文 QA 报告仍 checksum 有效；报告已失效时让路，与 `recovery._translated_qa_needs_rebuild` 一致），成立时源腿照常重算并重新登记 `qa.json`、照常把被删掉的 `source.srt` 补回来，只是经 `complete_qa_stage(..., preserve_blocking_stage=True)` 不改 stage、不发 `subtitle_review_acknowledged`——放行只体现在返回值上。源腿**自己**阻断（未确认的 `needs_review` / `failed`）仍照常记账，那是更靠前的新事实。`RENDER` 刻意不动：`recovery` / `workflow` / `cli` 全仓没有一处读它的状态，`render=succeeded` 对源腿也是真话。
+
+**② `resegment` 的 config-only 闸门：判定为不该改。** 实测两边都跑了：端到端导入 Job 上 `xvt resegment-translation` 退出码 2 拒绝；原子导入 Job（`run --target-language` → `import-translation`）上它**跑完并退出 0**——不是被别的守卫挡住，是真的跑完了。但结果状态**自洽**：6 条 `asr_resegmented` 源 cue 落盘，导入译文连同下游按失效闭包移出登记（7 条 `artifact_invalidated`，文件留在盘上），`status` 回到 `retryable` / `steps: translate`，没有「旧译文被套回新时间轴」这类残留。两道闸门防的不是同一件事：`revision` 防的是用户亲手交的原文↔译文配对被改坏（artifact 在就危险，双源对），`resegment` 防的是持久化目标导致的自动重新导入复发循环（config 在才危险）。**收紧会新增一条没有出口的拒绝**——重分段要靠 `translated_cues` 量超宽，而唯一的放弃出口 `xvt drop-imported-translation` 会连 `translated_cues` 一起失效，实测 drop 之后 `resegment-translation` 立刻以「缺 `translated_cues`」退出码 2 失败，被拒的用户只剩「先整轮重译一遍才被允许重分段」。**零代码改动**，只更正文档：`docs/RECOVERY.md` 与本文件此前都把 `resegment` 的闸门写成「config 或 artifact 双源」，那是错的。
+
+测试 1015 → 1016（新增 1 条红先回归，子测试 263 不变），**既有断言零改动**，协议快照零 diff。**遗留**：`resume` 在译文腿阻断时不再打印 `[进行中] 检查源字幕` / `[完成] 检查源字幕` 两行（那两行来自 stage 事件，而这次恰恰不写 stage）——源侧 QA 仍然跑了、`qa.json` 仍然重写了，只是人读流里看不见；判断为可接受（stage 没变就不该报 stage 变了），如果要让它可见，得给「跑了但不改 stage」另造一类事件，不值得。
+
+2026-10-18 **P4 阶段 3：`xvt drop-imported-translation`——显式放弃导入译文，P4 三阶段至此全部完成**（分支 `codex/drop-imported-translation`，PR #120，已合并）。
+
+**它不是新能力，是把一条既有的隐式旁路诚实化。** 今天「放弃导入译文」唯一的办法是跑原子 `xvt translate`：那条命令不看导入分支、直接改写 `translated_cues`，之后 `_ensure_translation` 在导入分支**之前**就按译文有效满足返回，实测能走到 `completed`。但那只是绕过——错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，**实测再跑一次 `rebuild-source` 原地复发同一个死循环**，而且 Job 的持久化目标仍写着「用导入译文」，解释不了自己的产物从哪来。
+
+**两条纪律，缺一条这个命令就是空话。** ①**双源同时清**：只摘 artifact 登记会被 `_ensure_translation` 的 `retained_translation or config.translation_subtitles` 从持久化目标捡回来；只清 config 则 `plan_advance_steps` 改口说 `translate`（那一步只看 `config.translation_subtitles`）而执行侧仍旧套用 Job 内副本。②**必须带失效闭包**：健康导入 Job 上只摘登记的话 `translated_cues` 仍 checksum 有效，`_ensure_translation` 更早的一道早退直接判满足，产物还是来自被放弃的译文。闭包照 `resegment` 的纪律：`downstream_of(INPUT_TRANSLATION_SUBTITLES)`（实跑 21 个 kind）+ 这条登记自身 + 五个 stage 复位 + `clear_burn_fingerprint`。
+
+**刻意不并入 `translation_candidate_qa` / `translation_review_revision`**（`resegment` 把它们显式并入）：那里的理由是重分段丢弃了 cue id、报告永久作废；这里源 cue 一个字节没动，两者都以内容 checksum 绑定在被放弃的候选上（`candidate_qa_issues` 比 `candidate_cues_checksum`，`human_revision_scope` 先要求 `translation_reviewed_cues` 仍是当前候选），候选失效后自行判否，而读它们的两条恢复分支都在 `await_translation_review` 之内、该等待步骤要求候选有效。
+
+**四个判断题的结论**：①没有导入译文的 Job 上**拒绝**（退出码 2），代价是不幂等、连跑两次第二次失败——但这个命令的全部作用就是移除某样东西，报成功会让用户以为改对了 Job。②`workflow=None` 的原子导入 Job **支持**（那里只有 artifact 一源），drop 之后 `revision.source_review_supported` 的双源闸门从拒绝翻转成放行，这是正确的，语义已由测试钉住。（**2026-10-18 更正**：这句原文把 `resegment` 也算进「双源闸门」，那是错的——它只看 config，原子导入 Job 本来就不被它拦住，详见本文件顶部的 C4。）③输出明说「放弃不等于完成」，收尾复用 `build_recovery_plan` 打印下一步，不在调用点自己拼命令；`--provider auto` 缺 API 配置时随后的 `continue` 停在 Agent 等待。④**进 `alternative_commands` 的第一位**，整轮重译退到第二位：drop 拆掉复发地雷而重译只是绕过，把后者放进导航却不给前者就是把那条「只是绕过」的话说完又不给解法。
+
+**已知代价（如实记）**：清掉 `config.workflow.translation_subtitles` 之后，那份用户原始译文文件退出 `paths.py` 的烧录/预览覆盖保护集，Job 内副本也因不再登记而退出 artifact 保护。这是正确的（Job 确实不再把它们当输入），但此后 `burn` / `preview` 的 `--output` 指向那两个路径不会被拦住；`job.input` 与 `config["subtitles"]` 的保护不受影响。
+
+测试 1006 → 1015（新增 9 条，全部在新文件 `tests/test_drop_imported_translation.py`；子测试 263 不变），**既有断言零改动**，协议快照零 diff。其中三条是本阶段的硬要求：①**端到端自证**（真实 CLI 造 P4 状态 → drop → 断言两处来源都清了、下游都失效了 → 打桩 provider 后 `continue` 走到 `completed`、`verify` 全 PASS）；②**「drop 不是空话」守卫**（健康导入 Job 上 drop 之后 `translated_cues` 必须失效、`continue` 不得直接判满足完成，而是落到 Agent 等待）；③**与旁路的对照**（同一套真实 CLI 跑两遍：原子 `translate` 绕过后再 `rebuild-source` 一次回到 `manual_fix`，drop 之后同样的第二遍是可推进的 `retryable`——这条把「只是绕过 vs 真的拆掉」钉成了可执行断言，也是文档里那句「实测复发」的出处）。
+
+**遗留**：无阻塞项。新命令未进 `xvt apply` 的路由表（它不收响应文件，与 `import-translation` 同理不纳入统一回填路由）。
+
+2026-10-18 **P4 阶段 2：`status` 正在推荐一条必然失败的命令——已修**（分支 `codex/import-translation-recovery-exit`，PR #119，已合并）。真实复现：媒体 Job 导入译文 → `rebuild-source --strategy asr` 之后，`status --json` 给 `category=retryable` / `advance_steps=["import_translation"]` / `primary_command=xvt continue …` / `alternative_commands=[]`，而那条 `continue` 逐字输出「任务失败：translated cue 1 has insufficient source timeline overlap」，紧跟着的恢复建议又是同一条 `continue`，退出码 2；连跑两次 stderr 逐字相同，`diff -r` 整个 Job 目录只有 `.xvt.lock` 的 PID 变了。**导航零变化，用户没有出口**——本仓库第 7 次同类缺陷。
+
+**只改 `continue` 的错误处理无效**：`recovery` 严格只读、从 artifact + config 纯推导，不感知运行期异常；而这条失败发生在 `set_stage(RUNNING)` **之前**，Job 一个字节都不改，下次 `status` 照旧给同样的结论。判定因此进了 `build_recovery_plan`，范式照搬 [强制对齐置信度不足的死循环出口](RECOVERY.md#强制对齐置信度不足的死循环出口)。
+
+**一份纯谓词，三处消费。** `pipeline.common.pending_translation_import_blocker(job, config)`：只读纯谓词，不写盘、不登记 artifact、不改 stage，重叠度量**复用阶段 1 的** `map_subtitle_translations`（连同 `require_timeline_overlap` 语义与 `_timeline_overlap_ratio`），不就地重造。放在 `pipeline/common.py` 是因为它是包内叶子（已 import `xvt.translate`），三个消费点 `recovery` / `workflow` / `cli` 都够得着，`transcription` 这类子模块将来要用也不必新增依赖边——放 `pipeline/translation.py` 会逼出 `transcription → translation` 这条白名单外的新边。三处消费：① `recovery._recovery_for_workflow` 的 `translate` / `import_translation` 分支归 **`manual_fix`** 并给出口（本阶段核心）；② `workflow._ensure_translation` 回填前的闸门，带**同一句诊断**失败（异常类型刻意仍是 `ValueError`、退出码仍是 2，不顺手改调用方看得见的契约）；③ `cli._cmd_rebuild_source` 收尾改打恢复计划的 reason + 导航行，不再无条件打「继续任务: xvt continue」。
+
+**出口按实测定，不自己发明。** 首选 `xvt import-translation JOB TRANSLATED_SUBTITLE --target-language LANG`（实测走到 `completed`、`verify` 全 PASS，且 `add_artifact` 按 kind 去重会**顶掉**错位登记、把复发地雷一起拆掉）；备选 `xvt translate JOB --target-language LANG --provider <持久化 provider>`，reason 里讲明它**只是绕过**（错位的 `input_translation_subtitles` 与 `config.workflow.translation_subtitles` 原样留着，再跑一次 `rebuild-source` 原地复发）。`continue` 不进任何推荐位；`resegment-translation` 不是出口（配置级闸门，对这类 Job 恒退出码 2）。分类选 `manual_fix` 而非 `awaiting_input` 同时修好批处理：`batch.py` 把 `manual_fix` 归入「绝不自动推进」并记 `failed`，`batch-continue` 不再每轮重撞同一个失败。文案按成因分两种（那份字幕**读不出来**／**时间轴对不上**）。
+
+**谓词刻意在 `polished` 档沉默**：那条腿的 `_ensure_translation` 永远在自己的块里返回、draft 失效时直接 `run_translation`，从不重新套用已存译文；对它出声会把一次真能推进的 `continue` 判死，并连带让 `batch-continue` 把条目记成 failed。已用「摘掉这道守卫」实测过该反证测试会变红。
+
+测试 999 → 1006（新增 7 条，子测试 263 不变），**既有断言零改动**，协议快照零 diff。其中一条是**自证推荐命令真能推进**的全链路测试：真实 CLI 造状态（`run --subtitles --translation-subtitles` → `rebuild-source --strategy asr`，只打桩 ffprobe / ffmpeg 抽音 / ASR 模型三处），把恢复计划吐出来的 `primary_command` 用 `shlex.split` 拆开、只把占位符换成真实字幕路径，**原样喂给 `main(argv[1:])`**，断言退出码 0、Job 回到 `complete`、`verify` 全 PASS；另一条是反证（映射得上的已存译文不得被归 `manual_fix`，且 `continue` 真能把它推到 `complete`）。
+
+**中途打红 9 条既有测试，全部回退了自己的改动而不是改断言**：8 条是我在 `cli.py` 里新加的 helper 与既有 `_print_recovery_navigation` **同名**（后定义的覆盖前者），改为给既有那份加两个带默认值的方言参数；1 条是 `tests/test_rebuild_source.py::test_continue_refuses_retained_translation_that_misses_the_rebuilt_timeline` 断言 `ValueError`，我原本抛了 `UserInputError`——改回 `ValueError`（那本来就是这条路径今天的异常契约，退出码不变）。
+
+~~**遗留（阶段 3，未做）**：`xvt drop-imported-translation`……~~ 已由下面最上方的阶段 3 做掉。
+
+2026-10-18 **P4 阶段 1：等长盲映射会把错位译文静默烧进成品——已修**（分支 `codex/strict-order-overlap-guard`，PR #118，已合并）。`translate.map_subtitle_translations` 在「源 cue 数 == 译文 cue 数」时按顺序硬配、一次重叠都不量，还把 `confidence` 写死 `1.0`。这不只是预检函数：`pipeline/translation.apply_subtitle_translation` 用的就是它，映射结果直接落盘成译文；而译文**文本**错位不触碰时间轴、文本完整性、显示宽度任何一项确定性 QA，一路进 `bilingual.srt` 并烧进成品。**P4 的不等长路径是吵闹的失败，等长路径是安静的错误**，后者危险得多。
+
+**闸门按语义分，不按 Job 状态分**：判据是**有没有人为当前这套源 cue 主张过「这份译文属于它」**。用户此刻显式交出一份字幕（`xvt import-translation`、`run --translation-subtitles`）就是在做那个主张，等长即按序接受是在兑现它——该路径行为、契约（README:857 / `skills/video-translate/SKILL.md:96`）与文案**一字未改**，它同时就是逃生舱：被挡住的用户再 `import-translation` 一次即可，而他们本来就该这么做。只有 `continue` 拿 Job 内早先存下的 `input_translation_subtitles` 去套一套**可能已经变过**的源 cue 时（`rebuild-source --strategy asr` 之后），才传 `require_timeline_overlap=True`，等长视为巧合、必须由逐对重叠证实。实现上只有三处：纯函数加一个默认 `False` 的参数、`apply_subtitle_translation` 原样透传、`workflow._ensure_translation` 那**一个**调用点把 `or` 拆成具名变量后传 `retained_translation is not None`（选择逻辑一字未改，该分支的归类/出口/错误处理全未触碰，那是阶段 2）。另外抽出 `_timeline_overlap_ratio` 作为两条分支共用的唯一度量，`confidence` 改为实测（对齐 1.0 / 时移 300ms 得 0.7 / 完全错位 0.0），顺带堵掉不等长分支上零时长 cue 的 `ZeroDivisionError`。
+
+**没有采用方案 A（无条件收紧）或方案 B（按 `source_rebuild_requested` 收紧）。** A 会改掉书面契约、在不加旗标时把「等长且整体时移超过半个 cue」的合法导入彻底堵死，且**必然**打红两条既有测试——`tests/test_translate.py::TranslateTest::test_maps_equal_cue_counts_by_order`（源 0–3000ms vs 译文 9000–12000ms）与 `tests/test_pipeline_translation.py::TranslationPipelineTest::test_existing_translation_uses_source_timeline`（源 1000–2000ms vs 译文 0–500ms），两例时间轴与源 cue **完全不相交**，重叠是 0 而不是「低于 0.5」，任何基于重叠的闸门都够不着，没有调参空间。B 则要把一条正确性闸门挂在 `docs/ARCH_IMPROVEMENT_PLAN.md:154` 已点名为技术债的顶层裸键 `source_rebuild_requested` 上，并把 `import-translation` 以外同类路径的洞留着。落地的这版两条既有测试都走显式路径，**零变红**。测试 992 → 999（新增 7 条），既有断言零改动，协议快照零 diff。
+
+~~**遗留（阶段 2）**：这条失败目前**没有自动出口**……~~ 已由下面的阶段 2 做掉。另：`docs/ARCHITECTURE.md:133` 原先说 `rebuild-source` 保留导入译文以便 `continue`「在新 cue 上重新验证映射」，该句此前是假的，闸门落地后已改成如实描述。
+
+2026-10-18 **P8（Whisper 尾部幻觉）收尾：结论固化 + 做掉一个前置条件，刻意不实现启发式**（分支 `codex/tail-word-evidence`，PR #117，已合并）。上一轮用真实素材把 P8 查清了，结论是**现在不该做**，本轮只把结论写进 `docs/REVIEW_FINDINGS_2026_10_17.md`，并做掉调查点出的那个前置条件。**① 原条目的归因改正了。** `_trim_trailing_hallucination` 是**纯重复检测器**，在 `segment.py:182-183` 的 `repeat_count < 3` 就早退（末词 `ありがとうございました` 的游程长度是 1），`:186-191` 的置信度闸门与 `:192-196` 的 `pathological_timestamps` **从未被执行到**——原条目说「置信度太高够不着」，方向对、归因错。原条目那句「此处是读代码的推断」也已作废并换成实测结果。**② 写明 n=1 / 0 负样本这个硬约束**：`asr/` 下 10 个 Job 的 `words.json` sha256 全同，有效样本只有一支视频，语料里没有任何一支真的以口头致谢收尾的视频，误伤率在数学上无法估计。三个原候选信号逐条量下来都不成立（「贴媒体末尾」是 `_normalize_boundaries` 钳出来的循环论证且近乎全判阳性；「与正文无词级重叠」的强度来自日文逐字分词，英文整词下 "Thanks **for** watching" 必然漏报；「套话词表」要匹配的文本已被截断成「ご視聴」，且按构造无法区分幻觉与讲者真说的致谢）。**③ 唯一干净的信号是零时长尾 token**（`ありがとうございました` @245140–245140，p=0.999；515 词里恰好 1 个，零误报），它量的是解码器产物而非内容，所以原理上不会误伤合法结尾——但 `pathological_timestamps` 把它和 `repeat_count >= 8` 捆死了，且回溯循环会在 `聴` 处 break。**④ 写明三条开工前置条件**（10–15 份覆盖 ja/zh/en 的真实转写含 3–5 份负样本；先拍板「cue 能不能被删、经由哪条命令」，不定就只能是 advisory、`error` 形态不在选项里；确认该签名在 faster-whisper 上也复现，目前一份样本都没有）**与形态建议**（`review` 级 + provenance 闸门，先例是 `qa.py:291-302` 的 `low_timing_confidence`；闸门不可省，`check_subtitles` 是**全仓 8 个调用点**共用的，含用户导入字幕的候选 QA `source_selection.py:104`，而用户字幕上一句「ご視聴ありがとうございました」完全合法）。
+
+**同一分支的唯一代码改动：让被丢弃的零时长尾词留痕**（前置条件 1 的前提——那条信号此前事后无法观测，不留痕就无从采样）。`segment.py:296` 的零时长过滤此前**静默丢弃**，现在丢弃**尾部**零时长词时往末条 cue 的 `warnings` 追加一条以 `TRAILING_ZERO_DURATION_WARNING_PREFIX` 开头的记录（词数、首尾毫秒、最大 probability、被丢弃的文本）。**形态选的是 cue warning，不是新事件、也不接 `qa.py`**：接 `qa.py` 会把报告 `status` 从 `pass` 翻成 `warning`，那是**改了 QA 结论**（`recovery.py:141` 对 QA 产物就按 `status == "pass"` 分支），本轮明确不允许；新事件则要把事件汇给进 `segment.py` 这个纯叶子函数，还要动 `EventType` / `docs/EVENTS.md` / `tests/test_events.py` 的字段表，收益不抵成本，而 `cue.warnings` 本来就是分段期决策的留痕通道（`OVERLAP_SHIFT_WARNING` / `MINIMUM_DURATION_WARNING` 同样零读者）。**约束核对**：QA 结论零变化（真实素材回放：52 条 cue 除这条 warning 外与已登记的 `source-cues.json` 逐字相同，QA 仍 `pass` / 零 issue）；cue 数量、ID、时间轴、文本零变化（测试里与「没有那个尾词」的对照组逐项比对）；只覆盖尾部，中段零时长词不留痕；用户导入字幕不经 `segment_transcript`，够不着。**协议快照零 diff**（快照场景全是纯字幕 Job，不转写、不分段；已单独跑过确认 golden 未动）。测试 988 → 992（+4，含「中段不留痕」「留痕不改 QA 结论」「用户导入字幕不受影响」三条反向守卫），263 subtests 不变，ruff check / format 全绿，既有断言零改动。
+
+2026-10-18 **一批低风险收口：两条「观察」先实证再决定，一条纯改名，一条文档口径**（分支 `codex/display-and-naming-cleanup`，PR #116，已合并）。**① P5「同一阶段先打 `[完成]` 再打 `[失败]`」——实证后确认是显示问题，但原条目对机制的描述是错的。** 用真实命令复现（两个 `.srt`，第二个带 `overlap`，跑 `xvt batch`）：人读输出确实先后出现 `[完成] 检查字幕` 与 `[失败] 检查字幕`，而同一时刻两个 `job.json` 的记账**都对**（一个 `subtitle_qa=succeeded`，另一个 `subtitle_qa=failed`），失败没有被挂到不该失败的 stage 上——**不是 P1 / `_finish_resumed_source` 那类归属错位**。但 `_last_failed_stage` 的相邻去重根本没参与：真正的原因是 ① `detail` / `phase` 只挂在 RUNNING 事件上，收尾事件不带，于是 `[进行中] 检查源字幕` 的收尾行退化成泛称 `[完成] 检查字幕`（`生成源字幕文件` → `生成字幕文件` 同病，**这是每次运行都看得见的另一处缺陷，原条目没发现**），② `xvt batch` 一个 sink 跨多个 Job 复用，泛称标签于是能在一次运行里先完成后失败。**单 Job 内反而造不出同名标签的那一对**（源文/译文两侧本该读成不同的标签，是 ① 把区分抹掉了），所以「给第二行标重新进入」这个修法单独用是不够的，必须先把限定词补回来。修法全在渲染层：`_HumanEventSink` 按 `(job_id, stage)` 记住 `[进行中]` 行的限定词、收尾行自己不带时复用；另按 `(job_id, 标签)` 记住本次已打过的 `[完成]`，同一 Job 同一标签再 `[失败]` 时**两行都保留**（压掉一行是隐瞒信息），只给失败行加「重新进入后失败，前面那行 [完成] 仍然成立」——键带 `job_id`，批处理跨 Job 的同名标签不会被误标。**事件载荷、`job.json`、JSONL 一字未改**，协议快照零 diff。**② yt-dlp 的 `-o` 不转义 output root 里的 `%` ——实测证实，已修。** 原条目写的是「可能」；这次离线取证（本机 yt-dlp 2026.08.19，`--load-info-json <伪造 info> --skip-download --print filename`）：`-o '/Users/x/My %(title)s videos/source.%(ext)s'` → `/Users/x/My PWNED TITLE videos/source.mp4`，`'/Users/x/%(id)s/source.%(ext)s'` → `/Users/x/abc123/source.mp4`，**目录部分照样被当模板展开**；`'/Users/x/100%% done/…'` → `/Users/x/100% done/…` 证实了转义约定，`'/Users/x/50% off/…'` 这类不构成字段的 `%` 本就原样通过、转义后结果不变，所以对 root 全量转义是安全的。新增 `download.py:_source_output_template(root)` （只转义 root，`source.%(ext)s` 保持真模板），两处 `-o` 共用；修完又用真实 yt-dlp 回验了一次生成的模板。**③ `agent_translation_polish_*` 改名 `agent_translate_and_polish_*`**（只动 `translation.py` 那组四个谓词，它们判定的是 `task=translate_and_polish` 一次成型；`polish.py` 的 `agent_translation_polish_manifest_valid` 与 `apply_agent_translation_polish` 刻意不动）。零行为变化是机械核验的：把新名字逐字换回旧名字后与改名前逐字相同，只剩 `workflow.py` 的一处 import 与 `pipeline/__init__.py` 的一处 `__all__` 因字母序换位。**④ README 的 `--fail-on-waiting` 口径**：按 parser 内省，支持它的是 `run` / `continue` / `apply` / `batch` / `batch-continue` 五条；现在五条的签名块都列出该旗标，参数条目统一以「退出码：`--fail-on-waiting`。」开头，`tests/test_readme_cli_reference.py` 仍绿。**红先**：C1 三条测试红在 `'[完成] 检查源字幕' not found in '[进行中] 检查源字幕\n[完成] 检查字幕\n…'`，C4 一条（两个 subTest）红在 `'…/My %(title)s videos/source.%(ext)s' != '…/My %%(title)s videos/source.%(ext)s'`；C2 / C3 无行为变化不红先。**既有断言零改动、既有测试零变红**，984 → 988，子测试 261 → 263（C4 的两个 subTest）。**遗留**：没有给「签名块必须列出 parser 真正支持的旗标」补守卫测试（现有 `test_readme_cli_reference.py` 只校验文末 cli-reference 段，日常命令的签名块仍靠人看），下次漂移抓不到；单 Job 内「同一标签先完成后失败」目前只有合成事件的测试钉住，没有真实命令的复现路径（polish → 语义校对那条重入链上，候选 QA 会把问题拦成 `awaiting_input` 而不是 `failed`），这条标注属防御性。
+
+2026-10-18 **把 `relink-source-media` 接进恢复导航，并修准源媒体缺失时的两段文案**（补上一批自己点名的三处「已知缺口」：`recovery.py` 的注释、`docs/RECOVERY.md` 与 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 B2 条目）。源媒体不在登记路径的 `manual_fix` 此前一律 `primary_command=None`，用户得自己从文档里找到那条命令。现在 Job 具备 checksum 有效的 v2 proof 时首选命令就是 `xvt relink-source-media JOB NEW_MEDIA_PATH`（新路径位置是**占位符**——媒体搬到哪里只有用户知道，导航不猜，与 `relink-burned-output` 的 `EXISTING_VIDEO` 同款）。**最关键的约束是「只在它真的会成功时才推荐」**：那条命令没有 v2 proof 就以退出码 2 失败，无条件推荐等于把「推荐一条在该状态下必然失败的命令」这类缺陷（本仓库已发生六次，最近一次正是上一批修的 B2 本身）换个命令再犯一次第 7 回；legacy fingerprint 的旧 Job 因此维持 `primary_command=None`。**资格判定的落点是本批唯一的设计抉择**：没有把 `workflow._burn_proof` 公有化，而是新增 `source_media_relink_blocker`（返回 `"goal"` / `"remote"` / `"proof"` 标签）+ `source_media_relink_available`（布尔包装），形态照既有的 `media_qa_failure` / `media_qa_passed`；`relink_source_media` 本体改为消费同一个 blocker 取报错文案（三条文案逐字不变）。理由：recovery 真正要问的是「这条命令在这个 Job 上会不会成功」而不是「有没有 proof」，只暴露 `_burn_proof` 会逼 recovery 把「有没有烧录目标」「是不是远程 Job」两条前置条件在调用点再写一遍，命令日后收紧时导航不跟着动。**分类刻意不动**：仍是 `manual_fix`（这个状态确实需要人工给出新路径，而 `batch.py` 把 `manual_fix` 归入「绝不自动推进」，改成 `awaiting_input` 会改变批处理语义），`alternative_commands` 两支都保持为空（`continue` 在这个状态必然失败）。**两段 reason 一并改准**：统一说「把该文件**原样**放回该路径…之后重新运行 `xvt status` 查看下一步」，不再说「放回原路径后再运行 continue」——后者在任何分支上都不是无条件真命题（指纹快路径要 `{path, size, mtime_ns}` 全等；mtime 变了要走内容 checksum 回退，而存量 proof 缺 `source_media_identity` 时回退拿不到授权、Job 仍落到 `burn`），而指向 `xvt status` 在所有情形下都成立，也与既有的 `hint: re-check with xvt status ... after repairs` 同口径。新增 2 条测试（982 → 984，子测试 261 不变）：一条**不打桩的端到端**自证推荐的命令真能推进（真实 `run --burn` 烧录 → `rename` 源媒体 → `build_recovery_plan` → `shlex.split` 取出 `primary_command`、断言前三段与占位符、只把占位符换成真实新路径 → **原样喂给 CLI `main(argv[1:])`** 断言退出码 0 → Job 回到 `complete` 且成品 checksum 与 mtime 都未变证明零重烧；只比字符串不算数），一条反证（删掉 `burn_fingerprint` artifact、塞回 legacy `config.workflow.burn_fingerprint` 的 Job 在同样状态下**不得**推荐这条命令，并已用「把资格判定短路成恒真」实测过它确实会变红）。**既有断言改了一处，已获批准**：`tests/test_workflow.py::test_recovery_needs_manual_fix_when_source_media_is_missing` 用的 `_relinkable_job` 末尾就是 `_record_burn_fingerprint`，签的正是 v2 proof，所以那个 Job 必然落在「推荐 relink」那一支，`assertIsNone(plan.primary_command)` 无解地变红——它把该测试 docstring 写的「不得再推荐 continue」过度收紧成了「一条命令都不给」。改法是断言具体命令串 + 新增 `assertNotIn("xvt continue", ...)` 把原意显式写出来，并把 `assertIsNone` 搬到上面那条无 v2 proof 的反证测试上（它在那里才真正成立）。协议快照零 diff，其余既有测试零变红。
+
+2026-10-18 **新增 `xvt relink-source-media JOB NEW_MEDIA_PATH`（advanced）：源媒体永久搬家后重指持久化路径**。不是新的状态机行为——上一批（#112）的「指纹不匹配时的源媒体内容 checksum 回退」本来就处理得了「路径变了、内容没变」，真实 Job 上实测过：媒体搬走后 `status` 报 `manual_fix`，手改 `job.json` 把 `config.workflow.burn_media` 指到新位置，Job 立刻回到 `complete`，零重烧（两条反证也成立：新路径上内容被改、或改 `target_font` 后都照旧判失效重烧）。缺的只是一个受支持的方式去改那个路径，本批就是给这个已经正确的行为配一个入口。**契约**：fail closed，只认内容 checksum——新文件 SHA-256 必须等于 checksum 有效的 v2 proof 登记的 `source_media_checksum`，没有 v2 proof 一律拒绝（legacy fingerprint 不给出口，与 `relink-burned-output` 同口径）；成功只写 `config.workflow.burn_media` 一个字段，不重烧、不碰 artifact 登记、不改 stage，因此**不发 artifact 事件**（`--events-jsonl` 只有 `cli_completed`，新路径在 `media` 字段），失败时 Job 一个字节都不改。**三个判断及依据**：(1) 远程 Job 拒绝——媒体是 Job 内登记的下载产物，「搬家」不适用，且把 `burn_media` 指到本地路径会把媒体身份从内容 checksum 口径换成 `{path,size,mtime_ns}` 口径、指纹必然漂移反而逼出重烧；(2) `burn_media` 原为 None 时照写，代价已核实并写进 RECOVERY：`_burn_media_value` 是 `config.burn_media or job.input`，写入后 `translation_qa_context` 改走 `probe_media(burn_media)`（多一次 ffprobe，媒体再次移走会探测失败而不是回落 `media_info`），`paths.py` 的覆盖保护里新路径只在它是本次烧录实际媒体时经 `media_path` 受保护（与 `run --burn-media` 的既有行为一致，不是本命令引入的）；(3) 因此**没有动 `paths.py`**——把 `burn_media` 加进 `_user_input_paths` 会一并改变 `run --burn-media` 的既有行为，属独立改动。存量 v2 proof（缺可选字段 `source_media_identity`）仍放行并写入新路径，但回退拿不到授权、Job 落到 `burn` 重烧一次（新 proof 即补上该字段）——零重烧是回退判定的性质，不是本命令的承诺；拒绝它才是把用户推回手改 `job.json`。新增 8 条测试（974 → 982，子测试 256 → 261），含一条不打桩的端到端（真实 `run` 烧录 → 移走媒体 → `status` 为 `manual_fix` → 执行命令 → 回到 `complete`，并以 `burned_video` 的 checksum 与 **mtime** 都未变、proof 文件未被重新签发证明没有重烧）。既有断言零改动，协议快照零 diff。**恢复导航的接入由同日的下一批完成，见本文件顶部条目。**
+
+2026-10-18 **给 `repair_polish_draft` 的 `manual_fix` 接上真实出口，并清掉一次成型路径留下的死 artifact 记录**（两条都来自同一次真实 `xvt` 实测：纯字幕输入 + `--provider agent`，零网络零 API）。**缺陷 1**：polished Job 的译文草稿失效且 `translation_progress` 不可零成本重建时，恢复计划是 `manual_fix` + `primary_command=null` + `alternative_commands=[]`，人类可读输出只剩一句 `hint: re-check with xvt status ... after repairs`——而诊断文案自己说的「请重新导入原始译文草稿」正是 `import-translation`：polished Job 上它经 `finalize_translation` 的 draft 分支重新写出并登记 `translation-draft-cues.json`，计划随即回到 `polish`。出口一直存在，只是恢复计划没接上。**落点刻意卡死在 checksum 上**：只有 Job 里存在 checksum 有效的 `translated_srt` 时才推荐它，并把那条确切路径（`shlex.quote`）拼进命令；`_reset_for_polish` 只是把下游产物移出登记、物理文件常常还在原地，照「通常还在」推荐就是第 7 次「推荐一条可能指向不存在文件的命令」。没有有效字幕时保持 `primary_command=None`，但 reason 点名那个缺失/已变化草稿的绝对路径。两种情形都给 `xvt translate JOB --target-language LANG --provider <持久化 provider>` 作 alternative，并写明它是整轮重译 + 重润色（openai-compatible 下是真实 API 成本）；`continue`（退出码 4）与 `polish-translation`（退出码 2）不进任何推荐位。kind 选 `translated_srt` 而不是 `bilingual_srt`：前者是纯译文、ID 与时间轴和 `source_cues` 一一对应，后者掺原文会污染译文。**缺陷 2**：走另一条出口（整轮重译→一次成型 `translate_and_polish`）把 Job 推到 `completed` 后，`status` 报 `complete` 并推荐 `xvt verify`，而 `verify` 必然以 `translation_draft_cues: artifact file is missing` 失败——一次成型路径从不写 `translation-draft-cues.json`，却没把那条已失效的登记摘掉。修在 `complete_agent_polished_outputs`，沿用既有的「按 kind 过滤 `job.artifacts`」失效机制只摘这一条（**不**用 `downstream_of(TRANSLATION_DRAFT_CUES)`，那个闭包含刚产出的 `translation_polished_cues`）；恢复依据不受影响，planner 的一次成型腿只看 manifest 与响应，`polish-translation` 本来就拒绝这类 Job。两条各一条端到端测试：缺陷 1 的那条**照恢复计划推荐的命令原样执行**（`shlex.split(primary)[1:]` 喂给 `main`）再驱动回 `completed`，缺陷 2 的那条断言 `verify` 在 `completed` 的 Job 上 overall pass。新增 4 条测试（970 → 974，子测试 256 不变），既有断言零改动，协议快照零 diff。**顺带实测、本轮刻意未修**：`xvt resume` 在 `repair_polish_draft` 状态下退出码 0 但不推进，还把 `subtitle_qa` / `render` 推成 `succeeded`、`burn` / `media_qa` 推成 `skipped`，而该 Job 既没有译文 cue 也没有译文渲染产物——状态行从此说假话。恢复分类没被带偏，危害有限，已登记进 review 清单。
+
+2026-10-18 **修掉非 http scheme 的 userinfo 脱敏漏半截密码（安全，约束 5）**。复现逐字：`redact_text("socks5://user:p@ss@proxy.example.com:1080 failed")` → `"socks5://<redacted>@ss@proxy.example.com:1080 failed"`，`"socks5h://user:a@b@c@proxy:1080"` → `"socks5h://<redacted>@b@c@proxy:1080"`；同形 `http://` 则正确。**两条分支的差异在实现路径而不是参数**：http/https 先被 `_URL_PATTERN`（`https?://[^\s"']+`）捞走，进 `redact_url` 用 `urlsplit` + `netloc.rsplit("@", 1)[1]`——`rsplit` 取**最后**一个 `@`，密码里的 `@` 自然被吃掉；非 http scheme 根本不进 `redact_url`（`parsed.scheme not in {"http","https"}` 直接原样返回），只能落到 `_redact_free_text` 的 `_USERINFO_PATTERN = r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+@"`，字符类**排除 `@`**，所以匹配停在**第一个** `@`。用户 `--proxy socks5://user:pass@host:1080` 时 yt-dlp 的 ProxyError 带着这条 URL，经 `create_event` 与 `pipeline.common.set_stage` 落进 `events.jsonl` 与 `job.json`。**修法是一个字符类**：`[^\s/@]+` → `[^\s/?#]+`，允许 `@` 进入匹配，贪婪 + 回溯自然停在 authority 里的最后一个 `@`，与 http 分支同口径。**它对任意 scheme 成立的理由是判定依据换了**——不是「哪些 scheme 要处理」的白名单（下一个 scheme 又会漏，这正是要避免的），而是 RFC 3986 的 authority 语法：authority 止于首个 `/`、`?`、`#`，字符类排除这三者（外加空白），`@` 必须落在 authority 内才算 userinfo。**误伤面同时变小而不是变大**：旧字符类只排除 `/`，`socks5://host:1080?next=foo@bar.com` 会被整段吞成 `socks5://<redacted>@bar.com`（实测，已作为红先样本钉住）；新规则在 `?` 处停住。没有 `scheme://` 前缀的 `@`（邮箱、`git@github.com:org/repo.git`、`scp user@host:/tmp`、`@dataclass`、`registry/img@sha256:…`、`s3://bucket/key@v2`）一律不触碰，11 个样本做 `assertEqual(原文, redact_text(原文))`。**`process.py` 的核实结果：那份命令参数脱敏确实没有自己的非 http userinfo 处理，但不是第二个洞。** `_redact_command` 的兜底是 `redact_url(argument)`（http/https only），可它的产物只有一个去处——`run_command` 里的 `create_event(COMMAND_STARTED/FAILED/COMMAND_COMPLETED, command=event_command)`，事件边界的 `redact_text` 会再过一遍。所以本轮**没有**在 `process.py` 里补脱敏（那正是约束 5 反对的「在调用点逐处补」），改为补两条守卫测试钉住边界兜底：非 `_SENSITIVE_OPTIONS` 位置的 socks5 URL 参数、以及命令失败时 stderr 里回显的那条 URL，都必须在事件里脱敏干净；外加一条回归守卫钉住 `--proxy` 的取值整体替换与 scheme 无关。**相邻猜测已实测证实、刻意未修**：不带 scheme 的 `/videoplayback?sig=...` 脱敏确实不命中（`_URL_PATTERN` 要 `https?://`、`_USERINFO_PATTERN` 要 `scheme://`，两条都够不着，与 O3 同类）。要兜住它得对「不含 scheme 的 `路径?query`」整体脱敏，而 `?k=v` 在 ffmpeg 滤镜串与普通散文里太常见，误伤面远大于 userinfo 那条（userinfo 有 `scheme://` 这个强锚点），已在 `docs/REVIEW_FINDINGS_2026_10_17.md` 从「未验证」移到实测条目并写明不修的理由。**幂等性**：`<redacted>` 不含 `/?#` 与空白，替换后 authority 内只剩一个 `@`，第二遍必然原地不动；9 个 case 每条都断言 `redact_text(redact_text(s)) == redact_text(s)`（既有的 `test_redact_text_is_idempotent` 零改动）。**红先证据**（备份 `src/xvt/events.py` 到 scratchpad → 还原 → 跑新测试 → 恢复）：`'socks5://<redacted>@proxy.example.com:1080 failed' != 'socks5://<redacted>@ss@proxy.example.com:1080 failed'`、`'socks5h://<redacted>@proxy:1080' != 'socks5h://<redacted>@b@c@proxy:1080'`、`'ftp://<redacted>@files.example.com/x' != 'ftp://<redacted>@cret@files.example.com/x'`、`'socks5://proxy.example.com:1080?next=foo@bar.com' != 'socks5://<redacted>@bar.com'`，以及 `AssertionError: 'ss@proxy' unexpectedly found in '{"type":"command_started",…,"socks5://<redacted>@ss@proxy.example.com:1080"]}'`（共 10 failed / 3 passed，`http_keeps_working` 与 `https_keeps_working` 两个 subtest 修前就绿，正是「只有非 http 分支坏」的反证）。**既有测试零变红、既有断言零改动**，协议快照零 diff。新增 4 条测试，966 → 970，子测试 235 → 256。**遗留（如实记录）**：(a) 非 http scheme 的 **query** 仍完全不脱敏（`socks5://host/p?token=abc` 原样），因为 `_URL_PATTERN` 只捞 http/https；把它放宽到任意 scheme 会让 `redact_url` 的 `urlunsplit` 规范化去改写 socks/ftp/rtmp 文本，改动面与风险都超出本轮，未动——**(a) 与 (b) 已于 2026-10-20 一并修掉（见本文件顶部条目）**，修法不是放宽 `_URL_PATTERN`，而是在 `_redact_free_text` 末尾加一条「键名命中 `_is_sensitive_query_key` 才脱敏其值」的规则，与 scheme 无关；(b) 上面那条不带 scheme 的签名路径；(c) `job.input` 作为恢复依据仍按原样落盘（上一轮已登记，未变）。
+
+2026-10-18 **修掉烧录派生指纹的「mtime 假失效」，并给源媒体缺失补上正确的归因与导航（B1/B2/B3）**。三条出自同一个真实烧录 Job 上的实测，根因同一个：源媒体身份的口径。**① B3（最严重）：只 `touch` 一次源媒体就要求整段重编码。** `_burn_fingerprint` 的本地分支把媒体身份取成 `{path, size, mtime_ns}`，内容 checksum / size / 路径全不变、只有 `mtime_ns` 变了的情况下，`status` 从 `complete` 翻成 `retryable - 烧录派生指纹已失效` + `steps: burn`；不带 `-p` 的 `cp`、不带 `-a` 的 `rsync`、备份还原同样触发。这不是 RECOVERY.md 原先记的那条「已知例外」（那条是反方向：同 size+mtime 的**不同**文件被错误地**证实**为有效），约束 9 的「元数据只能证伪」在这里证伪了一个内容上有效的完成态。**指纹算法与载荷格式一字未改**（改了会让全部存量 v2 proof 一次性失效），加的是快路径之后的第二道判定 `_burn_fingerprint_satisfied`：快路径仍是元数据指纹（零额外 IO，`status` 的成本边界不变），只在本来就要报失效的分支上多哈希一次源媒体。回退要求三条全部成立——checksum 有效的 v2 proof、**proof 里登记的烧录时媒体身份重算出的指纹仍等于已登记指纹**、源媒体当前内容 checksum 等于 proof 登记那份。中间那条是本轮关键抉择：只比对 `source_media_checksum`（最初设想）会把「手改 `job.json` 换字体 / `hardware_encoding`」的指纹漂移一起放过，实测它打红两条既有的 fail-closed 断言（`test_recovery_retries_burn_when_v2_proof_fingerprint_is_stale` 与 `test_relink_burned_output_rejects_unverified_candidates_without_mutation[fingerprint]`，两者都用 `hardware_encoding` 漂移模拟「指纹过期」）。为此 v2 proof 新增**可选**字段 `source_media_identity`（只对本地媒体登记）。**② B1：`relink` 把「源媒体不在原路径」误报成「指纹过期」**——指纹算不出来而非过期，现在在报 stale 之前加一道只 `stat` 不哈希的前置检查并点名那个路径；媒体 QA 放行与 proof 指纹比对仍各只有一份实现，没有就地重造判定。**③ B2：源媒体缺失时 `status` 推荐一条必然失败的 `continue` 且无 alternative**（这类缺陷的第 6 次）——计划只剩 `render` / `burn` 且本地源媒体不在登记路径时归 `manual_fix` + `primary_command=None`，`reason` 点名路径。**刻意没做什么**：(a) 不给 `continue` / `burn` 加任何「重指源媒体路径」的新 CLI 参数——「没有命令能把持久化的源媒体路径指到新位置」是独立待决策项，也正因如此 B2 刻意**不**推荐 `xvt burn JOB --media NEW`（它能产出合格成品却让 Job 停在原地，是另一个死角）；(b) 远程 Job 的下载产物缺失不归 `manual_fix`（`continue` 能重新获取，是真出口），由 `missing_burn_source_media(..., local_only=True)` 表达；(c) 计划里还有 `translate` 等步骤时不拦（那些步骤 `continue` 真能推进）；(d) 存量 v2 proof 没有 `source_media_identity`，回退对它们不生效，下一次重烧即补上——刻意选了 fail closed 而不是给 legacy proof 开一条证不出「只有媒体身份变了」的弱回退。**遗留**：`tests/test_workflow.py::BurnFingerprintArtifactTest::test_record_writes_artifact_and_clears_workflow_key` 用整份 dict 相等钉住 proof 文档，新增可选字段后必须把 `source_media_identity` 补进期望值（一处，加 1 个键）；这是本轮唯一需要改的既有断言，**等批准后再改**，在此之前全量为 965 passed + 1 failed。另一条遗留：远程 Job 的 relink 在下载产物 checksum 失效（文件还在）时仍报 stale，口径与本地不一致，判不准就没动。
+
+2026-10-18 **补上 `_finish_resumed_source` 的失败归属（上一轮登记的遗留），并核实了「对齐门不落盘」那条实际不存在**。**① 已修：`pipeline/transcription.py:_finish_resumed_source` 整段没有 try/except**。它依次做「写 `source-cues.json` + 登记 → 可选的候选 QA / 源选择补登记 → `_run_source_subtitle_qa` → `_render_source_srt`」，后两个 helper 都是先 `set_stage(…, RUNNING)` 再干活，而两个调用点（同文件 `resume_job` 内复用 source_cues 的入口与分段后的收尾）外层也没有 except，于是磁盘满、目录无写权限、`save_subtitles` 抛错等**非 QA 异常**会让 `subtitle_qa` 或 `render` 永久停在 `running`，`job.json` 里一条失败记录都没有。`_run_source_subtitle_qa` 的 docstring 早就写明「失败归属留在调用方」，只是三个调用方里有一个从没兑现。**修法选了局部 `current_stage` + 一个 try/except，不是 P1 那套 `on_stage` 回传**，理由写进了函数 docstring：`on_stage` 存在的唯一理由是 `_normalize_audio_and_transcribe` 在**内部跨了两个 stage**（NORMALIZE_AUDIO → TRANSCRIBE），调用方无法得知它停在哪一个；这里调的两个 helper 各自只覆盖一个 stage，调用方自己就知道当前在哪一段，用回传等于为同一种形状造第二套写法。更直接的依据是同文件已有一个**逐字同构的姐妹终结函数** `_finish_subtitle_job`（纯字幕 Job 的 QA + 渲染收尾），它正是局部 `current_stage` + 一个 except，照它写两个收尾函数就能用同一种方式读。同样**刻意不在 except 里扫 RUNNING 的 stage**（96d38f8 已记录过理由：恢复路径上可能留着上一次中断的 RUNNING）。`except` 里保留了 `status is not FAILED` 的判断，这不是防御性冗余：QA 报告整体 `failed` 时 `complete_qa_stage` 自己把 `subtitle_qa` 记成 FAILED 并抛 `RuntimeError`，无条件改写会把那条具体的 QA 原因换成通用异常文本（已实测确认保留）。**刻意没做什么**：source cues 落盘与源选择补登记留在 try **之外**——`resume` 到这里时 SEGMENT / ALIGN 都已记成功，这段写盘不属于任何正在跑的 stage，硬塞给 SUBTITLE_QA 就是另一种错归属；它失败时不留 `running`，异常照常上抛由 CLI 记账。**② 核实后未改：`_process_adaptive_media` 的两处对齐门裸抛**（置信度门与对齐后 QA error 门）。接到的缺陷描述说它们「抛出前没有 `set_stage(ALIGN, FAILED)`，ALIGN 停在 running」，**实测不成立**：这两处都在 `_process_adaptive_media` 自己的 try 内（该 try 早于 96d38f8 就存在），外层 except 用 `current_stage`（进对齐段时已置为 `ALIGN`）落 `FAILED` 并带 `error_category`，`job.json` 里两条原话一字不差。既有的 `test_low_confidence_subtitle_alignment_fails_with_report` 与 `test_forced_alignment_rejects_error_level_post_alignment_qa` 已经各钉住一处 `align.status == "failed"`。同理 `_process_acquired_media` 的那份对齐门也在它自己的 try 内，不是遗漏。**所以本轮没有在这两处加 `set_stage`**：那会与外层边界重复记账（且外层的 `if … is not FAILED` 会让新加的那行成为实际生效的唯一一处，等于把归属从边界挪回调用点，与约束 5「脱敏/记账在边界集中做」的方向相反）。**遗留（如实记录）**：(a) `resume_job` 自己那份置信度门（`set_stage(ALIGN, FAILED, error="subtitle alignment confidence is below the required threshold")`）**不带数值、也不带 `error_category`**，与自适应路径经边界写出的「带 `(0.000 < 0.550)`」不一致——这是真实的单侧漂移，但要改的是 `resume` 那一侧的文案，方向与本轮拿到的描述相反，没有自行决定；(b) 「对齐后 QA error 门只有 `_process_adaptive_media` 有」这条已在 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 O8 表里登记，属结构性重构，本轮按要求未碰；(c) P3 的相邻情形（对齐后 QA error 不落盘报告，`recovery` 没有证据判定必然失败）与本轮修的东西无关，**没有**被本轮修掉，也没有标为已修；(d) P4 / P5 / P7 / P8 / P9 一律未碰。**红先证据**：2 条新测试在修复前均报 `AssertionError: <StageStatus.RUNNING: 'running'> != <StageStatus.FAILED: 'failed'>`（分别断言 `render` 与 `subtitle_qa`），两条分别走 `_finish_resumed_source` 的两个调用点。既有测试零变红、零改动，协议快照零 diff。956 → 958，子测试仍 235。 **主干验收时的两处追补（959 passed，子测试仍 235）**：**①「遗留 (a)」已修**——`resume_job` 置信度门改成与自适应路径逐字同构的 `"… threshold ({confidence:.3f} < {minimum_confidence:.3f})"`。那条遗留里「也不带 `error_category`」的半句是**误判，刻意没有照它改**：`error_category(error)` 的实现是 `getattr(error, "category", "workflow")`，裸 `ValueError` 没有 `.category`，返回的正是 `set_stage` 的默认值 `"workflow"`，两侧落盘与事件里的 category **完全相同**，补一个 no-op 参数只会让读代码的人以为原本不同。红先逐字输出：`AssertionError: 'subtitle alignment confidence is below the required threshold' != 'subtitle alignment confidence is below the required threshold (0.231 < 0.550)'`（同一条测试里 `ALIGN == FAILED` 的断言**修复前就通过**，再次印证 resume 侧确实落盘、只是文案弱）。**②「遗留 (c)」定位清楚了，仍未修、已独立立项**：原始「P3 邻接」说的不是 stage 归属，而是 `_process_adaptive_media:565` 算出的 `aligned_report` **从不写盘、不登记 artifact**，只用于 `:572` / `:585` 的分支判定；于是强制对齐被 QA error 门拒绝时，`job.json` 里只有一句「failed subtitle QA with error-level issues」，**没有任何产物说明是哪些 cue 的哪些 issue**。回落 ASR 那一支有 `selection_reason=alignment_post_qa_failed` 相对好些，缺口集中在 `--align-subtitles` 强制路径。**没有顺手修的理由**：按约束 7 新增产物要同步 artifact kind 枚举、`artifacts.py` 的派生依赖图与失效闭包、checksum 登记和 JSONL 事件，不是小改动；而「只往错误文本里塞几个 issue 码」是半修，会制造「已处理」的假象却仍然没有可校验的产物。**我自己的 review 失误也记在这里**：我给出的「两处对齐门裸抛」前提是错的——我只读了 560-640 这个窗口就下了结论，没有检查外层是否有 try（`try` 在 :470、`except` 在 :670）。subagent 用实测反驳并拒绝按错误前提改代码，是正确处理。
+
+## 2026-10-17
+
+2026-10-17 **ASR 转写腿真实 E2E 验收（12 项通过）发现的 10 个问题中修了 4 个 + 1 组文档**，全部不联网、不跑真实 ASR（按既有测试的打桩方式）。**① P1（bug）本地媒体的 ASR 失败被记到 `import_subtitles`，`transcribe` 停在 `running`**：`pipeline/transcription.py:_process_adaptive_media` 设 `current_stage = IMPORT_SUBTITLES` 之后直接调 `_normalize_audio_and_transcribe`，中间不推进 `current_stage`；该函数自己 `set_stage` NORMALIZE_AUDIO / TRANSCRIBE 但不碰外层变量，于是外层 `except` 把转写失败记成 `import_subtitles=failed`（那次运行根本没导入字幕），`transcribe` 永远停在 `running`。姐妹函数 `_process_acquired_media` 是逐段显式推进的，所以这是单侧遗漏。修法是给 `_normalize_audio_and_transcribe` 加 `on_stage` **失败归属回传通道**（调用方传一个 `nonlocal current_stage` 的闭包），内部每进一个 stage 就回传一次；不采用「在 except 里找 RUNNING 的 stage」的通用写法，因为恢复路径上可能存在上一次中断留下的 RUNNING，会把后续失败错挂到它身上。**② P2（bug）`--engine faster` 在 faster-whisper 未安装时静默回退 mlx**：回退保留（直接失败会卡住只装了一种后端的用户），改成可见——`transcribe.py` 新发 `transcription_fallback` 事件（`requested_engine` / `effective_engine` / `reason`，不带 job 字段，因为它是零 Job 依赖的叶子），CLI 人读流打 `[回退] ASR 引擎：…`，pipeline 的三个 `transcribe_audio` 调用点统一经 `_record_effective_engine` 把 `transcript.engine` 写回 `job.config["engine"]`。**选择改写而不是另加「实际引擎」字段**：该键的唯一用途是「下次用哪个引擎」（`resume` / `rebuild-source` 都从它取值，见 `transcription.py` 的 1343/1364/1604/1633/1727 原行号），加第二个字段会立刻产生两份互相漂移的口径；用户请求的引擎留在 JSONL 事件里（持久记录）。新增事件类型已同步 `docs/EVENTS.md`，`test_events.py` 的字段表守卫通过；协议快照不涉及转写事件，零 diff。**③ P3（导航死循环，同类缺陷第 5 次）对齐置信度不足后 `status` 推荐的 `continue` 必然再次失败**：`align_subtitles` / `allow_low_confidence_alignment` 固化在 `job.config` 里，`continue` 拿同一份 `input_subtitles` + 同一份 `word_transcript` 重跑确定性对齐，每次同一个退出码 2，而 `alternative_commands` 为空。新增 `recovery._alignment_confidence_deadlock`，**只看 Job 状态不猜异常**：媒体 Job、`align_subtitles is True`、未放行低置信、`subtitle_alignment` checksum 有效且 `confidence < minimum_alignment_confidence`，**且 `word_transcript` 与 `input_subtitles` 两份对齐输入都 checksum 有效**（缺任一则重跑可能得到不同置信度，不能断言必然失败，仍走既有的转写 checkpoint 恢复）。满足时归 `manual_fix` + `xvt rebuild-source JOB --strategy asr`（该命令会把 `align_subtitles` 置 false 并复用 checkpoint，验收实测 0.095s 能救）。排序必须在两条 `retryable` 之前。**本轮没有为「primary_command 必然失败」做守卫**：它要求对每个恢复分支断言「在该 Job 状态上跑这条命令会推进」，等于在测试里重跑真实命令，成本远高于上一轮的「表态表 + AST 守卫」；替代做法是三条负向控制测试（缺转写 checkpoint / 放行低置信 / 置信度达标各自仍是 `retryable`），把这次判定的边界钉住。**④ P10（小瑕疵）`resume` 未重跑 `normalize_audio` 却刷新了它的 `completed_at`**：判定为**疏漏而非刻意**，依据有两条——同函数里复用 `word_transcript` 的早退路径完全不碰 TRANSCRIBE stage（不对称），而 `rebuild_source` 对同类 stage 的刻意处理是「已经是 SUCCEEDED 就原样保留时间戳，否则清掉 `started_at` 再记 completed」。按后者口径修：已 SUCCEEDED 不动，仅 checkpoint 有效而阶段没记成功时补记。**⑤ P6 文档**：README 与架构说明写明「产物以 Job 登记表为准，不要按固定文件名取」，点名源文修订后的 `source-reviewed-*` 命名与 `rebuild-source` / `resegment-translation` 留在 `artifacts/` 下的陈旧文件（恢复证据，刻意不删）。**红先证据**（未执行任何写类 git 命令）：11 条新测试在修复前全红或为负向护栏——`transcribe` 状态 `'running' != 'failed'`、`normalize_audio` 状态 `'running' != 'failed'`、config engine `'faster' != 'mlx'`、`completed_at` 两个时间戳不相等、`transcription_fallback` 事件数 `0 != 1`、恢复分类 `'retryable' != 'manual_fix'`、`EventType` 无 `TRANSCRIPTION_FALLBACK`。**过程中一条既有测试变红并已按约定处理**：我最初还顺手让「复用 words 时补记 NORMALIZE_AUDIO / TRANSCRIBE 成功」以自愈遗留的 `running`，这抹掉了 `rebuild_source` 刻意写入的 `SKIPPED`，打红 `test_rebuild_source.py::test_reuses_words_when_original_local_media_is_missing`；**回退了这段范围外改动**（没有改那条既有断言），该早退路径现在只回传失败归属、不写 stage。**遗留（如实记录）**：`_finish_resumed_source` 整段**没有 try/except**，`_run_source_subtitle_qa` / `_render_source_srt` 抛非 QA 异常（磁盘满等）时会留下 `running` 的 stage——与 P1 同属「停在 running」症状但不是同一个缺陷（P1 是错归属，这里是无归属），改它要动 resume 的失败语义并补测试，本轮未纳入范围；P4 / P5 / P7 / P8 / P9 按要求未碰，已记入 `docs/REVIEW_FINDINGS_2026_10_17.md` 新增的「2026-10-17 ASR 转写腿真实 E2E 验收发现」一节。新增 11 条测试，945 → 956，子测试仍 235。
+
+2026-10-17 polished 真实 E2E 验收的两条体验/文档问题已修（都是低严重度，不含正确性 bug）。**① `polish-translation` 落到 Agent 等待时不给下一步命令**：`_cmd_polish_translation` 此前只打印 `mode: agent` 与 manifest 路径，用户必须再跑一次 `xvt status` 才知道要回填 `apply-polish-translation`——而 `run` / `continue` / `translate` 的等待出口早就调 `_print_recovery_navigation` 把命令拼好了。修法是复用同一个 helper（`result.mode == "agent"` 时调用），不另造文案：恢复导航经 `build_recovery_plan` → `_recovery_for_workflow` → `plan_advance_steps` 的 `await_agent_polish` 分支，给出首选 `continue`、前置 `xvt apply JOB RESPONSE`、备选 `apply-polish-translation JOB RESPONSE`，路径由 `_job_command` 统一 `shlex.quote`。非等待态（`reused` / `openai-compatible`）输出一字未改；`--events-jsonl` 分支未碰，事件流不变。**② Agent 一次成型的 polished Job 上补跑润色，报错与恢复建议自相矛盾**：`task=translate_and_polish` 的 manifest 把初译与润色合在同一次回填里完成，这类 Job 从来不写 `translation-draft-cues.json`，所以 `polish-translation` 对它**结构上**不适用——不是「checkpoint 失效需要恢复草稿」。旧行为在 `pipeline/polish.py:_prepare_draft` 报 `polished workflow has no valid translation draft checkpoint`（EXIT 2），紧跟着的 `report_failure` 打出「恢复建议：当前目标已完成，可以校验已有产物」，两句拼在一起读着互相打架，而真正的原因一句没说。修法是在 `existing is None` 这一支里**复用既有谓词** `pipeline.translation.agent_translate_and_polish_started`（planner 的 `draft_path is None and agent_translate_and_polish_started(job)` 与 `recovery` 的 `invalid_polished_agent` 用的就是它，不新造判定）区分两种情形：一次成型的 Job 给新常量 `AGENT_ONE_SHOT_POLISH_RERUN_MESSAGE`（说明润色在初译那一步完成、从不写 draft、这条路不适用，并指向 `xvt status`），draft 曾存在但 checksum 失效的仍走原来那句「需要恢复草稿」的引导（既有测试 `test_missing_draft_does_not_resnapshot_polished_translation` 守着，零改动）。**「当前目标已完成」那句刻意不改**：`build_recovery_plan` 是 Job 状态的纯函数，被 `status`、`continue`、`batch-continue` 的持久化分类与协议快照共用，让它感知「本次调用抛了什么异常」要把在途异常穿进只读判定，破坏「Job 状态是唯一事实来源」的契约；而这类 Job 的译文目标**确实**已完成，那句话本身是对的。矛盾感全部来自报错不说原因，报错说清之后两句互相印证（这条路不适用 + 目标确实已完成）。**③ 文档**：README 的 Q5a 补跑一节明确排除 Agent `polished` Job（既不能补跑润色，也不存在「草稿失效需要恢复」这件事；要改译文走 `retranslate-cues` 或重跑一轮完整翻译——`retranslate-cues` 在这类 Job 上可用，已实测确认而不是推断），`polish-translation` 的用法块补两条行为说明；README 事件章节把 `workflow_planned` 从「端到端链路通用事件」改成「只有 `run` 首跑会发」（`continue` 只发带 `continuation=true` 的 `workflow_started`，见 `workflow.py:861` 的注释与 1328/1390 两处发事件点），**改文档不改实现**，`docs/EVENTS.md` 同步补注。**红先验证**（备份 `cli.py` / `polish.py` / `README.md` 到 scratchpad，未执行任何 git 命令）：3 条新测试红在 `'xvt apply-polish-translation <job>' not found in 'mode: agent\n<manifest>\n'`、`'translate_and_polish' not found in 'polished workflow has no valid translation draft checkpoint'`，以及 CLI 层逐字复现的那一对矛盾 `任务失败：polished workflow has no valid translation draft checkpoint` ＋ `恢复建议：当前目标已完成，可以校验已有产物。`；第 4 条（非等待态输出不变）是修前修后都绿的护栏。**协议快照零 diff**（8 passed + 2 subtests），**既有测试零变红、既有断言零改动**。新增 4 条测试，941 → 945，子测试仍 235。遗留（如实记录）：上一轮登记的那条「已满足的 polished Job 上显式重开 `polish-translation` 或语义校对的 Agent 等待会被报成空计划」**仍未修**，本轮只让这类 Job 的报错自解释，没有动 planner 的闸门表态表；`run_atomic_translation_polish` 里那句 `atomic polished translation has no valid draft checkpoint` 没有做同样的区分（原子 Job 走 `translate` 入口、不经 `polish-translation`，本轮未纳入范围）；验收另发现 `xvt apply ... --continue` 在一条命令内把译文 QA 与渲染做了两遍（结果正确、属重复做功），已记进 `docs/REVIEW_FINDINGS_2026_10_17.md` 的「观察」一节待单独立项，本轮刻意未碰。
+
+2026-10-17 发布 0.2.0：把 0.1.1 之后累积的全部工作一次发出，重点是正确性与安全边界而非新功能。发版前做了本地真实端到端验收（零网络零付费，8 个 Job）：基础链路含烧录与媒体 QA 并目检渲染帧、术语表回退、二次回填失效、确认绑定报告、输出覆盖保护、Base URL 拒绝、错误脱敏、终检守卫与退出码九项全部通过，并因此抓到一个 P0（整轮 Agent 等待被「译文已满足」吞掉，导航闭环断在 CLI 自己推荐的那条路上），已在发版前修掉。**验收未覆盖**：ASR 转写腿、真实翻译 API、`polished` 质量链真实路径、目录批处理、YouTube 下载、长素材与非 16:9 画幅——其中 polished 链路本版有过批次循环重构，只有协议快照与单元测试在守，这是下一轮真实验收的首选目标。
+
+2026-10-17 真实 E2E 验收抓到的 P0 已修（整轮 Agent 翻译等待被「译文目标已满足」吞掉），外加一处文档口径冲突。**复现路径**（验收在三个 Job 上复现，不是构造的 advanced 用法）：Job 停在局部重译等待 → `status` 自己提示「重新运行一轮完整翻译即可取代它」→ 照做 `xvt translate JOB --target-language zh-CN --provider agent`（EXIT 0，写出新 `translation-batches.json`，`stages.translate=awaiting_input`）→ `status` 第一行显示 `translate=awaiting_input` 而恢复计划报 `complete`、下一步给 `xvt verify` → `continue` 报「任务处理完成」EXIT 0 → `xvt apply JOB RESPONSE` EXIT 2「the job is not awaiting Agent input; run xvt status」。导航闭环断掉，唯一出路是自己猜到 README 里的 `apply-translation`。**根因**：`plan_advance_steps` 里 `await_agent_translation` 的**全部** return 分支都埋在 `if goals.needs_translation and not _translation_satisfied(job, config):` 里，旧译文仍 checksum 有效时根本不会被求值——与函数体最前那条 `await_cue_retranslation` 早退（注释里写明了同一条理由）完全不对称。这是同一类缺陷的第四次（前三次：`qa_blocked` 给在途等待让路、F3 manifest 失效死局、F4 原子分支让路）。**修法**：`workflow.py` 新增单点谓词 `agent_full_translation_waiting`（`TRANSLATE` 停在 `awaiting_input` + `translation_batches` checksum 有效，planner 两处分支共用，manifest 失效时判否以保住上一轮「给 `translate` 重建」的修复）与 `_full_translation_request_is_newest`（按 `job.artifacts` 登记次序比较整轮 manifest 与 `cue_retranslation_batches` / `translation_polish_batches` / 三份语义报告，与 `pipeline.retranslate._newer_full_translation_request` 同判据、方向相反）；在 `cue_retranslation_waiting` 早退之后、`_translation_satisfied` 之前新增对称早退。满足度只算一次（提成局部变量 `translation_satisfied`），避免在没有只读记忆化作用域的 `continue` 路径上把四五个产物哈希两遍。**各类等待的优先级**：① `await_cue_retranslation`（函数体最前，谓词严格，`FAILED` 态额外让位更新的整轮请求）→ ② 整轮 Agent 翻译等待（满足度之前，要求整轮 manifest 是最后登记的在途请求）→ ③ 满足度之后、`not translation_satisfied` 分支内的语义 → 润色 → 整轮既有分支。三侧自动一致：`status` 的 `_recovery_for_workflow`、`continue` 的 `_advance_workflow` 入口等待判定、`xvt apply` 的 `_STEP_ROUTES` 都读同一份 `plan_advance_steps`，`batch-continue` 读持久化的 `recovery_plan` 分类。**让这一类更难复发**：新增 `workflow._SATISFIED_GATED_AWAIT_STEPS` 表态表（语义/润色/人工 review 三条刻意只在「未满足」分支里判，理由写在注释里）＋ `AwaitStepsCoverageTest` 第三条 AST 守卫——planner 里每个 `await_*` 要么出现在满足度闸门**之外**，要么登记进该表，两边对不上就红；做过变异自证（把新早退删掉即红在「未表态的 `['await_agent_translation']`」）。**P1 判断：改文档不改代码。** `xvt burn JOB --media <损坏 mp4>` 把 `stages.render` 记成 `failed`（EXIT 3）与 `docs/RECOVERY.md`「本地替代媒体或字体导致布局失败时 Job 不变」看似冲突，但依据有三：原子 `burn` 成功时本来就推进 `render` / `burn` / `media_qa` 三个 stage，所以「原子命令不写 stage」不是契约；文档那句的真实适用范围是**布局 QA 失败**，而该路径抛 `UserInputError`、`burn_translated_job` 的兜底刻意 `except UserInputError: raise` 不记 stage（`tests/test_pipeline_burnin.py` 的 `persist_workflow_qa=False` 用例已钉住「不覆盖 QA 报告/stage」）；损坏文件是 `probe_media` → `CommandError` 落到 `except Exception`，属另一类失败。文档已按「只覆盖布局 QA 一类失败」改写并写明其它失败照旧按 stage 记账、不影响恢复判定。**红先验证**（备份源码、未执行任何 git 命令）：3 条新测试红在 `Tuples differ: () != ('await_agent_translation',)` 与 `ExitCode.USER_ERROR: 2 != 0`（stderr 逐字复现「response file has no task field, and the job is not awaiting Agent input」＋「恢复建议：当前目标已完成」）。修后第 3/4/5 步变成：`status` 归 `awaiting_input`、首选 `continue`、前置给可复制的 `xvt apply JOB RESPONSE`、备选 `apply-translation --target-language zh-CN`；`continue` 返回 `awaiting_input` 并只发一次 `workflow_waiting`、不发 `workflow_completed`；`xvt apply JOB RESPONSE` EXIT 0 并写入新译文。**协议快照零 diff**（8 passed + 2 subtests），**既有测试零变红、既有断言零改动**。新增 5 条测试，936 → 941，子测试仍 235。遗留（如实记录）：已满足的 polished Job 上**显式重开** `polish-translation` 或语义校对的 Agent 等待仍会被报成空计划（登记在表态表里，已写进 `docs/RECOVERY.md` 的「已知遗留」一节，无 E2E 复现，本轮未修）；新判定依赖 `job.artifacts` 的登记次序，手工编辑 `job.json` 重排 artifact 会改变等待归属；P1 那条「原子 `burn` 失败留下的 `render=failed` 永久留在 `job.json` 里」只在下一次成功烧录时才被推回 `succeeded`，刻意未加清理。
+
+2026-10-17 N1 已修（清单里最后一条「需设计决策」的条目，安全性修复）。**生产侧**：`pipeline/review.py` 的 `acknowledged_review_issues` 此前只比对 `source_cues_checksum`，于是「为 v1 译文确认过 cue 3 行宽超限」会自动代签一条内容完全不同、恰好同样在 cue 3 超宽的 v2 译文，用户从没看过它，四条译文回填路径（agent / import / retranslate / semantic 收尾）都暴露。**关键事实：`report_kind` / `report_checksum` 自确认通道引入（`d361828`）起就一直落盘，只是校验侧从来没读过它们**——所以修法是补校验而不是改落盘格式，真实 Job 的存量确认记录照常有效，只有测试里手搓的 fixture 缺字段。防御上显式排除 `report_checksum is None`，否则报告未登记时 `artifact_checksum_for` 返回 `None`，一条写着 `report_checksum: null` 的伪造记录会因「两边都是 `None`」蒙混过关。**测试侧**：新增 2 条——`test_acknowledgment_does_not_sign_off_a_different_translation`（同一 Job、同一 cue、同一个 review 问题码 `bilingual_overflow_risk`，只换译文内容，断言旧确认失效且新报告不放行）与 `test_acknowledgment_rejects_unregistered_report`（`report_checksum: null` 的伪造记录），两条都做过红先验证（备份源码临时去掉校验即复现修复前的代签行为）。修掉 6 条变红：5 条是手搓确认记录缺 `report_kind` / `report_checksum`（`test_pipeline.py` 1 条、`test_pipeline_burnin.py` 的 `_acknowledge_review_issues` helper 带掉 2 条含 4 subtest、`test_revision_preflight.py` 3 条），**纯补 setup 字段，断言一字未动**；第 6 条 `test_workflow.py::test_continue_rebuilt_qa_keeps_stored_review_acknowledgment` 是 helper `_standard_job_with_translated_outputs` 用紧凑 JSON 写 QA 报告（311 字节）、与生产 `pipeline.common.write_json` 的缩进 JSON（394 字节）**解析后逐字段相同但字节不同**，改为调用 `write_json`——改完这条才真正在验它声称要验的东西，此前它即使在生产路径上会失效也照样绿。顺带把 `test_pipeline.py` 另两条本就绿的确认测试（bool cue id、新增 review 问题）也补齐字段，免得它们因「记录格式不全」而不是想验的原因变绿。**全仓有没有别的 fixture 手写 QA 报告 JSON**：用「临时把 `write_json` 的 `indent=2` 改成 `indent=3` 跑全量」做了实证探测，除 `tests/test_provider_protocol_snapshot.py`（它本就冻结 artifact 内容 checksum，预期内）外**零额外变红**，说明没有第二处 fixture 与生产序列化字节耦合；其余 ~30 处手写的 QA JSON 都是从不被生产重建的静态桩（多为 `{"status":"pass","issues":[]}`），刻意不动。**协议快照零 diff**（8 passed + 2 subtests）。新增 2 条测试，934 → 936，子测试仍 235。已知性质（写进 review 清单）：绑的是报告**字节** checksum 而非语义等价，将来改 `write_json` 的序列化写法会让全部存量确认一次性失效，方向 fail-closed 故接受。遗留：`report_kind` 的取值白名单原本在校验侧与写入侧各写一份字面量，验收时已提成共享常量 `ACKNOWLEDGEABLE_QA_KINDS`（两处同源，新增报告种类只需改一处）。
+
+2026-10-17 macOS CI 集成测试修复：给 macOS 加 ffmpeg 后 CI 报 `No such filter: 'ass'`。根因是 homebrew 把 ffmpeg 拆成两个 formula——精简的 `ffmpeg` 不带 `--enable-libass`，而烧录/预览靠 `-vf ass=filename=...` 送字幕；本机装的是 `ffmpeg-full` 所以一直绿，「本机能过所以 CI 能过」的论证只验了可执行文件存在、没比对 formula。两处同时修：`tests/ffmpeg_support.py` 把门控从「有 ffmpeg」改成「有 `ass` 滤镜」（任何装精简版的用户此前都会崩在 filtergraph 上而不是跳过），CI 改装 `ffmpeg-full` 并在装完断言滤镜到位（断言两个平台都跑，防止将来退回静默跳过）。
+
+2026-10-17 O8 + O9 + O10 + O11 已修（清单「可优化」的最后一批，四条互相独立）。**O8（死码）**：`run_local_transcription`（原 :824）与 `run_remote_transcription`（原 :1062）的 `if "source_strategy" in job.config` 确认恒真——两处都在同一函数体内用字面量 config 创建 Job，字典里固定写着这个键（参数默认 `"auto"`，永不为 `None`），`create_job` 只做 `dict(config or {})` 不剔键。**旧 Job 走不到这两处**（它们只创建新 Job、从不 `load_job`）；旧 Job 唯一会撞上同款判定并分流到 `_process_acquired_media` 的入口是 `resume_remote_transcription`，那里 `job` 来自 `load_job`，判定**原样保留**，同文件另外 5 处 `"source_strategy" in job.config` 同理未动。`_process_acquired_media` 因此仍被调用，函数保留。零行为变化、无新增测试（没有可观测差异可断言）。清单附带的「对齐/分段规则 3–4 份副本且已漂移」**核实属实但本轮不动**（结构性重构）：三份对齐门在 `_process_adaptive_media`（:488）/ `_process_acquired_media`（:696）/ `resume_job`（:1653），真实漂移是「对齐后 QA error 门」只有第一份有，失败行为也分成自动回落 ASR、抛 `ValueError`、`set_stage(FAILED)` 后抛三种；分段侧同一串 `segmentation_config_for_preset(job.config.get(...))` 出现 5 次。定位已写进 review 清单供后续立项。**O9（文档四处）**：逐条核过代码才改——① AGENTS 的批处理句改为「缺失**且具备重新关联资格**时绝不自动重烧，不具备资格的（legacy fingerprint）按 `retryable` 重烧」，依据是 `burned_output_relink_recovery_available` 要求 checksum 有效的 v2 proof、legacy 在那里返回 `False`；② `docs/RECOVERY.md` 删掉「`_burn_fingerprint` 的 size+mtime 不承担有效性判定」，换成一节「一处已知例外」如实写明本地源媒体在指纹里的身份是 `{path, size, mtime_ns}`、而该指纹是 `_burn_satisfied` 的放行条件之一，所以同 size+mtime 的替换文件不会触发重烧，并写明接受理由与确证手段；③ 模块表补齐 `ls src/xvt/*.py` 对账出的 7 个（`config` / `stages` / `source_selection` / `errors` / `locking` / `cancellation` / `doctor`）；④ `semantic_state` 改为「语义链路只读纯函数」（17 个顶层函数，不止报告解析）。**O10（CI）**：先摸影响面才改——全仓 ffmpeg 门控只有 `tests/test_e2e.py::EndToEndTest`（3 条）与 `tests/test_burn.py::BurnFilterPathSmokeTest`（1 条 + 4 subtest），没有独立字体门控；本机 macOS 装了 ffmpeg，`pytest -q -rs` 的 **skip 数为 0**，这 4 条一直真实在跑并通过；它们都显式 `hardware_encoding=False`（libx264，不依赖 VideoToolbox），homebrew bottle 带齐 libx264 / aac / ass，因此判断加装 ffmpeg 变红风险低。`ci.yml` 的 Linux 步骤改名 `Install ffmpeg (Linux)`，新增 `Install ffmpeg (macOS)`（`brew install --quiet ffmpeg` + `HOMEBREW_NO_AUTO_UPDATE` / `HOMEBREW_NO_INSTALL_CLEANUP`），pytest 步骤加 `-rs` 让 skip 原因在 CI 日志可见。代价是 macOS job 多一次分钟级的 brew 安装。**O11**：`cli.py` 的 `_cmd_status` 手拼双引号（全仓唯一例外）改 `shlex.quote`，新增测试用 `Tom's $HOME videos` 作输出根，除比对期望串外还 `shlex.split` 反解析断言第三个 token 逐字等于真实路径，并断言旧形态不得回潮；红先自证（还原旧写法后变红）。**协议快照零 diff**（8 passed + 2 subtests），**既有测试零变红、既有断言零改动**。新增 1 条测试，933 → 934，子测试仍 235。CHANGELOG 只记 O11（唯一用户可见变化）；O8 零行为变化、O9 纯文档、O10 只动 CI，刻意不记。遗留（如实记录）：O10 的「加装 ffmpeg 后 CI 仍绿」只有本机 macOS 的证据，**真实 CI 跑绿尚未验证**，合并后要看一次 macOS job；`brew install ffmpeg` 没有缓存，每次 macOS job 都重装；O8 的死码删除没有测试守住「将来有人再加一条恒真分支」。下一项按清单仍是 N1 的设计决策，以及 O1 与 O8 的副本重构。
+
+2026-10-17 O2 + O4 + O6 已修（三条互相独立）。**O2 的定性要改——它不是整洁问题，是可达的正确性 bug**：构造「workflow 快照无 `translation_policy`、顶层 `job.config["translation_policy"]` 有术语」的 Job 后实测确认，翻译侧拿到 `TranslationPolicy(style='faithful', terms=())`，而译文 QA 侧的 `required_glossary_terms` 同时返回 `(('OpenAI','OpenAI'),)`——两侧确实分叉；独立验证 `check_subtitles` 对不含该术语的译文返回 `failed` / `glossary_violation`（error 级，连 `--acknowledge` 出口都没有），死锁闭环成立。这种 Job 真实可达：`WorkflowConfig.translation_policy` 对策略快照落地之前创建的 Job 解析为 `None`，`workflow_config.py` 里**没有任何**把顶层键同步进快照的路径，而 `xvt translate --glossary G` 只写顶层键。修法是**四份合成一份**：`common.resolved_translation_policy(job, config=None)` 为唯一实现（快照优先、顶层键兜底，`config` 显式给出时优先采用），`workflow._translation_policy` 与 `semantic_state.resolved_policy` 删除，`translation.translation_progress_rebuildable` 里清单未点名的第四份（注释原文「与 `workflow._translation_policy` 同口径」）一并换掉——它重算 fingerprint 判 checkpoint 能否零成本重建，口径漂移会把可复用的 checkpoint 判成不可重建、整轮重付 API 费用。`translation._resolved_translation_inputs` 刻意未合并（它解决「CLI 参数 vs 快照」的逐字段合并，不是同一件事）。**O4**：`paths.py` 新增 `_user_input_paths`，把本地 `job.input`、`job.config["subtitles"]`、`workflow.translation_subtitles` 并入覆盖保护集（URL 形式的 `job.input` 按 `urlparse` 的 http/https 跳过，与 `_burn_fingerprint` 同口径），这些路径不按 `writing_kind` 排除；错误文案补 `an original input file`，原有 `source media` / `existing artifact` 字样保留因此既有断言未改。烧录与预览共用同一保护集。**O6**：`_record_burn_fingerprint` 增加可选 `event_sink`（`_ensure_burn` 透传），登记改走 `pipeline.common.add_artifact`——顺带收掉这处绕开共享登记实现的旁路，checksum / 同 kind 去重 / 落盘 / `artifact_created` 事件全部复用一份；不新增 `EventType`。红先证据齐全：O2 的行为测试红在 policy 不相等、身份守卫红在 `AttributeError`；O4 红在原始音频不在保护集；O6 红在 `artifact_created(kind=burn_fingerprint)` 事件数 0 != 1。**协议快照零 diff**（7 个场景全是纯字幕 Job，不经过 `_ensure_burn`），**既有测试零变红、既有断言零改动**。新增 5 条测试，928 → 933，子测试仍 235。文档：CHANGELOG 记了 O2 / O4 / O6 三条（都是用户可见变化），`docs/EVENTS.md` 的 `artifact_created` 节补了 `kind=burn_fingerprint` 的来源说明，review 清单三条改标「已修（本轮）」并改写了 O2 的定性。遗留（如实记录）：身份守卫只能拦「同名副本」，换个名字再抄一遍仍拦不住；O4 只覆盖 Job 里**记着**的用户文件，用户在 Job 之外的任意文件仍可被 `--output` 指中（这是 CLI 显式输出路径的固有语义，未扩大保护面）；`job.input` 为非 http/https scheme（如 `ftp://`）时按本地路径处理，不会误拦但也不精确。下一项按清单仍是 N1 的设计决策。
+
+2026-10-17 F5 + F7 + O7 已修（同一批「守卫与去重」，零生产行为变化）。**F5（去重）**：`pipeline/transcription._source_selection_matches` 公有化为 `source_selection_matches`（R1.4 先例），与 `common.artifact_checksum_for` / `common.error_category` 一起经 `pipeline/__init__` re-export；`workflow.py` 删掉三份逐字副本改为引用。清单只点名「另两处复制自 `common.py`」，本轮逐字比对确认第三处就是 `_artifact_checksum` ≡ `common.artifact_checksum_for`（在 `record_media_download_selection` 正上方）。行为零变化（`"none"` vs `SourceCandidateKind.NONE` 是 `StrEnum`，相等）。清单所称「无测试桩阻碍」不完全准确：`tests/test_pipeline_revision.py` 有一处**直接 import**（非 `patch()` 桩）`from xvt.workflow import _source_selection_satisfied` 加 3 个调用点，已同步改名、仍从 `xvt.workflow` 导入，三条断言一字未改。`tests/test_pipeline_imports.py` 白名单无需改动（没有新增包内依赖边）。**F7（补测试）**：`tests/test_revision_preflight.py` 新增 `_glossary_response` 与两条用例，走真实 QA（术语表 → workflow 快照 → `translation_qa_context.required_terms` → `check_subtitles`）不打桩绕过判定；阻断用例刻意用**短**译文，使行宽那一支不可能命中，唯一能让预检变红的就是 error 级分支，并断言预检只读 + 正式 apply 抛错不落 `translation_reviewed_cues`。**O7a**：`AwaitStepsCoverageTest` 用 ast 从 `plan_advance_steps` 的各条 `return`（递归进元组）**与** `steps.append(...)` 收字符串字面量，`await_*` 与 `AWAIT_STEPS` 双向不许有差集（只看 `return` 的话，改成先 append 就能绕过）。**O7b**：新增 `tests/test_subprocess_boundary.py` 四条 ast 守卫——除 `process.py` 外禁 import `subprocess`、反向钉住 `process.py` 真在用它、全仓含 `process.py` 禁 `shell=True`、禁 `os.system` / `os.popen`；AGENTS 不可破坏约束 6 的措辞已同步。**O7c**：清单「改成 pass 全绿」的说法**独立复验属实**（915 条全绿），新增测试除钉住 verify 三元结果外，更钉住下游后果——`valid_artifact_path` 对无 checksum 的 artifact 必须返回 `None`（这才是违反约束 9 的真实风险面）。红先/变异自证齐全：F5 两种形态（名字缺席 → `AttributeError`；重新复制同名副本 → `assertIs` 失败）各红 3 / 2 条；F7 删掉 error 级分支后全量 927 条里**恰好只有新增那一条**变红；O7a 两种注入形态（`return` 与 `append`）各自变红；O7b 三种变异（`doctor.py` import `subprocess`、`process.py` 加 `shell=True`、`doctor.py` 加 `os.system`）各自只打红对应那条；O7c 变异后新测试红。协议快照零 diff，**既有测试零变红、既有断言零改动**。新增 12 条测试，915 → 927，子测试仍 235。CHANGELOG 未记：三条都是内部去重与测试/守卫，无任何用户可见行为变化。遗留（如实记录）：`batch.py:265` 还有一份与 `common.error_category` 逐字相同的 `_error_category`，不在本轮 F5 的点名范围（清单只说 workflow.py），未动；F5 的身份守卫只能拦「同名副本」，有人换个名字再抄一遍仍拦不住。下一项按清单是 N1 的设计决策。
+
+2026-10-17 F6 + O5 已修（四阶段，**第一步是改测试而不是改生产代码**）。**阶段 A**：`tests/test_workflow.py` 里 7 处（含 1 处 3 个 subtest）把 `run_translation` / `apply_subtitle_translation` / `burn_translated_job` / `valid_artifact_path` / `_record_burn_fingerprint` 打成「不推进 Job 的假实现」却断言 `completed` 的测试，全部改成构造真实状态。新增三个模块级 helper：`_write_source_leg_artifacts`（落 `source_cues` / `source_srt`，取代整体 patch `valid_artifact_path`）、`_complete_translation_artifacts`（译文 cue + 真实 `save_subtitles` 两份 SRT + 真实 `check_subtitles` QA 报告，推进 TRANSLATE / SUBTITLE_QA / RENDER）、`_complete_burn_artifacts`（成品 + `media-qa.json` pass，推进 BURN / MEDIA_QA）。带 burn 的 Job 改用真实存在的本地媒体文件，`_record_burn_fingerprint` 因此走真实实现登记 v2 proof；`run_transcription` 的桩补上「把 workflow 目标固化进 Job」这一真实副作用（缺它 proof 登记会静默跳过，是阶段 A 唯一一次卡住的地方）。**既有断言一字未改**，只改桩的伪造方式；用临时断言逐条验过 7 处结束时 `plan_advance_steps` 为空后删除。阶段 A **没有暴露任何生产代码问题**。**阶段 B**：新增 `test_burn_not_satisfied_when_media_qa_blocks_a_valid_burned_output`（不打桩，2 个 subTest），构造「成品 checksum 有效 + v2 proof 指纹匹配 + 媒体 QA 被否」两种真实状态；变异自证通过（分别失效 `_burn_satisfied` 的 stage 判定与报告 `status` 判定，对应 subtest 各自变红，其余全绿）。**阶段 C**：`workflow.py` 新增 `media_qa_failure` / `media_qa_passed`（唯一实现，标签 `stage` / `missing` / `unreadable` / `status`）与 `_burn_proof_fingerprint_matches(..., require_source_media=)`；烧录满足度、relink 资格、`relink_burned_output` 三处接入，relink 的四条历史报错文案按标签映射逐字保留；`recovery._burn_recovery_reason` 改为接收调用方算好的标签、只在 `"stage"` 上分叉，不再自己重写判定。刻意差异全部参数化或写进 docstring（源媒体是否哈希、成品要求有效 vs 已失效、是否要求 `translated_cues`、legacy proof 容忍度、relink 文案、recovery 文案排序），清单见 [review 清单](REVIEW_FINDINGS_2026_10_17.md) 的 F6 条目。**阶段 D（O5）**：`_advance_workflow` 发 `WORKFLOW_COMPLETED` 之前断言 `plan_advance_steps(job, config)` 为空，不为空抛 `InternalError`（退出码 4），消息带剩余步骤；**零既有测试变红**。协议快照零 diff。新增 5 条测试 + 2 个 subtest，911 → 914 测试、233 → 235 子测试。遗留（如实记录）：`recovery._burn_recovery_reason` 对「stage succeeded 但报告失效 / 判定非 pass」仍沿用「成品缺失 / 指纹失效」文案，没有归因到媒体 QA——这是文案排序而非放行判定（`_burn_satisfied` 早已独立判这些状态未完成），改它属用户可见行为变更且被 `tests/test_recovery.py` 两条测试钉住，不塞进纯重构；`relink_burned_output` 的「媒体 QA 报告不可解析」分支由共享谓词接走后丢了 `raise ... from error` 的异常链（报错文案不变，无测试依赖）。下一项按清单是 N1 的设计决策，之后 F7 / O7。
+
+2026-10-17 持久化脱敏收口（F1 / F8 / O3）已修。**F1**：`pipeline/common.py` 的 `set_stage` 在入口统一 `redact_text(error)`，`record.error` 与 `stage_failed` 事件共用同一份脱敏文本（`redact_text` 幂等，事件分支再脱敏一次结果不变）；刻意不去补那约 18 个 `error=str(error)` 调用点——靠调用方自觉的契约必然再漏。`events.redact_text` 的 docstring 同步改成「两条持久化边界已集中接入」的现状。**F8**：`events.py` 的 `_SENSITIVE_QUERY_KEYS` 从精确匹配集合扩成三层判定 `_is_sensitive_query_key`——精确名单（向后兼容）→ 子串规则（`signature` / `credential` / `token` / `secret` / `password` / `accesskey` / `apikey`，覆盖 GCS v4、腾讯 `q-signature`、`OSSAccessKeyId`）→ 按非字母数字分段的整词规则（`auth` / `authorization` / `key` / `sig` / `pwd` / `passwd`，命中阿里云 `auth_key`，同时不误伤 `monkey` / `keyword` / `author` / `design` / `signal`）。**O3**：`translation_provider.py` 新增 `_validate_base_url`，在解析出 Base URL 之后、「配置是否齐全」判定之前拒绝带 userinfo 或 query 的 Base URL，错误消息只回显 hostname；`--provider auto` 也抛错而不静默降级。实测确认过必须入口拒绝：`https://user:secretpw@api.example.com/v1` 抛的是 `http.client.InvalidURL: nonnumeric port: 'secretpw@api.example.com'`（有无代理两条路径一致），不带 scheme，`_URL_PATTERN` 与 `_USERINFO_PATTERN` 都不命中，脱敏原样返回。红先取证齐全（未改生产代码直接跑新测试：F1 的 5 个 subtest 全红，F8 的 14 个 subtest 红，O3 的 2 个 subtest + 2 条测试红）。协议快照零 diff，**既有测试零变红**。新增 10 条测试 + 55 个 subtest，900 → 910 测试、178 → 233 子测试（其中 `test_messages_compared_by_value_survive_redaction_unchanged` 是 review 时补的守卫，不是红先测试：`pipeline/review.py:246` 按文本相等识别 `SUBTITLE_REVIEW_REQUIRED_MESSAGE` 来收口过期阻断错误，脱敏若改写这条常量会让收口静默失效）。AGENTS 约束 5 的措辞随之改为「在 `set_stage` 边界统一脱敏」。遗留（如实记录，未修）：`artifacts/source-candidate-qa.json` 的 `invalid_candidate` issue message 带 `load_subtitles` 的 `str(error)`，不过边界、未脱敏（内容是本地路径与解析错误，无凭据面，且 QA message 被 `candidate_qa.overflow_limits` 正则解析，改动面大于收益）；`pipeline/revision.py:413` 的 `qa_record.error = qa_message` 绕过 `set_stage` 直写（取值只有两个硬编码常量，零凭据面，但目前没有守卫阻止下一处这样写）；`job.input` 作为恢复依据按原样落盘，用户若把签名 URL 当输入，它在 `job.json` 里是明文而在事件里已脱敏。下一项按清单是 N1 的设计决策。
+
+2026-10-17 review 清单正确性剩余（F2 / F3 / F4）已修，O5 停下待裁决。F2：`pipeline/translation.py` 新增 `_resolved_translation_inputs`，`prepare_agent_translation` 与 `run_translation` 在未显式传参时逐字段回退 `workflow.translation_policy` 与 `workflow.batch_size`，与同文件 `base_url` / `model` 的回退同口径（`cli.py` 的 `translate` / `prepare-translation` 两处 `--batch-size`、`--translation-style` 随之去掉默认值，改用「None 表示未指定」，与 `polish-translation` 一致）。F3：`workflow.py` 的 `plan_advance_steps` 删掉「manifest 失效仍报 `await_agent_translation`」的兜底分支（原 :745-746），落到 `translate` / `import_translation`；`_ensure_translation` 的等待分支同步要求 `translation_batches` checksum 有效，否则重建批次。F4：`recovery.py` 在 `qa_blocked` 判定后为原子 Job 补一条等价让路条件（`TRANSLATE` 等待态 + manifest 有效 → 放行给既有的原子等待分支）。红先取证齐全（备份源码跑新测试，8 条红、3 条控制组绿）。协议快照零 diff。新增 9 条测试，891 → 900。**O5（`workflow_completed` 前的 fail-closed 终检）已实现但按约定停下未落地**：补上 `plan_advance_steps(job, config) == ()` 的断言后，`tests/test_workflow.py` 里 6 条测试 + 1 条测试的 3 个 subtest 变红，原因全部是这些测试把 `run_translation` / `apply_subtitle_translation` / `burn_translated_job` / `valid_artifact_path` 打了桩，Job 状态从未真正推进却断言 `result.status == "completed"`——与 F6 的根因同族（真实状态从未被构造）。守卫代码与测试暂存在本次会话的 scratchpad，是否落地取决于「先把这 7 处桩改成构造真实状态」的决策。另有两条既有测试的 **setup**（断言字节不变）被修正：`test_plan_advance_steps_awaits_agent_without_burn` 与 `test_recovery_plan_describes_agent_translation_prerequisite` 原本在「没有有效 manifest」的状态下断言等待引导，F3 后这正是应给出 `translate` 的状态，故给它们补上有效 manifest，测试本意（等待步骤不追加 burn / 等待引导的命令形状）不变。
+
+2026-10-17 全面 review 发现存档：一次只读的全仓设计与实现 review（5 个切面：正确性与恢复契约、安全边界、架构与可维护性、测试质量含 19 个内存变异点、文档漂移）产出 1 条阻断级、10 条应修与一批可优化项，逐条带锚点与触发条件，存档在 [review 发现清单](REVIEW_FINDINGS_2026_10_17.md)。阻断级 B1（译文二次回填交付旧字幕）已修。**下次开工优先按该清单的「建议处理顺序」走**：F2/F3/F4/O5 正确性剩余 → F1/F8/O3 持久化脱敏收口 → N1（确认是否绑定译文内容）的设计决策 → F6/F7/O7 烧录判定与 fail-closed 补洞。清单同时记录了本次 review 的覆盖盲区（字幕算法、下载策略、转写适配层、快照 golden 内容本身），不要因为它没提就认为那些区域没问题。
+
+2026-10-17 译文回填失效口径修复（阻断级正确性 bug）：`pipeline/translation.py` 的 `apply_agent_translation`（:1402）与 `apply_subtitle_translation`（:1465）此前给 `finalize_translation` 传的是 `invalidate_preview_artifacts`，而同一函数的另外两个调用点（`retranslate.py:333`、`semantic.py:529`）传的是 `invalidate_rendered_artifacts`——四个调用点分成两派。preview 口径只删 `preview_ass` 及其下游，不碰 `translated_srt` / `bilingual_srt` / `bilingual_ass`，不清烧录 fingerprint，也不重置 SUBTITLE_QA / RENDER / BURN / MEDIA_QA。链条是：`finalize_translation` 结尾的 `_qa_and_render_translation` 在 `if not complete_qa_stage(...): return (qa_path,)` 处早退，QA 非 pass 时根本不渲染；于是一个已渲染过的 Job 回填 v2 译文且 v2 的译文 QA 落在 `needs_review` 时，`translated_cues` 是 v2 而磁盘上的 SRT 还是 v1 且 checksum 有效（文件没被动过），`workflow._translation_satisfied` 全绿、`continue` 发 `workflow_completed`，用户拿到的是旧译文——违反不可破坏约束第 4 条的精神（QA 未放行的内容被当成交付）。两处改为 `invalidate_rendered_artifacts`，与另外两个调用点对齐。判定「原 preview 口径不是刻意」的依据：同一个 `finalize_translation` 内 polished 草稿分支自己就做了等价的完整重置（`downstream_of(TRANSLATION_DRAFT_CUES)` + `clear_burn_fingerprint` + 四个 stage 回 PENDING）；`invalidate_preview_artifacts` 的注释与唯一合理调用点 `burnin.py:276` 都表明它是为「译文 cue 未变、只重做预览」设计的；rendered 口径在集合上严格包含 preview 口径；首次翻译时下游产物尚未登记、失效为空操作，stage 置 PENDING 后紧接着被 `_qa_and_render_translation` 推进，无回归面。红先取证：新测试在修复前的代码上失败于「过期 v1 `translated.srt` 仍是 checksum 有效的交付物」。协议快照零 diff（两个场景都是首次翻译，失效为空操作且不发事件）。新增 `TranslationRevisionInvalidationTest` 两条（Agent 回填走完整断言，导入译文走轻量断言），889 → 891。遗留观察（本次未改）：`subtitle_review_acknowledgment` 只绑定 `source_cues` checksum 与「问题族 + cue id」，译文内容变化不会使其失效——v1 的超宽确认会替一条用户从未看过的 v2 超宽译文代签放行。`revision.py` / `semantic.py` 改写 cue 时都显式 pop 掉这条确认，`invalidate_rendered_artifacts` 没有；四条译文回填路径同样暴露，属于既有缺口而非本次引入，需单独决策。下一项仍是 Phase 5（语义链路编排单份化）。
+
+2026-10-17 R3.1 Phase 4c：semantic 接入共享批次循环，Phase 4 收尾——四条链路（translation / retranslate / polish / semantic）至此共用 `run_provider_batches` 一份循环骨架。`_run_review_phase`（初审 / 复审共用，三次调用）与 `_run_repair_phase` 两处同形循环各减 20 / 26 行，`_emit_batch_event` 这个只服务于它们的 helper 一并删除（`semantic.py` 1163 → 1094 行）。semantic 相对已接入三处的两条新差异按参数化承接，没有硬塞：`with_batch_index=True` 让共享循环内部 `enumerate(batches, start=1)` 把**本轮 1 起序号**注入 started / retrying / completed 三类事件（它与稳定的 `batch.id` 是两个不同的东西，混用就是历史上「批次 38/1」那个显示 bug）；`fail_stage=False` 表示循环内不收口 stage——语义校对的 stage 失败由 `run_translation_semantic_review` 的外层 `except` 统一带 `extras={"phase": "semantic_review"}` 收口，循环里再收一次会多发一个不带 phase 的 `stage_failed`。其余差异走既有参数：`request=semantic_review_batch` / `semantic_repair_batch`（显式传，保住 51 + 11 处桩位）、review 传 `_SEMANTIC_REVIEW_RESPONSE_CORRECTION` 而 repair 沿用默认、`phase` 为 `semantic_review` / `repair`、`skip=batch.id in completed`、`on_result` 写 checkpoint。循环之后那次额外的 `_write_review_checkpoint` / `_write_repair_checkpoint`（重新赋值 `path` / `progress_path` 的那行）保留在循环外。链路决策逻辑（初审 → 可修复？→ 修复 → 复审 → 确认/等待）零改动，留给 Phase 5。协议快照零 diff；`fail_stage=False` 此前全仓无覆盖，新增 `test_api_review_failure_collars_stage_once_with_semantic_phase` 与 `test_api_repair_failure_collars_stage_once_with_semantic_phase` 两条（887 → 889）。负向取证：把 `fail_stage` 写死 True 时这两条新测试红（`stage_failed` 2 != 1，快照不覆盖失败路径仍绿）；去掉 `batch_index` 注入时 `api_polished` 快照场景与 `test_human_revision_scopes_review_and_preserves_untouched_issues` 红。下一项是 Phase 5（语义链路编排单份化）。
+
+2026-10-17 R3.1 Phase 4b：polish 接入共享批次循环，并收敛两处 Agent 降级事件。`_run_translation_polish` 的循环块 62 → 22 行，差异全部参数化：`request=polish_batch`（显式传，保住 `xvt.pipeline.polish.polish_batch` 这个桩位）、批次事件带 `phase=polish`、checkpoint 跳过只看 `batch.id in completed`、每批后 `_write_progress` 走 `on_result`。`run_provider_batches` 新增 4a 预留未加的 `stage_extras`（默认 `None`，只服务润色失败收口的 `extras={"phase": "polish"}`，与事件里的 `phase` 刻意不互相派生），并补上它的专项测试 `test_api_polish_failure_marks_stage_with_polish_phase`——此前全仓无人断言润色失败事件的 `phase`。`pipeline/common.py` 新增叶子 helper `emit_agent_fallback`，收敛 translation 与 polish 两处 `TRANSLATION_FALLBACK` 发射（`phase=None` 时不写该键）；helper 只发事件，不含 `set_stage(AWAITING_INPUT)`——两处的 stage 位置与 extras 本就不同。polish 侧 `_load_progress` 的 `translation_progress_reset` 保持原样未动（Phase 1 记录的快照已知缺口）。协议快照零 diff；负向取证：去掉 `stage_extras` 只有新增的 polish 测试会红（快照不覆盖润色失败路径），漏传 fallback 的 `phase` 则 `polish_agent_rerun` 场景会红。
+
+2026-10-17 R3.1 Phase 4a：provider 批次循环单份化（translation 与 retranslate）。`pipeline/translation.py` 新增 `run_provider_batches`，承接取消点、批次事件、逐批回调与失败时的 stage 收口；`run_translation` 的循环块 82 → 40 行，`retranslate_cues` 44 → 23 行。两处的真实差异全部参数化保留：局部重译不发 `translation_batch_started` / `translation_batch_completed`、没有 checkpoint、事件不带 `phase`，初译只在 polished 质量下带 `phase=draft`。共享循环刻意留在 `translation.py` 而非新模块：38 处测试桩钉在该模块的 `translate_batch` / `time.sleep` / `_backoff_delay` 上，移出会一次性废掉这些桩并与 translation 成环。协议快照零 diff；负向取证确认把「重译不发进度事件」这条差异错误统一后快照会红。原 Phase 3（Agent 交接前奏单份化）已折入 Phase 4：实测 `TRANSLATION_FALLBACK` 全仓只有 2 处发射，不值一轮独立 PR，留到 4b 随 polish 循环一起收。
+
+2026-10-17 R3.1 Phase 2：消解 pipeline 包内的函数级 import 环。新增零依赖叶子 `src/xvt/pipeline/semantic_state.py`，下移 `semantic_review_target` 及其完整传递闭包共 18 个只读派生函数（批次重算、policy 回退、报告解析、repair checkpoint 读取、Agent 结果解析与序列化），`review` / `revision` 顶层 import 该叶子，`semantic` 顶层 import `review` / `revision` / 该叶子，原先 8 处函数体内惰性 import 全部消除。纯搬移：18 个函数在改名映射下 AST 完全等价，协议快照零 diff。`tests/test_pipeline_imports.py` 新增 ast 守卫，禁止 pipeline 包内出现任何函数级 `xvt.pipeline.*` import（覆盖任意嵌套深度与自引用）并防止扫描范围静默缩小。`xvt.recovery` ⇄ `xvt.pipeline` 的跨层环不在本阶段范围。
+
+2026-10-17 R3.1 Phase 1：provider 协议快照回归网落地（`tests/test_provider_protocol_snapshot.py` 与 `tests/fixtures/provider-protocol-snapshot.json`），零生产代码改动。7 个场景冻结 API polished、Agent polished、`auto` 降级、进度重置、局部重译（API 与 Agent）和显式补跑润色（Agent）的事件序列、artifact 内容 checksum、manifest 键序与 fingerprint；负向对照确认改掉事件发射点、事件类型、artifact 文件名或 manifest 键名都会让快照变红。R3.1 据此拆为 5 个独立可合阶段，后续每个阶段以「快照零 diff」为硬验收，出现 diff 即回退而不改 golden。已知缺口：polish 侧 `translation_progress_reset`、Agent 链路 fingerprint 字面值（绑定 job id，只冻自洽性与传播分组）、provider 彻底失败后的 stage 收口文案。
+
+## 2026-10-11
+
+2026-10-11 Q6.2 离线基线：只读扫描全部 20 个历史 Job，整理 39 份语义报告与 26 次已接受修订，提取 4 类最小样本并增加确定性边界测试。多轮修订引入不同遗漏、源文疑点保留和历史无变化建议分别处理；不把模型输出当真值，不修改生产提示词或默认质量。当前模型重复输入实验与原音 oracle 仍待验证，Q6.2 未整体完成。详见 [收敛基线](Q6_2_CONVERGENCE_BASELINE.md)。
+
+2026-10-11 polished Agent 验收：独立临时 Job 完成公开视频下载、84 条英文人工字幕、Agent natural + polished 翻译与语义校对、1080p H.264/AAC 整段烧录及媒体 QA。24 个 artifact 全部校验通过，时间轴和源文不变；错误 fingerprint 回填不改 Job/manifest，完成后 continue 不重翻译/重烧。字幕 QA 有 17 条 warning、无阻断项。三帧目视抽查正常。此样本不覆盖 ASR 或真实语义修复，默认保持 standard + faithful；下一项为 Q6.2 语义复查收敛验证。详见 [验收记录](POLISHED_AGENT_E2E_ACCEPTANCE.md)。
+
+2026-10-11 YouTube 画质修复：已复现 Chrome Cookie 仅返回 360p，而匿名提供 1080p。完整视频获取现比较两种访问方式，原音轨优先、分辨率无上限、固定格式 ID、独立临时下载与实际媒体校验；原子发布拒绝覆盖。新增可选脱敏摘要，不自动更换旧 Job 媒体或字幕。check 专项与对抗复查已修复缺格式判定、无音轨候选及覆盖竞态，最终无剩余发现。全量 868 测试、176 子测试通过，Ruff、help、doctor 通过；授权临时整段下载得到 1920×1080、原音轨与正常时长。隔离验证及限制见 [画质修复记录](YOUTUBE_DOWNLOAD_QUALITY_PLAN.md)。用户已授权最终检查通过后提交推送；实际提交状态以 Git 记录为准。
+
+## 2026-10-04
+
+2026-10-04 校对体验改动：译文 QA 已加入 FFmpeg/libass 实际 ASS 宽度测量，超过字数建议但容纳得下时仅 warning；测量不可用仍保守阻断。候选 QA、人工预检、译文收尾与烧录使用实际媒体/字体上下文，确认绑定 layout；预览不覆盖正式 QA。人工 JSON/SRT 修订新增 `apply --check`，正式提交也在写入前完整预检，不合格不改 Job 或失效下游。此次不修改语义 severity、源文重建和下载策略。实现与验证结果见本次分支；不重写用户已完成的视频任务。
+
+
+## 从其它章节搬出的历史叙述
+
+### 当前快照节（2026-10-04 起的历史记录）
+
+2026-10-04 review 修复：原子 `burn` 与 `preview` 的所选媒体/字体 QA 只读，不覆盖工作流正式报告；本地替代媒体或字体导致布局失败时 Job 不变，检查前发生的远程媒体获取仍按原契约持久化。端到端 `run` / `continue` 仍持久化目标布局 QA。短视频、窄画幅和字体变化的回归覆盖失败后继续原工作流。polished Agent 本地纯字幕 CLI 冒烟已完成，3 条 cue 时间轴保持不变、14 个 artifact 校验通过；公开视频到烧录的 Agent 主链验收已于 2026-10-11 完成，覆盖范围见本文件顶部验收记录。
+
+2026-10-04：修复显式 YouTube 字幕请求在浏览器 Cookie 查询漏报人工字幕时直接回退 ASR 的问题。匹配人工字幕缺失时匿名补查一次，同一视频匹配成功后匿名下载字幕；显式代理保留、媒体访问方式不变。`remote_info.subtitles_anonymous` 与选字幕事件记录访问方式，下载中断恢复继续匿名；补查失败报错。已有源 cue 的 Job 不自动重建，polished Agent 主链 E2E 已于 2026-10-11 完成，默认质量继续保持 standard + faithful。
+
+本次 review 补齐已有有效候选的保护：不重新补查、不把旧自动字幕重标为人工字幕。公开 YouTube 视频的临时 Job 已实际完成匿名补查、人工字幕下载与源字幕 QA，共 67 条 cue，无媒体下载、ASR 或翻译 API 调用；用户原 Job 保持原样。
+
+CI 回归修复：烧录 QA 测试分别模拟布局测量成功和不可用，检查短字幕对应的 pass/warning、警告内容与 QA 放行状态，不再依赖宿主机 FFmpeg 和字体。生产 QA 规则保持不变。
+
+### 后续任务规划节：Q1–Q6.1 的逐条完成记录
+
+**Q1：翻译传输可靠性已完成。** `RemoteDisconnected`、连接重置、分块传输中途断开（`IncompleteRead`）和 TLS 中途终止（`SSLEOFError` 等）等传输错误已进入 retryable 分类，其余 `HTTPException` 以不可重试依赖故障退出而不再穿透为 traceback，证书与握手类 `SSLError` 保持立即失败；传输重试与结构纠错使用独立预算，默认分别为 4 次和 1 次；主翻译与局部重译共用重试实现和 retry 事件语义。
+
+**Q2：新 Job 自适应源字幕已完成。** 平台字幕只在显式 `--youtube-subtitles` 下请求；`--source-strategy auto|subtitles|asr` 写入新 Job 顶层配置。`auto` 直接采用通过 QA 的人工候选，对失败候选先对齐再回退 ASR；自动候选在翻译/烧录目标中使用 ASR，源字幕-only 且 QA 通过时可直接采用。候选 QA 和选择写为 `source_candidate_qa`、`source_selection` checksum artifact，并以 `source_selected` 事件记录；平台尾 cue 仅在超出媒体不超过 500ms 时裁剪。旧 Job 缺少策略仍走历史路径。
+
+**Q3：已有 Job 源字幕重建已完成。** advanced `xvt rebuild-source JOB --strategy asr [--cookies-from-browser ...] [--proxy ...]` 显式重建，不由 `continue` 自动执行。它复用校验通过的词级转写、规范化音频和本地或已下载媒体；远程缺少可用 checkpoint 与媒体时才重取。命令持久化 ASR 策略与修复意图、关闭对齐，失效 `source_candidate_qa`、`source_cues`、`source_selection`、`translation_resegmentation` 及全部下游产物，并保留 `input_translation_subtitles` 以按新 cue 重新验证映射。修复中断后 `status` 保持显式重试，成功后端到端 Job 用 `continue`，旧原子 Job 用 `translate`。`status` 仅在非 ASR 源字幕 QA error 且可重建时首次给出建议，不对 ASR 自身 error、`needs_review` 或译文 QA 重复建议重建；不升级 schema 或新增 stage/事件类型，复用既有 artifact/stage、`source_selected` 和 `cli_completed`。
+
+**Q4：语义组翻译已完成。** 翻译前由确定性代码建立语义组，句末标点或 650ms 间隔结束组；组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限依次按软标点、连接词前和最大停顿择边，单个超长 cue 单独成组。provider 以完整组装箱，批次外前后各一个完整相邻组只读；`semantic_groups` 保持为批次协议的可选加法，响应继续严格只覆盖当前 `items`。prompt v3 和 grouping version 进入 API 指纹以重置旧 API checkpoint，并写入 Agent manifest 供消费者识别；已等待输入的旧 Agent Job 仍按严格 ID 契约兼容回填，重新准备批次后才获得语义组。Q4 不新增 stage、artifact、事件或 Job schema，默认翻译风格继续为 `faithful`，局部重译使用 singleton groups。
+
+**Q5a：已有译文可恢复润色已完成。** `polish-translation` 为现代端到端 Job 保存 `translation_draft_cues`，持久化 `translation_quality=polished`，并以 `translation_polish_batches` / `translation_polish_progress` / `translation_polished_cues` 表达 Agent/API 恢复状态。`status`、`continue` 和 `batch-continue` 共用 `polish` / `await_agent_polish` 计划；局部重译和重新导入译文会重建 draft 并失效旧润色结果。润色复用 `translate` stage 与批次事件的 `phase=polish`，不升级 Job schema。
+
+**Q5b：新 Job 翻译质量模式已完成。** `run`、`batch`、`translate` 和 `prepare-translation` 支持 `--translation-quality standard|polished`，默认仍为 `standard + faithful`。API polished 路径按 draft -> polish 保存两阶段 checkpoint；Agent manifest 使用 `task=translate_and_polish`、task version 和可重算 fingerprint，一次回填登记 progress 与 polished 候选。Agent 无 draft 证据链可从完整 progress 确定性补齐 polished 候选，且不会被误判为 Q5a 的 draft 修复。旧 WorkflowConfig、原子 Job、batch manifest 和无 task Agent manifest 继续按 `standard`。
+
+**Q6：语义校对与一次修复已完成。** polished 候选必须经过 `meaning_error`、`omission`、`terminology`、`awkward_join`、`source_suspect` 五类结构化 review；除 `source_suspect` 外的问题按完整语义组最多修复一次并最终复查。API 初审、修复和复审逐批 checkpoint，并使用阶段对应的结构纠错提示；Agent 使用严格绑定 Job、候选、版本和批次的 `task=semantic_review_and_repair` manifest，通过 `apply-semantic-review` 一次性校验后回填，无效响应不会破坏等待状态。初次报告含可修复问题时不能提前确认；`source_suspect` 在无关修复后继续保留；最终报告只有在初次报告、修复 checkpoint 和修复候选 checksum 均有效时才能批准。新增四类 checksum artifact，`status` / `continue` / batch recovery 区分 Agent 输入等待和人工语义确认等待。确认绑定 source、候选、报告、prompt version 与精确问题集合，且后续确定性字幕 QA 仍可阻断。专项方案见 [Q6 技术方案](Q6_SEMANTIC_REVIEW_PLAN.md)。
+
+**Q6.1a：人工译文修订已完成。** Q6 等待人工复核时生成 fingerprint 绑定的 JSON/SRT 模板；两种载体严格保留完整模板 ID 集合。`apply JOB REVIEW --continue` 可一步回填并继续，修订记录持久化 `changed_ids`，只重新复查受影响的完整语义组；不会重跑翻译、润色或自动修复。候选还由 checksum 绑定的 `translation_candidate_qa` fail-closed 门禁保护，只有目标译文可修问题进入模板。源文修改会失效译文及下游，因此拒绝 `--continue`。详见 [Q6.1 方案](Q6_1_HUMAN_REVISION_PLAN.md)。
+
+**Q6.1b：源文修订与多路径引导已完成。** `prepare-source-review JOB --cue ID` 生成绑定当前 source checksum 和精确 ID 集合的 JSON 与同 fingerprint SRT；`apply-source-review-fixes` 接受任一载体且只修改 source text，保留 cue 时间轴、words、置信度和 provenance。SRT 用固定文件名承载 fingerprint，按原时间轴还原 cue ID；改时间轴、增删 cue、注释 ID 不符、空文本或改名均被拒绝。接受结果以 fingerprint 文件保存，并在一次 Job 原子保存中切换 `source_review_revision`、source cue、`selected_kind=human_reviewed` 的选择记录、源 QA 和可用 SRT；QA 阻断时不登记 source SRT，确认后 `continue` 从人工 cue 恢复。旧翻译、润色、语义报告、译文修订、渲染和烧录全部失效，上游媒体与转写证据保留；导入译文任务明确拒绝。Q6 的 `source_suspect` 现在会自动准备源文模板，`status` 优先源文修订并同时提供译文修订和直接确认；旧等待 Job 由 `continue` 懒生成，避免在恢复命令中展开大量 cue ID。
+
+**Q6.1c：提示词加固已完成。** API 与 Agent 统一把完整语义组作为连续话语处理，翻译与润色允许同组内协调语序、指代和连接词但不跨组移动含义；专名、产品名、代码标识符和术语没有明确证据时不得猜测修正。语义校对明确五类问题边界，解析器拒绝无变化建议、`source_suspect` 非空建议和单 cue `awkward_join`。translation/polish/review/repair prompt 当前为 v5/v3/v4/v3；旧 checkpoint 与带版本指纹的 Agent manifest 安全失效。人工修订 Agent manifest 可只复查 `changed_ids` 命中的完整语义组，相邻组只读。2026-08-08 的历史真实 API polished 回归证据保持有效；2026-10-11 Agent 主链 E2E 已完成，默认保持 standard + faithful；下一步验证 Q6.2 语义复查收敛。
+
+**简中模型译文标点收口已完成。** 初译、一次翻译加润色、显式润色、语义修复和局部重译共用同一写入边界：消除全角 `，`、`。`，句中位置按需替换为一个半角空格以保留 `OpenAI GPT-5` 一类词边界，行尾与换行前直接移除；模型把省略号写成的连续全角句号归一为单个 `…`；问号、感叹号、分号、冒号、破折号、ASCII 标点一律保留，不折叠模型原有换行。左右同形的引号（`"`、`'`、`＂`、`＇`）按上下文推断开闭方向，英文词内撇号和数字后的尺寸符号不参与引号计数，补出的空格始终落在引号之外。源 cue 末尾为问句而译文缺少句末语义标点时补 `？`，位置镜像源文中问号相对末尾闭合符号的位置（源文 `(ready?)` 得到 `（准备好了吗？）`，源文 `Is it (a)?` 得到 `是吗（a）？`），译文闭合符号少于源文时按译文实际数量收敛。语义审查把半角空格和 cue 边界视为有效分隔，不会仅因缺少全角逗号或句号报告 `awkward_join`。处理范围严格限于显式 `zh-CN` / `zh-Hans` 等简中标签；导入译文、人工译文修订、源字幕、bare `zh`、繁中及其他目标语言保持不变。恢复中的 API checkpoint 与 Agent 回填通过相同路径，保证重放文本和 checksum 一致。
+
+### 后续任务规划节：R 系列的已完成项
+
+- **已完成（PR #67）**：真实 Job 复现的两个恢复语义矛盾——R2.5 字幕 QA 确认后 `translate` stage 收口（2026-08-01 polished E2E Job 复现并实证修复）、R2.4 烧录成品缺失误报"媒体 QA 未过"的文案拆分（2026-07-16/18 Job 复现）。
+- **已完成（PR #68，堆叠于 #67）**：R1 全部四项——CI 增加 Python 3.11/3.13 矩阵与 `uv build`、补打并推送 `v0.1.0` / `v0.1.1` tag 且 AGENTS 记录发版流程、`tests/test_pipeline_imports.py` 守卫 pipeline 依赖方向、16 个跨模块 `_` 前缀符号公有化。R1.3 落地时发现 semantic ↔ review/revision 存在函数级惰性 import 打破加载期循环，留待 R3.1 一并消解。
+- **已完成**：R2.1 `_run_command` 分发拆解——26 个命令分支提取为独立 `_cmd_<name>` 函数 + `_COMMAND_DISPATCH` 字典分发表，`_run_command` 从 622 行缩减至 4 行查表逻辑，纯搬移不改行为。
+- **已完成**：R2.2 统一 `xvt apply JOB RESPONSE` 路由——task 字段优先、Job 等待步骤回退的两级路由，`--target-language` 自动解析；局部重译是显式例外：`apply-cue-retranslation` 需要 `xvt apply` 拿不到的 cue ID 与目标语言，因此无论响应带不带 `task`（协议一致的重译响应只有 `fingerprint` + `items`，靠「有有效重译 manifest 且 `translate` 在等输入」识别）都以 `invalid_input` 报错并给出可复制的手工命令；原 `apply-*` 命令全部保留为稳定入口，`status` 改为优先推荐统一入口。12 个新增路由测试（含真实 Job 零 mock 集成测试与路由表同源守卫）。
+- **已完成**：R2.3 译文与源文修订 SRT 人工通道——两类 JSON 模板旁均写出同 fingerprint 的 `*-review-<fp12>.srt`（正文为 `#<cue id>` 注释行加当前文本），可用任意字幕工具编辑；对应 `apply-*-review-fixes` 按后缀识别，统一入口 `xvt apply` 按固定文件名路由。SRT 的 fingerprint 由文件名承载，cue ID 按 `(start_ms, end_ms)` 精确匹配还原，改时间轴、增删 cue、注释与时间轴不符均在解析边界被拒。JSON/SRT 汇聚为同一 `changes` 语义；旧 Job 只有 JSON 时按同一 fingerprint 补齐 SRT，`status` 的 `input:` 一并列出两种载体。
+- **已完成**：R2.4 两阶段——`relink-burned-output` 仅以 checksum 有效的 v2 burn proof（绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum）、媒体 QA 与候选文件 checksum 证明身份后更新成品路径；legacy fingerprint 不得直接 relink，需 `continue` 重烧生成 v2 proof；重复 `burned_video` fail closed，普通 `status` 不会为 v2 proof 额外计算源媒体内容 checksum。恢复导航在其余静态条件满足、但已登记成品缺失或 checksum 失效时返回 `awaiting_input`，首选重新关联、备选显式重烧；建议仅表示可能可关联，relink 会复核源媒体内容。`batch-continue` 将该状态作为停止态，不自动重烧。媒体 QA、proof 或 fingerprint 无效仍为 `retryable`。polished 质量另加一条限制：只有语义候选已收尾（语义校对通过且 `translated_cues` 与最终候选一致）才给 relink 导航，否则 continue 的收尾会改写译文 cue、让刚关联的成品指纹失效。详见 [R2.4 技术方案](R2_4_BURNED_OUTPUT_RELINK_PLAN.md)。
+
+全部改进不触碰不可破坏约束，不改变磁盘协议与旧 Job 兼容性。另：2026-08-01 已用公开素材完成 polished **API** 路径真实 E2E（语义校对零问题通过），2026-10-11 Agent 主链 polished E2E 已通过，默认决定继续保持 standard + faithful；多样本对照仍待做。R3.1/R3.2 之后再设计 Q7 翻译上下文与术语候选包：候选可参考全文、平台元数据和用户 glossary，但模型推断不得自动改写源文或成为强制术语；人工确认保持可选。Q7 完成后再进入消费现有事件、QA artifact、修订 SRT 和预览能力的可视化校对工作台。
+
+### 已完成：CLI 阶段语义与完成摘要打磨
+
+CLI 执行生命周期加固（Job/Batch 独占执行锁、SIGINT/SIGTERM 取消、进程组清理、持久化中断状态）与 JSONL 事件协议 v1 均已完成，详见 [路线图](../ROADMAP.md) 和 [CHANGELOG](../CHANGELOG.md)。真实 E2E 暴露的 P0（缺 `translated.srt`/`bilingual.srt`、`needs_review` 恢复不提示 acknowledge）已在本轮修复。Job/artifact 路径安全与输出覆盖策略已固定（见 `xvt.paths`）。这些能力已经满足未来界面消费要求，但在开发界面前先完成字幕质量闭环。
+
+真实 YouTube 字幕翻译与烧录验收已确认功能链路、checksum 和媒体 QA 正常。2026-08-19 的 polished API E2E 完成到烧录和媒体 QA，最终 `verify` 校验 29 个 artifact、0 failed、0 warnings；人工回填后的每轮推进只做受影响语义组复查和候选 QA，没有重新翻译或重新润色。已确认及后续体验项如下：
+
+- ~~YouTube 下载格式回退 / 403 引导（E2E P0-3）。~~ 已完成：格式串 `bv*+ba/b/18/best`；HTTP 403 提示 `continue` / 更新 yt-dlp / `--cookies-from-browser`。
+- ~~下载平台字幕和下载源视频使用不同提示，避免重复显示“获取素材”。~~ 已完成（`acquire` detail）。
+- ~~端到端任务不得先显示“跳过翻译/烧录”再实际执行；API 自动翻译准备批次时不得显示“等待用户输入”。~~ 已完成（计划跳过静默 + `await_input`）。
+- ~~区分源字幕 QA/渲染与译文字幕 QA/渲染；`needs_review` 在 status 中勿仅显示为 `failed`（P1-7）。~~ 已完成：纯 review 持久化为 `awaiting_input`，error 才是 `failed`，stage 枚举未扩展。
+- ~~翻译重试的人类可读输出补齐下一次尝试序号和等待时间。~~ 已完成。
+- ~~完成摘要按最终视频、字幕和 Job 分类，并由 XVT 显示总耗时。~~ 已完成。
+- ~~ASR 低 timing confidence / 确认摩擦（E2E P2）。~~ 已完成：ASR 派生 cue 的 `low_timing_confidence` 降为 warning；对齐与用户导入仍 review；硬溢出仍需确认。
+- ~~Job/artifact 路径安全边界和输出覆盖策略。~~ 已完成：烧录/预览经 `xvt.paths` 拒绝覆盖源媒体、job 文件与其他 artifact；同 kind 可重写。
+- ~~局部语义复查进度把稳定批次 ID 当作本轮序号，出现「批次 38/1」一类显示。~~ 已完成：事件保留 `batch` 作为稳定 ID，新增可选 `batch_index` 供人类进度显示。
+- ~~`xvt apply ... --continue` 完成后夹带回填阶段的旧产物路径和 recovery 摘要。~~ 已完成：统一回填路由在继续工作流前抑制中间人类输出，只展示继续后的真实终态。
+- **已完成（Q6.2 本地预检）**：`apply --check` 对人工 JSON/SRT 修订执行只读身份校验和确定性 QA，集中列出阻断的 cue、问题类型及宽度限制；正式 apply 在写入前重复预检。实际 ASS 行宽测量同步落地。Q6.2 剩余工作是下述语义复查收敛验证。
+- **部分完成（Q6.2）**：历史任务的最小离线回归集已建立，见 [收敛基线](Q6_2_CONVERGENCE_BASELINE.md)。未找回“可接受/无需报告却登记为问题”的留存实例；同一记录批次的历史检出差异也不能直接证明当前模型缺陷。下一步单独授权重复输入模型实验并补足源文 oracle，再评估提示词、响应纠错或审查策略。验收要求减少无效往返，同时保留真实 meaning/omission 问题及确定性 QA。YouTube 首次 403 和无变化建议被现有边界正确拦截，不列为当前正确性 Bug。
+
+## 冻结快照：项目说明书五节（2026-10-21 搬出，不再维护）
+
+> 以下五节是 2026-10-21 从 `HANDOFF.md` 搬出的说明书内容，**已停止维护**。
+>
+> 搬出时逐条核过：其中绝大多数事实已由 [README](../README.md) 与 [架构说明](ARCHITECTURE.md) 覆盖，两边都没有的独有事实已在同一次改动里回收进那两份文档。
+>
+> **这里的内容只用于考古。与 README / 架构说明不一致时，一律以那两份为准。**
+## 已完成能力
+
+### 输入和素材获取
+
+- 支持本地视频、音频和 HTTP/HTTPS 远程 URL。
+- YouTube 通过 yt-dlp 获取元数据、人工字幕、自动字幕、音频或完整视频。
+- 人工字幕优先。只有显式传入 `--allow-auto-subtitles` 才使用自动字幕。
+- yt-dlp 把语言写进字幕文件名，同一 Job 的下载目录可能同时留有多个语言或变体；选取时先精确匹配 `source.<language>.srt`，再匹配 `source.<language>-*` / `source.<language>.*`（大小写不敏感），都没有才回退字典序首个。
+- 请求烧录时，远程完整视频在前置阶段下载一次，ASR 和烧录复用同一文件。
+- Cookie 来源和代理必须显式传入，不会默认读取浏览器状态。
+
+### 转写和时间轴
+
+- 支持 MLX Whisper 和 faster-whisper，保留词级时间戳；faster-whisper 提供真实百分比，MLX 提供运行时长心跳。
+- 分段综合停顿、标点、字幕时长和显示宽度；`conservative`、`balanced`、`compact` 预设仅调整 ASR 的停顿和最大时长，默认保持平衡行为。
+- 可导入 SRT、VTT、ASS 和 SSA 源字幕，默认保留用户时间轴。
+- 输入字幕必须是 UTF-8（带不带 BOM 都可以）。非 UTF-8（GBK、Big5、Shift_JIS、带 BOM 的 UTF-16/32）与解析失败都归为 `invalid_input`（退出码 2），报错指向用户传入的原始路径并给出 `iconv` 转码建议；带 BOM 的 UTF-16/32 会点名疑似编码，无 BOM 的 UTF-16/32 走解析失败分支，消息里按 NUL 字节提示疑似宽字符编码。XVT 不做本地字符集探测——宽松解码器会把内容「成功」解成乱码，乱码会流进翻译 API 并固化进 checksum。
+- 源字幕可直接作为 `run` 输入创建纯字幕 Job，无需媒体即可翻译、QA、恢复和导出三种 SRT；无媒体时不生成 ASS，也不支持预览、烧录或重分段。
+- `--align-subtitles` 会额外运行 ASR，并用顺序模糊对齐修正整体偏移或漂移；它必须与 `--subtitles` 同用。强制对齐 fail-closed：置信度低于阈值失败（`--allow-low-confidence-alignment` 可显式放行），对齐后字幕 QA 出现 error 级问题同样失败且该参数不放行。去掉 `--align-subtitles` 保留的是源字幕原时间轴，不是 ASR 分段；需要 ASR 时间轴要用 `--source-strategy asr`。
+- cue 结束时间、相邻重叠和媒体边界会在分段与 QA 阶段校正或阻断。
+- 分段遵守中日文**行首行尾禁则**（禁則処理）：cue 不以闭合括号、句读、连字符、中点、小字假名、长音符或叠字记号开头，也不以起始括号结尾。字符类取自 JIS X 4051 / JLREQ 并与 UAX #14 对齐，中文侧按 GB/T 15834 补齐；唯一谓词是 `segment.forbidden_break`，cue 边界的三个产出点（主循环的句末/停顿/超时切、`_soft_cut`、`_partition_words` 的宽度切）都走它。形态是罚分不是硬禁，整行全是禁则字符时仍切得动。**它只管排版，挡不住词法边界**——日文逐字转写下仍可能切在词中间（`科学|的`），那一半要靠分词器，结论与代价评估见 `docs/REVIEW_FINDINGS_2026_10_17.md` 的 P7。
+- 分段与对齐共用同一个边界归一实现：重叠优先按中点切开；中点无法给两条 cue 都留出正时长（严重重叠、完全嵌套、词时间戳回退）时把后一条推到前一条结束处，仍不足则补足 1ms 最小时长，受影响的 cue 在 `warnings` 留痕但不产生新的 QA 问题。尾部收口的 `min(padded_end, next_start, media_duration_ms)` 同样钳制回正时长。归一后做单调性自检，不把零/负时长时间轴交给下游 QA。
+
+### 翻译
+
+- 支持 OpenAI-compatible Chat Completions，实际请求地址为 `<base-url>/chat/completions`。
+- 默认环境变量为 `XVT_TRANSLATION_BASE_URL`、`XVT_TRANSLATION_MODEL` 和 `XVT_TRANSLATION_API_KEY`。
+- `--provider auto` 在配置完整时调用 API，配置不完整时降级为 Agent 批次。
+- `--provider openai-compatible` 缺少配置时直接失败，不静默降级。
+- `translate` 和 `prepare-translation` 支持 JSON 术语表与 `faithful`、`natural`、`concise` 风格；批次仅携带命中源 cue 的术语。
+- `run` 也支持同一套参数，并将解析后的策略快照写入工作流配置；`continue` 不依赖原术语表文件，始终复用该快照。
+- 译文 QA 对命中源 cue 的术语确定性检查目标词；违规生成 `glossary_violation`、保留 QA 报告并阻断渲染和烧录。阻断的 error 全部是 `glossary_violation` 时，`status` / `continue` 给出 `retranslate-cues --cue … --target-language …` 出口（该 severity 不能由 acknowledge 通道放行）；`standard` 只改指定 cue，`polished` 会写成新草稿并重启润色与语义校对。必需术语优先取端到端 Job 的 `config.workflow` 策略快照，顶层 `config.translation_policy` 只是原子 Job 的回退位置；`prepare-translation` 在最后一次落盘前写入该顶层配置，兼容 API 模式下也不会被随后的 `load_job` 丢弃。
+- API 翻译按批次保存进度，指纹包含源 cue checksum、语言、端点、模型、批次大小、提示词版本、语义分组版本和翻译策略。
+- 默认兼容 API 翻译批次为 25 个 cue，请求超时为 180 秒；单个新 Job 可通过 `--batch-size` / `--timeout-seconds` 覆盖，已创建 Job 始终复用持久化配置。
+- 429、部分 4xx、5xx、网络异常、远端断连、响应读取连接重置、分块响应中途断开（`IncompleteRead` / `BadStatusLine` / `LineTooLong`）和 TLS 连接中途终止（`SSLEOFError` / `SSLZeroReturnError` / `SSLSyscallError`）具有明确的传输重试分类；证书与握手类 `SSLError` 在请求和响应两个阶段都立即失败（请求阶段经 `URLError` 包装，按 `reason` 判定）。传输故障默认最多重试 4 次，优先使用最长 30 秒的有效 `Retry-After`（RFC 9110 的 delta-seconds 与 HTTP-date 两种形态，其余值退回本地退避），否则按 equal jitter 指数退避；结构性无效响应另有固定 2 次纠错重试，两个预算互不消耗，且传输重试保留上一轮的纠正提示。
+- 翻译响应必须完整覆盖 cue ID，不允许重复、缺失或额外 ID；`id` 必须是真正的整数，JSON 布尔值（`true` / `false`）与全部其他解析器一致被拒绝，不再当作 cue 1。
+- 标准 Agent manifest 记录 `source_cues_checksum`，回填时拒绝源 cue 已变化的陈旧响应；已登记的 manifest 若 checksum 失效、缺失或内容损坏同样拒绝回填并引导重新 `prepare-translation`。从未登记 manifest 的极旧 Job 与没有该字段的旧 manifest 仍按原样接受，只读查询路径不受影响。
+- 回填的输入校验是纯只读的，失败不改写 Job 状态：`apply-translation`（含统一 `xvt apply`）与 `import-translation` 把「读不出 / 非 UTF-8 / 结构不符 / 覆盖不全 / manifest 失配 / 源 cue 无效」这些检查全部放在触碰 stage 之前，坏输入下 `TRANSLATE` 原地保持 `awaiting_input`。否则等待态被顶成 `failed`，`plan_advance_steps` 不再返回 `await_agent_translation`，统一 `xvt apply` 会误报「not awaiting Agent input」，恢复计划也从「等待回填」降级成「重跑翻译」——用户只是敲错一个文件，却要重付一次翻译成本。校验通过后才置 `running`，随后真正的改写（`import-translation` 的字幕拷贝与 artifact 登记、`finalize_translation` 的落盘与 QA）失败仍按原约定收口成 `failed`。`translate_and_polish`（一次翻译加润色）分支不在此列，仍按原有的 stage 记账。
+- 翻译在不改动 cue 的前提下建立确定性语义组：句末标点或 650ms 间隔结束组，组上限为 `min(20, batch_size)` 个 cue 或 30 秒，超限按软标点、连接词前和最大停顿择边；单个超长 cue 单独成组。provider 批次只按完整组装箱，批次外前后各一个完整相邻组仅作只读上下文。
+- `TranslationBatch.semantic_groups` 记录当前批次的组 ID；响应仍只覆盖当前 `items` 的原 cue ID，不得输出上下文 ID。局部重译使用 singleton groups；`max_target_characters` 是显示建议，最终显示风险仍由确定性 QA 判定。
+- `resegment-translation` 仅对超过硬显示阈值且具有 ASR 词级时间戳的 cue 按语义优先边界重切；它重建 source cue 和 source SRT，废弃旧翻译及其下游产物，禁止复用或字符拆分旧译文。
+- `retranslate-cues` 只翻译指定 cue ID，保留其他译文和时间轴；每个目标 cue 带相邻源 cue 作为上下文，回填后完整重跑译文 QA 并使旧渲染/烧录产物失效。Agent 模式的等待是 `plan_advance_steps` 的正式步骤 `await_cue_retranslation`：`status` 归 `awaiting_input` 并拼出带具体 cue ID 与目标语言的 `apply-cue-retranslation` 命令，`continue` 不宣告完成，`batch-continue` 停在该条目。谓词严格绑定当前 source/translated cue checksum，回填后的残留 manifest 不会盖掉后续的润色或语义等待。回填失败不再丢掉这次等待，两种模式的 stage 收口不同：用户显式跑的 `apply-cue-retranslation`，其校验（响应 fingerprint 对不上、`--cue` / `--target-language` 写错、manifest 与当前 XVT 版本失配等）全是只读动作，失败不改写 Job 状态，`TRANSLATE` 原地保持 `awaiting_input`；API 模式（`retranslate-cues` 直连提供方）下响应是 XVT 自己刚落盘并登记的内部产物、stage 已由调用方置 `running`，同一段校验失败属于内部故障，仍按原约定收口成 `failed`。两种情形下盘上的 manifest 都原样保留且仍然有效，那次等待并没有作废，因此 `cue_retranslation_waiting` 的 stage 条件同时接受 `awaiting_input` 与 `failed`；`failed` 这一支现在只覆盖 API 模式重译失败与旧版本留下的历史 Job（旧版本把用户输入错误也打成 `failed`）。`status` / `continue` 继续提示回填，不会在 `SUBTITLE_QA` 成功时改口报完成、也不会在 `SUBTITLE_QA` 失败时重复给出用户已经跑过的 `retranslate-cues`。`failed` 情形额外要求「没有更新的在途整轮翻译请求」：用户改走整轮重翻时 `prepare_agent_translation` 写出的新 `translation_batches` 在 `job.artifacts` 里排在重译 manifest 之后，此时整轮等待优先，回填出口不会指向已被取代的那一份。恢复计划拼出的 `--cue` 顺序与 manifest 内的批次顺序一致（不排序）：`apply-cue-retranslation` 对 manifest 做全等比对，乱序 `--cue` 的 Job 上排序会让复制的命令必然失败。放弃一次重译不必手工删文件：`prepare_agent_translation` 写出新的整轮 `translation_batches` 时会把 `cue_retranslation_batches` 移出登记，否则残留 manifest 会遮蔽合法的初译等待。`polished` Job 上回填结果会成为新草稿并重启润色与语义校对（真实模型成本），`standard` Job 只改选中的 cue。
+
+### 字幕和显示质量
+
+- 输出 `source.srt`、`translated.srt`、`bilingual.srt` 和 `bilingual.ass`。
+- 模型生成的显式简中译文（`zh-CN`、`zh-Hans` 及 `zh-Hans-*` 区域后缀形式）写入时消除全角 `，`、`。`：句中按需替换为一个半角空格以保留词边界，行尾与换行前直接移除；连续全角句号归一为单个 `…`；问号、感叹号、分号、冒号、破折号、ASCII 标点和原有换行保留。源 cue 末尾问句而译文缺少句末语义标点时补 `？`，位置镜像源文中问号相对末尾闭合符号的位置。导入译文、人工修订、源字幕、bare `zh`、繁中及其他目标语言不变。
+- 双语字幕固定为译文一行、原文一行。每种语言内部的原始换行会被折叠。
+- 16:9 横版英文在 64 个显示单位以内通过，65 到 72 为警告，超过 72 需要复核。窄画幅会收紧限制，中文限制更严格。
+- ASR / `asr_resegmented` 的 `low_timing_confidence` 为 warning；对齐或用户导入字幕的低置信度仍为 review，需确认后继续。
+- ASS 使用独立的中英文字体和字号。macOS 默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`。
+- cue 文本中的字面 `{` `}` 在 ASS 渲染时转义为 libass 的 `\{` `\}`，不再被当作覆盖标签块吞掉，`{\an8}` 一类内容也不会真的改变字幕位置；`\N` 换行与 `{\rSource}` 样式切换是渲染器拼接的结构，不参与转义。反斜杠刻意不转义（ASS 无标准反斜杠转义，libass 原样输出未知序列）。SRT/VTT 导出保留花括号。导入端已同口径收口：`load_subtitles`（`--subtitles`、`--translation-subtitles`、`import-translation`）按 pysubs2 解析出的实际格式分叉，SRT/VTT 保留字面花括号、只剥 `{\…}` 形态的覆盖块，ASS/SSA 仍整段剥除（那里 `{...}` 是标签语法本身），导出→人工编辑→导回链路不再丢内容；人工修订 SRT 走独立纯文本解析器，同样保留。仍存在的限制：SRT/VTT 里 `{\…}` 形态的字面文本与真覆盖标签无法区分，仍会被剥除。
+- 字幕 QA error 记为 `failed`；纯 `needs_review` 记为 `awaiting_input`。两者都会停止工作流且不允许继续烧录，原子命令也不会误发 `cli_completed`。
+- 高级原子 `xvt burn` / `xvt preview` 与端到端链路共用同一道 fail-closed 译文 QA 门（`pipeline.review.review_gate_satisfied`），不能绕过 QA：要求 checksum 有效的译文 cue 与 QA 报告，`pass` / `warning` 放行，`needs_review` 只在报告内全部 review 问题都被当前有效确认覆盖时放行，error、缺失、checksum 失效或结构异常一律拒绝。确认通道只有 `continue --acknowledge-subtitle-review`，因此原子 Job 的报错文案指向重跑 `xvt translate`，不指向不可用的 `continue`。
+- 语义复核确认后，若译文候选和渲染产物已有效或被补齐，`translate` stage 会收口为 `succeeded` 并清除旧 QA 错误；字幕 QA 的独立 `needs_review` 仍需单独确认。
+- 「译文已满足」的判定包含译文 QA 报告与双语 ASS：需要 checksum 有效的 `translated_cues`、`translated_srt`、`bilingual_srt`、`translated_subtitle_qa`，外加**已登记过**的 `bilingual_ass`（`workflow._translation_satisfied` 与 polished 链路的 finalize 短路共用同一口径）。漏掉 QA 报告会让报告单独失效的 Job 被判成「已完成」而空转，`continue` 永不重建。`bilingual_ass` 同理：它是 README / 架构说明列出的交付物，也是 `workflow_completed` 汇报的产物之一，删掉或改坏 `bilingual.ass` 后旧口径会让 `continue` / `status` / `batch-continue` 三路都报完成，而 CLI 没有任何命令能单独重建它；补上之后 `plan_advance_steps` 给出 `render`，走零 API 成本的重渲染。该条件只对已登记过 `bilingual_ass` 的 Job 生效——纯音频、纯字幕等没有分辨率的 Job 从来不渲染 ASS，对它们要求 ASS 会让 `continue` 永远收敛不了。烧录 Job 不额外分叉：至多多渲染一次 ASS，代价为零。原子 Job 上这条缺口的零成本出口（`recovery.atomic_translated_qa_rebuild_command`，`status` 与 `pipeline.burnin` 的 QA 门共用）只对 `standard` 成立：`import-translation` 与其余回填路径共用 `finalize_translation`，在 `polished` Job 上走 draft 分支，QA 不重建、渲染不执行、整条润色腿失效，因此该函数对 `polished` 返回 `None`，两处调用方各自落回既有引导。
+- 恢复计划的判定顺序有一条硬约束：局部重译等待必须排在 `qa_blocked` 之前。术语死锁的出口就是 `retranslate-cues`，跑完后译文 QA 还没重跑、`SUBTITLE_QA` 仍是 `failed`，排在后面会把等待重报成 `manual_fix` 并重复给出同一条命令，端到端 Job 上还与 `plan_advance_steps` 的 `await_cue_retranslation` 自相矛盾。原子与端到端两条分支共用 `_cue_retranslation_waiting_plan`。
+- 同构的第二条让路：端到端 Job 上 `qa_blocked` 也要给**任何**在途 Agent 等待让路。`SUBTITLE_QA=failed` 只说明上一次译文 QA 没过，它不会因为随后开了一次新的等待而自动复位——用户改走整轮重翻时 `prepare_agent_translation` 会移走重译 manifest、写入新的 `translation_batches` 并把 `TRANSLATE` 置为 `awaiting_input`，却不碰 `SUBTITLE_QA`。此时 `plan_advance_steps` 首步是正式等待步骤，等待才是真状态：`recovery._build_recovery_plan` 与 `workflow._advance_workflow` 用同一口径把 QA 引导排在等待之后，于是 `status` 报等待、`continue` 返回 `awaiting_input` 而不是抛错要求重跑、`batch-continue` 停在该条目并给出统一 `xvt apply` 或 `apply-cue-retranslation` 回填引导，三侧不再各说各话。
+- 恢复计划里出现的 `--target-language` 一律 `shlex.quote`：该值只被 Job 保存、没有内容校验，而恢复计划是「复制即执行」面。
+- 字幕 QA `needs_review` 被确认后，`continue` 会清除 `translate` stage 上的过期阻断错误（要求 QA 门已放行、确认仍对当前源 cue 有效、译文 cue 与两份 SRT 均有效）；旧 Job 下次 `continue` 自动收口。
+
+### 烧录和媒体 QA
+
+- FFmpeg 烧录支持 VideoToolbox 和 libx264。
+- 默认优先硬件编码，只在明确的硬件编码器错误时回退 libx264。
+- 视频码率按分辨率选择，不再使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数。
+- 输出媒体会检查视频流、音频流、AAC 音频、分辨率和时长偏差。
+- 烧录派生 fingerprint 包含译文 checksum、媒体身份、编码方式和字体；端到端 `run` / `continue` 烧录写入 checksum 保护的 `version=2` `burn_fingerprint` proof（`burn-fingerprint.json`），并绑定 `burned_video` checksum 与实际源媒体内容 checksum；高级原子 `xvt burn` 不签发 workflow proof。旧 Job 若仅有 `workflow.burn_fingerprint` 仍可按既有轻量完成语义读取，但不能作为 relink 证明；必须 `continue` 重烧一次生成 v2 proof。`continue` 只复用成品、proof/指纹与媒体 QA 均有效时的结果。
+- 烧录目标只有在 `burned_video` checksum、烧录指纹和媒体 QA 全部有效时才算完成；指纹失效或媒体 QA 失败会通过 `status`/`continue` 提示重新烧录。
+- 源媒体永久搬家（路径变了、内容没变）后，`xvt relink-source-media JOB NEW_MEDIA_PATH`（advanced）把持久化的 `config.workflow.burn_media` 指到新位置：只认内容 checksum（必须等于 checksum 有效的 v2 proof 登记的 `source_media_checksum`，没有 v2 proof 拒绝），只写这一个字段，不重烧、不碰 artifact 登记、不改 stage、不发 artifact 事件；写入后烧录派生指纹的内容 checksum 回退即成立，Job 零重烧回到 `complete`。远程 Job 不支持。恢复导航已接入：源媒体不在登记路径且 Job 够格（`workflow.source_media_relink_available`）时，`status` 的 `primary_command` 就是 `xvt relink-source-media JOB NEW_MEDIA_PATH`（新路径为占位符）；只有 legacy fingerprint 的旧 Job 维持 `None`。
+- `preview` 可按 cue 或起始时间生成短片段预览；未显式覆盖时复用工作流保存的烧录媒体、字体和编码设置，不修改正式烧录 stage。缺 checksum 有效的译文与 QA 报告时以退出码 4（`workflow`）失败，不再按用户输入错误退 2；`burn` 的 QA 门在远程媒体下载之前执行。
+- 预览生成 `preview.ass` 和 `preview.mp4` checksum artifact；译文局部重译或重新分段后旧预览会失效。
+- 烧录与预览输出允许写到 Job 目录外的绝对路径，但不得覆盖源媒体、`job.json` 或其他已登记 artifact；同 kind（`burned_video` / `preview_video`）允许重写；路径别名和硬链接也会在写入前检查（`xvt.paths`）。
+- 字幕经 `-vf ass=filename=...` 进入 filtergraph，路径按两层规则转义（先 filter 选项值层 `\ : '`，再 filtergraph 层 `\ ' , ; [ ]`）且不加引号包裹，因此 Job 目录含单引号（如 `Tom's Videos`）、逗号、分号或方括号时也能正常烧录与预览。
+
+### Job、恢复和事件
+
+- 每次 `run` 创建独立 Job，stage 和 artifact 写入 `job.json`。
+- 普通 CLI 默认把人类可读的阶段、下载、翻译批次、转写和烧录进度写入 stderr，最终路径继续写入 stdout。
+- `job_started` 在 Job 首次持久化后立即携带 `job_file`，早期素材获取失败也能定位任务文件。
+- 已有 Job 的原子命令会从 CLI 参数预先记录任务路径，早期失败不会误报为任务尚未创建。
+- `run` / `continue` / `apply --continue` / `batch` / `batch-continue` 停在 `awaiting_input` 时默认返回退出码 0；显式 `--fail-on-waiting` 时返回 10（`AWAITING_INPUT`），批处理有失败条目时仍是 6（6 优先于 10）。`apply` 的旗标经 continuation Namespace 透传给 `_cmd_continue`，不加 `--continue` 时无作用。该旗标只改退出码，不发 `cli_failed`、不改 Job/batch 状态与事件流。Skill 不使用它。
+- Ctrl-C 返回退出码 130、SIGTERM 返回 143，两者都清理外部进程组并把当前 `running` stage 持久化为 `failed`，错误为 `interrupted by user`；改写既有 Job 的命令与 `batch-continue` 以 flock 独占执行，冲突退出码 7；独立预览中断不会生成正式工作流恢复计划，而是提示重新运行 preview。`interrupt_running_stage` 是中断处理块的第一条语句，因此它的 except 元组必须包含 `XvtError`（`job.json` 在运行期间被删除或改坏时 `load_job` 抛 `UserInputError`）：漏掉会让整个收尾落空，退出码退化成 1。批处理另有四个 `_process_item` 自身管不到的中断窗口：批次已落盘但 `batch_started` 正在发射、两个条目之间、条目置 `running` 落盘后但还没进入内层 `try`、以及最后一个条目完成后汇总落盘前。这些窗口由 `_process_batch` 的兜底 `except`（不是 `finally`，避免与内层收尾打架）统一收口：仍标 `running` 的条目降级为 `interrupted`，`batch.status` 写成 `interrupted` 并留下 `next_action`，`batch.json` 不会停在 `status=running` 且无下一步。该处理与 `_process_item` 已有的持久化天然幂等。中断状态落盘后的 JSONL/人读终态报告是 best-effort：终端或管道关闭等普通输出异常不得覆盖原取消异常，退出码仍保持 130/143。
+- 人读终端输出统一经 `cli._terminal_safe` 转义控制字符，漏斗收在 `_HumanEventSink._line` / `_progress` 与 `_print_safe` 三处：叙述行里嵌的文件名（目录扫描而来）、远端标题（yt-dlp 元数据）和错误消息都可以合法地带 `\r` / ESC，足以覆盖已打印的行、清屏并伪造出一条看起来出自 XVT 的 `next:` 命令，`shlex.quote` 不设防（单引号内的控制字符照样被终端解释）。转义幂等，因此批处理条目导航里逐字段的既有调用可以照旧保留。**例外**：stdout 上的纯产物路径清单（供 xargs / 管道消费的 `print(path)`）是契约行，不转义。
+- `load_user_response_json` 只服务用户提交的响应文件，`translation.load_translation_response` 是它的间接路径；读已登记 artifact 用 `translation.translations_from_response`（接受已解析载荷）。以该 helper 为底的只读谓词，except 元组里必须有 `XvtError`。非 UTF-8 的响应文件与非 UTF-8 的输入字幕同口径归 `invalid_input`（退出码 2）：`UnicodeDecodeError` 是 `ValueError` 子类但不是 `JSONDecodeError` 子类，`load_user_response_json` 与 `xvt apply` 的 except 元组都必须显式带上 `UnicodeError`，否则同一次失败会出现两个分类（`stage_failed` 记 `workflow`、顶层按 `isinstance(ValueError)` 记 `invalid_input`），`xvt apply` 那条路径还会逃逸成裸 codec 报错；`apply` 的报错额外给出 `iconv` 转码建议。
+- `doctor` 的 ffmpeg 能力探测与 libass 渲染探测走 `process.run_command` 而不是裸 `subprocess.run`：以进程组方式启动并在所有退出路径（含超时）清理孙进程，同时响应全局取消事件。doctor 自行判定通过/失败，因此用 `CommandError` 捞回 `result`，超时按 `returncode == 124` 识别。
+- artifact 使用 SHA-256 checksum，`verify` 会重新计算。
+- `resume` 只恢复转写 checkpoint；`continue` 读取 `job.config.workflow` 完成翻译和烧录目标。远程 Job 的 `resume` 优先复用 checksum 有效的已下载媒体，没有可复用媒体时委派远程恢复路径重新获取，可能触发一次媒体下载。
+- 远程端到端 Job 在检查或下载阶段失败后，可以通过 `continue` 在同一个 Job 中重试；checksum 有效的远程元数据、字幕和媒体会被复用。
+- `--cookies-from-browser` 和 `--proxy` 同时作用于远程检查与下载，重试时可以重新显式提供。
+- `status`、普通失败输出和 Ctrl-C 共用结构化 `RecoveryPlan`，只复用 checksum 验证通过的 artifact。
+- 端到端 Job 的恢复计划通过 `plan_advance_steps` 与 `continue` 对齐，并暴露 `advance_steps`（人类可读 `steps:` 行与 JSON `recovery_plan`）。
+- 恢复计划区分 `retryable`、`awaiting_input`、`manual_fix`、`unrecoverable` 和 `complete`。
+- 当前 schema 的 Job 若缺少必填字段、stage 或字段类型错误，会作为可控的无效输入失败，不输出 Python traceback。cue 产物（`source-cues.json`、`translated-cues.json` 等）同样：未知字段前向兼容忽略，结构确实无法解析时报 `invalid cue artifact`（退出码 2 并发出 `cli_failed`），不再抛裸 `TypeError`。命令行给出的 `job.json` / `batch.json` 路径不存在或指向目录时同样归退出码 2 并点名路径，不再报「外部依赖或子进程故障」；Job 内**已登记** artifact 缺失不走这条路——路径来源是 Job 自己，仍按依赖或工作流问题处理。
+- `polished` Job 的润色草稿失效时，只有 `translation_progress` 能零 API 成本重建草稿（fingerprint 匹配、覆盖全部批次、每个批次 cue 都有译文）才允许 `continue` 继续；否则以人工修复文案停下，不会静默重新翻译加润色。`status` 与 `continue` 共用该谓词，可重建时归 `retryable`、否则 `manual_fix`；谓词无副作用，provider 不可解析时按不可重建处理。
+- Agent 降级会进入 `awaiting_input`，不会发出虚假的完成事件。
+- JSONL 已覆盖工作流、stage、artifact、翻译批次、下载、转写和烧录进度。
+- `workflow_completed` 和 `cli_completed` 会列出 checksum 有效的用户产物；仅生成源字幕的任务也会返回 `source.srt`。
+- `batch` 会固定目录输入清单并串行创建独立 Job；单项失败不会阻断后续文件，`batch.json` 原子记录汇总状态和恢复计划。
+- `batch-continue` 校验已有 Job 后只恢复未完成项，Agent 等待和人工修复仍保持显式阻断。已完成条目上只有中间 checkpoint（`normalized_audio`、`word_transcript`、批次 manifest 等）失效时保持 `completed`，只在 `item["verification"]` 与 `batch_item_completed` 事件里标注 `degraded` 并列出失效 kind（旧行为是 `failed` + 退出码 6，且引导只报告不修复，构成死循环）；目标产物失效不走这条放行——缺烧录成品停在 relink 的 `awaiting_input`，缺 `source.srt` 落到 `continue` 由 `resume` 重建，缺 `bilingual.ass` 由 `_translation_satisfied` 判成未完成后落到 `continue` 重渲染（不再被标成 `degraded` 并宣称「不影响成品」）。普通模式会在汇总行后逐条打印待处理条目及其恢复命令（取自已持久化的 `recovery_plan`，最多 10 条）。
+- `--events-jsonl` 继续保持 stdout 纯 JSONL，不与普通进度文本混合。
+- 命令参数、URL 用户信息、常见签名查询参数、Cookie 和鉴权信息会在事件边界脱敏。
+
+## 支持的输入组合
+
+| 输入 | 行为 |
+| --- | --- |
+| 本地视频 | ASR，按需翻译和烧录 |
+| 本地视频 + 源字幕 | 跳过 ASR，保留源字幕时间轴 |
+| 本地视频 + 源字幕 + 译文字幕 | 跳过 ASR 和翻译 API，合并后可烧录 |
+| 本地音频 | ASR 和字幕输出；烧录时必须增加 `--burn-media` |
+| YouTube URL | 按参数选择平台字幕或 Whisper |
+| YouTube URL + 人工字幕请求 | 优先下载人工字幕，缺失时按配置回退自动字幕或 ASR |
+| 本地目录 | `batch` 按稳定顺序创建独立 Job，失败隔离并生成可恢复汇总报告 |
+| 已有 Job | `status` 查看下一步，`verify` 校验，`resume` 恢复转写，`continue` 完成端到端目标 |
+
+纯字幕文件可以直接创建 Job；一个 Job 仍然只能生成一个目标语言。
+
+## 端到端工作流
+
+```mermaid
+flowchart TD
+    A["本地媒体或 YouTube URL"] --> B["检查输入并创建 Job"]
+    B --> C{"有可用源字幕吗"}
+    C -->|"有"| D["导入源字幕"]
+    C -->|"没有"| E["获取或规范化音频"]
+    E --> F["Whisper 词级转写"]
+    F --> G["分段生成源 cue"]
+    D --> H["源字幕 QA"]
+    G --> H
+    H --> I{"请求目标语言吗"}
+    I -->|"否"| J["输出 source.srt"]
+    I -->|"是"| K{"已有译文字幕吗"}
+    K -->|"有"| L["映射译文到源 cue"]
+    K -->|"没有"| M{"API 配置完整吗"}
+    M -->|"是"| N["逐批翻译并保存进度"]
+    M -->|"否"| O["生成 Agent 批次并等待回填"]
+    O --> L
+    N --> L
+    L --> P["译文 QA 和双语 SRT/ASS"]
+    P --> Q{"请求烧录吗"}
+    Q -->|"否"| R["工作流完成"]
+    Q -->|"是"| S["FFmpeg 烧录和媒体 QA"]
+    S --> R
+```
+
+## 常用命令
+
+完整本地流程：
+
+```bash
+uv run --no-sync xvt run "/path/to/video.mp4" \
+  --output "/absolute/output" \
+  --language en \
+  --target-language zh-CN \
+  --provider auto \
+  --burn \
+  --events-jsonl
+```
+
+YouTube 平台字幕优先：
+
+```bash
+uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --output "/absolute/output" \
+  --youtube-subtitles \
+  --subtitle-language en \
+  --allow-auto-subtitles \
+  --target-language zh-CN \
+  --burn
+```
+
+已有源字幕和译文字幕：
+
+```bash
+uv run --no-sync xvt run "/path/to/video.mp4" \
+  --output "/absolute/output" \
+  --subtitles "/path/to/source.srt" \
+  --translation-subtitles "/path/to/translated.srt" \
+  --target-language zh-CN \
+  --burn
+```
+
+恢复和诊断（优先 `status` → `continue`）：
+
+```bash
+uv run --no-sync xvt status "/path/to/job.json"
+uv run --no-sync xvt status "/path/to/job.json" --json   # recovery_plan.advance_steps
+uv run --no-sync xvt continue "/path/to/job.json" --events-jsonl
+uv run --no-sync xvt verify "/path/to/job.json" --json
+# advanced：仅转写 checkpoint
+uv run --no-sync xvt resume "/path/to/job.json" --events-jsonl
+uv run --no-sync xvt preview "/path/to/job.json" --cue 18 --duration 15
+uv run --no-sync xvt batch "/path/to/input-directory" --output "/absolute/output"
+uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
+```
+
+Agent 翻译回填：
+
+```bash
+uv run --no-sync xvt apply-translation "/path/to/job.json" \
+  "/path/to/translation-response.json" \
+  --target-language zh-CN
+
+uv run --no-sync xvt continue "/path/to/job.json"
+```
+
+局部重译与 Agent 回填：
+
+```bash
+uv run --no-sync xvt retranslate-cues "/path/to/job.json" \
+  --cue 18 --target-language zh-CN --provider agent
+
+uv run --no-sync xvt apply-cue-retranslation "/path/to/job.json" \
+  "/path/to/cue-retranslation-response.json" \
+  --cue 18 --target-language zh-CN
+
+uv run --no-sync xvt continue "/path/to/job.json"
+```
+
+## Job 模型
+
+Stage 包含：
+
+```text
+inspect
+acquire
+normalize_audio
+import_subtitles
+transcribe
+align
+segment
+translate
+subtitle_qa
+render
+burn
+media_qa
+```
+
+Stage 状态为 `pending`、`running`、`awaiting_input`、`succeeded`、`failed` 或 `skipped`。
+
+典型 artifact 包含：
+
+```text
+media.json
+remote.json
+audio.wav
+words.json
+source-cues.json
+source.srt
+translation-batches.json
+translation-progress.json
+translation-response.json
+translated-cues.json
+translated.srt
+bilingual.srt
+bilingual.ass
+preview.ass
+preview.mp4
+qa.json
+qa-translated.json
+burned.mp4
+media-qa.json
+```
+
+`job.config.workflow` 保存目标语言、请求产物、翻译提供方、模型、API Key 环境变量名、分段预设、烧录参数和派生指纹。它不保存 API Key 或代理凭据。
+
+批处理使用独立的 `batch.json` schema v1，不改变 Job schema。报告位于 `output/batches/<batch-id>/batch.json`，保存固定输入清单、共享工作流参数、每项 Job 文件、产物、状态、脱敏错误和恢复计划。批处理不复制媒体或字幕算法。
