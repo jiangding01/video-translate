@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import ceil
 
 from xvt.models import Cue, Transcript, Word
-from xvt.qa import display_width, display_width_limit
+from xvt.textwidth import display_width, display_width_limit
 
 SENTENCE_END = frozenset(".?!。？！…")
 SOFT_BREAK = frozenset(",;:，；：、")

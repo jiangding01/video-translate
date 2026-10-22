@@ -10,8 +10,8 @@ from typing import Any
 from xvt.config import DEFAULT_BATCH_SIZE
 from xvt.errors import InternalError, UserInputError
 from xvt.models import Cue
-from xvt.qa import character_limit, reading_speed_limit
 from xvt.segment import BREAK_BEFORE, SENTENCE_END, SOFT_BREAK
+from xvt.textwidth import character_limit, reading_speed_limit
 
 TRANSLATION_STYLES = frozenset({"faithful", "natural", "concise"})
 SEMANTIC_GROUPING_VERSION = 1

@@ -3,12 +3,32 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
-from unicodedata import east_asian_width
 
 from xvt.models import Cue
 from xvt.process import CommandError
 from xvt.render import AssStyleOptions, measure_bilingual_line_widths
 from xvt.subtitles import normalize_display_text
+from xvt.textwidth import (
+    character_limit,
+    display_width,
+    display_width_limit,
+    display_width_review_limit,
+    is_cjk_language,
+    reading_speed_limit,
+)
+
+__all__ = [
+    "SubtitleIssue",
+    "SubtitleQaReport",
+    "check_subtitles",
+    "target_overflow_cue_ids",
+    "character_limit",
+    "display_width",
+    "display_width_limit",
+    "display_width_review_limit",
+    "is_cjk_language",
+    "reading_speed_limit",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,45 +45,6 @@ class SubtitleQaReport:
     cue_count: int
     issues: tuple[SubtitleIssue, ...]
     layout: dict[str, Any] | None = None
-
-
-def is_cjk_language(language: str | None) -> bool:
-    return bool(language and language.casefold().startswith(("zh", "ja", "ko")))
-
-
-def character_limit(language: str | None) -> int:
-    return 18 if is_cjk_language(language) else 64
-
-
-def reading_speed_limit(language: str | None) -> int:
-    return 9 if is_cjk_language(language) else 20
-
-
-def display_width(text: str) -> int:
-    return sum(2 if east_asian_width(character) in {"W", "F"} else 1 for character in text)
-
-
-def display_width_limit(language: str | None) -> int:
-    limit = character_limit(language)
-    return limit * 2 if is_cjk_language(language) else limit
-
-
-def display_width_review_limit(
-    language: str | None,
-    *,
-    video_width: int | None = None,
-    video_height: int | None = None,
-) -> int:
-    if is_cjk_language(language):
-        return display_width_limit(language)
-    if not video_width or not video_height:
-        return 72
-    aspect_ratio = video_width / video_height
-    if aspect_ratio < 1.2:
-        return 56
-    if aspect_ratio < 1.6:
-        return 64
-    return 72
 
 
 def _reading_units(text: str, language: str | None) -> int:
