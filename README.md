@@ -572,7 +572,7 @@ xvt burn JOB_FILE [--media PATH] [--output PATH] [--software]
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 - FFmpeg，烧录时需包含 libass，建议同时具备 VideoToolbox 或 libx264
-- 能渲染目标语言全部字形的字幕字体（macOS 系统自带 Hiragino，默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`；Linux 上中日韩需要 `fonts-noto-cjk` 一类包）。缺字体时烧录仍可进行，但行宽 QA 无法测量，会回退保守限制并给出 warning，`xvt doctor` 的字体检查会报 fail
+- 能渲染目标语言全部字形的字幕字体（macOS 系统自带 Hiragino，默认中文字幕字体为 libass 可读取的 `Hiragino Sans GB`；Linux 上中日韩需要 `fonts-noto-cjk` 一类包）。缺字时行宽 QA 无法测量，会回退保守限制并给出 warning，报告同时按 cue 与腿给出 `font_missing_glyph`，点名缺的是哪个码位：**可见字符**判 `review`，烧录停在 `needs_review`（确认后可用 `xvt continue JOB --acknowledge-subtitle-review` 放行），零宽与控制字符只记 warning、不拦烧录。`xvt doctor` 的字体检查会报 fail 并点名是哪种语言的哪个字体
 - yt-dlp，仅 YouTube 输入需要
 - macOS Apple Silicon 使用 MLX Whisper 时安装 `asr-mlx` extra
 
@@ -596,7 +596,7 @@ uv run --no-sync xvt doctor
 uv run --no-sync xvt doctor --json
 ```
 
-`doctor` 会检查 FFmpeg、ffprobe、yt-dlp、libass、默认字幕字体的一帧实渲染、VideoToolbox、libx264 和已安装的 ASR 引擎。ffmpeg 能力探测（30 秒）与字体渲染检查（60 秒）都有超时上限，任一探测超时按该检查项失败处理，不会让命令无限期挂住；探测与其余外部命令走同一条执行路径，超时或 Ctrl-C 时整个进程组（含 ffmpeg 自己派生的子进程）都会被清理，不会留下后台进程继续占用 CPU。
+`doctor` 会检查 FFmpeg、ffprobe、yt-dlp、libass、字幕字体的一帧实渲染、VideoToolbox、libx264 和已安装的 ASR 引擎。字体检查对 zh / ja / ko / en 四种语言**各渲染一帧**（`font_for_language` 按语言给出不同家族，只探中文会让日语用户拿到一份全绿的 doctor 和一屏豆腐块），失败时 `subtitle_font` 这一项点名是哪种语言的哪个字体。ffmpeg 能力探测（30 秒）与字体渲染检查（每次 60 秒）都有超时上限，任一探测超时按该检查项失败处理，不会让命令无限期挂住；探测与其余外部命令走同一条执行路径，超时或 Ctrl-C 时整个进程组（含 ffmpeg 自己派生的子进程）都会被清理，不会留下后台进程继续占用 CPU。
 
 ## 快速开始
 

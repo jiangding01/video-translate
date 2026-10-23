@@ -77,8 +77,8 @@ flowchart LR
 | `subtitles.py` / `align.py` | 字幕读写（SRT/VTT 导出保留字面 `{}`；导入侧 `load_subtitles` 按 pysubs2 解析出的实际格式而非文件后缀分叉：SRT/VTT 保留字面花括号、只剥 `{\…}` 形态的覆盖块，ASS/SSA 整段剥除）和已有字幕到 ASR 的顺序模糊对齐 |
 | `translate.py` / `translation_provider.py` | 确定性语义组、结构化术语表和翻译风格、按完整组装箱的翻译批次协议、兼容 API 调用、断点恢复、cue ID 全量或局部回填；默认 API 批次 25 个 cue、请求超时 180 秒 |
 | `textwidth.py` | 零依赖叶子：显示宽度与按语言/画幅的显示单位上限等七个纯宽度/阅读函数（`display_width`、`is_cjk_language`、`character_limit`、`display_width_limit`、`reading_speed_limit`、`reading_units`、`display_width_review_limit`；另有 `is_japanese_or_korean` 供上限分档），`qa.py` 原名 re-export；依赖方向 `textwidth ← segment ← {qa, render}` |
-| `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查 |
-| `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式（cue 文本的字面 `{}` 转义为 libass `\{` `\}`）、译文超宽先经 `segment.wrap_target_lines` 切成最多 2 行再以 `\N` 拼接，libass 行宽测量与 ASS 写出同源；分辨率自适应码率（不使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数）与安全的 FFmpeg 参数构造（filtergraph 路径两层转义）；`\N` 换行与 `{\rSource}` 样式切换是渲染器拼接的结构，不参与转义，反斜杠刻意不转义（ASS 无标准反斜杠转义，libass 原样输出未知序列） |
+| `qa.py` | 空文本、时间重叠、时长、翻译完整性、术语违规和按画幅计算的字幕显示宽度检查；行宽测量失败时分两路——缺字（`render.FontGlyphError`）按 cue 与腿给出 `font_missing_glyph`（可见字符 `review`、零宽/控制字符与变体选择符 `warning`），其余失败沿用笼统的 `layout_measurement_unavailable` warning，两路都照旧回退保守显示单位上限 |
+| `render.py` / `burn.py` | 平台感知字体、双语 ASS 样式（cue 文本的字面 `{}` 转义为 libass `\{` `\}`）、译文超宽先经 `segment.wrap_target_lines` 切成最多 2 行再以 `\N` 拼接，libass 行宽测量与 ASS 写出同源（测量时解析 libass 的 fontselect 告警，按码位与字体名去重后以 `FontGlyphError` 带出缺字信息）；分辨率自适应码率（不使用 FFmpeg 8.1 不兼容的 VideoToolbox 质量参数）与安全的 FFmpeg 参数构造（filtergraph 路径两层转义）；`\N` 换行与 `{\rSource}` 样式切换是渲染器拼接的结构，不参与转义，反斜杠刻意不转义（ASS 无标准反斜杠转义，libass 原样输出未知序列） |
 | `paths.py` | 用户烧录/预览输出绝对路径校验与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact） |
 | `events.py` / `process.py` | 结构化事件、敏感命令参数脱敏与流式外部进程执行 |
 | `recovery.py` | artifact checksum 校验、`RecoveryPlan`（含 `advance_steps`）、与 `plan_advance_steps` 对齐的恢复建议 |

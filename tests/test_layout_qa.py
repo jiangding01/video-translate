@@ -4,7 +4,15 @@ from unittest.mock import patch
 from xvt.models import Cue
 from xvt.process import CommandError, CommandResult
 from xvt.qa import check_subtitles
-from xvt.render import AssStyleOptions, measure_bilingual_line_widths
+from xvt.render import AssStyleOptions, FontGlyphError, measure_bilingual_line_widths
+
+# libass 实测输出（macOS / ffmpeg 链接的 libass.9）：逐帧各报一次，同一码位会重复。
+_ADLAM_STDERR = (
+    "[Parsed_ass_0 @ 0x7fb726c0be00] fontselect: failed to find any fallback with "
+    "glyph 0x1E900 for font: (Hiragino Sans GB, 700, 0)\n"
+    "[Parsed_ass_0 @ 0x7fb726c0be00] fontselect: failed to find any fallback with "
+    "glyph 0x1E900 for font: (Hiragino Sans GB, 700, 0)\n"
+)
 
 
 class LayoutQaTest(unittest.TestCase):
@@ -147,6 +155,110 @@ class LayoutQaTest(unittest.TestCase):
         self.assertEqual(report.status, "needs_review")
         self.assertEqual(report.layout["measurement"], "unavailable")
         self.assertIn("layout_measurement_unavailable", {i.code for i in report.issues})
+
+    def test_missing_glyph_names_the_character_and_the_cue(self):
+        """缺字不能只说「测量不可用」：要点名哪个码位、哪条 cue、哪一腿。"""
+
+        affected = Cue(
+            1, 0, 4000, "Hello", target_text="测试\U0001e900文字", target_language="zh-CN"
+        )
+        clean = Cue(2, 4000, 8000, "World", target_text="没有问题", target_language="zh-CN")
+        with patch("xvt.render.run_command", return_value=CommandResult((), 0, "", _ADLAM_STDERR)):
+            report = check_subtitles(
+                [affected, clean],
+                require_translation=True,
+                measure_layout=True,
+                video_width=640,
+                video_height=360,
+            )
+        glyph_issues = [i for i in report.issues if i.code == "font_missing_glyph"]
+        # 逐帧重复报同一码位，去重后只留一条。
+        self.assertEqual(len(glyph_issues), 1)
+        issue = glyph_issues[0]
+        self.assertEqual((issue.cue_id, issue.severity), (1, "review"))
+        self.assertIn("U+1E900", issue.message)
+        self.assertIn("target", issue.message)
+        self.assertEqual(report.status, "needs_review")
+        self.assertEqual(report.layout["measurement"], "unavailable")
+        # 全局那条仍在（E2E 的降级断言依赖它），但文案要带上缺字与字体。
+        fallback = next(i for i in report.issues if i.code == "layout_measurement_unavailable")
+        self.assertIn("U+1E900", fallback.message)
+        self.assertIn("Hiragino Sans GB", fallback.message)
+
+    def test_invisible_missing_glyph_does_not_block(self):
+        """零宽字符缺字形不影响观感，不能因此把烧录拦下来。"""
+
+        # 零宽空格写成 chr() 而不是字面量：字面量在源码里是看不见的。
+        cue = Cue(
+            1, 0, 4000, "Hello", target_text=f"字幕{chr(0x200B)}文本", target_language="zh-CN"
+        )
+        stderr = (
+            "fontselect: failed to find any fallback with glyph 0x200B "
+            "for font: (Helvetica, 400, 0)"
+        )
+        with patch("xvt.render.run_command", return_value=CommandResult((), 0, "", stderr)):
+            report = check_subtitles(
+                [cue],
+                require_translation=True,
+                measure_layout=True,
+                video_width=640,
+                video_height=360,
+            )
+        issue = next(i for i in report.issues if i.code == "font_missing_glyph")
+        self.assertEqual(issue.severity, "warning")
+        self.assertEqual(report.status, "warning")
+
+    def test_missing_glyph_outside_cue_text_only_warns_globally(self):
+        """码位不在任何 cue 文本里（来自样式/头部）时不编归属，只留全局 warning。"""
+
+        cue = Cue(1, 0, 4000, "Hello", target_text="字幕", target_language="zh-CN")
+        stderr = (
+            "fontselect: failed to find any fallback with glyph 0x17000 "
+            "for font: (Helvetica, 400, 0)"
+        )
+        with patch("xvt.render.run_command", return_value=CommandResult((), 0, "", stderr)):
+            report = check_subtitles(
+                [cue],
+                require_translation=True,
+                measure_layout=True,
+                video_width=640,
+                video_height=360,
+            )
+        self.assertEqual([i.code for i in report.issues], ["layout_measurement_unavailable"])
+        self.assertIn("U+17000", report.issues[0].message)
+        self.assertEqual(report.status, "warning")
+
+    def test_non_glyph_measurement_failure_keeps_the_legacy_warning(self):
+        """缺字之外的测量失败（ffmpeg 缺失、bbox 解析不出）文案与严重度一字不变。"""
+
+        cue = Cue(1, 0, 4000, "Hello", target_text="字幕", target_language="zh-CN")
+        with patch(
+            "xvt.qa.measure_bilingual_line_widths", side_effect=ValueError("measurement is invalid")
+        ):
+            report = check_subtitles(
+                [cue],
+                require_translation=True,
+                measure_layout=True,
+                video_width=640,
+                video_height=360,
+            )
+        self.assertEqual([i.code for i in report.issues], ["layout_measurement_unavailable"])
+        self.assertEqual(
+            report.issues[0].message,
+            "rendered width unavailable; conservative display-unit limits applied",
+        )
+        self.assertEqual(report.status, "warning")
+
+    def test_glyph_error_carries_deduplicated_codepoints_and_fonts(self):
+        """``FontGlyphError`` 带出码位与字体名；字体名那段在截断消息里可缺省。"""
+
+        cue = Cue(1, 0, 4000, "Hello", target_text="字幕", target_language="zh-CN")
+        stderr = _ADLAM_STDERR + "fontselect: failed to find any fallback with glyph 0x6D4B\n"
+        with patch("xvt.render.run_command", return_value=CommandResult((), 0, "", stderr)):
+            with self.assertRaises(FontGlyphError) as caught:
+                measure_bilingual_line_widths([cue], video_width=640, video_height=360)
+        self.assertEqual(caught.exception.codepoints, (0x1E900, 0x6D4B))
+        self.assertEqual(caught.exception.fonts, ("Hiragino Sans GB",))
 
     def test_duplicate_cue_ids_fail_even_when_measurement_falls_back(self):
         cues = [Cue(1, 0, 1000, "Hello", "W" * 70), Cue(1, 1000, 2000, "World", "OK")]

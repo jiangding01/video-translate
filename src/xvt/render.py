@@ -13,6 +13,51 @@ from xvt.process import run_command
 from xvt.segment import wrap_overflowing_target
 from xvt.subtitles import normalize_display_text
 
+# libass 的 fontselect 告警，实测形如（macOS / ffmpeg 链接的 libass.9，默认 loglevel 下可见）
+# ``fontselect: failed to find any fallback with glyph 0x1E900 for font:``
+# ``(Hiragino Sans GB, 700, 0)``，并且**逐帧各报一次**，同一码位会重复出现。
+# 码位是主载荷，``for font:`` 那段设为可选：触发判定仍用下面那条子串（它是既有的、
+# 已经在用的条件），这条正则只负责**尽力**取出码位与字体名，取不到就退回原来的笼统降级。
+_GLYPH_FALLBACK_MARKER = "failed to find any fallback with glyph"
+_GLYPH_FALLBACK_RE = re.compile(
+    rf"{_GLYPH_FALLBACK_MARKER} 0x([0-9A-Fa-f]+)(?: for font: \(([^,)]*))?"
+)
+
+
+class FontGlyphError(ValueError):
+    """libass 明确说某个码位在任何回退字体里都找不到字形。
+
+    刻意做成 ``ValueError`` 的子类：``qa.check_subtitles`` 既有的
+    ``except (CommandError, ValueError, OSError)`` 原样兜底，缺字之外的测量失败
+    （ffmpeg 缺失、超时、bbox 解析不出）行为一字不变，只有这一类才额外归属到
+    具体 cue。它在 qa 内部就被吃掉，不出 CLI，因此不进 ``errors.py`` 的异常族
+    （那里是退出码语义的单一事实来源）。
+    """
+
+    def __init__(self, codepoints: tuple[int, ...], fonts: tuple[str, ...]) -> None:
+        self.codepoints = codepoints
+        self.fonts = fonts
+        super().__init__("subtitle font cannot render every glyph")
+
+
+def _missing_glyphs(stderr: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """取出缺字码位与报告缺字的字体名，各自去重保序。
+
+    libass 逐帧各报一次，同一码位会重复出现（实测两帧两条），所以必须去重。
+    """
+
+    codepoints: dict[int, None] = {}
+    fonts: dict[str, None] = {}
+    for raw_codepoint, font in _GLYPH_FALLBACK_RE.findall(stderr):
+        codepoint = int(raw_codepoint, 16)
+        if codepoint > 0x10FFFF:
+            # 越界码位 ``chr()`` 会抛，而这是在异常处理路径上，不能再炸一次。
+            continue
+        codepoints[codepoint] = None
+        if font and font.strip():
+            fonts[font.strip()] = None
+    return tuple(codepoints), tuple(fonts)
+
 
 @dataclass(frozen=True, slots=True)
 class AssStyleOptions:
@@ -202,8 +247,8 @@ def measure_bilingual_line_widths(
             cwd=directory,
             timeout=60,
         )
-    if "failed to find any fallback with glyph" in result.stderr:
-        raise ValueError("subtitle font cannot render every glyph")
+    if _GLYPH_FALLBACK_MARKER in result.stderr:
+        raise FontGlyphError(*_missing_glyphs(result.stderr))
     measured = {}
     seen_frames: set[int] = set()
     pattern = r"n:(\d+)\s+pts:.*?x1:(\d+) x2:(\d+).*?w:(\d+) h:(\d+)"

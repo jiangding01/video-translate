@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from xvt.models import Cue
 from xvt.process import CommandError
-from xvt.render import AssStyleOptions, measure_bilingual_line_widths
+from xvt.render import AssStyleOptions, FontGlyphError, measure_bilingual_line_widths
 from xvt.segment import (
     TARGET_WRAP_MAX_LINES,
     target_wrap_binding,
@@ -55,6 +56,68 @@ class SubtitleQaReport:
     cue_count: int
     issues: tuple[SubtitleIssue, ...]
     layout: dict[str, Any] | None = None
+
+
+# 缺字之外的测量失败沿用这条文案（ffmpeg 缺失、超时、bbox 解析不出）；E2E 的降级
+# 分路断言与存量报告都认它，不要改写。
+_MEASUREMENT_UNAVAILABLE_MESSAGE = (
+    "rendered width unavailable; conservative display-unit limits applied"
+)
+# 零宽与控制字符缺字形不改变观感，不足以把烧录拦下来；变体选择符同理。
+_INVISIBLE_GLYPH_CATEGORIES = frozenset({"Cc", "Cf"})
+
+
+def _glyph_is_invisible(codepoint: int) -> bool:
+    if 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF:
+        return True
+    return unicodedata.category(chr(codepoint)) in _INVISIBLE_GLYPH_CATEGORIES
+
+
+def _glyph_label(codepoint: int) -> str:
+    """``U+1E900 '𞤀'``；不可见字符只给码位，回显字面量只会把报告弄脏。"""
+
+    if _glyph_is_invisible(codepoint):
+        return f"U+{codepoint:04X}"
+    return f"U+{codepoint:04X} {chr(codepoint)!r}"
+
+
+def _measurement_unavailable_issue(detail: str = "") -> SubtitleIssue:
+    message = _MEASUREMENT_UNAVAILABLE_MESSAGE
+    if detail:
+        message = f"rendered width unavailable ({detail}); conservative display-unit limits applied"
+    return SubtitleIssue("layout_measurement_unavailable", "warning", 0, message)
+
+
+def _missing_glyph_issues(cues: list[Cue], error: FontGlyphError) -> list[SubtitleIssue]:
+    """缺字时除了全局降级 warning，再按 cue 与腿点名「哪个字渲染不出来」。
+
+    码位解析不出（libass 改了文案）时退回原来的笼统 warning：降级方向安全，不猜。
+    码位在任何 cue 文本里都找不到（来自样式或头部）时同样不编归属。
+    """
+
+    if not error.codepoints:
+        return [_measurement_unavailable_issue()]
+    detail = f"subtitle font cannot render {', '.join(_glyph_label(c) for c in error.codepoints)}"
+    if error.fonts:
+        detail = f"{detail}; font: {', '.join(error.fonts)}"
+    issues = [_measurement_unavailable_issue(detail)]
+    for codepoint in error.codepoints:
+        character = chr(codepoint)
+        severity = "warning" if _glyph_is_invisible(codepoint) else "review"
+        for cue in cues:
+            for role, text in (("source", cue.source_text), ("target", cue.target_text or "")):
+                if character not in text:
+                    continue
+                issues.append(
+                    SubtitleIssue(
+                        "font_missing_glyph",
+                        severity,
+                        cue.id,
+                        f"{role} text contains {_glyph_label(codepoint)} "
+                        "which the subtitle font cannot render",
+                    )
+                )
+    return issues
 
 
 def _contains_glossary_term(text: str, term: str) -> bool:
@@ -217,15 +280,10 @@ def check_subtitles(
                 [cue_id, role, width, limit]
                 for (cue_id, role), (width, limit) in sorted(measured.items())
             ]
+        except FontGlyphError as error:
+            issues.extend(_missing_glyph_issues(cues, error))
         except (CommandError, ValueError, OSError):
-            issues.append(
-                SubtitleIssue(
-                    "layout_measurement_unavailable",
-                    "warning",
-                    0,
-                    "rendered width unavailable; conservative display-unit limits applied",
-                )
-            )
+            issues.append(_measurement_unavailable_issue())
     seen_ids: set[int] = set()
     for index, cue in enumerate(cues):
         if cue.id in seen_ids:
