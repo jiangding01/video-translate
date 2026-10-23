@@ -169,11 +169,23 @@ def _download_compared_video(
         raise DependencyError("匿名画质查询返回不同的视频或时长，拒绝下载。")
     selected = configured
     access = "configured"
+    # 画质相同、而只有 Cookie 侧提取不完整时也要换路：两侧画质一致就没有降级风险，
+    # 留在脏的一侧只会让整单失败。YouTube 的 SABR 实验按账号开启，Cookie 侧会**一直**
+    # 报 `web_embedded ... formats have been skipped`，而匿名侧零警告、选中同一个格式，
+    # 于是「严格更高画质才换」会把这类账号的每一个 YouTube 视频都卡死（2026-10-23 实测）。
+    # 匿名侧画质更低时仍然不换——那才是 5ae28e8 要防的静默降级。
+    clean_anonymous_tie = (
+        configured.incomplete
+        and not anonymous.incomplete
+        and anonymous.original_audio == configured.original_audio
+        and min(anonymous.width, anonymous.height) >= min(configured.width, configured.height)
+    )
     if (
         anonymous.original_audio
         and not configured.original_audio
         or anonymous.original_audio == configured.original_audio
         and min(anonymous.width, anonymous.height) > min(configured.width, configured.height)
+        or clean_anonymous_tie
     ):
         if configured.has_audio and not anonymous.has_audio:
             raise DependencyError("匿名高清视频缺少原视频音轨，拒绝替换。")
@@ -230,6 +242,8 @@ def _download_compared_video(
                 "anonymous_higher_resolution"
                 if access == "anonymous"
                 and min(selected.width, selected.height) > min(configured.width, configured.height)
+                else "anonymous_clean_extraction"
+                if access == "anonymous" and configured.incomplete
                 else "anonymous_original_audio"
                 if access == "anonymous"
                 else "configured_best"

@@ -129,6 +129,48 @@ class DownloadQualityTest(unittest.TestCase):
         self.assertEqual(calls[2][calls[2].index("-f") + 1], "137+140")
         self.assertTrue(all("--proxy" in args for args in calls[:3]))
 
+    def test_cookie_sabr_tie_falls_back_to_the_clean_anonymous_probe(self):
+        """两侧画质相同、只有 Cookie 侧提取不完整时，改走干净的匿名侧，而不是整单失败。
+
+        真实踩坑（2026-10-23）：YouTube 对该账号开了 SABR 实验，Cookie 侧必然报
+        ``web_embedded ... formats have been skipped``，而匿名侧零警告、选中的是同一个
+        1080p 格式。此前「严格更高画质才换」让平局停在脏的 Cookie 侧，于是这台机器上
+        任何 YouTube 视频都卡在「格式提取不完整」。换路仍受原有的音轨闸约束。
+        """
+
+        calls, report = self.execute(
+            configured=selection(1080),
+            anonymous=selection(1080),
+            warning=(
+                "Some web_embedded client https formats have been skipped as they are missing a URL"
+            ),
+        )
+        self.assertEqual(report["access"], "anonymous")
+        self.assertEqual(report["height"], 1080)
+        self.assertEqual(report["reason"], "anonymous_clean_extraction")
+        self.assertNotIn("--cookies-from-browser", calls[2])
+
+    def test_cookie_sabr_tie_still_fails_when_the_anonymous_probe_is_also_dirty(self):
+        """平局换路的前提是另一侧**干净**；两侧都脏时没有可信参照，照旧 fail closed。"""
+
+        with self.assertRaises(DependencyError):
+            self.execute(
+                configured=selection(1080),
+                anonymous=selection(1080),
+                warning="formats have been skipped as they are missing a URL",
+                anonymous_warning="formats have been skipped as they are missing a URL",
+            )
+
+    def test_cookie_sabr_tie_still_refuses_an_anonymous_video_without_audio(self):
+        """平局换路不得绕过既有的音轨闸：匿名侧没有音轨就拒绝替换。"""
+
+        with self.assertRaises(DependencyError):
+            self.execute(
+                configured=selection(1080),
+                anonymous=selection(1080, audio=False),
+                warning="formats have been skipped as they are missing a URL",
+            )
+
     def test_4k_and_8k_have_no_resolution_cap(self):
         for height in [2160, 4320]:
             with self.subTest(height=height):
