@@ -91,6 +91,84 @@ class WrapTargetLinesTest(unittest.TestCase):
                     self.assertLessEqual(display_width(line), max_width)
 
 
+class WrapKatakanaRunTest(unittest.TestCase):
+    """片假名连续段整体算一个 token（与 Latin / 数字连续段同口径）。
+
+    禁则表挡不住这类切点：小字假名与长音符在 ``NO_LINE_START`` 里，但
+    ``グラフィッ|クス`` 这种普通片假名之间的位置照样放行，所以必须在分词层保住。
+    """
+
+    def test_katakana_run_is_not_split(self) -> None:
+        self.assertEqual(
+            wrap_target_lines(
+                "新しいグラフィックスエンジンの設計について話します", "ja", max_width=36
+            ),
+            ("新しいグラフィックスエンジン", "の設計について話します"),
+        )
+        self.assertEqual(
+            wrap_target_lines(
+                "これはユーザーインターフェースの設計に関する重要な話です", "ja", max_width=36
+            ),
+            ("これはユーザーインターフェース", "の設計に関する重要な話です"),
+        )
+
+    def test_middle_dot_stays_a_break_point(self) -> None:
+        # `・`(U+30FB) 刻意排除在片假名段外：并进去 `アイス・コーヒー` 就再也切不开，
+        # 而 `・` 后换行本来合法（`・` 在 NO_LINE_START，所以也不会被切到行首）。
+        self.assertEqual(
+            wrap_target_lines(
+                "アイス・コーヒーとホット・コーヒーのどちらがお好みですか", "ja", max_width=36
+            ),
+            ("アイス・コーヒーとホット・", "コーヒーのどちらがお好みですか"),
+        )
+
+    def test_halfwidth_katakana_run_is_not_split(self) -> None:
+        # normalize_display_text 只折叠空白、不做半角转全角，所以半角也要整段保住，
+        # 否则同一个词会因半角全角而行为不一致。
+        self.assertEqual(
+            wrap_target_lines("これはｸﾞﾗﾌｨｯｸｽｴﾝｼﾞﾝの設計について話しますよ", "ja", max_width=36),
+            ("これはｸﾞﾗﾌｨｯｸｽｴﾝｼﾞﾝの", "設計について話しますよ"),
+        )
+
+    def test_latin_and_katakana_runs_both_stay_whole(self) -> None:
+        lines = wrap_target_lines(
+            "AIグラフィックスの処理速度が大幅に向上したという話です", "ja", max_width=36
+        )
+
+        self.assertIsNotNone(lines)
+        assert lines is not None
+        for run in ("AI", "グラフィックス"):
+            self.assertEqual(sum(run in line for line in lines), 1, run)
+
+    def test_oversized_katakana_run_returns_none(self) -> None:
+        # 硬形态：段整体放不下就维持 review，与 Latin 单 token 放不下时同口径
+        # （test_single_token_returns_none）。段宽 32 + 前缀 6 与 + 后缀 10 都超过 36，
+        # 而前后缀不相邻无法合并成一行，所以无解。
+        text = "これは" + "ア" * 16 + "の設計です"
+        self.assertEqual(display_width(text), 48)
+        self.assertIsNone(wrap_target_lines(text, "ja", max_width=36))
+
+    def test_japanese_without_katakana_is_unchanged(self) -> None:
+        # 「不该红时不红」：不含片假名的日文句子切分逐字不变。
+        self.assertEqual(
+            wrap_target_lines(
+                "これは字幕の幅を超える長い日本語の文章です。改行が必要です", "ja", max_width=36
+            ),
+            ("これは字幕の幅を超える長い日", "本語の文章です。改行が必要です"),
+        )
+
+    def test_hiragana_and_kanji_are_still_split_by_character(self) -> None:
+        # 平假名与汉字刻意不收：那是词法边界，要分词器才挡得住（P7 ②），这里只保证
+        # 它们仍按字切、不会被片假名段的区间误吞。
+        lines = wrap_target_lines(
+            "ともだちといっしょにこうえんまでさんぽにいきました", "ja", max_width=36
+        )
+
+        self.assertIsNotNone(lines)
+        assert lines is not None
+        self.assertEqual("".join(lines), "ともだちといっしょにこうえんまでさんぽにいきました")
+
+
 class WrapOverflowingTargetTest(unittest.TestCase):
     def test_limit_is_the_review_limit(self) -> None:
         for language, width, height in (
@@ -113,7 +191,7 @@ class WrapOverflowingTargetTest(unittest.TestCase):
     def test_binding_is_a_fresh_copy(self) -> None:
         binding = target_wrap_binding()
         binding["max_lines"] = 3
-        self.assertEqual(target_wrap_binding(), {"version": 1, "max_lines": 2})
+        self.assertEqual(target_wrap_binding(), {"version": 2, "max_lines": 2})
 
 
 if __name__ == "__main__":

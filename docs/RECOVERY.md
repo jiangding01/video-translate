@@ -398,7 +398,7 @@ legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重�
 - 报告 status 是 `pass` 或 `warning`。**已确认的 `needs_review` 刻意不复用**：那条路径的放行来自存档确认，`complete_qa_stage` 要为它发一条 `subtitle_review_acknowledged`（「这次放行依据哪条确认」的唯一事件证据），而布局确认正是约束 4 点名要绑定的东西，省下的一次测量不值这笔；
 - `translated_subtitle_qa` 与 `bilingual_ass` 都 checksum 有效（两者都在 `downstream_of(TRANSLATED_CUES)` 的失效闭包里，译文一变登记当场被摘掉，复用不到旧产物）；
 - 报告**自己**的 `layout` 块里 `measurement == "measured"`、`video_width` / `video_height` / `style_options` 与本次烧录真正要用的画幅和 `AssStyleOptions` 完全一致——画幅与字体的绑定取自那份报告被测量时的真实输入，不是「当前配置碰巧长这样」的推断，手改 `job.json` 的字体也绕不过去；
-- 报告 `layout.wrap` 必须等于当前绑定的 `{version: 1, max_lines: 2}`（译文超宽的确定性换行规则）。旧报告没有该键一律不复用、照旧重测重渲：旧 QA 量的是单行，新代码烧出去的可能是两行，复用就是量的与烧的不一致；
+- 报告 `layout.wrap` 必须等于当前绑定的 `{version: 2, max_lines: 2}`（译文超宽的确定性换行规则；`version` 2 自 2026-10-24 把片假名连续段并成一个 token 起，1 是换行刚落地时的按字切）。旧报告没有该键一律不复用、照旧重测重渲：旧 QA 量的是单行，新代码烧出去的可能是两行，复用就是量的与烧的不一致；
 - 本次烧录媒体的时长已知，且全部 cue 都落在时长内。媒体时长没有记进报告，所以这一项不推断而**就地重判**：时长在整份报告里只影响 `outside_media`（error 级）一条，按本次媒体重算一次即可，时长未知（0）时拒绝复用。
 
 术语表不参与比对：两腿都调 `required_glossary_terms(job)`，同一个 Job 必然同值，且该判定与画幅、字体、媒体一概无关。

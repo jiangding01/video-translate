@@ -314,7 +314,7 @@ class TargetWrapQaTest(unittest.TestCase):
 
         self.assertEqual(report.status, "warning")
         self.assertEqual([issue.code for issue in report.issues], ["target_wrapped"])
-        self.assertEqual(report.layout["wrap"], {"version": 1, "max_lines": 2})
+        self.assertEqual(report.layout["wrap"], {"version": 2, "max_lines": 2})
 
     def test_kinsoku_violating_only_break_stays_review(self) -> None:
         # 两行各 18 字的上限下唯一放得下的切点落在 `」` 之前：不切，维持 review。

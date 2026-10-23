@@ -37,7 +37,7 @@ HANDOFF「已知限制」第 1 条：译文超过硬显示阈值时只能由 QA 
 
 ### D1 换行函数放 `segment.py`，直接复用 `_partition_words`
 
-新增 `wrap_target_lines(text, language, *, max_width, max_lines=2) -> tuple[str, ...] | None`。对译文构造伪 `Word(text, start_ms=0, end_ms=0)` 喂给 `_partition_words(tokens, 2, max_width=limit)`。分词：非 CJK 按空白分词、每个 token 保留尾随空格以便 `_text` 原样拼回；CJK 按字分词，但 Latin / 数字连续段作为一个 token 不拆。
+新增 `wrap_target_lines(text, language, *, max_width, max_lines=2) -> tuple[str, ...] | None`。对译文构造伪 `Word(text, start_ms=0, end_ms=0)` 喂给 `_partition_words(tokens, 2, max_width=limit)`。分词：非 CJK 按空白分词、每个 token 保留尾随空格以便 `_text` 原样拼回；CJK 按字分词，但 Latin / 数字连续段与**片假名连续段**（`_KATAKANA_RUN`，2026-10-24 补齐；刻意排除 `・` / `゠` 及半角 `･` 这三个词间分隔符）各作为一个 token 不拆。
 
 这是全仓第 **4** 个切分出口，按 AGENTS 必须接入 `forbidden_break`——DP 内部经 `_break_penalty` 已经走它。但 `KINSOKU_BREAK_PENALTY = 64` 是代价不是硬禁，无路可走时 DP 仍会给出违禁切点；分段腿可以接受这个兜底，展示换行不行。所以**切完后对每个边界再过一遍 `forbidden_break`，违禁即返回 `None` → review**。`forbidden_break` docstring 从「三个产出点」改为四个。
 
@@ -55,7 +55,7 @@ HANDOFF「已知限制」第 1 条：译文超过硬显示阈值时只能由 QA 
 
 ### D4 报告 `layout` 块新增 `wrap` 绑定
 
-`check_subtitles` 在 `measure_layout` 时于 `layout` 加 `"wrap": {"version": 1, "max_lines": 2}`。`pipeline.burnin._reusable_rendered_layout` 把它纳入绑定：旧报告没有这个键 → 不复用 → 烧录腿重测重渲（fail closed）。否则旧 QA 量的单行与新代码烧的两行会错位。这是对 RECOVERY「烧录腿复用渲染腿的布局 QA 与 ASS」契约的一处显式扩展。
+`check_subtitles` 在 `measure_layout` 时于 `layout` 加 `"wrap": {"version": 2, "max_lines": 2}`（`version` 2 自 2026-10-24 的片假名段分词起；1 是换行刚落地时的按字切）。`pipeline.burnin._reusable_rendered_layout` 把它纳入绑定：旧报告没有这个键 → 不复用 → 烧录腿重测重渲（fail closed）。否则旧 QA 量的单行与新代码烧的两行会错位。这是对 RECOVERY「烧录腿复用渲染腿的布局 QA 与 ASS」契约的一处显式扩展。
 
 ### D5 issue 文案前缀不变
 
