@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-23（基线 `main` 的 `5ef3290`，本条改动在 `feat/font-missing-glyph-attribution` 上待合并；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（HEAD `b87d55b`，`main`，工作树干净；写于 Claude Opus 5 会话）
+
+2026-10-23 **YouTube 画质平局且仅 Cookie 侧提取不完整时改走干净的匿名侧（#145）。** `download._download_compared_video` 本来就有「Cookie 侧受损就回退匿名侧」的机制，但换路条件写的是**严格**更高画质，于是两侧画质相同时留在脏的 Cookie 侧、随后被「格式提取不完整」护栏整单拦下。YouTube 的 SABR 实验按账号开启后 Cookie 侧**每次**都报 `web_embedded ... formats have been skipped`、而匿名侧零警告且选中同一个 1080p，于是这类账号下**任何** YouTube 视频都卡死在这条护栏上（2026-10-23 真实端到端验收撞到，当时只能靠 yt-dlp 垫片绕过）。现在平局且仅 Cookie 侧脏时也换路，`reason` 记新取值 `anonymous_clean_extraction`。**护栏本身一个字未改**：`incomplete` 判定、标记清单与错误文案全部保留，脏的一侧永远不会被下载；匿名侧画质更低（那才是 `5ae28e8` 要防的静默降级）、匿名侧也脏、缺原音轨、音轨语言不一致四类仍然失败。真实验收（不带垫片、真实 Cookie 打真实 YouTube）：修复前报「视频格式提取不完整」，修复后以 `access=anonymous`、`reason=anonymous_clean_extraction` 拿到 1080p 原音轨，format_id 与 Cookie 侧选中的完全相同。方案见 [YouTube 下载画质方案](docs/YOUTUBE_DOWNLOAD_QUALITY_PLAN.md)。
 
 2026-10-23 **字体缺字不再静默降级：点名到码位、cue 与腿，可见字符停烧录。** 此前 libass 报缺字只被子串匹配认出来，收成一条 `cue_id=0` 的 `layout_measurement_unavailable` warning，行宽 QA 整份退保守上限而报告照样放行，成品是一屏豆腐块。现在解析 libass 本就带着的码位与字体名（逐帧重复，去重后用 `render.FontGlyphError` 带出），按 cue 与腿产出 `font_missing_glyph`：可见字符 `review`（停 `needs_review`，`--acknowledge-subtitle-review` 可放行），零宽/控制字符与变体选择符 `warning`。缺字之外的测量失败文案与严重度一字未动；候选 QA 里缺字刻意不作为阻断项（否则语义收尾会停在「要求修订但模板里没有可改项」的死局，已加守卫测试）。`xvt doctor` 的字体检查从只探 zh-CN 扩到 zh/ja/ko/en 四种。顺带补上了 [2026-10-17 review 发现清单](docs/REVIEW_FINDINGS_2026_10_17.md) 欠的实证：五种缺字字符各真跑一次测量，确认缺字分支真的会触发。来源是 [BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B1。
 
@@ -22,11 +24,11 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1134 个测试、327 个子测试，全部通过（2026-10-23） |
+| 自动化测试 | 1138 个测试、329 个子测试，全部通过（2026-10-24） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
-| Git | 功能修改使用 `codex/` 开发分支，Review 通过后以 PR 合并 `main` |
+| Git | 功能修改使用 `feat/` 开发分支（早期为 `codex/`），Review 通过后以 PR 合并 `main` |
 | 默认 CLI 路径 | `run` → `status` → `continue`（批处理 `batch` / `batch-continue`） |
 
 当前代码可以完成本地视频或 YouTube 视频的转写、翻译、双语字幕生成和可选烧录。端到端流程收敛到 `xvt run`；中断后先 `xvt status` 查看 `recovery_plan` / `advance_steps`，再 `xvt continue` 按持久化目标补齐。翻译与烧录推进与 status 共用 `plan_advance_steps`。由 `run` / `continue` 按持久化目标完成的烧录写入 checksum 保护的 `version=2` burn proof，绑定烧录 fingerprint、`burned_video` checksum 和实际源媒体内容 checksum；高级原子 `xvt burn` 不签发 workflow proof。仅有效 v2 proof 可让 `relink-burned-output` 重新关联已移动成品。若其余静态条件满足但已登记成品缺失或 checksum 失效，`status` 返回 `awaiting_input`，首选重新关联占位命令、备选显式 `continue` 重烧；这只表示成品可能可重新关联，执行时仍会校验实际源媒体内容。`batch-continue` 停在该状态，不自动重烧。旧/legacy fingerprint、媒体 QA/proof/fingerprint 无效仍为 `retryable`，只推荐重烧。
