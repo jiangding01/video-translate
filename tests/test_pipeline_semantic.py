@@ -28,8 +28,9 @@ from xvt.pipeline import (
     source_review_input_path,
     translation_review_input_path,
 )
-from xvt.pipeline.revision import translation_review_stem
+from xvt.pipeline.revision import _translation_review_items, translation_review_stem
 from xvt.recovery import build_recovery_plan, file_checksum, valid_artifact_path
+from xvt.segment import TARGET_WRAP_MAX_LINES
 from xvt.subtitles import save_subtitles
 from xvt.translate import (
     GlossaryTerm,
@@ -1872,6 +1873,9 @@ class SemanticReviewPipelineTest(unittest.TestCase):
                 f"line width {annotation['display_width']} exceeds {annotation['limit']}",
                 annotation["message"],
             )
+            # 换行落地后 limit 是「每行上限」，模板必须同时给出行数，否则人看到 36 会
+            # 以为要把整句缩进一行。
+            self.assertEqual(annotation["max_lines"], TARGET_WRAP_MAX_LINES)
             self.assertEqual(semantic_only["id"], 1)
             self.assertEqual(semantic_only["source_text"], "Hello.")
             self.assertFalse(semantic_only["must_fix"])
@@ -1934,6 +1938,43 @@ class SemanticReviewPipelineTest(unittest.TestCase):
             self.assertTrue(item["must_fix"])
             self.assertEqual([entry["code"] for entry in item["qa"]], ["glossary_violation"])
             self.assertEqual(list(item["qa"][0]), ["code", "message"])
+
+    def test_translation_review_items_scope_max_lines_to_target_role(self) -> None:
+        """``max_lines`` 只跟着译文的宽度标注走：源文永不换行，给它标两行就是说谎。"""
+
+        cues = [
+            Cue(id=1, start_ms=0, end_ms=1000, source_text="Hello.", target_text="你好。"),
+            Cue(id=2, start_ms=1000, end_ms=2000, source_text="World.", target_text="世界。"),
+        ]
+        items = _translation_review_items(
+            cues,
+            {1, 2},
+            [
+                {
+                    "code": "bilingual_overflow_risk",
+                    "cue_id": 1,
+                    "message": "source line width 99 exceeds 36 display units",
+                },
+                {
+                    "code": "bilingual_overflow_risk",
+                    "cue_id": 2,
+                    "message": (
+                        "target line width 41 exceeds 36 display units "
+                        f"after wrapping into {TARGET_WRAP_MAX_LINES} lines"
+                    ),
+                },
+            ],
+        )
+        source_annotation, target_annotation = (item["qa"][0] for item in items)
+        self.assertEqual(
+            list(source_annotation),
+            ["code", "message", "display_width", "limit", "width_unit"],
+        )
+        self.assertEqual(
+            list(target_annotation),
+            ["code", "message", "display_width", "limit", "width_unit", "max_lines"],
+        )
+        self.assertEqual(target_annotation["max_lines"], TARGET_WRAP_MAX_LINES)
 
     def test_translation_template_backfill_accepts_legacy_id_text_items(self) -> None:
         """回填端忽略未知字段，只认 id/text；旧格式模板必须照样能提交。"""

@@ -813,7 +813,7 @@ uv run --no-sync xvt continue "/path/to/job.json" --acknowledge-translation-revi
 | `items[].id` | cue ID，回填时必须完整保留模板的 ID 集合，且顺序为 ID 升序 |
 | `items[].source_text` | 该 cue 的源文（只读标注） |
 | `items[].must_fix` | 该 cue 是否被候选译文 QA 阻断；`true` 表示必须改到 QA 通过才能继续（只读标注） |
-| `items[].qa` | 该 cue 的阻断项列表，每项含 `code`、`message`；行宽超限时额外给出 `display_width`、`limit`、`width_unit`，单位为 `ASS pixels` 或回退时的 `display units`（只读标注） |
+| `items[].qa` | 该 cue 的阻断项列表，每项含 `code`、`message`；行宽超限时额外给出 `display_width`、`limit`、`width_unit`，单位为 `ASS pixels` 或回退时的 `display units`。译文行宽项再给 `max_lines`：`limit` 是**每行**上限，译文最多占 `max_lines` 行；源文永不换行，其宽度项不带该键（均为只读标注） |
 | `items[].text` | 当前译文，**唯一会被回填读取的可编辑字段** |
 
 同名的 `.srt` 通道只含 `#<cue id>` 注释行与译文正文，不带任何标注——那些注释行是解析锚点，不能改动。需要看标注时对照 JSON 模板即可，两条通道等价。

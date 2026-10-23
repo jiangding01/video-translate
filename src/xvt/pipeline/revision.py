@@ -26,6 +26,7 @@ from xvt.pipeline.common import (
 from xvt.pipeline.semantic_state import semantic_review_target
 from xvt.qa import SubtitleQaReport, check_subtitles
 from xvt.recovery import valid_artifact_path
+from xvt.segment import TARGET_WRAP_MAX_LINES
 from xvt.subtitles import load_review_srt, save_review_srt, save_subtitles
 from xvt.translation_provider import SEMANTIC_REVIEW_PROMPT_VERSION
 from xvt.workflow_config import (
@@ -648,6 +649,10 @@ def _translation_review_items(
 
     ``source_text``/``must_fix``/``qa`` 只是标注，回填端一律忽略；可编辑的 ``text``
     放在最后，紧挨着这些标注。顺序保持 cue id 升序，与同名 SRT 通道逐条对得上。
+
+    宽度标注里的 ``limit`` 是**每行**上限（``segment.wrap_target_lines`` 之后 QA 量的
+    就是最宽那行），所以同时给出 ``max_lines``：只报上限会让人以为要把整句缩进一行。
+    换行只作用于译文，源文永不换行，因此行数只标在 ``target`` 的宽度标注上。
     """
 
     grouped: dict[int, list[dict[str, Any]]] = {}
@@ -661,6 +666,8 @@ def _translation_review_items(
         if limits is not None:
             annotation["display_width"], annotation["limit"] = limits
             annotation["width_unit"] = "ASS pixels" if "ASS pixels" in message else "display units"
+            if message.startswith("target line width "):
+                annotation["max_lines"] = TARGET_WRAP_MAX_LINES
         grouped.setdefault(cue_id, []).append(annotation)
     return [
         {
