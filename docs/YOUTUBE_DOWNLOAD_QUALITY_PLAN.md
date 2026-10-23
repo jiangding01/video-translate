@@ -20,7 +20,7 @@
 
 ## 诊断与恢复
 
-成功结果附带可选 source.download.json：version、video_id、access、format_id、实际 width/height/duration_ms、audio_language、original_audio、reason 和 media_checksum。原因包括 anonymous_higher_resolution、anonymous_original_audio、configured_best。原始 JSON、Cookie、签名 URL 与自由格式提取日志不落盘。
+成功结果附带可选 source.download.json：version、video_id、access、format_id、实际 width/height/duration_ms、audio_language、original_audio、reason 和 media_checksum。原因包括 anonymous_higher_resolution、anonymous_clean_extraction（画质平局、Cookie 侧提取不完整而匿名侧干净时改走匿名侧）、anonymous_original_audio、configured_best。原始 JSON、Cookie、签名 URL 与自由格式提取日志不落盘。
 
 pipeline 的转写与远程烧录入口登记 media_download_selection artifact；同名事件提供公共 Job 字段与 summary_path。摘要缺失、坏 JSON、非对象或媒体 checksum 不匹配时跳过。该诊断 artifact 是 downloaded_media/source_video 的失效下游，媒体不依赖摘要，不会因摘要丢失自动重下载。
 
