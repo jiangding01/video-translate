@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-23（基线 `main` 的 `e6711e5`，本条改动在 `feat/revision-template-max-lines` 上待合并；写于 Claude Opus 5 会话）
+更新时间：2026-10-23（基线 `main` 的 `5ef3290`，本条改动在 `feat/font-missing-glyph-attribution` 上待合并；写于 Claude Opus 5 会话）
+
+2026-10-23 **字体缺字不再静默降级：点名到码位、cue 与腿，可见字符停烧录。** 此前 libass 报缺字只被子串匹配认出来，收成一条 `cue_id=0` 的 `layout_measurement_unavailable` warning，行宽 QA 整份退保守上限而报告照样放行，成品是一屏豆腐块。现在解析 libass 本就带着的码位与字体名（逐帧重复，去重后用 `render.FontGlyphError` 带出），按 cue 与腿产出 `font_missing_glyph`：可见字符 `review`（停 `needs_review`，`--acknowledge-subtitle-review` 可放行），零宽/控制字符与变体选择符 `warning`。缺字之外的测量失败文案与严重度一字未动；候选 QA 里缺字刻意不作为阻断项（否则语义收尾会停在「要求修订但模板里没有可改项」的死局，已加守卫测试）。`xvt doctor` 的字体检查从只探 zh-CN 扩到 zh/ja/ko/en 四种。顺带补上了 [2026-10-17 review 发现清单](docs/REVIEW_FINDINGS_2026_10_17.md) 欠的实证：五种缺字字符各真跑一次测量，确认缺字分支真的会触发。来源是 [BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B1。
 
 2026-10-23 **人工修订模板的宽度标注补 `max_lines`（#141 的尾巴）。** `pipeline/revision.py` 的宽度标注此前只给 `limit`，而换行落地后那是「每行上限」，模板读者看到 36 会以为要把整句缩进一行。现在同一分支里补一个 `max_lines`（取 `segment.TARGET_WRAP_MAX_LINES`，不写死 2），只标在 `target` 的宽度项上——源文永不换行，给它标两行就是说谎。`candidate_qa.overflow_limits` 的正则一字未改（行数是代码常量，不从 message 解析），`recovery.py:282` 的等待原因文案零改动。已生成的模板不会被改写：`revision_fingerprint` 不含标注内容，要重新生成才带上该键。
 
@@ -20,7 +22,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1127 个测试、327 个子测试，全部通过（2026-10-23） |
+| 自动化测试 | 1134 个测试、327 个子测试，全部通过（2026-10-23） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -79,10 +81,11 @@
 接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。
 
 1. **日语片假名词内断行**（#141 已知限制）。`segment.py` 的 `_CJK_WRAP_TOKEN` 对 ja 按字切，会把 `グラフィックス` 从中间切开。无分词器前提下，把**片假名连续段**（含长音 `ー`）与现有 Latin 段同样作为一个 token 不拆；注意 `_wraps_by_character` 现在 zh/ja 为真、ko 已改按空白。验收：`tests/test_segment_wrap.py` 加片假名用例，切不开时仍返回 `None` → review。
-2. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
-3. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
-4. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
-5. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
+2. **B2：下载与烧录前的磁盘容量预检**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2）。`doctor._check_output_directory` 只探可写，`download.py` 没用 yt-dlp 的 `filesize_approx` 做任何判断；`docs/REVIEW_FINDINGS_2026_10_17.md` 记过真实的「磁盘满 stage 停在 running」。用标准库 `shutil.disk_usage`，只做证伪（明显不够才拦），不引依赖。
+3. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
+4. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
+5. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
+6. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
 
 ## 接手步骤
 

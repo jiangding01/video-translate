@@ -65,8 +65,17 @@ class DoctorTest(unittest.TestCase):
             patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
             patch(
                 "xvt.doctor.run_command",
-                # 调用顺序：1=libass `-filters`、2=字体渲染、3=h264_videotoolbox、4=libx264。
-                side_effect=[capability, font_failure, capability, capability],
+                # 调用顺序：1=libass `-filters`、2-5=zh/ja/ko/en 四次字体渲染、
+                # 6=h264_videotoolbox、7=libx264。
+                side_effect=[
+                    capability,
+                    font_failure,
+                    capability,
+                    capability,
+                    capability,
+                    capability,
+                    capability,
+                ],
             ),
             patch("xvt.doctor.importlib.util.find_spec", return_value=object()),
         ):
@@ -74,6 +83,39 @@ class DoctorTest(unittest.TestCase):
 
         font_check = next(check for check in report["checks"] if check["name"] == "subtitle_font")
         self.assertEqual(font_check["status"], "fail")
+        # 失败要点名是哪种语言的字体，否则用户只知道「有问题」不知道装什么。
+        self.assertIn("zh-CN", font_check["message"])
+
+    def test_doctor_reports_a_non_chinese_subtitle_font_failure(self) -> None:
+        """只探 zh-CN 会让日语用户拿到全绿的 doctor 和一屏豆腐块。"""
+
+        capability = _capability_result()
+        font_failure = CommandError(
+            CommandResult(args=(), returncode=1, stdout="", stderr="failed to find any fallback")
+        )
+        with (
+            patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+            patch(
+                "xvt.doctor.run_command",
+                # 第 3 次调用是 ja 那一探。
+                side_effect=[
+                    capability,
+                    capability,
+                    font_failure,
+                    capability,
+                    capability,
+                    capability,
+                    capability,
+                ],
+            ),
+            patch("xvt.doctor.importlib.util.find_spec", return_value=object()),
+        ):
+            report = run_doctor()
+
+        font_check = next(check for check in report["checks"] if check["name"] == "subtitle_font")
+        self.assertEqual(font_check["status"], "fail")
+        self.assertIn("ja", font_check["message"])
+        self.assertNotIn("zh-CN", font_check["message"])
 
     def test_doctor_marks_capability_check_failed_on_timeout(self) -> None:
         with (
@@ -94,8 +136,16 @@ class DoctorTest(unittest.TestCase):
             patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
             patch(
                 "xvt.doctor.run_command",
-                # 调用顺序：1=libass `-filters`、2=字体渲染、3=h264_videotoolbox、4=libx264。
-                side_effect=[capability, _timeout_error(), capability, capability],
+                # 调用顺序：1=libass `-filters`、2-5=四次字体渲染、6=h264、7=libx264。
+                side_effect=[
+                    capability,
+                    _timeout_error(),
+                    capability,
+                    capability,
+                    capability,
+                    capability,
+                    capability,
+                ],
             ),
             patch("xvt.doctor.importlib.util.find_spec", return_value=object()),
         ):
@@ -115,7 +165,8 @@ class DoctorTest(unittest.TestCase):
         ):
             run_doctor()
 
-        self.assertEqual(run_command_mock.call_count, 4)
+        # 1=libass `-filters`、2-5=zh/ja/ko/en 四次字体渲染、6=h264、7=libx264。
+        self.assertEqual(run_command_mock.call_count, 7)
         self.assertTrue(all(call.kwargs.get("timeout") for call in run_command_mock.call_args_list))
 
     def test_doctor_checks_output_parent_without_creating_directory(self) -> None:

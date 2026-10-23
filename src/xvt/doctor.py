@@ -71,11 +71,20 @@ def _check_asr() -> dict[str, str]:
     }
 
 
-def _check_ass_font() -> dict[str, str]:
-    ffmpeg = shutil.which("ffmpeg")
-    font = font_for_language("zh-CN")
-    if not ffmpeg:
-        return {"name": "subtitle_font", "status": "fail", "message": "ffmpeg is not installed"}
+# `font_for_language` 按语言给出不同家族（非 darwin / 非 win32 上 zh / ja / ko 各要一份
+# Noto Sans CJK，其余语言走拉丁回退）。只探 zh-CN 会让日语用户拿到一份全绿的 doctor
+# 和一屏豆腐块——缺字在烧录时才暴露，而那时 QA 只能退回保守规则。
+_FONT_CHECK_SAMPLES = (
+    ("zh-CN", "字体检查"),
+    ("ja", "字幕テスト"),
+    ("ko", "자막 확인"),
+    ("en", "Font check"),
+)
+
+
+def _probe_ass_font(ffmpeg: str, language: str, sample: str) -> str | None:
+    """渲染一帧该语言的样例字幕；成功返回 ``None``，失败返回原因。"""
+
     with tempfile.TemporaryDirectory() as directory:
         subtitle_path = save_bilingual_ass(
             [
@@ -84,9 +93,9 @@ def _check_ass_font() -> dict[str, str]:
                     0,
                     1000,
                     "Font check",
-                    target_text="字体检查",
+                    target_text=sample,
                     source_language="en",
-                    target_language="zh-CN",
+                    target_language=language,
                 )
             ],
             Path(directory) / "font-check.ass",
@@ -118,20 +127,29 @@ def _check_ass_font() -> dict[str, str]:
         except CommandError as command_error:
             result = command_error.result
     if result.returncode == 124:
-        return {
-            "name": "subtitle_font",
-            "status": "fail",
-            "message": (f"libass render check timed out after {_FFMPEG_RENDER_TIMEOUT_SECONDS:g}s"),
-        }
+        return f"timed out after {_FFMPEG_RENDER_TIMEOUT_SECONDS:g}s"
     detail = f"{result.stdout}\n{result.stderr}".casefold()
     font_errors = ("error opening font", "failed to find any fallback", "could not open")
     if result.returncode == 0 and not any(error in detail for error in font_errors):
-        return {"name": "subtitle_font", "status": "pass", "message": font}
-    return {
-        "name": "subtitle_font",
-        "status": "fail",
-        "message": f"libass cannot render the default font: {font}",
-    }
+        return None
+    return "libass cannot render it"
+
+
+def _check_ass_font() -> dict[str, str]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return {"name": "subtitle_font", "status": "fail", "message": "ffmpeg is not installed"}
+    checked = []
+    failures = []
+    for language, sample in _FONT_CHECK_SAMPLES:
+        font = font_for_language(language)
+        reason = _probe_ass_font(ffmpeg, language, sample)
+        checked.append(f"{language}: {font}")
+        if reason is not None:
+            failures.append(f"{language} ({font}): {reason}")
+    if failures:
+        return {"name": "subtitle_font", "status": "fail", "message": "; ".join(failures)}
+    return {"name": "subtitle_font", "status": "pass", "message": ", ".join(checked)}
 
 
 def _check_output_directory(output: str | Path) -> dict[str, str]:

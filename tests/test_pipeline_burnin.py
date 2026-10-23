@@ -13,8 +13,9 @@ from xvt.job_store import create_job, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline import burn_translated_job, preview_translated_job
+from xvt.pipeline.burnin import _check_render_layout
 from xvt.recovery import file_checksum
-from xvt.render import AssStyleOptions
+from xvt.render import AssStyleOptions, FontGlyphError
 from xvt.segment import target_wrap_binding
 
 _QA_KIND = "translated_subtitle_qa"
@@ -222,7 +223,17 @@ class BurnPreviewPipelineTest(unittest.TestCase):
                 Path(output).write_bytes(b"preview")
                 return Path(output)
 
+            # 字体名是虚构的，而这条测试此前让真实 libass 去量它：不同机器的回退链不同
+            # （本机能回退到带 CJK 字形的字体，CI 的 macOS runner 回退不到），测量结果
+            # 因此随环境漂移——缺字判定收紧后它在 macOS CI 上直接把预览拦了下来。本测试
+            # 验的是预览的字体/参数/产物管线，不是测量本身，所以把测量定住；缺字的真实
+            # 行为由 test_layout_qa.py 与下面那条「字体渲染不出就拒绝预览」覆盖。
+            measured = {
+                (cue_id, role): (120, 492) for cue_id in (1, 2) for role in ("source", "target")
+            }
+
             with (
+                patch("xvt.qa.measure_bilingual_line_widths", return_value=measured),
                 patch("xvt.pipeline.burnin.probe_media", side_effect=[source_info, preview_info]),
                 patch("xvt.pipeline.burnin.burn_subtitles", side_effect=burn),
             ):
@@ -235,6 +246,7 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             persisted = load_job(job_file)
             preview_ass_text = (artifacts / "preview.ass").read_text(encoding="utf-8")
             with (
+                patch("xvt.qa.measure_bilingual_line_widths", return_value=measured),
                 patch("xvt.pipeline.burnin.probe_media", return_value=source_info),
                 self.assertRaisesRegex(UserInputError, "existing artifact"),
             ):
@@ -242,6 +254,7 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             media_alias = root / "media-alias.mp4"
             os.link(burn_media, media_alias)
             with (
+                patch("xvt.qa.measure_bilingual_line_widths", return_value=measured),
                 patch("xvt.pipeline.burnin.probe_media", return_value=source_info),
                 self.assertRaisesRegex(UserInputError, "source media"),
             ):
@@ -260,6 +273,61 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             {artifact.kind for artifact in persisted.artifacts} & {"preview_ass", "preview_video"},
             {"preview_ass", "preview_video"},
         )
+
+    def test_render_layout_check_rejects_fonts_that_cannot_render_the_text(self) -> None:
+        """选了渲染不出字幕的字体时，原子预览/烧录必须拒绝，而不是出一屏豆腐块。
+
+        这条行为是 PR #144 收紧缺字判定后才有的，而且是 CI 的 macOS runner 先撞上的：
+        那台机器对虚构字体名回退不到 CJK 字形。之前这种情况只记一条 warning 就放行。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = create_job("/tmp/input.mp4", root)
+            translated = [
+                Cue(
+                    1,
+                    0,
+                    2000,
+                    "First",
+                    target_text="第一条",
+                    source_language="en",
+                    target_language="zh-CN",
+                )
+            ]
+            media_info = MediaInfo(
+                "/tmp/input.mp4", 30000, 5, "mp4", 1920, 1080, 30.0, "h264", "aac", True, True
+            )
+            with (
+                patch(
+                    "xvt.qa.measure_bilingual_line_widths",
+                    side_effect=FontGlyphError((0x7B2C,), ("Target Font",)),
+                ),
+                self.assertRaisesRegex(UserInputError, "subtitle QA blocks rendering"),
+            ):
+                _check_render_layout(
+                    job,
+                    translated,
+                    media_info,
+                    AssStyleOptions(target_font="Target Font"),
+                    None,
+                    persist=False,
+                )
+
+            # 对照组：同一条路径上「测量不可用但不是缺字」（ffmpeg 缺失、bbox 解析不出）
+            # 照旧只记 warning、照旧放行。两条一起才说明收紧的是缺字这一类，不是测量失败。
+            with patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                side_effect=ValueError("measurement is invalid"),
+            ):
+                _check_render_layout(
+                    job,
+                    translated,
+                    media_info,
+                    AssStyleOptions(target_font="Target Font"),
+                    None,
+                    persist=False,
+                )
 
     def test_preview_rejects_failed_translated_subtitle_qa(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
