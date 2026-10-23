@@ -988,7 +988,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 
 双语输出会折叠每种语言内部的源字幕换行，确保每个 cue 为“译文一到两行 + 原文一行”；译文只在整段超显示上限时才切成两行（见下）。对 16:9 横版英文，64 个显示单位以内通过，65 到 72 个显示单位仅警告，超过 72 才需复核；窄画幅会自动收紧上限。中文维持更严格的每行上限（36 个显示单位）。
 
-译文整段超过显示上限时，QA 与 ASS 写出会先按禁则确定性地把它切成最多 2 行（`segment.wrap_target_lines`，行首行尾禁则不得违反），两行都不超限就通过并在报告里记一条 `target_wrapped` warning；切不开（单个词或字、只能违禁才切得开）或切完仍超限才像以前一样要求复核，文案仍以 `target line width N exceeds M display units` 开头，后缀为 ` after wrapping into 2 lines`。ASS 写出与 libass 行宽测量使用同一份切分，QA 量的就是烧出去的；cue 的 ID、起止时间和数量不变，`translated.srt` / `bilingual.srt` 不换行，源文也不换行。
+译文整段超过显示上限时，QA 与 ASS 写出会先按禁则确定性地把它切成最多 2 行（`segment.wrap_target_lines`，行首行尾禁则不得违反），两行都不超限就通过并在报告里记一条 `target_wrapped` warning；切不开（单个词或字、整段放不下的片假名连续段、只能违禁才切得开）或切完仍超限才像以前一样要求复核，文案仍以 `target line width N exceeds M display units` 开头，后缀为 ` after wrapping into 2 lines`。切分不会把一个词从中间劈开：`OpenAI GPT-5` 一类 Latin / 数字连续段与 `グラフィックス` 一类片假名连续段各算一个整体，中点 `・` 与双连字符 `゠` 前后仍是合法切点；日文的平假名与汉字仍按字切（那要分词器才能判，禁则与字符类都挡不住）。ASS 写出与 libass 行宽测量使用同一份切分，QA 量的就是烧出去的；cue 的 ID、起止时间和数量不变，`translated.srt` / `bilingual.srt` 不换行，源文也不换行。
 
 字幕 QA 的 `reading_speed` 提醒按「阅读单位」每秒计：空白与标点不计，CJK 语言下 ASCII 字母与数字每个计半个单位（向上取整）；上限为 zh 9、ja / ko 13、其余语言 20 单位/秒。该口径只用于 QA 判定，翻译侧的 `max_target_characters` 预算仍按字符数计。
 

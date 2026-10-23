@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-24（HEAD `b87d55b`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（基线 `main` 的 `9343c13`，本条改动在 `feat/katakana-wrap-token` 上待合并；写于 Claude Opus 5 会话）
+
+2026-10-24 **日语片假名词不再被展示换行从中间切开，`wrap.version` 升 2。** `_CJK_WRAP_TOKEN` 此前只让 Latin / 数字段整体不拆，片假名走 `\S` 单字一 token，`グラフィックス` 被切成 `グラフィッ|クス`；禁则表挡不住（小字假名与长音符在 `NO_LINE_START` 里，普通片假名之间照样放行）。新增 `_KATAKANA_RUN` 把片假名连续段与 Latin 段同口径整体算一个 token——**不是新启发式，是把既有规则补全到同一类对象**，`グラフィ|ックス` 与 `Open|AI` 坏在同一处。刻意排除 `゠` / `・` 与半角 `･` 三个词间分隔符（否则 `アイス・コーヒー` 切不开）；半角片假名纳入（`normalize_display_text` 不做半角转全角）；平假名与汉字不收（词法边界，要分词器，P7 ②）。**硬形态**：段放不下即 `None` 维持 review，与 Latin 单 token 同口径；退化可达但 20 条构造样本 0 命中、修好 5 条，仓库零份 ja 译文 artifact 所以那只是机制差异不是误伤率。`version` 1→2 的理由**不是**约束 4 被违反（`_reusable_rendered_layout` 复用的报告与 ASS 同源一致），而是不升则修复对在途 Job 不生效。升级影响：带 `layout` 块的报告重跑后 checksum 变，人工确认需重做。顺带补了 P7 ⑤ 那张表的交叉引用（该行在源文分段侧仍按 0/12 不做）与 `ARCHITECTURE.md` 漏改的「产出点三→四」。
 
 2026-10-23 **YouTube 画质平局且仅 Cookie 侧提取不完整时改走干净的匿名侧（#145）。** `download._download_compared_video` 本来就有「Cookie 侧受损就回退匿名侧」的机制，但换路条件写的是**严格**更高画质，于是两侧画质相同时留在脏的 Cookie 侧、随后被「格式提取不完整」护栏整单拦下。YouTube 的 SABR 实验按账号开启后 Cookie 侧**每次**都报 `web_embedded ... formats have been skipped`、而匿名侧零警告且选中同一个 1080p，于是这类账号下**任何** YouTube 视频都卡死在这条护栏上（2026-10-23 真实端到端验收撞到，当时只能靠 yt-dlp 垫片绕过）。现在平局且仅 Cookie 侧脏时也换路，`reason` 记新取值 `anonymous_clean_extraction`。**护栏本身一个字未改**：`incomplete` 判定、标记清单与错误文案全部保留，脏的一侧永远不会被下载；匿名侧画质更低（那才是 `5ae28e8` 要防的静默降级）、匿名侧也脏、缺原音轨、音轨语言不一致四类仍然失败。真实验收（不带垫片、真实 Cookie 打真实 YouTube）：修复前报「视频格式提取不完整」，修复后以 `access=anonymous`、`reason=anonymous_clean_extraction` 拿到 1080p 原音轨，format_id 与 Cookie 侧选中的完全相同。方案见 [YouTube 下载画质方案](docs/YOUTUBE_DOWNLOAD_QUALITY_PLAN.md)。
 
@@ -24,7 +26,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1138 个测试、329 个子测试，全部通过（2026-10-24） |
+| 自动化测试 | 1145 个测试、333 个子测试，全部通过（2026-10-24） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -53,7 +55,7 @@
 
 ## 已知限制
 
-- 译文超硬显示阈值时，能按禁则切成最多 2 行的已由确定性换行自动放行（记 `target_wrapped` warning）；切不开或切完仍超的仍由 QA 阻断。libass 像素驱动的二分换行与重译缩短未实现（方案见 [docs/TARGET_LINE_WRAP_PLAN.md](docs/TARGET_LINE_WRAP_PLAN.md)）。
+- 译文超硬显示阈值时，能按禁则切成最多 2 行的已由确定性换行自动放行（记 `target_wrapped` warning）；切不开或切完仍超的仍由 QA 阻断——`_KATAKANA_RUN` 落地后「片假名连续段整体放不下」也是切不开的一种（硬形态，刻意不退回按字切；真撞上频繁 review 时的退路写在 `segment.py` 该常量的注释里）。libass 像素驱动的二分换行与重译缩短未实现（方案见 [docs/TARGET_LINE_WRAP_PLAN.md](docs/TARGET_LINE_WRAP_PLAN.md)）。
 - 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；Agent 主链真实 E2E 已通过，但默认切换仍需多样本质量与成本对照。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
@@ -82,12 +84,11 @@
 
 接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。
 
-1. **日语片假名词内断行**（#141 已知限制）。`segment.py` 的 `_CJK_WRAP_TOKEN` 对 ja 按字切，会把 `グラフィックス` 从中间切开。无分词器前提下，把**片假名连续段**（含长音 `ー`）与现有 Latin 段同样作为一个 token 不拆；注意 `_wraps_by_character` 现在 zh/ja 为真、ko 已改按空白。验收：`tests/test_segment_wrap.py` 加片假名用例，切不开时仍返回 `None` → review。
-2. **B2：下载与烧录前的磁盘容量预检**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2）。`doctor._check_output_directory` 只探可写，`download.py` 没用 yt-dlp 的 `filesize_approx` 做任何判断；`docs/REVIEW_FINDINGS_2026_10_17.md` 记过真实的「磁盘满 stage 停在 running」。用标准库 `shutil.disk_usage`，只做证伪（明显不够才拦），不引依赖。
-3. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
-4. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
-5. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
-6. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
+1. **B2：下载与烧录前的磁盘容量预检**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2）。`doctor._check_output_directory` 只探可写，`download.py` 没用 yt-dlp 的 `filesize_approx` 做任何判断；`docs/REVIEW_FINDINGS_2026_10_17.md` 记过真实的「磁盘满 stage 停在 running」。用标准库 `shutil.disk_usage`，只做证伪（明显不够才拦），不引依赖。
+2. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
+3. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
+4. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
+5. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
 
 ## 接手步骤
 
