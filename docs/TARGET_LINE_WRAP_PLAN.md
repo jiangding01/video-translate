@@ -61,6 +61,8 @@ HANDOFF「已知限制」第 1 条：译文超过硬显示阈值时只能由 QA 
 
 切完仍超限时文案保持 `target line width N exceeds M display units` 前缀，后缀加 ` after wrapping into 2 lines`。`candidate_qa._LINE_WIDTH_PATTERN` 是 `search`，前缀不变就仍能解析，`recovery.py` / `pipeline/revision.py` 两个消费者零改动；人工修订模板里给的上限自然就是「每行上限」。`N` 取最宽那行的宽度。
 
+补记（2026-10-23）：「上限自然就是每行上限」只在代码视角成立——模板读者只看到 `limit: 36` 会以为要把整句缩进一行。`pipeline/revision.py` 的宽度标注随后补了 `max_lines`（取 `segment.TARGET_WRAP_MAX_LINES`），只标在 `target` 的宽度项上；解析仍是 `overflow_limits` 那一份正则，行数不从 message 里解析，`recovery.py` 的消费确实零改动。
+
 ### D6 不超限的 cue 报告字节逐字不变
 
 协议快照冻结了 `translated_subtitle_qa` 的内容 checksum，快照里没有烧录 / 渲染场景（`layout` 恒为 `None`）。只要不超限路径不改一个字节，快照不动。实现后跑快照：若 diff **恰好**是「某条 fixture 原本 review、现在 `target_wrapped`」，那是刻意的协议变更，按 AGENTS 修改流程第 8 条重生成 golden 并写 Changelog；若 diff 是别的，回退改动。
