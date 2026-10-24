@@ -83,6 +83,8 @@
 
 ### Documentation
 
+- CI 固定 uv 版本（`astral-sh/setup-uv` 的 `version: "0.12.1"`）并显式声明 `permissions: contents: read`。不固定版本时 setup-uv 要先查一次 latest release，2026-10-24 macos/3.11 正是在那一步 `Connect Timeout` 挂掉的；它同时打的 「No (valid) GitHub token provided」来自 `getLatestVersion` 的 catch-all 分支（任何错误都打这句），与 token 无关——`github-token` 的默认值本来就是 `${{ github.token }}`，显式再传 `secrets.GITHUB_TOKEN` 是同一个值、零效果。固定版本后那次 API 调用直接消失，少一个失败点，也让 CI 装的 uv 可复现（`uv.lock` 锁了依赖却没锁解析它的工具本身）；pin 的是本机实测版本，所以「本地验过的」就是「CI 跑的」，升级节奏同 `uv.lock`。权限声明与本次故障无关，是独立的最小权限收紧：本 workflow 只跑测试与打包，不显式声明就会吃仓库的默认设置。**这两条都不保证 CI 不再抖**（checkout、`uv sync`、brew/apt 装 ffmpeg 都还要联网），只是去掉一个本不必要的网络依赖。
+
 - README 的环境要求与 AGENTS 的验证命令一节写明**字幕字体是行宽 QA 的前置条件**：缺能渲染目标语言全部字形的字体时，libass 报 `failed to find any fallback with glyph`，`measure_bilingual_line_widths` 抛错，`qa.check_subtitles` **静默降级**到保守显示单位上限（只记一条 `layout_measurement_unavailable` warning），烧录照旧进行、测试照旧全绿。Linux 上中日韩需要 `fonts-noto-cjk` 一类包（`render.font_for_language` 在非 darwin / 非 win32 上要 `Noto Sans CJK SC` / `JP` / `KR`，其余语言要 `DejaVu Sans`），macOS 用系统自带的 Hiragino。CI 的 Linux 侧据此补装字体，并在两个平台新增一步能力断言（`.github/scripts/verify_layout_measurement.py`，本地同样可跑）：对 zh-CN / ja / en 各真的调一次测量并断言报告自己的 `layout["measurement"] == "measured"`，而不是 `fc-list | grep cjk` 这类代理指标。**产品行为零改动**（`src/` 未改，降级规则本身不变）：变的是 Linux CI 上行宽 QA 从一直降级变成真实测量，于是 `run` / `continue` 烧录腿复用渲染腿布局 QA 的那条分支在两个平台上都被验到。
 - README、`xvt run --help` / `xvt batch --help`、架构说明与事件契约补齐 `--engine` 的后端回退行为，此前四处都没有记载。
 - README 与架构说明写明**产物以 Job 登记表为准，不要按固定文件名取**：源文修订会把 `source_cues` / `source_srt` / `subtitle_qa` 重新指向 `source-reviewed-*` 命名的文件，`rebuild-source` / `resegment-translation` 会把下游产物移出登记表，两种情况下带旧内容的 `source.srt`、`translated.srt`、`bilingual.*`、`qa-translated.json` 都仍留在 `artifacts/` 下。这些残留是恢复证据，刻意不删除；按固定路径读取的脚本会拿到旧内容。
