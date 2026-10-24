@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-10-24（HEAD `6b227e4`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（HEAD `e5d7da3`，`main`，工作树干净；写于 Claude Opus 5 会话）
 
 2026-10-24 **日语片假名词不再被展示换行从中间切开，`wrap.version` 升 2。** `_CJK_WRAP_TOKEN` 此前只让 Latin / 数字段整体不拆，片假名走 `\S` 单字一 token，`グラフィックス` 被切成 `グラフィッ|クス`；禁则表挡不住（小字假名与长音符在 `NO_LINE_START` 里，普通片假名之间照样放行）。新增 `_KATAKANA_RUN` 把片假名连续段与 Latin 段同口径整体算一个 token——**不是新启发式，是把既有规则补全到同一类对象**，`グラフィ|ックス` 与 `Open|AI` 坏在同一处。刻意排除 `゠` / `・` 与半角 `･` 三个词间分隔符（否则 `アイス・コーヒー` 切不开）；半角片假名纳入（`normalize_display_text` 不做半角转全角）；平假名与汉字不收（词法边界，要分词器，P7 ②）。**硬形态**：段放不下即 `None` 维持 review，与 Latin 单 token 同口径；退化可达但 20 条构造样本 0 命中、修好 5 条，仓库零份 ja 译文 artifact 所以那只是机制差异不是误伤率。`version` 1→2 的理由**不是**约束 4 被违反（`_reusable_rendered_layout` 复用的报告与 ASS 同源一致），而是不升则修复对在途 Job 不生效。升级影响：带 `layout` 块的报告重跑后 checksum 变，人工确认需重做。顺带补了 P7 ⑤ 那张表的交叉引用（该行在源文分段侧仍按 0/12 不做）与 `ARCHITECTURE.md` 漏改的「产出点三→四」。
 
@@ -84,7 +84,7 @@
 
 接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。
 
-1. **B2：下载与烧录前的磁盘容量预检**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2）。`doctor._check_output_directory` 只探可写，`download.py` 没用 yt-dlp 的 `filesize_approx` 做任何判断；`docs/REVIEW_FINDINGS_2026_10_17.md` 记过真实的「磁盘满 stage 停在 running」。用标准库 `shutil.disk_usage`，只做证伪（明显不够才拦），不引依赖。
+1. **B2：下载前的磁盘容量预检**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2）。`download.py` 没用 yt-dlp 的 `filesize_approx` 做任何判断，而 `docs/REVIEW_FINDINGS_2026_10_17.md:386` 记过真实的「磁盘满导致 stage 永久停在 running」——那次是**下载**阶段。用标准库 `shutil.disk_usage`，只做证伪（明显不够才 fail closed，拿不到大小就跳过不猜），不引依赖。**2026-10-24 读代码后把复查里并列的四条落点改成分层，只做第一层**：①（本条）下载前预检，动 `download.py` + `EventType` 新增 `download_space_insufficient` + `docs/EVENTS.md`（有 `tests/test_events.py` 契约守卫）+ 测试；注意 `filesize_approx` 要经 `_probe_video` 解析并给 `VideoSelection` 这个 frozen dataclass 加字段，而它正是 `_download_compared_video` 画质比较的载体，加字段要连带复核 `test_fail_closed_boundaries` 的 11 条边界。②**`doctor` 的 `output_free_space` 单独拍板，不要夹在这条里**：`doctor.py:166` 的聚合是 `all(check["status"] == "pass")`，**没有 `warn` 档**，所以复查里写的「低于阈值给 warn 不给 fail」在现有结构里做不到——要么引入第三档状态（连带改 README 的 doctor 输出契约与现有 8 个检查项的测试期望，影响面比这个功能本身大），要么这一项等于没做。③ 烧录前估算收益最弱：成品与源同量级而源已在盘上，真正会爆的是下载那一步。④ Skill 文档加一条同义规则，零成本顺手做。
 2. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
 3. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
 4. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
