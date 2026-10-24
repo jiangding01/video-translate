@@ -6,7 +6,7 @@ import platform
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from xvt.models import Cue
 from xvt.process import CommandError, run_command
@@ -27,7 +27,21 @@ def _check_binary(name: str) -> dict[str, str]:
     return {"name": name, "status": "fail", "message": f"{name} is not installed"}
 
 
-def _ffmpeg_capability(arguments: list[str], token: str, name: str) -> dict[str, str]:
+def _ffmpeg_capability(
+    arguments: list[str],
+    token: str,
+    name: str,
+    *,
+    missing_status: Literal["fail", "warn"] = "fail",
+) -> dict[str, str]:
+    """探测 ffmpeg 是否带某个能力。
+
+    ``missing_status`` 只作用于「ffmpeg 正常返回、但输出里没有这个 token」这一个分支
+    ——也就是「这台机器确实没有这个能力」。ffmpeg 不存在或探测超时都是**判不出来**，
+    那两条照旧 fail：前者已由 ``_check_binary("ffmpeg")`` 决定整体结论，后者是环境
+    异常，不该因为「这个能力可以降级」就被说成没事。
+    """
+
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return {"name": name, "status": "fail", "message": "ffmpeg is not installed"}
@@ -53,7 +67,7 @@ def _ffmpeg_capability(arguments: list[str], token: str, name: str) -> dict[str,
     output = f"{result.stdout}\n{result.stderr}"
     if result.returncode == 0 and token in output:
         return {"name": name, "status": "pass", "message": token}
-    return {"name": name, "status": "fail", "message": f"ffmpeg lacks {token}"}
+    return {"name": name, "status": missing_status, "message": f"ffmpeg lacks {token}"}
 
 
 def _check_asr() -> dict[str, str]:
@@ -152,14 +166,55 @@ def _check_ass_font() -> dict[str, str]:
     return {"name": "subtitle_font", "status": "pass", "message": ", ".join(checked)}
 
 
-def _check_output_directory(output: str | Path) -> dict[str, str]:
+def _resolved_output(output: str | Path) -> tuple[Path, Path]:
+    """返回 (解析后的目标路径, 最近一个已存在的祖先)。
+
+    目标目录可能还没建，所以可写性与可用空间都只能问最近的已存在祖先——两项共用这一份
+    解析，免得一项量目标、一项量祖先而给出互相矛盾的结论。
+    """
+
     path = Path(output).expanduser().resolve()
     candidate = path
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
+    return path, candidate
+
+
+def _check_output_directory(output: str | Path) -> dict[str, str]:
+    path, candidate = _resolved_output(output)
     if candidate.is_dir() and os.access(candidate, os.W_OK):
         return {"name": "output", "status": "pass", "message": str(path)}
     return {"name": "output", "status": "fail", "message": f"not writable: {path}"}
+
+
+# 1080p 成品约 1–3 GB/小时，低于这个量连一条短视频都放不下。阈值是经验值，所以这一项
+# **永远只是 warn**：它用固定阈值而不是实际需求，没有资格拦任何东西——真正按所选格式
+# 大小判定的闸门在下载前那道预检（``download._check_download_space``）。
+_MINIMUM_FREE_BYTES = 2 * 2**30
+
+
+def _check_output_free_space(output: str | Path) -> dict[str, str] | None:
+    """输出位置的可用空间；拿不到就返回 ``None``，调用方不追加这一项。
+
+    ``disk_usage`` 在网络卷或权限受限的路径上可能抛 ``OSError``，那是**判不出来**而不是
+    「空间不足」，所以不报 warn——与下载前预检同一条纪律：只做证伪，不猜。
+    """
+
+    _, candidate = _resolved_output(output)
+    try:
+        free = shutil.disk_usage(candidate).free
+    except OSError:
+        return None
+    if free >= _MINIMUM_FREE_BYTES:
+        return {"name": "output_free_space", "status": "pass", "message": f"{free / 2**30:.1f} GiB"}
+    return {
+        "name": "output_free_space",
+        "status": "warn",
+        "message": (
+            f"only {free / 2**30:.1f} GiB free at {candidate}; "
+            "downloads and burns may run out of space"
+        ),
+    }
 
 
 def run_doctor(output: str | Path | None = None) -> dict[str, Any]:
@@ -169,13 +224,26 @@ def run_doctor(output: str | Path | None = None) -> dict[str, Any]:
         _check_binary("yt-dlp"),
         _ffmpeg_capability(["-filters"], "subtitles", "libass"),
         _check_ass_font(),
-        _ffmpeg_capability(["-encoders"], "h264_videotoolbox", "hardware_encoder"),
+        # 缺 VideoToolbox 只是回退软件编码（AGENTS 关键设计决定第 8 条），不是跑不了。
+        # 此前它报 fail，而 h264_videotoolbox 是 Apple 独有的，于是非 macOS 上
+        # `xvt doctor` 整体**永远** fail、退出码永远 3，整份报告因此没有信号价值。
+        _ffmpeg_capability(
+            ["-encoders"], "h264_videotoolbox", "hardware_encoder", missing_status="warn"
+        ),
         _ffmpeg_capability(["-encoders"], "libx264", "software_encoder"),
         _check_asr(),
     ]
     if output:
         checks.append(_check_output_directory(output))
-    status = "pass" if all(check["status"] == "pass" for check in checks) else "fail"
+        if (free_space := _check_output_free_space(output)) is not None:
+            checks.append(free_space)
+    # fail 优先于 warn：有任何一项真的跑不了，整体就是 fail，不被「其余只是建议」冲淡。
+    if any(check["status"] == "fail" for check in checks):
+        status = "fail"
+    elif any(check["status"] == "warn" for check in checks):
+        status = "warn"
+    else:
+        status = "pass"
     return {
         "status": status,
         "platform": platform.system().lower(),

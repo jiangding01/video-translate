@@ -273,7 +273,7 @@ xvt relink-source-media JOB_FILE NEW_MEDIA [--events-jsonl]
 xvt doctor [--output PATH] [--json]
 ```
 
-- `--output`：额外检查目标输出位置。
+- `--output`：额外检查目标输出位置（可写性与可用空间两项）。
 - `--json`：输出机器可读诊断结果。
 
 </details>
@@ -596,7 +596,7 @@ uv run --no-sync xvt doctor
 uv run --no-sync xvt doctor --json
 ```
 
-`doctor` 会检查 FFmpeg、ffprobe、yt-dlp、libass、字幕字体的一帧实渲染、VideoToolbox、libx264 和已安装的 ASR 引擎。字体检查对 zh / ja / ko / en 四种语言**各渲染一帧**（`font_for_language` 按语言给出不同家族，只探中文会让日语用户拿到一份全绿的 doctor 和一屏豆腐块），失败时 `subtitle_font` 这一项点名是哪种语言的哪个字体。ffmpeg 能力探测（30 秒）与字体渲染检查（每次 60 秒）都有超时上限，任一探测超时按该检查项失败处理，不会让命令无限期挂住；探测与其余外部命令走同一条执行路径，超时或 Ctrl-C 时整个进程组（含 ffmpeg 自己派生的子进程）都会被清理，不会留下后台进程继续占用 CPU。
+`doctor` 会检查 FFmpeg、ffprobe、yt-dlp、libass、字幕字体的一帧实渲染、VideoToolbox、libx264 和已安装的 ASR 引擎；给了 `--output` 还会检查该位置的可写性与可用空间。每项结果分 `PASS` / `WARN` / `FAIL` 三档，整体结论取「有 `FAIL` 即 `fail`，否则有 `WARN` 即 `warn`，全过才 `pass`」，**退出码只在 `fail` 时为 3，`warn` 与 `pass` 都是 0**——`warn` 的语义是「这台机器能跑，只是有一项降级」。当前有两项会给 `WARN` 而不是 `FAIL`：缺 VideoToolbox（`hardware_encoder`，烧录会回退软件编码，只是更慢）与输出位置可用空间低于 2 GiB（`output_free_space`，阈值是经验值，真正按所选格式大小判定的闸门在下载前那道预检；可用空间拿不到时这一项整个不出现，不猜）。字体检查对 zh / ja / ko / en 四种语言**各渲染一帧**（`font_for_language` 按语言给出不同家族，只探中文会让日语用户拿到一份全绿的 doctor 和一屏豆腐块），失败时 `subtitle_font` 这一项点名是哪种语言的哪个字体。ffmpeg 能力探测（30 秒）与字体渲染检查（每次 60 秒）都有超时上限，任一探测超时按该检查项失败处理，不会让命令无限期挂住；探测与其余外部命令走同一条执行路径，超时或 Ctrl-C 时整个进程组（含 ffmpeg 自己派生的子进程）都会被清理，不会留下后台进程继续占用 CPU。
 
 ## 快速开始
 

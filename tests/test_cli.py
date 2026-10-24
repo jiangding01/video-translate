@@ -3988,6 +3988,31 @@ class BatchResultPrintingTest(unittest.TestCase):
         self.assertIn("\\x1b", rendered)
         self.assertIn("可写", rendered)
 
+    def test_doctor_warn_status_exits_zero(self) -> None:
+        # warn 的语义是「能跑，有建议」：退成非 0 就和 fail 没区别，脚本里也就分不出
+        # 「这台机器不行」和「这台机器可以，只是有一项降级」。
+        report = {
+            "status": "warn",
+            "platform": "linux",
+            "architecture": "x86_64",
+            "checks": [
+                {"status": "pass", "name": "ffmpeg", "message": "/usr/bin/ffmpeg"},
+                {
+                    "status": "warn",
+                    "name": "hardware_encoder",
+                    "message": "ffmpeg lacks h264_videotoolbox",
+                },
+            ],
+        }
+        output = StringIO()
+        with patch("xvt.cli.run_doctor", return_value=report), redirect_stdout(output):
+            return_code = main(["doctor"])
+
+        self.assertEqual(return_code, 0)
+        rendered = output.getvalue()
+        self.assertIn("WARN hardware_encoder", rendered)
+        self.assertIn("overall: warn", rendered)
+
 
 class HumanEventSinkTerminalSafetyTest(unittest.TestCase):
     """人读输出的唯一漏斗是 _line / _progress，控制字符必须在那里被统一挡掉。
