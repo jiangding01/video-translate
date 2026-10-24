@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,13 @@ def _assert_process_dead(test: unittest.TestCase, pid: int, timeout_seconds: flo
 
 def _capability_result(stdout: str = "subtitles libx264 h264_videotoolbox") -> CommandResult:
     return CommandResult(args=(), returncode=0, stdout=stdout, stderr="")
+
+
+@dataclass(frozen=True)
+class _Usage:
+    """``shutil.disk_usage`` 的替身：余量检查只读 ``free``。"""
+
+    free: int
 
 
 def _timeout_error() -> CommandError:
@@ -182,6 +190,111 @@ class DoctorTest(unittest.TestCase):
             output_check = next(check for check in report["checks"] if check["name"] == "output")
             self.assertEqual(output_check["status"], "pass")
             self.assertFalse(output.exists())
+
+    def test_missing_hardware_encoder_is_only_a_warning(self) -> None:
+        # h264_videotoolbox 是 Apple 独有的，非 macOS 上必然缺失；burn.py 会回退软件
+        # 编码，所以这是「慢」不是「跑不了」。此前它报 fail，于是 Linux 上整体永远 fail。
+        with (
+            patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+            patch("xvt.doctor.run_command", return_value=_capability_result("subtitles libx264")),
+            patch("xvt.doctor.importlib.util.find_spec", return_value=object()),
+        ):
+            report = run_doctor()
+
+        hardware = next(c for c in report["checks"] if c["name"] == "hardware_encoder")
+        self.assertEqual(hardware["status"], "warn")
+        self.assertEqual(report["status"], "warn")
+        # 软件编码器仍在，所以没有任何一项是 fail。
+        self.assertEqual([c["name"] for c in report["checks"] if c["status"] == "fail"], [])
+
+    def test_fail_wins_over_warn(self) -> None:
+        # ASR 缺失（fail）与硬件编码器缺失（warn）同时出现：整体必须是 fail，不被
+        # 「其余只是建议」冲淡。
+        with (
+            patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+            patch("xvt.doctor.run_command", return_value=_capability_result("subtitles libx264")),
+            patch("xvt.doctor.importlib.util.find_spec", return_value=None),
+        ):
+            report = run_doctor()
+
+        statuses = {c["name"]: c["status"] for c in report["checks"]}
+        self.assertEqual(statuses["hardware_encoder"], "warn")
+        self.assertEqual(statuses["asr"], "fail")
+        self.assertEqual(report["status"], "fail")
+
+    def test_timeout_still_fails_even_for_a_warn_capability(self) -> None:
+        # missing_status 只覆盖「ffmpeg 正常返回但没有这个 token」。超时是判不出来，
+        # 不能因为这个能力可以降级就说成没事。
+        with (
+            patch("xvt.doctor.shutil.which", return_value="/usr/bin/ffmpeg"),
+            patch("xvt.doctor.run_command", side_effect=_timeout_error()),
+        ):
+            result = _ffmpeg_capability(
+                ["-encoders"], "h264_videotoolbox", "hardware_encoder", missing_status="warn"
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("timed out", result["message"])
+
+    def _output_report(self, free_bytes):
+        """带 --output 跑一次 doctor；``free_bytes`` 传 OSError 则模拟拿不到可用空间。"""
+
+        usage = (
+            patch("xvt.doctor.shutil.disk_usage", side_effect=free_bytes)
+            if isinstance(free_bytes, OSError)
+            else patch("xvt.doctor.shutil.disk_usage", return_value=_Usage(free_bytes))
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+                patch("xvt.doctor.run_command", return_value=_capability_result()),
+                patch("xvt.doctor.importlib.util.find_spec", return_value=object()),
+                usage,
+            ):
+                return run_doctor(Path(directory) / "jobs")
+
+    def test_low_free_space_is_a_warning_not_a_failure(self) -> None:
+        report = self._output_report(512 * 2**20)
+
+        space = next(c for c in report["checks"] if c["name"] == "output_free_space")
+        self.assertEqual(space["status"], "warn")
+        self.assertIn("0.5 GiB", space["message"])
+        self.assertEqual(report["status"], "warn")
+        self.assertEqual([c["name"] for c in report["checks"] if c["status"] == "fail"], [])
+
+    def test_ample_free_space_passes(self) -> None:
+        report = self._output_report(100 * 2**30)
+
+        space = next(c for c in report["checks"] if c["name"] == "output_free_space")
+        self.assertEqual(space["status"], "pass")
+        self.assertEqual(report["status"], "pass")
+
+    def test_exactly_the_threshold_passes(self) -> None:
+        report = self._output_report(2 * 2**30)
+
+        space = next(c for c in report["checks"] if c["name"] == "output_free_space")
+        self.assertEqual(space["status"], "pass")
+
+    def test_unreadable_disk_usage_omits_the_check(self) -> None:
+        # 拿不到可用空间是「判不出来」，不是「空间不足」：这一项整个不出现，也不 warn。
+        report = self._output_report(OSError("network volume"))
+
+        self.assertEqual([c for c in report["checks"] if c["name"] == "output_free_space"], [])
+        self.assertEqual(report["status"], "pass")
+
+    def test_free_space_check_is_absent_without_output(self) -> None:
+        # 「不该红时不红」：不给 --output 时检查项不变，新项不会凭空出现。
+        with (
+            patch("xvt.doctor.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+            patch("xvt.doctor.run_command", return_value=_capability_result()),
+            patch("xvt.doctor.importlib.util.find_spec", return_value=object()),
+        ):
+            report = run_doctor()
+
+        names = [c["name"] for c in report["checks"]]
+        self.assertNotIn("output_free_space", names)
+        self.assertNotIn("output", names)
+        self.assertEqual(report["status"], "pass")
 
     def test_ffmpeg_capability_timeout_kills_grandchild_process_group(self) -> None:
         # 反回归：doctor 的 ffmpeg 探测必须像 run_command 一样以进程组方式清理超时

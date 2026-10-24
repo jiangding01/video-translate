@@ -1427,7 +1427,9 @@ def _cmd_doctor(arguments: argparse.Namespace) -> int:
             # message 里嵌着 --output 路径与 shutil.which 命中的可执行文件路径，外部可控。
             _print_safe(f"{check['status'].upper():4} {check['name']}: {check['message']}")
         print(f"overall: {report['status']}")
-    return ExitCode.OK if report["status"] == "pass" else ExitCode.DEPENDENCY_ERROR
+    # warn 的语义是「能跑，有建议」：退成非 0 就和 fail 没区别，脚本里也就没法区分
+    # 「这台机器不行」和「这台机器可以，只是有一项降级」。
+    return ExitCode.OK if report["status"] in {"pass", "warn"} else ExitCode.DEPENDENCY_ERROR
 
 
 def _cmd_run(arguments: argparse.Namespace) -> int:

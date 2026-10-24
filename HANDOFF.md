@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-24（HEAD `17a963c`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（基线 `main` 的 `1b125f7`，本条改动在 `feat/doctor-warn-status` 上待合并；写于 Claude Opus 5 会话）
+
+2026-10-24 **`xvt doctor` 有了 `warn` 档，顺带修掉「非 macOS 上整体永远 fail」（B2 剩余层①）。** 8 个检查项此前只有 `pass` / `fail` 两档、聚合是 `all(status == "pass")`，而 `h264_videotoolbox` 是 Apple 独有的——非 macOS 上 `hardware_encoder` 必然缺失、整体永远 `fail`、退出码永远 3，整份报告没有信号价值；而 `burn.py` 本来就回退软件编码，缺它是慢不是跑不了。现在三档聚合（**fail 优先于 warn**）、`hardware_encoder` 缺失记 `warn`、退出码只在 `fail` 时为 3。`missing_status` 只覆盖「ffmpeg 正常返回但没有这个 token」，ffmpeg 缺失与探测超时是**判不出来**，照旧 fail。`--output` 新增 `output_free_space`（低于 2 GiB 记 warn、**永不 fail**，`OSError` 时这一项整个不出现）：阈值是经验值，没有资格拦东西，真闸门是下载前那道按实际大小的预检；可写性与余量共用一份路径解析。其余 6 项与 `asr` 的 fail 语义一字未动。三个坏实现各自注入过（聚合反序、OSError 记 warn、hardware 退回 fail），对应用例都变红。本机实跑 `xvt doctor --output` 为 10 项全 PASS、`output_free_space: 245.6 GiB`（与 `df` 的 246Gi 一致）、退出码 0。
 
 2026-10-24 **完整视频下载前先做磁盘容量预检（B2 第一层）。** `download.py` 整条下载前此前没有任何容量估算，而 `REVIEW_FINDINGS_2026_10_17.md:386` 记过真实的「磁盘满导致 stage 永久停在 running」——失败发生在最贵的那一步且状态是坏的。现在 `_probe_video` 把所选格式的登记大小记进 `VideoSelection`，`_download_compared_video` 在选定一侧后、建临时目录前调 `_check_download_space`：不足则发新事件 `download_space_insufficient` 并以 `DependencyError`（退出码 3）失败，一个字节都不下、不留临时目录。门槛按**合并峰值**算（分离格式两份、单文件一份）；大小求和**按 `requested_formats` 走而不是 video + audio 相加**——单文件格式下那两者是同一份 dict，相加会翻倍并误拦空间充足的下载（有用例钉住）。只做证伪：拿不到大小就跳过，不为 `filesize_approx` 的估算误差再加余量（低估只是退化成现状，不产生新失败模式）。判定排在格式提取完整性护栏**之后**，`test_fail_closed_boundaries` 的 11 条边界一字未动。新事件进了 `tests/test_events.py` 的 golden（下载类事件此前没有一个在里面），文档字段表与实际载荷现在双向校验——改错文档字段名两个守卫都会红，已实测。覆盖面只到 Cookie YouTube 比较路径，剩余层见「下一步待办」第 1 条。
 
@@ -28,7 +30,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1154 个测试、335 个子测试，全部通过（2026-10-24） |
+| 自动化测试 | 1163 个测试、337 个子测试，全部通过（2026-10-24） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -86,7 +88,7 @@
 
 接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。
 
-1. **B2 剩余层：`doctor` 余量检查与另两条下载路径**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2；第一层「下载前预检」已于 2026-10-24 落地，只覆盖 Cookie YouTube 比较路径）。① **`doctor` 的 `output_free_space` 要先拍板 `warn` 档**：`doctor.py:166` 的聚合是 `all(check["status"] == "pass")`，没有第三档状态，所以复查里写的「低于阈值给 warn 不给 fail」在现有结构里做不到——引入第三档要连带改 README 的 doctor 输出契约与现有 8 个检查项的测试期望，影响面比这个检查本身大。② 另两条下载路径（无 Cookie / 非 YouTube、`audio_only`）没有探测数据：要覆盖得在 `download_remote_media` 入口补一次 `--dump-single-json`（多一次网络往返），或给 `inspect_remote` 加 `-f` 选择器并扩 `RemoteMediaInfo`——后者经 `pipeline/common.py:47` 的 `asdict()` 进 `job.json`，属持久化契约。③ 烧录前估算收益最弱：成品与源同量级而源已在盘上，真正会爆的是下载那一步。
+1. **B2 剩余层：另两条下载路径与烧录前估算**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2；第一层「下载前预检」与 `doctor` 的 `warn` 档 + `output_free_space` 都已于 2026-10-24 落地）。① 另两条下载路径（无 Cookie / 非 YouTube、`audio_only`）没有探测数据：要覆盖得在 `download_remote_media` 入口补一次 `--dump-single-json`（多一次网络往返），或给 `inspect_remote` 加 `-f` 选择器并扩 `RemoteMediaInfo`——后者经 `pipeline/common.py:47` 的 `asdict()` 进 `job.json`，属持久化契约。② 烧录前估算收益最弱：成品与源同量级而源已在盘上，真正会爆的是下载那一步。
 2. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
 3. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
 4. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
