@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -52,6 +53,31 @@ class VideoSelection:
     language: str | None
     original_audio: bool
     incomplete: bool
+    # 实际要下载的各 format 登记大小之和；拿不到就是 None（不猜）。
+    size_bytes: int | None = None
+    # 实际要下载的 format 数：>1 表示 video / audio 分离、下载后要 mux。
+    part_count: int = 1
+
+
+def _requested_size_bytes(parts: list[dict[str, Any]]) -> int | None:
+    """实际要下载的各 format 的登记大小之和；任一 part 拿不到大小就返回 ``None``。
+
+    **按 ``parts`` 求和，不能写 ``video_size + audio_size``**：单文件格式（选择器
+    回落到 ``b``）下 ``parts`` 只有一个元素，而那个 dict 同时带 ``vcodec`` 与
+    ``acodec``，``_probe_video`` 里的 ``video`` 与 ``audio`` 指向**同一份** dict，
+    两侧相加会把大小翻一倍，于是空间充足也会被预检误拦。
+
+    ``filesize`` 优先于 ``filesize_approx``。拿不到大小不等于「大小是 0」，所以
+    返回 ``None`` 让调用方跳过预检——这条判定只做证伪，不猜。
+    """
+
+    total = 0
+    for part in parts:
+        size = part.get("filesize") or part.get("filesize_approx")
+        if type(size) not in {int, float} or not math.isfinite(size) or size <= 0:
+            return None
+        total += int(size)
+    return total or None
 
 
 def _probe_video(
@@ -139,6 +165,51 @@ def _probe_video(
         # YouTube's extractor marks original audio with preference 10 (default/dubbed is lower).
         audio is not None and audio.get("language_preference") == 10,
         incomplete,
+        _requested_size_bytes(parts),
+        len(parts),
+    )
+
+
+# 分离下载的 video 与 audio 要各自先落盘、再 mux 成 mp4（``--merge-output-format mp4``），
+# mux 完才删中间文件，所以峰值占用约是两份；单文件格式无需 mux，峰值就是一份。
+# 磁盘只剩 1.5 份时下载不会在传输阶段失败，而是在 mux 阶段失败——所以门槛取两份不是
+# 保守过度，而是实际峰值。
+_MUXED_PEAK_FACTOR = 2
+
+
+def _check_download_space(
+    selection: VideoSelection, root: Path, event_sink: EventSink | None
+) -> None:
+    """下载前的容量预检：明显不够才 fail closed，拿不到大小就跳过。
+
+    只做**证伪**。``filesize_approx`` 名字就写着是估算，低估时预检放过一次本该拦的
+    下载（退化成预检之前的现状，不产生新的失败模式），所以这里不为估算误差再加固定
+    余量——加了就从证伪滑向猜。
+
+    `root` 与 yt-dlp 真正写入的临时目录同在一个文件系统（``tempfile.TemporaryDirectory``
+    带 ``dir=root``），发布用的是 ``os.link`` 硬链接、不额外占空间，所以量 `root` 的
+    可用空间就是量实际要用的那块盘。
+    """
+
+    if selection.size_bytes is None:
+        return
+    required = selection.size_bytes * (_MUXED_PEAK_FACTOR if selection.part_count > 1 else 1)
+    available = shutil.disk_usage(root).free
+    if available >= required:
+        return
+    if event_sink:
+        event_sink(
+            create_event(
+                EventType.DOWNLOAD_SPACE_INSUFFICIENT,
+                required_bytes=required,
+                available_bytes=available,
+                format_id=selection.format_id,
+                part_count=selection.part_count,
+            )
+        )
+    raise DependencyError(
+        f"下载目标磁盘空间不足：预计需要 {required / 2**30:.1f} GiB（含合并峰值），"
+        f"当前可用 {available / 2**30:.1f} GiB；请清理磁盘或改用本地媒体入口。"
     )
 
 
@@ -201,6 +272,9 @@ def _download_compared_video(
         selected, access = anonymous, "anonymous"
     if selected.incomplete or anonymous.incomplete:
         raise DependencyError("视频格式提取不完整，无法确认最高画质；请重试或提供本地高清视频。")
+    # 排在 incomplete 护栏**之后**：提取不完整时无论空间多少都不该下载，既有失败顺序
+    # 不变。排在建临时目录**之前**：失败早于下载，不留半个临时目录，一个字节都不下。
+    _check_download_space(selected, root, event_sink)
     with tempfile.TemporaryDirectory(prefix=".xvt-download-", dir=root) as directory:
         temporary = Path(directory)
         # Exact IDs prevent a later extraction from silently choosing a lower format.
