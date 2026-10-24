@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-10-24（基线 `main` 的 `a1557f8`，本条改动在 `feat/download-space-precheck` 上待合并；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（HEAD `17a963c`，`main`，工作树干净；写于 Claude Opus 5 会话）
 
 2026-10-24 **完整视频下载前先做磁盘容量预检（B2 第一层）。** `download.py` 整条下载前此前没有任何容量估算，而 `REVIEW_FINDINGS_2026_10_17.md:386` 记过真实的「磁盘满导致 stage 永久停在 running」——失败发生在最贵的那一步且状态是坏的。现在 `_probe_video` 把所选格式的登记大小记进 `VideoSelection`，`_download_compared_video` 在选定一侧后、建临时目录前调 `_check_download_space`：不足则发新事件 `download_space_insufficient` 并以 `DependencyError`（退出码 3）失败，一个字节都不下、不留临时目录。门槛按**合并峰值**算（分离格式两份、单文件一份）；大小求和**按 `requested_formats` 走而不是 video + audio 相加**——单文件格式下那两者是同一份 dict，相加会翻倍并误拦空间充足的下载（有用例钉住）。只做证伪：拿不到大小就跳过，不为 `filesize_approx` 的估算误差再加余量（低估只是退化成现状，不产生新失败模式）。判定排在格式提取完整性护栏**之后**，`test_fail_closed_boundaries` 的 11 条边界一字未动。新事件进了 `tests/test_events.py` 的 golden（下载类事件此前没有一个在里面），文档字段表与实际载荷现在双向校验——改错文档字段名两个守卫都会红，已实测。覆盖面只到 Cookie YouTube 比较路径，剩余层见「下一步待办」第 1 条。
 
