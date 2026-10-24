@@ -226,6 +226,18 @@ yt-dlp 下载进度（`download.py`）。
 | `speed` | number? | 下载速度（字节/秒） |
 | `eta_seconds` | number? | 预计剩余秒数 |
 
+### `download_space_insufficient`
+下载**之前**的容量预检判定不通过，整单以 `DependencyError`（退出码 3）失败，一个字节都不下载。
+只在能从 yt-dlp 探测拿到所选格式登记大小时判定；拿不到大小一律跳过预检、不发本事件（只做证伪，不猜）。
+`required_bytes` 含合并峰值：video / audio 分离（`part_count > 1`）时要先各自落盘再 mux，
+mux 完才删中间文件，所以按两份算；单文件格式按一份算。按约束 5 不写路径。
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `required_bytes` | int | 预计需要的字节数（含分离格式的合并峰值） |
+| `available_bytes` | int | 目标目录所在文件系统的可用字节数 |
+| `format_id` | string | 所选 yt-dlp 格式 ID |
+| `part_count` | int | 实际要下载的格式数：`>1` 表示分离后需 mux |
+
 ## 转写
 
 音频转写（`transcribe.py`）与远端字幕选择（`pipeline/transcription/remote.py`）。

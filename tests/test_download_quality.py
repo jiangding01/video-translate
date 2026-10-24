@@ -1,6 +1,8 @@
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,8 +15,24 @@ from xvt.pipeline.common import add_artifact, record_media_download_selection
 from xvt.process import CommandError, CommandResult
 
 
-def selection(height, *, video_id="abc", language="en", audio=True, duration=10):
-    return {
+@dataclass(frozen=True)
+class _Usage:
+    """``shutil.disk_usage`` 的替身：容量预检只读 ``free``。"""
+
+    free: int
+
+
+def selection(
+    height, *, video_id="abc", language="en", audio=True, duration=10, size=None, approx=None
+):
+    """单文件格式的探测 JSON（没有 ``requested_formats``）。
+
+    这一份同时带 ``vcodec`` 与 ``acodec``，所以 ``_probe_video`` 里的 ``video`` 与
+    ``audio`` 指向**同一个** dict——容量预检必须按 ``parts`` 求和，按 video+audio
+    相加会翻倍。``test_single_file_format_size_is_not_doubled`` 钉住这一点。
+    """
+
+    data = {
         "id": video_id,
         "format_id": "18" if height == 360 else "137+140",
         "width": height * 16 // 9,
@@ -24,6 +42,41 @@ def selection(height, *, video_id="abc", language="en", audio=True, duration=10)
         "acodec": "aac" if audio else "none",
         "language": language,
         "language_preference": 10,
+    }
+    if size is not None:
+        data["filesize"] = size
+    if approx is not None:
+        data["filesize_approx"] = approx
+    return data
+
+
+def _size_keys(size):
+    return {} if size is None else {"filesize": size}
+
+
+def split_selection(height, *, video_size, audio_size, duration=10):
+    """video / audio 分离的探测 JSON：下载后要 mux，容量门槛按两份算。"""
+
+    return {
+        **selection(height, duration=duration),
+        "requested_formats": [
+            # width / height 必须落在 video part 上：_probe_video 取的是
+            # video["width"]，不是顶层 data 的。
+            {
+                "vcodec": "h264",
+                "acodec": "none",
+                "width": height * 16 // 9,
+                "height": height,
+                **_size_keys(video_size),
+            },
+            {
+                "vcodec": "none",
+                "acodec": "aac",
+                "language": "en",
+                "language_preference": 10,
+                **_size_keys(audio_size),
+            },
+        ],
     }
 
 
@@ -40,6 +93,8 @@ class DownloadQualityTest(unittest.TestCase):
         anonymous_error=False,
         anonymous_warning="",
         race=False,
+        free_bytes=None,
+        collect_events=None,
     ):
         configured = configured if configured is not None else selection(360)
         anonymous = anonymous if anonymous is not None else selection(1080)
@@ -103,13 +158,19 @@ class DownloadQualityTest(unittest.TestCase):
                         (root / "source.mp4").write_bytes(b"old video")
                     return file_checksum(path)
 
-                with patch("xvt.download.file_checksum", side_effect=hash_media):
+                space = (
+                    patch("xvt.download.shutil.disk_usage", return_value=_Usage(free_bytes))
+                    if free_bytes is not None
+                    else nullcontext()
+                )
+                with patch("xvt.download.file_checksum", side_effect=hash_media), space:
                     result = download_remote_media(
                         "https://youtu.be/abc",
                         root,
                         cookies_from_browser="chrome",
                         proxy="http://127.0.0.1:7890",
                         runner=runner,
+                        event_sink=(collect_events.append if collect_events is not None else None),
                     )
                 self.assertEqual(sum("--dump-single-json" in args for args in calls), 2)
                 report = json.loads(result.with_suffix(".download.json").read_text())
@@ -118,6 +179,23 @@ class DownloadQualityTest(unittest.TestCase):
                 self.assertFalse(list(root.glob(".xvt-download-*")))
                 if existing or race:
                     self.assertEqual((root / "source.mp4").read_bytes(), b"old video")
+
+    def test_sufficient_space_downloads_and_emits_nothing(self):
+        """「不该红时不红」：空间充足时完整流程照旧，且不发预检事件。"""
+
+        events = []
+        calls, report = self.execute(
+            configured=selection(1080, size=2**30),
+            anonymous=selection(1080, size=2**30),
+            free_bytes=100 * 2**30,
+            collect_events=events,
+        )
+
+        self.assertEqual(report["access"], "configured")
+        self.assertEqual(sum("--dump-single-json" in args for args in calls), 2)
+        self.assertEqual(
+            [event for event in events if event.type == "download_space_insufficient"], []
+        )
 
     def test_cookie_sabr_falls_back_to_anonymous_hd(self):
         calls, report = self.execute(
@@ -238,6 +316,117 @@ class DownloadQualityTest(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case), self.assertRaises((DependencyError, RuntimeError)):
                 self.execute(**case)
+
+
+class DownloadSpacePrecheckTest(unittest.TestCase):
+    """下载前容量预检（B2 第一层）。
+
+    只做证伪：拿不到所选格式的登记大小就跳过，不猜。``_probe_runner`` 对任何非探测
+    命令直接断言失败，所以「预检生效时一个字节都不下」由桩本身钉住，不靠事后数命令
+    条数；反过来，预检**该放行**时这条断言会以 AssertionError 冒出来，正是放行的证据。
+    """
+
+    GIB = 2**30
+
+    def _probe_runner(self, calls, probe, stderr=""):
+        def runner(args, **kwargs):
+            calls.append(args)
+            if "--dump-single-json" not in args:
+                raise AssertionError(f"预检应早于下载失败，不该起这条命令：{args}")
+            return CommandResult(tuple(args), 0, json.dumps(probe), stderr)
+
+        return runner
+
+    def _attempt(self, probe, free_bytes, *, stderr=""):
+        """跑到预检为止；返回 (异常, 事件列表)。"""
+
+        calls, events = [], []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch("xvt.download.shutil.disk_usage", return_value=_Usage(free_bytes)),
+                self.assertRaises(Exception) as caught,
+            ):
+                download_remote_media(
+                    "https://youtu.be/abc",
+                    root,
+                    cookies_from_browser="chrome",
+                    runner=self._probe_runner(calls, probe, stderr),
+                    event_sink=events.append,
+                )
+            self.assertFalse(list(root.iterdir()), "预检失败不该留下任何产物")
+        return caught.exception, events
+
+    def _assert_passed_precheck(self, probe, free_bytes):
+        error, events = self._attempt(probe, free_bytes)
+        self.assertIsInstance(error, AssertionError)
+        self.assertIn("不该起这条命令", str(error))
+        self.assertEqual(events, [])
+
+    def test_insufficient_space_fails_before_downloading(self):
+        probe = split_selection(1080, video_size=2 * self.GIB, audio_size=self.GIB)
+        error, events = self._attempt(probe, free_bytes=self.GIB // 2)
+
+        self.assertIsInstance(error, DependencyError)
+        self.assertIn("磁盘空间不足", str(error))
+        (event,) = events
+        self.assertEqual(event.type, "download_space_insufficient")
+        # 分离格式按 mux 峰值算两份：(2 + 1) GiB × 2。
+        self.assertEqual(event.data["required_bytes"], 6 * self.GIB)
+        self.assertEqual(event.data["available_bytes"], self.GIB // 2)
+        self.assertEqual(event.data["part_count"], 2)
+        self.assertEqual(event.data["format_id"], "137+140")
+        self.assertNotIn("path", event.data)
+
+    def test_split_format_threshold_is_double(self):
+        probe = split_selection(1080, video_size=self.GIB, audio_size=self.GIB)
+        error, _ = self._attempt(probe, free_bytes=4 * self.GIB - 1)
+        self.assertIsInstance(error, DependencyError)
+        # 刚好两份就放行。
+        self._assert_passed_precheck(probe, free_bytes=4 * self.GIB)
+
+    def test_single_file_format_size_is_not_doubled(self):
+        # 单文件格式下 video 与 audio 是同一个 dict：按 video+audio 相加会算成 4 GiB
+        # 再乘 2，2.5 GiB 可用就被误拦。按 parts 求和只算 2 GiB、门槛一份。
+        self._assert_passed_precheck(selection(360, size=2 * self.GIB), 5 * self.GIB // 2)
+
+    def test_missing_size_skips_the_precheck(self):
+        # 「不该红时不红」：拿不到大小就跳过，不把未知当成 0，也不拦。
+        self._assert_passed_precheck(selection(360), free_bytes=1)
+
+    def test_partial_size_information_skips_the_precheck(self):
+        # 分离格式只有一路报了大小：总量不可知，整条跳过而不是拿半份当全份。
+        probe = split_selection(1080, video_size=2 * self.GIB, audio_size=None)
+        self._assert_passed_precheck(probe, free_bytes=1)
+
+    def test_filesize_approx_is_used(self):
+        error, events = self._attempt(selection(360, approx=4 * self.GIB), self.GIB)
+
+        self.assertIsInstance(error, DependencyError)
+        self.assertEqual(events[0].data["required_bytes"], 4 * self.GIB)
+        self.assertEqual(events[0].data["part_count"], 1)
+
+    def test_filesize_wins_over_approx(self):
+        error, events = self._attempt(
+            selection(360, size=3 * self.GIB, approx=99 * self.GIB), self.GIB
+        )
+
+        self.assertIsInstance(error, DependencyError)
+        self.assertEqual(events[0].data["required_bytes"], 3 * self.GIB)
+
+    def test_incomplete_extraction_still_wins_over_space(self):
+        """既有失败顺序不变：提取不完整时无论空间多少都报那一条。"""
+
+        probe = split_selection(1080, video_size=4 * self.GIB, audio_size=self.GIB)
+        error, events = self._attempt(
+            probe,
+            free_bytes=1,
+            stderr="WARNING: Some web formats have been skipped as they are missing a URL",
+        )
+
+        self.assertIsInstance(error, DependencyError)
+        self.assertIn("视频格式提取不完整", str(error))
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":

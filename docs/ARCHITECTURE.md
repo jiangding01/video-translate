@@ -2,7 +2,7 @@
 
 ## YouTube 完整视频画质选择
 
-`download.download_remote_media` 统一转写与远程烧录的完整视频获取。显式 Cookie 的 YouTube 输入串行查询配置访问与匿名访问：yt-dlp 内部按原音轨和分辨率排序，跨访问方式优先已标记原音轨，再比较短边尺寸，无分辨率上限。获选格式 ID 固定，下载在输出目录的独立临时子目录进行，ffprobe 核对尺寸、音视频流和时长后以原子无覆盖 hard link 发布；失败不登记有效媒体。
+`download.download_remote_media` 统一转写与远程烧录的完整视频获取。显式 Cookie 的 YouTube 输入串行查询配置访问与匿名访问：yt-dlp 内部按原音轨和分辨率排序，跨访问方式优先已标记原音轨，再比较短边尺寸，无分辨率上限。获选格式 ID 固定。下载**之前**有一道容量预检（`_check_download_space`）：按 `_requested_size_bytes` 对实际要下载的各 format 登记大小求和（必须按 `requested_formats` 求和——单文件格式下 video 与 audio 是同一份 dict，相加会翻倍），分离格式按合并峰值两份算，不足则发 `download_space_insufficient` 并以 `DependencyError` 失败；大小未知时跳过（只做证伪）。该判定排在格式提取完整性护栏**之后**、建临时目录**之前**，既有失败顺序不变且失败时不留产物。下载在输出目录的独立临时子目录进行，ffprobe 核对尺寸、音视频流和时长后以原子无覆盖 hard link 发布；失败不登记有效媒体。
 
 可选白名单摘要由 `pipeline.common.record_media_download_selection` 在媒体登记后关联。`media_download_selection` 依赖 `downloaded_media` / `source_video` 的失效传播；媒体不反向依赖摘要。缺失、损坏或 checksum 不匹配的摘要被忽略，不影响媒体恢复。摘要事件仅提供 Job 字段与 `summary_path`，不携带原始提取日志或签名 URL。
 

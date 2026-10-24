@@ -270,6 +270,13 @@ class EventPayloadContractTest(unittest.TestCase):
                 batch=1,
                 batch_total=3,
             ),
+            EventType.DOWNLOAD_SPACE_INSUFFICIENT: create_event(
+                EventType.DOWNLOAD_SPACE_INSUFFICIENT,
+                required_bytes=4 * 2**30,
+                available_bytes=512 * 2**20,
+                format_id="137+140",
+                part_count=2,
+            ),
             EventType.CLI_FAILED: create_event(
                 EventType.CLI_FAILED,
                 command="run",

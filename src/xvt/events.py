@@ -54,6 +54,7 @@ class EventType(StrEnum):
 
     # 下载
     DOWNLOAD_PROGRESS = "download_progress"
+    DOWNLOAD_SPACE_INSUFFICIENT = "download_space_insufficient"
     MEDIA_DOWNLOAD_SELECTION = "media_download_selection"
 
     # 转写

@@ -895,7 +895,7 @@ XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有�
 
 ### YouTube 视频下载画质
 
-完整 YouTube 视频下载显式使用 `bv*+ba/b`、`lang,res` 排序，不设 1080p 上限。传入浏览器 Cookie 时比较原访问方式与忽略本机配置的匿名方式，保留显式代理；优先原音轨，再比较短边分辨率，同等条件保留原访问方式；但平局时若只有 Cookie 侧提取不完整而匿名侧干净，改走匿名侧（画质一致因此没有降级风险，`reason` 记为 `anonymous_clean_extraction`）。固定获选格式 ID 下载后，以 ffprobe 核对尺寸、音视频流和时长；格式提取不完整或比较失败时停止，不悄悄改选低清。匿名查询失败也会保守停止，受限视频可使用本地媒体入口。
+完整 YouTube 视频下载显式使用 `bv*+ba/b`、`lang,res` 排序，不设 1080p 上限。传入浏览器 Cookie 时比较原访问方式与忽略本机配置的匿名方式，保留显式代理；优先原音轨，再比较短边分辨率，同等条件保留原访问方式；但平局时若只有 Cookie 侧提取不完整而匿名侧干净，改走匿名侧（画质一致因此没有降级风险，`reason` 记为 `anonymous_clean_extraction`）。选定一侧后、下载开始**之前**先做一次磁盘容量预检：按所选格式的登记大小（`filesize` 优先于 `filesize_approx`）与目标目录所在文件系统的可用空间比较，明显不够就以退出码 3 失败并发 `download_space_insufficient` 事件，一个字节都不下载。video / audio 分离的格式下载后要合并，合并完才删中间文件，所以门槛按两份算；单文件格式按一份。探测拿不到大小时**跳过**预检而不是拦下（只做证伪，不猜），所以它不会误拦空间充足的下载。固定获选格式 ID 下载后，以 ffprobe 核对尺寸、音视频流和时长；格式提取不完整或比较失败时停止，不悄悄改选低清。匿名查询失败也会保守停止，受限视频可使用本地媒体入口。
 
 成功下载可生成 `source.download.json` 与可选 `media_download_selection` artifact，记录尺寸、访问方式、音轨身份与 checksum，不保存 Cookie 或签名 URL。该摘要不决定媒体有效性。升级后旧 Job 仍复用 checksum 有效的低清媒体，不自动重下载；已有译文需要高清重烧时使用 `xvt burn JOB --media /path/to/HD.mp4 --output /path/to/output.mp4`。
 
