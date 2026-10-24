@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-24（HEAD `9ef0415`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（HEAD `8ed488f`，`main`，工作树干净；写于 Claude Opus 5 会话）
+
+2026-10-24 **CI 固定 uv 版本并收紧 permissions；「传 GITHUB_TOKEN」被查证为无效改动。** #148 的 macos/3.11 挂在 `Install uv`（`Connect Timeout`），日志里那句「No (valid) GitHub token provided」把它说成了认证问题——读 `setup-uv` 源码后确认那是 `getLatestVersion` 的 **catch-all** 分支文案（任何错误都打它），而 `github-token` 的默认值本来就是 `${{ github.token }}`、与 `secrets.GITHUB_TOKEN` 同值，显式再传零效果。真正的失败点是「不固定版本就要先查一次 latest release」那次 API 调用，所以改成 `version: "0.12.1"`（本机实测版本，让本地验过的就是 CI 跑的；已核该 tag 真实存在且含 arm64 macOS 与 x86_64 Linux 资产，pin 一个不存在的版本会让四个矩阵项全挂）。顺带显式声明 `permissions: contents: read`（与本次故障无关的独立收紧，缓存读写走 `ACTIONS_RUNTIME_TOKEN`、不受它约束）。**两条都不保证 CI 不再抖**，只是去掉一个本不必要的网络依赖。教训：别照着错误日志的字面归因动手——那句话是 catch-all 打的，我第一次就被它带偏、提过一个无效方案。
 
 2026-10-24 **`xvt doctor` 有了 `warn` 档，顺带修掉「非 macOS 上整体永远 fail」（B2 剩余层①）。** 8 个检查项此前只有 `pass` / `fail` 两档、聚合是 `all(status == "pass")`，而 `h264_videotoolbox` 是 Apple 独有的——非 macOS 上 `hardware_encoder` 必然缺失、整体永远 `fail`、退出码永远 3，整份报告没有信号价值；而 `burn.py` 本来就回退软件编码，缺它是慢不是跑不了。现在三档聚合（**fail 优先于 warn**）、`hardware_encoder` 缺失记 `warn`、退出码只在 `fail` 时为 3。`missing_status` 只覆盖「ffmpeg 正常返回但没有这个 token」，ffmpeg 缺失与探测超时是**判不出来**，照旧 fail。`--output` 新增 `output_free_space`（低于 2 GiB 记 warn、**永不 fail**，`OSError` 时这一项整个不出现）：阈值是经验值，没有资格拦东西，真闸门是下载前那道按实际大小的预检；可写性与余量共用一份路径解析。其余 6 项与 `asr` 的 fail 语义一字未动。三个坏实现各自注入过（聚合反序、OSError 记 warn、hardware 退回 fail），对应用例都变红。本机实跑 `xvt doctor --output` 为 10 项全 PASS、`output_free_space: 245.6 GiB`（与 `df` 的 246Gi 一致）、退出码 0。
 
@@ -30,7 +32,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1163 个测试、337 个子测试，全部通过（2026-10-24） |
+| 自动化测试 | 1163 个测试、339 个子测试，全部通过（2026-10-24） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |

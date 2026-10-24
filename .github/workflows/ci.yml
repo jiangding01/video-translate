@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# 本 workflow 只跑测试与打包，不写回仓库任何东西；不显式声明就会吃仓库的默认设置
+# （可能是 read-write）。缓存的读写走 ACTIONS_RUNTIME_TOKEN，不受这里约束。
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -85,6 +90,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
+          # 固定版本，不走 setup-uv 的「查 latest release」那条 API 调用：2026-10-24
+          # macos/3.11 就是在那一步 Connect Timeout 挂掉的，而它打的
+          # 「No (valid) GitHub token provided」是 catch-all 分支的误导性文案，与
+          # token 无关（github-token 默认已是 ${{ github.token }}）。顺带让 CI 装的
+          # uv 可复现：uv.lock 锁了依赖，却没锁解析它的工具本身。
+          # 升级节奏同 uv.lock——本机 `uv --version` 变了就一起升。
+          version: "0.12.1"
           enable-cache: true
           python-version: ${{ matrix.python-version }}
 
