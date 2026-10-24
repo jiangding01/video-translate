@@ -1,6 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from xvt.download import (
     VIDEO_FORMAT_SELECTOR,
@@ -206,7 +209,7 @@ class DownloadTest(unittest.TestCase):
             root = Path(directory)
             downloaded = root / "source.mp4"
 
-            def runner(args):
+            def runner(args, **kwargs):
                 calls.append(args)
                 downloaded.write_bytes(b"video")
                 return CommandResult(tuple(args), 0, f"{downloaded}\n", "")
@@ -214,16 +217,20 @@ class DownloadTest(unittest.TestCase):
             download_remote_media("https://youtu.be/abc", root, runner=runner)
 
         self.assertEqual(VIDEO_FORMAT_SELECTOR, "bv*+ba/b")
-        format_index = calls[0].index("-f")
-        self.assertEqual(calls[0][format_index + 1], VIDEO_FORMAT_SELECTOR)
-        self.assertIn("--merge-output-format", calls[0])
-        self.assertIn("mp4", calls[0])
+        # calls[0] 是容量预检的探测（也带 `-f`，用同一个 selector），下载是 calls[1]。
+        probe, download = calls
+        self.assertIn("--dump-single-json", probe)
+        self.assertEqual(probe[probe.index("-f") + 1], VIDEO_FORMAT_SELECTOR)
+        format_index = download.index("-f")
+        self.assertEqual(download[format_index + 1], VIDEO_FORMAT_SELECTOR)
+        self.assertIn("--merge-output-format", download)
+        self.assertIn("mp4", download)
 
     def test_http_403_guides_continue_and_cookies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
-            def runner(args):
+            def runner(args, **kwargs):
                 raise CommandError(
                     CommandResult(
                         tuple(args),
@@ -245,7 +252,7 @@ class DownloadTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
-            def runner(args):
+            def runner(args, **kwargs):
                 raise CommandError(
                     CommandResult(
                         tuple(args),
@@ -289,6 +296,9 @@ class DownloadTest(unittest.TestCase):
             downloaded = root / "source.mp4"
 
             def runner(args, **kwargs):
+                if "--dump-single-json" in args:
+                    # 容量预检的探测：本用例只验进度事件，返回空元数据让预检跳过。
+                    return CommandResult(tuple(args), 0, "{}", "")
                 downloaded.write_bytes(b"video")
                 kwargs["line_callback"](
                     "stderr",
@@ -313,6 +323,9 @@ class DownloadTest(unittest.TestCase):
             downloaded = root / "source.mp4"
 
             def runner(args, **kwargs):
+                if "--dump-single-json" in args:
+                    # 容量预检的探测：本用例只验进度事件，返回空元数据让预检跳过。
+                    return CommandResult(tuple(args), 0, "{}", "")
                 downloaded.write_bytes(b"video")
                 kwargs["line_callback"](
                     "stderr",
@@ -336,12 +349,163 @@ class DownloadTest(unittest.TestCase):
             outside = root.parent / "outside.mp4"
             outside.write_bytes(b"video")
 
-            def runner(args):
+            def runner(args, **kwargs):
                 return CommandResult(tuple(args), 0, f"{outside}\n", "")
 
             with self.assertRaisesRegex(RuntimeError, "outside the job directory"):
                 download_remote_media("https://youtu.be/abc", root, runner=runner)
             outside.unlink()
+
+
+class DirectDownloadSpacePrecheckTest(unittest.TestCase):
+    """无 Cookie / 非 YouTube 完整视频下载的容量预检。
+
+    这条路径没有 ``VideoSelection``（那是 YouTube 画质比较的产物），所以自己探一次。
+    探测与下载必须看到同一组格式，否则量的不是要下的；探测失败一律跳过预检，不让某个
+    站点的元数据形状把整条下载弄挂。
+    """
+
+    GIB = 2**30
+
+    def _run(self, *, free_bytes, probe_stdout=None, probe_error=None, audio_only=False):
+        """返回 (命令列表, 事件列表, 抛出的异常或 None)。"""
+
+        calls, events = [], []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded = root / "source.mp4"
+
+            def runner(args, **kwargs):
+                calls.append(args)
+                if "--dump-single-json" in args:
+                    if probe_error is not None:
+                        raise probe_error
+                    return CommandResult(tuple(args), 0, probe_stdout or "{}", "")
+                downloaded.write_bytes(b"video")
+                return CommandResult(tuple(args), 0, f"{downloaded}\n", "")
+
+            raised = None
+            with patch(
+                "xvt.download.shutil.disk_usage",
+                return_value=SimpleNamespace(free=free_bytes),
+            ):
+                try:
+                    download_remote_media(
+                        "https://example.com/video",
+                        root,
+                        audio_only=audio_only,
+                        runner=runner,
+                        event_sink=events.append,
+                    )
+                except Exception as error:  # noqa: BLE001 - 用例自己断言类型
+                    raised = error
+        return calls, events, raised
+
+    @staticmethod
+    def _split_probe(video_size, audio_size):
+        return json.dumps(
+            {
+                "format_id": "137+140",
+                "requested_formats": [
+                    {"vcodec": "h264", "acodec": "none", "filesize": video_size},
+                    {"vcodec": "none", "acodec": "aac", "filesize": audio_size},
+                ],
+            }
+        )
+
+    def test_insufficient_space_fails_before_downloading(self) -> None:
+        calls, events, raised = self._run(
+            free_bytes=self.GIB // 2,
+            probe_stdout=self._split_probe(2 * self.GIB, self.GIB),
+        )
+
+        self.assertIsInstance(raised, DependencyError)
+        self.assertIn("磁盘空间不足", str(raised))
+        # 只起了探测，没起下载——一个字节都没下。
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--dump-single-json", calls[0])
+        (event,) = events
+        self.assertEqual(event.type, "download_space_insufficient")
+        self.assertEqual(event.data["required_bytes"], 6 * self.GIB)
+        self.assertEqual(event.data["format_id"], "137+140")
+        self.assertEqual(event.data["part_count"], 2)
+
+    def test_sufficient_space_downloads(self) -> None:
+        calls, events, raised = self._run(
+            free_bytes=100 * self.GIB,
+            probe_stdout=self._split_probe(2 * self.GIB, self.GIB),
+        )
+
+        self.assertIsNone(raised)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--dump-single-json", calls[1])
+        self.assertEqual(events, [])
+
+    def test_probe_failure_skips_the_precheck(self) -> None:
+        # 站点元数据拿不到不该让下载失活：探测失败就跳过预检，照常下载。
+        calls, events, raised = self._run(
+            free_bytes=1,
+            probe_error=CommandError(CommandResult((), 1, "", "ERROR: Unsupported URL")),
+        )
+
+        self.assertIsNone(raised)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(events, [])
+
+    def test_unparsable_probe_output_skips_the_precheck(self) -> None:
+        calls, events, raised = self._run(free_bytes=1, probe_stdout="not json at all")
+
+        self.assertIsNone(raised)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(events, [])
+
+    def test_probe_without_sizes_skips_the_precheck(self) -> None:
+        # 「不该红时不红」：元数据有效但没报大小，按未知处理而不是当成 0。
+        calls, events, raised = self._run(
+            free_bytes=1,
+            probe_stdout=json.dumps({"format_id": "18", "vcodec": "h264", "acodec": "aac"}),
+        )
+
+        self.assertIsNone(raised)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(events, [])
+
+    def test_audio_only_is_not_probed(self) -> None:
+        # bestaudio/best 通常是几十 MB，不值一次网络往返。
+        calls, events, raised = self._run(free_bytes=1, audio_only=True)
+
+        self.assertIsNone(raised)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--dump-single-json", calls[0])
+        self.assertEqual(events, [])
+
+    def test_probe_uses_the_same_access_flags_as_the_download(self) -> None:
+        # 探测与下载必须看到同一组格式，否则量的不是要下的。
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded = root / "source.mp4"
+
+            def runner(args, **kwargs):
+                calls.append(args)
+                if "--dump-single-json" in args:
+                    return CommandResult(tuple(args), 0, "{}", "")
+                downloaded.write_bytes(b"video")
+                return CommandResult(tuple(args), 0, f"{downloaded}\n", "")
+
+            download_remote_media(
+                "https://example.com/video",
+                root,
+                cookies_from_browser="chrome",
+                proxy="http://127.0.0.1:7890",
+                runner=runner,
+            )
+
+        probe, download = calls
+        for flag in ("--cookies-from-browser", "chrome", "--proxy", "http://127.0.0.1:7890"):
+            self.assertIn(flag, probe, flag)
+            self.assertIn(flag, download, flag)
+        self.assertEqual(probe[probe.index("-f") + 1], download[download.index("-f") + 1])
 
 
 if __name__ == "__main__":
