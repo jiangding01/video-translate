@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-10-24（基线 `main` 的 `1b125f7`，本条改动在 `feat/doctor-warn-status` 上待合并；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（HEAD `9ef0415`，`main`，工作树干净；写于 Claude Opus 5 会话）
 
 2026-10-24 **`xvt doctor` 有了 `warn` 档，顺带修掉「非 macOS 上整体永远 fail」（B2 剩余层①）。** 8 个检查项此前只有 `pass` / `fail` 两档、聚合是 `all(status == "pass")`，而 `h264_videotoolbox` 是 Apple 独有的——非 macOS 上 `hardware_encoder` 必然缺失、整体永远 `fail`、退出码永远 3，整份报告没有信号价值；而 `burn.py` 本来就回退软件编码，缺它是慢不是跑不了。现在三档聚合（**fail 优先于 warn**）、`hardware_encoder` 缺失记 `warn`、退出码只在 `fail` 时为 3。`missing_status` 只覆盖「ffmpeg 正常返回但没有这个 token」，ffmpeg 缺失与探测超时是**判不出来**，照旧 fail。`--output` 新增 `output_free_space`（低于 2 GiB 记 warn、**永不 fail**，`OSError` 时这一项整个不出现）：阈值是经验值，没有资格拦东西，真闸门是下载前那道按实际大小的预检；可写性与余量共用一份路径解析。其余 6 项与 `asr` 的 fail 语义一字未动。三个坏实现各自注入过（聚合反序、OSError 记 warn、hardware 退回 fail），对应用例都变红。本机实跑 `xvt doctor --output` 为 10 项全 PASS、`output_free_space: 245.6 GiB`（与 `df` 的 246Gi 一致）、退出码 0。
 
@@ -86,7 +86,7 @@
 
 ## 下一步待办（按建议顺序，每条可独立成 PR）
 
-接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。
+接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。**头部「更新时间」那行一律写 `（HEAD <父提交>，main，工作树干净；写于 … 会话）`，即便改动要走 `feat/` 分支与 PR，也不要写「本条改动在 `feat/xxx` 上待合并」**：那是一个会变的未来状态，分支合并并删除后它当场过时，而没人会回头改——2026-10-23 至 24 这样连留了四条，每条都要事后补一次提交。父提交 hash 描述的是「这份文件所讲的代码基线」，是提交那一刻的事实，不会过时。
 
 1. **B2 剩余层：另两条下载路径与烧录前估算**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2；第一层「下载前预检」与 `doctor` 的 `warn` 档 + `output_free_space` 都已于 2026-10-24 落地）。① 另两条下载路径（无 Cookie / 非 YouTube、`audio_only`）没有探测数据：要覆盖得在 `download_remote_media` 入口补一次 `--dump-single-json`（多一次网络往返），或给 `inspect_remote` 加 `-f` 选择器并扩 `RemoteMediaInfo`——后者经 `pipeline/common.py:47` 的 `asdict()` 进 `job.json`，属持久化契约。② 烧录前估算收益最弱：成品与源同量级而源已在盘上，真正会爆的是下载那一步。
 2. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
