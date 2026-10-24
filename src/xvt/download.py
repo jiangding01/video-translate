@@ -22,6 +22,10 @@ CommandRunner = Callable[..., CommandResult]
 
 VIDEO_FORMAT_SELECTOR = "bv*+ba/b"
 
+# 探测都是纯元数据查询，秒级返回；给足余量后仍不返回按环境异常处理，不让一次探测
+# 把整条下载挂住。画质比较与容量预检两处共用这一个上限。
+_PROBE_TIMEOUT_SECONDS = 60
+
 
 def _source_output_template(root: Path) -> str:
     """把 Job 目录拼成 yt-dlp 的 ``-o`` 值，目录部分里的字面量 ``%`` 一律转义成 ``%%``。
@@ -57,6 +61,19 @@ class VideoSelection:
     size_bytes: int | None = None
     # 实际要下载的 format 数：>1 表示 video / audio 分离、下载后要 mux。
     part_count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class _DownloadSize:
+    """容量预检要的三个值，与 ``VideoSelection`` 解耦。
+
+    无 Cookie / 非 YouTube 的下载路径没有 ``VideoSelection``（它是 YouTube 画质比较的
+    产物），所以预检吃这个轻量结构，两条路径各自构造。
+    """
+
+    size_bytes: int | None
+    part_count: int
+    format_id: str
 
 
 def _requested_size_bytes(parts: list[dict[str, Any]]) -> int | None:
@@ -104,7 +121,7 @@ def _probe_video(
         command.extend(["--proxy", proxy])
     command.append(url)
     try:
-        result = runner(command, timeout=60)
+        result = runner(command, timeout=_PROBE_TIMEOUT_SECONDS)
     except CommandError as error:
         raise DependencyError("视频画质查询失败；请对同一 Job 重试，或提供本地视频。") from error
     try:
@@ -177,9 +194,7 @@ def _probe_video(
 _MUXED_PEAK_FACTOR = 2
 
 
-def _check_download_space(
-    selection: VideoSelection, root: Path, event_sink: EventSink | None
-) -> None:
+def _check_download_space(size: _DownloadSize, root: Path, event_sink: EventSink | None) -> None:
     """下载前的容量预检：明显不够才 fail closed，拿不到大小就跳过。
 
     只做**证伪**。``filesize_approx`` 名字就写着是估算，低估时预检放过一次本该拦的
@@ -191,9 +206,9 @@ def _check_download_space(
     可用空间就是量实际要用的那块盘。
     """
 
-    if selection.size_bytes is None:
+    if size.size_bytes is None:
         return
-    required = selection.size_bytes * (_MUXED_PEAK_FACTOR if selection.part_count > 1 else 1)
+    required = size.size_bytes * (_MUXED_PEAK_FACTOR if size.part_count > 1 else 1)
     available = shutil.disk_usage(root).free
     if available >= required:
         return
@@ -203,13 +218,78 @@ def _check_download_space(
                 EventType.DOWNLOAD_SPACE_INSUFFICIENT,
                 required_bytes=required,
                 available_bytes=available,
-                format_id=selection.format_id,
-                part_count=selection.part_count,
+                format_id=size.format_id,
+                part_count=size.part_count,
             )
         )
     raise DependencyError(
         f"下载目标磁盘空间不足：预计需要 {required / 2**30:.1f} GiB（含合并峰值），"
         f"当前可用 {available / 2**30:.1f} GiB；请清理磁盘或改用本地媒体入口。"
+    )
+
+
+def _probe_download_size(
+    url: str,
+    selector: str,
+    *,
+    cookies: str | None,
+    proxy: str | None,
+    anonymous: bool,
+    runner: CommandRunner,
+) -> _DownloadSize:
+    """只为容量预检探测所选格式的大小；拿不到一律降级成「不知道」。
+
+    **刻意不复用 ``_probe_video``**：那个为 YouTube 画质比较服务，对 ``id`` / ``format_id``
+    / 宽高 / 时长逐项严格校验，缺一项就抛 ``DependencyError``——非 YouTube 站点很可能过不了
+    那些校验，而容量预检只要一个大小，不该因为某个站点的元数据形状不同就把整条下载弄挂。
+    所以这里捕获一切解析与命令失败，返回 ``size_bytes=None`` 让调用方跳过预检：代价是那次
+    探测白花，比让下载失活划算。
+
+    flag 照**下载命令**构造（而不是照 ``_probe_video``：它在无 Cookie 时总加
+    ``--ignore-config``，而直接下载路径只在 ``_anonymous`` 时才加）。探测与下载必须看到
+    同一组格式，否则量的不是要下的。
+    """
+
+    command = [
+        "yt-dlp",
+        "--skip-download",
+        "--no-playlist",
+        "--no-progress",
+        "--no-warnings",
+        "--dump-single-json",
+        "-f",
+        selector,
+    ]
+    if anonymous:
+        command.append("--ignore-config")
+    if cookies:
+        command.extend(["--cookies-from-browser", cookies])
+    if proxy:
+        command.extend(["--proxy", proxy])
+    command.append(url)
+    unknown = _DownloadSize(None, 1, selector)
+    try:
+        result = runner(command, timeout=_PROBE_TIMEOUT_SECONDS)
+        data = json.loads(result.stdout)
+    except (CommandError, OSError, ValueError):
+        # 刻意**不**捕 TypeError：``result.stdout`` 必然是 str、非 dict 的分支下面用
+        # isinstance 判，所以这里出 TypeError 只会是 runner 的调用约定不对（例如测试桩
+        # 不接 ``timeout``）。那是该暴露的 bug，吞掉它会让预检静默失活而测试照旧全绿。
+        return unknown
+    if not isinstance(data, dict):
+        return unknown
+    requested = data.get("requested_formats") or [data]
+    if not isinstance(requested, list):
+        return unknown
+    parts = [part for part in requested if isinstance(part, dict)]
+    if not parts:
+        return unknown
+    format_id = data.get("format_id")
+    return _DownloadSize(
+        _requested_size_bytes(parts),
+        len(parts),
+        # 空串也退回 selector：事件契约里 format_id 是「所选格式 ID」，不是空值。
+        format_id if isinstance(format_id, str) and format_id else selector,
     )
 
 
@@ -274,7 +354,11 @@ def _download_compared_video(
         raise DependencyError("视频格式提取不完整，无法确认最高画质；请重试或提供本地高清视频。")
     # 排在 incomplete 护栏**之后**：提取不完整时无论空间多少都不该下载，既有失败顺序
     # 不变。排在建临时目录**之前**：失败早于下载，不留半个临时目录，一个字节都不下。
-    _check_download_space(selected, root, event_sink)
+    _check_download_space(
+        _DownloadSize(selected.size_bytes, selected.part_count, selected.format_id),
+        root,
+        event_sink,
+    )
     with tempfile.TemporaryDirectory(prefix=".xvt-download-", dir=root) as directory:
         temporary = Path(directory)
         # Exact IDs prevent a later extraction from silently choosing a lower format.
@@ -536,6 +620,23 @@ def download_remote_media(
     ):
         return _download_compared_video(
             validated_url, root, cookies_from_browser, proxy, event_sink, runner
+        )
+
+    if not audio_only and _selection is None:
+        # 这条路径（无 Cookie / 非 YouTube 的完整视频）没有任何探测数据，所以自己探一次。
+        # audio_only 不做：`bestaudio/best` 通常是几十 MB，不值一次网络往返；`_selection`
+        # 非空时是 `_download_compared_video` 递归进来的，那边已经预检过了。
+        _check_download_space(
+            _probe_download_size(
+                validated_url,
+                VIDEO_FORMAT_SELECTOR,
+                cookies=cookies_from_browser,
+                proxy=proxy,
+                anonymous=_anonymous,
+                runner=runner,
+            ),
+            root,
+            event_sink,
         )
 
     command = [

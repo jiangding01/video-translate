@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-24（HEAD `8ed488f`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-10-24（HEAD `c65198f`，`main`，工作树干净；写于 Claude Opus 5 会话）
+
+2026-10-24 **无 Cookie / 非 YouTube 的完整视频下载也做容量预检；B2 剩余层就此收口。** 上一轮的预检只挂在 Cookie YouTube 画质比较路径（靠那条路现成的 `_probe_video` 数据），而无 Cookie / 非 YouTube 的完整视频走直接下载路径、同样 GB 级却零探测。现在新增 `_probe_download_size` 自己探一次，**刻意不复用 `_probe_video`**（后者为画质比较做严格字段校验，非 YouTube 站点过不了；容量预检只要一个大小，不该因元数据形状不同就把下载弄挂），捕获一切失败降级成「未知」跳过预检；探测 flag 照**下载命令**构造（`_probe_video` 在无 Cookie 时总加 `--ignore-config`，直接路径不是），否则量的不是要下的，有用例钉住。`_check_download_space` 入参从 `VideoSelection` 解耦成 `_DownloadSize`，判定一字未改，不新增事件。**剩下两项评估后都不做**：`audio_only` 是 `bestaudio/best`、几十 MB 量级，不值一次网络往返；烧录前估算**只在硬件编码路径有可信依据**（`-b:v` 是我们给的目标码率，可按 码率 × 时长 算），软件编码走 `-crf 18`、码率随内容变，而「用源文件大小当门槛」不成立——源既非上界也非下界（ProRes 源重编码后小得多 → 误拦；已压缩源可能变大 → 漏报），且非 macOS 一律走 CRF、正好没有保护。自查：`_probe_download_size` 的 `except` 初稿把 `TypeError` 也捕了，结果**吞掉了测试桩不接 `timeout` 这个调用约定错误**——6 条受影响的既有用例当时全是绿的，预检被静默跳过而我以为没有影响面。收窄 `except` 后它们如实变红，逐条适配。
 
 2026-10-24 **CI 固定 uv 版本并收紧 permissions；「传 GITHUB_TOKEN」被查证为无效改动。** #148 的 macos/3.11 挂在 `Install uv`（`Connect Timeout`），日志里那句「No (valid) GitHub token provided」把它说成了认证问题——读 `setup-uv` 源码后确认那是 `getLatestVersion` 的 **catch-all** 分支文案（任何错误都打它），而 `github-token` 的默认值本来就是 `${{ github.token }}`、与 `secrets.GITHUB_TOKEN` 同值，显式再传零效果。真正的失败点是「不固定版本就要先查一次 latest release」那次 API 调用，所以改成 `version: "0.12.1"`（本机实测版本，让本地验过的就是 CI 跑的；已核该 tag 真实存在且含 arm64 macOS 与 x86_64 Linux 资产，pin 一个不存在的版本会让四个矩阵项全挂）。顺带显式声明 `permissions: contents: read`（与本次故障无关的独立收紧，缓存读写走 `ACTIONS_RUNTIME_TOKEN`、不受它约束）。**两条都不保证 CI 不再抖**，只是去掉一个本不必要的网络依赖。教训：别照着错误日志的字面归因动手——那句话是 catch-all 打的，我第一次就被它带偏、提过一个无效方案。
 
@@ -32,7 +34,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1163 个测试、339 个子测试，全部通过（2026-10-24） |
+| 自动化测试 | 1170 个测试、341 个子测试，全部通过（2026-10-24） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -90,11 +92,10 @@
 
 接手约定：先出方案等批准再编码（AGENTS 修改流程第 1 条）；每条一个 `feat/` 分支、串行开 PR；行为变化补测试且至少一条「不该红时不红」；改完同步 README / ARCHITECTURE / RECOVERY / CHANGELOG / 本文件，并全仓 `rg` 核旧口径残留。本文件受 `tests/test_handoff_budget.py` 守卫，新条目 ≤ 2KB、总量 ≤ 200 行 / 32KB。**头部「更新时间」那行一律写 `（HEAD <父提交>，main，工作树干净；写于 … 会话）`，即便改动要走 `feat/` 分支与 PR，也不要写「本条改动在 `feat/xxx` 上待合并」**：那是一个会变的未来状态，分支合并并删除后它当场过时，而没人会回头改——2026-10-23 至 24 这样连留了四条，每条都要事后补一次提交。父提交 hash 描述的是「这份文件所讲的代码基线」，是提交那一刻的事实，不会过时。
 
-1. **B2 剩余层：另两条下载路径与烧录前估算**（[BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B2；第一层「下载前预检」与 `doctor` 的 `warn` 档 + `output_free_space` 都已于 2026-10-24 落地）。① 另两条下载路径（无 Cookie / 非 YouTube、`audio_only`）没有探测数据：要覆盖得在 `download_remote_media` 入口补一次 `--dump-single-json`（多一次网络往返），或给 `inspect_remote` 加 `-f` 选择器并扩 `RemoteMediaInfo`——后者经 `pipeline/common.py:47` 的 `asdict()` 进 `job.json`，属持久化契约。② 烧录前估算收益最弱：成品与源同量级而源已在盘上，真正会爆的是下载那一步。
-2. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
-3. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
-4. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
-5. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
+1. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
+2. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
+3. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
+4. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
 
 ## 接手步骤
 
