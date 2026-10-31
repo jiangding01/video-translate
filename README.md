@@ -91,7 +91,7 @@ xvt batch-continue BATCH.json
 | `--min-alignment-confidence FLOAT` | 对齐结果的最低置信度，默认 `0.55`。 |
 | `--allow-low-confidence-alignment` | 显式接受低于阈值的对齐结果；只放行低置信度，不放行对齐后 error 级 QA 问题，且仍需通过后续字幕 QA。 |
 | `--segmentation-preset conservative\|balanced\|compact` | ASR cue 分段预设，默认 `balanced`；不改变导入字幕的既有时间轴。 |
-| `--youtube-subtitles` | 对 YouTube 输入请求平台字幕候选；不传时不会下载平台字幕。 |
+| `--youtube-subtitles` | 对 YouTube 输入请求平台字幕候选；**不传就不会去取**，此时源选择记 `platform_subtitles_not_requested`（区别于「请求过但平台没有」的 `platform_subtitles_missing`），平台确有人工字幕时 CLI 会提示可用语言与参数。`--source-strategy subtitles` **不隐含**本旗标，两者要一起传。必须同时给 `--subtitle-language`。 |
 | `--subtitle-language LANG` | 希望下载的平台字幕语言，例如 `en`。下载目录中同时存在多个语言或多个变体的字幕文件时，按该语言优先选取。 |
 | `--allow-auto-subtitles` | 人工字幕不可用时允许下载 YouTube 自动字幕候选。 |
 | `--cookies-from-browser BROWSER` | 让 yt-dlp 从指定浏览器读取登录 Cookie，例如 `chrome`；只记录浏览器名称，不持久化 Cookie 内容。 |
@@ -905,7 +905,7 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
   --allow-auto-subtitles
 ```
 
-XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有传入 `--allow-auto-subtitles` 才会请求自动字幕。yt-dlp 会把语言写进字幕文件名，同一 Job 的下载目录可能同时留有多个语言或变体；XVT 选取时先精确匹配 `source.<language>.srt`，再匹配 `source.<language>-*` 与 `source.<language>.*`（大小写不敏感），都没有才回退到字典序第一个。新 Job 默认 `--source-strategy auto`：人工候选 QA 通过直接采用，失败时先尝试对齐再回退 ASR；自动候选在翻译或烧录任务中最终使用 ASR，在只生成源字幕且 QA 通过时可直接采用。`subtitles` 强制候选为时间轴，`asr` 强制媒体转写（不能用于纯字幕输入，也不能与 `--align-subtitles` 同用）。候选 QA 与最终选择会写入 `source-candidate-qa.json`、`source-selection.json`。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
+XVT 仅在传入 `--youtube-subtitles` 时请求平台候选字幕，且只有传入 `--allow-auto-subtitles` 才会请求自动字幕。yt-dlp 会把语言写进字幕文件名，同一 Job 的下载目录可能同时留有多个语言或变体；XVT 选取时先精确匹配 `source.<language>.srt`，再匹配 `source.<language>-*` 与 `source.<language>.*`（大小写不敏感），都没有才回退到字典序第一个。新 Job 默认 `--source-strategy auto`：人工候选 QA 通过直接采用，失败时先尝试对齐再回退 ASR；自动候选在翻译或烧录任务中最终使用 ASR，在只生成源字幕且 QA 通过时可直接采用。`subtitles` 强制候选为时间轴，`asr` 强制媒体转写（不能用于纯字幕输入，也不能与 `--align-subtitles` 同用）；注意 `subtitles` 不会自己去请求平台字幕，没有候选时它会直接失败并提示补 `--youtube-subtitles`。候选 QA 与最终选择会写入 `source-candidate-qa.json`、`source-selection.json`。需要登录态或代理时，必须由用户显式传入 `--cookies-from-browser` 或 `--proxy`。
 
 显式请求 YouTube 平台字幕并传入 `--cookies-from-browser` 时，若登录态查询未找到匹配的人工字幕，且没有有效的已下载字幕或用户源字幕，XVT 会补做一次匿名查询。找到同一视频的匹配人工字幕后，字幕也匿名下载；该路径忽略 yt-dlp 本机配置以避免重新带入 Cookie，但保留显式代理，媒体下载仍使用原访问参数。补查失败会报错，不把提取失败当成字幕不存在。匿名来源记录在 `remote.json` 的 `subtitles_anonymous` 与 `remote_subtitles_selected` 事件的 `anonymous` 字段中。此行为同样适用于 `polished`；已有候选保留原来源分类，已生成源 cue 的 Job 不会自动更换源字幕。
 

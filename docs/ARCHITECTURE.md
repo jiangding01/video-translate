@@ -192,7 +192,7 @@ Job 登记表是产物有效性的唯一依据，**不要按固定文件名取�
 在可视化校对界面之前，项目先实现 [字幕质量与自适应源字幕技术方案](SUBTITLE_QUALITY_PLAN.md)。方案保持现有边界：
 
 - 不新增 Job stage，不升级 Job schema；源字幕选择复用转写腿，润色和语义校对作为 `translate` / `subtitle_qa` 的可恢复子步骤，通过 artifact、现有 stage 状态和事件 `detail` 细分。
-- Q2 已完成新 Job 的源字幕选择：平台字幕仅由显式 `--youtube-subtitles` 请求；`auto` 对通过 QA 的人工候选保留快速路径，对失败候选先对齐再 ASR，自动候选在翻译/烧录目标下使用 ASR；`subtitles` / `asr` 可显式覆盖。候选 QA、选择报告和最终 source cues 均为 checksum artifact；用户本地字幕默认保留。
+- Q2 已完成新 Job 的源字幕选择：平台字幕仅由显式 `--youtube-subtitles` 请求，**未请求时选择报告记 `platform_subtitles_not_requested`**，与「请求了但平台确实没有」的 `platform_subtitles_missing` 分开（2026-11-01 的真实验收实测过混用的代价：选择报告说平台字幕缺失，而同 Job 的 `remote_info` 记着 `subtitle_languages == ["en"]`，用户据此白跑一次 ASR）；人读模式下 CLI 会把平台实际可用的人工字幕语言与启用参数一并打出，本地文件输入的 Job 没有「平台」可言、一律仍记 `platform_subtitles_missing`；`auto` 对通过 QA 的人工候选保留快速路径，对失败候选先对齐再 ASR，自动候选在翻译/烧录目标下使用 ASR；`subtitles` / `asr` 可显式覆盖。候选 QA、选择报告和最终 source cues 均为 checksum artifact；用户本地字幕默认保留。
 - YouTube 显式字幕请求在浏览器 Cookie 查询缺少匹配人工字幕时补做一次匿名查询；仅接受同一视频的匹配人工字幕。查询与字幕下载均忽略 yt-dlp 本机配置、保留显式代理，媒体下载沿用原访问参数。`remote_info.subtitles_anonymous` 记录字幕访问方式，更新后重新登记 checksum；补查失败阻断 inspect，不静默进入 ASR。
 - 已有有效下载字幕或用户源字幕时不补查、不替换来源元信息，避免恢复时把旧自动字幕误分类为人工字幕。
 - Q2 选择报告损坏或缺失但 source cues 仍有效时，只从既有 cue provenance 与校验通过的候选/对齐 artifact 重建审计报告，不重新选择或改写时间轴；原因记为 `selection_artifact_recovered`。

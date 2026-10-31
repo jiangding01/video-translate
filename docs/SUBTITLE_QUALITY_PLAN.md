@@ -137,11 +137,12 @@ candidate_qa_failed
 alignment_below_threshold
 alignment_post_qa_failed
 platform_subtitles_missing
+platform_subtitles_not_requested
 forced_asr
 selection_artifact_recovered
 ```
 
-`source_selected` 事件已记录 `job_id`、`job_file`、`strategy`、`candidate_kind`、`selected_kind`、`reason` 和 `report_path`。Q3 重建复用该事件记录最终 ASR 选择，不新增事件类型；事件协议保持 v1。
+`source_selected` 事件已记录 `job_id`、`job_file`、`strategy`、`candidate_kind`、`selected_kind`、`reason`、`available_platform_subtitles` 和 `report_path`。`platform_subtitles_missing` 只表示「请求过但平台没有」；平台字幕是 opt-in，未传 `--youtube-subtitles` 时记 `platform_subtitles_not_requested`，并把平台实际可用的人工字幕语言放进 `available_platform_subtitles` 供 CLI 指路（只进事件不进 artifact：`source-selection.json` 的内容 checksum 被协议快照冻结）。Q3 重建复用该事件记录最终 ASR 选择，不新增事件类型；事件协议保持 v1。
 
 ### 已有 Job 修复入口
 

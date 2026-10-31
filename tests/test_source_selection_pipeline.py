@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +14,7 @@ from xvt.download import RemoteMediaInfo
 from xvt.events import Event
 from xvt.job_store import create_job, save_job
 from xvt.media import MediaInfo
-from xvt.models import StageName, StageStatus, Transcript, Word
+from xvt.models import Artifact, Job, StageName, StageStatus, Transcript, Word
 from xvt.pipeline import (
     resume_job,
     resume_remote_transcription,
@@ -21,6 +22,7 @@ from xvt.pipeline import (
     run_remote_transcription,
     run_subtitle_transcription,
 )
+from xvt.pipeline.transcription.shared import platform_manual_subtitle_languages
 from xvt.process import CommandResult
 from xvt.recovery import file_checksum, valid_artifact_path
 from xvt.workflow import continue_workflow
@@ -117,6 +119,62 @@ class SourceSelectionPipelineTest(unittest.TestCase):
         self.assertEqual(selection["reason"], "user_subtitles_preserved")
         self.assertEqual(source_start_ms, 1_000)
         self.assertIn("source_candidate_qa", {item.kind for item in job.artifacts})
+
+    def test_remote_without_youtube_subtitles_reports_not_requested_and_lists_languages(
+        self,
+    ) -> None:
+        """远程 Job 没请求平台字幕时，原因码要说实话，并把可用语言记下来。
+
+        2026-11-01 真实验收的那条因果链就从这里起头：平台有 en 人工字幕，选择记录
+        却说 platform_subtitles_missing，用户据此以为只能走 ASR。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote_info = RemoteMediaInfo(
+                "abc", "Example", 5_000, "https://youtu.be/abc", ("en",), ("en", "zh")
+            )
+
+            def download_media(_url, output_directory, **_kwargs):
+                path = Path(output_directory) / "audio.m4a"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"audio")
+                return path
+
+            with (
+                patch("xvt.pipeline.transcription.remote.inspect_remote", return_value=remote_info),
+                patch(
+                    "xvt.pipeline.transcription.remote.download_remote_media",
+                    side_effect=download_media,
+                ),
+                patch(
+                    "xvt.pipeline.transcription.remote.probe_media",
+                    return_value=self._media_info(root / "audio.m4a"),
+                ),
+                patch(
+                    "xvt.pipeline.transcription.local.run_command",
+                    side_effect=self._write_normalized_audio,
+                ),
+                patch(
+                    "xvt.pipeline.transcription.local.transcribe_audio",
+                    return_value=self._transcript(),
+                ) as transcribe,
+                patch(
+                    "xvt.pipeline.transcription.remote.download_remote_subtitles"
+                ) as download_subtitles,
+            ):
+                job = run_remote_transcription("https://youtu.be/abc", root)
+                selection = self._selection(job)
+
+        # 没请求就不该去下载；这条同时钉住「候选为空的成因确实是没去要」。
+        download_subtitles.assert_not_called()
+        transcribe.assert_called_once()
+        self.assertEqual(selection["candidate_kind"], "none")
+        self.assertEqual(selection["selected_kind"], "asr")
+        self.assertEqual(selection["reason"], "platform_subtitles_not_requested")
+        # 可用语言只进事件不进 artifact（协议快照冻结了 selection 的内容 checksum），
+        # 所以这里断言 selection 里**没有**它，可用语言的断言在 CLI 渲染测试里。
+        self.assertNotIn("available_platform_subtitles", selection)
 
     def test_manual_candidate_errors_fall_back_to_asr_after_low_confidence_alignment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1073,3 +1131,42 @@ class SourceSelectionPipelineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlatformManualSubtitleLanguagesTest(unittest.TestCase):
+    """``None``（本地 Job）与 ``()``（远程但无人工字幕）必须分开。
+
+    混为一谈就会把本地 Job 记成 platform_subtitles_not_requested——本地输入没有
+    「平台」可言，那只是把一个谎话换成另一个。
+    """
+
+    def _job(self, root: Path, remote_info: RemoteMediaInfo | None) -> Job:
+        job = create_job("https://youtu.be/abc" if remote_info else "/tmp/input.mp4", root)
+        if remote_info is not None:
+            path = root / "jobs" / job.id / "artifacts" / "remote-info.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(asdict(remote_info)), encoding="utf-8")
+            job.artifacts.append(Artifact("remote_info", str(path), file_checksum(path)))
+        save_job(job)
+        return job
+
+    def test_local_job_has_no_platform(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertIsNone(platform_manual_subtitle_languages(self._job(root, None)))
+
+    def test_remote_without_manual_subtitles_is_empty_not_none(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            info = RemoteMediaInfo("abc", "Example", 5_000, "https://youtu.be/abc", (), ("en",))
+            self.assertEqual(platform_manual_subtitle_languages(self._job(root, info)), ())
+
+    def test_remote_with_manual_subtitles_lists_them(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            info = RemoteMediaInfo(
+                "abc", "Example", 5_000, "https://youtu.be/abc", ("en", "ja"), ()
+            )
+            self.assertEqual(
+                platform_manual_subtitle_languages(self._job(root, info)), ("en", "ja")
+            )
