@@ -27,7 +27,7 @@ MAX_ENTRY_BYTES = 2 * 1024
 
 ENTRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 # 条目的终止边界：下一条日期条目，或下一个 markdown 标题。
-BOUNDARY_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|#{1,6}\s)")
+BOUNDARY_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|#{1,6}\s|>)")
 
 OVERFLOW_HINT = (
     f"超出的部分请滚进 {ARCHIVE_HINT}（按日期倒序，插在对应日期分组最前面）；"
@@ -39,7 +39,7 @@ OVERFLOW_HINT = (
 def _entries(lines):
     """把以 YYYY-MM-DD 开头的日期条目切出来，返回 [(起始行号, 文本)]。
 
-    边界取「下一条日期条目」与「下一个 markdown 标题」里先到的那个，条目不会越过
+    边界取「下一条日期条目」「下一个 markdown 标题」与「块引用」里先到的那个，条目不会越过
     章节标题把无关内容吃进来。这条边界是 2026-10-21 的 review 实测出来的：当时边界
     一路吃到文件末尾，HANDOFF 里一句碰巧以日期开头的正文（R 系列那句「2026-08-02 的
     全量审查……」）把整个「## 接手步骤」节吞了进去，往那一节加 212 字节就会让守卫
@@ -117,6 +117,25 @@ class EntryBoundaryTest(unittest.TestCase):
         self.assertEqual(line_no, 1)
         self.assertNotIn("填充", body)
         self.assertLessEqual(len(body.encode("utf-8")), MAX_ENTRY_BYTES)
+
+    def test_entry_stops_at_block_quote(self):
+        """文件末尾的块引用说明不得把最后一条日期条目撑爆。
+
+        HANDOFF 的日期条目列表后面固定跟着一段 `>` 引用（档案指引与体量约定，约 0.65KB）。
+        它是文件级说明，不属于任何条目；边界不停在这里，最后一条条目就永远背着这 0.65KB，
+        于是任何 ≥1.4KB 的条目一旦滚成最后一条就会误报——2026-11-01 归档时实测撞到。
+        """
+        lines = [
+            "2026-10-23 一条正常长度的条目。",
+            "",
+            "> 体量约定：本文件 ≤ 200 行且 ≤ 32KB。",
+            ">",
+            "> " + "填充" * 2000,
+        ]
+        entries = _entries(lines)
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn("填充", entries[0][1])
+        self.assertLessEqual(len(entries[0][1].encode("utf-8")), MAX_ENTRY_BYTES)
 
     def test_entry_stops_at_next_dated_entry(self):
         """同一节里相邻的两条条目仍然各算各的。"""

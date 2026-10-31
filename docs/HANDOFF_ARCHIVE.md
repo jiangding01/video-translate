@@ -8,11 +8,23 @@
 
 ## 日期目录
 
+- [2026-10-23](#2026-10-23)（2 条）
+- [2026-10-22](#2026-10-22)（1 条）
 - [2026-10-20](#2026-10-20)（14 条）
 - [2026-10-18](#2026-10-18)（13 条）
 - [2026-10-17](#2026-10-17)（19 条）
 - [2026-10-11](#2026-10-11)（3 条）
 - [2026-10-04](#2026-10-04)（1 条）
+
+## 2026-10-23
+
+2026-10-23 **人工修订模板的宽度标注补 `max_lines`（#141 的尾巴）。** `pipeline/revision.py` 的宽度标注此前只给 `limit`，而换行落地后那是「每行上限」，模板读者看到 36 会以为要把整句缩进一行。现在同一分支里补一个 `max_lines`（取 `segment.TARGET_WRAP_MAX_LINES`，不写死 2），只标在 `target` 的宽度项上——源文永不换行，给它标两行就是说谎。`candidate_qa.overflow_limits` 的正则一字未改（行数是代码常量，不从 message 解析），`recovery.py:282` 的等待原因文案零改动。已生成的模板不会被改写：`revision_fingerprint` 不含标注内容，要重新生成才带上该键。
+
+2026-10-23 **字体缺字不再静默降级：点名到码位、cue 与腿，可见字符停烧录。** 此前 libass 报缺字只被子串匹配认出来，收成一条 `cue_id=0` 的 `layout_measurement_unavailable` warning，行宽 QA 整份退保守上限而报告照样放行，成品是一屏豆腐块。现在解析 libass 本就带着的码位与字体名（逐帧重复，去重后用 `render.FontGlyphError` 带出），按 cue 与腿产出 `font_missing_glyph`：可见字符 `review`（停 `needs_review`，`--acknowledge-subtitle-review` 可放行），零宽/控制字符与变体选择符 `warning`。缺字之外的测量失败文案与严重度一字未动；候选 QA 里缺字刻意不作为阻断项（否则语义收尾会停在「要求修订但模板里没有可改项」的死局，已加守卫测试）。`xvt doctor` 的字体检查从只探 zh-CN 扩到 zh/ja/ko/en 四种。顺带补上了 [2026-10-17 review 发现清单](docs/REVIEW_FINDINGS_2026_10_17.md) 欠的实证：五种缺字字符各真跑一次测量，确认缺字分支真的会触发。来源是 [BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B1。
+
+## 2026-10-22
+
+2026-10-22 **BaoCut 对标落地三个 PR，剩余项见「下一步待办」。** 对开源剪辑软件 BaoCut（`/Users/jiangding/baocut`，Rust + Electron）做了转写/翻译链路与 CLI 两路调研并经独立核验，结论：可借鉴的是算法与协议而非其常驻 Runtime 架构；XVT 在 libass 真实行宽测量、Q6 语义校对、任务级 `recovery_plan` 三处强于它。据此落地：#140 HANDOFF 拆分归档（741 行→93 行，`tests/test_handoff_budget.py` 守卫）；#141 译文超宽先做 cue 内确定性换行（最多 2 行、禁则后检、QA 与 ASS 同源、`layout.wrap` 绑定，方案 [docs/TARGET_LINE_WRAP_PLAN.md](docs/TARGET_LINE_WRAP_PLAN.md)）；#142 ja/ko 阅读速度上限 13 + QA 阅读单位口径改细（标点不计、CJK 下 Latin 半字，只影响 `reading_speed` warning）。两处自查教训已写进对应文件注释：新守卫要照项目既有正确做法写（`test_events.py` 按标题切块）；「不该红时不红」也要有测试。
 
 ## 2026-10-20
 
