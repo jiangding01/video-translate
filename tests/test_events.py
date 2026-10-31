@@ -218,6 +218,7 @@ class EventPayloadContractTest(unittest.TestCase):
                 candidate_kind="manual",
                 selected_kind="subtitles",
                 reason="manual_subtitles_passed",
+                available_platform_subtitles=["en"],
                 report_path="/tmp/source-selection.json",
             ),
             EventType.TRANSLATION_REVIEW_INPUT_READY: create_event(

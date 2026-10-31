@@ -25,7 +25,7 @@ xvt continue <JOB>
 
 ## 应修
 
-### E1 平台人工字幕被静默跳过，且 reason 与同 Job 的事实矛盾 — ✅ 已核验，`待修`
+### E1 平台人工字幕被静默跳过，且 reason 与同 Job 的事实矛盾 — ✅ 已核验，**已修（本轮）**
 
 同一个 Job 里两个 artifact 对同一事实相反陈述：`remote_info.subtitle_languages == ["en"]`（XVT 自己探测并落盘的），而 `source_selection.reason == "platform_subtitles_missing"`、`candidate_kind == "none"`、`selected_kind == "asr"`。真实原因是平台字幕为 opt-in，未传 `--youtube-subtitles` 时 `config.youtube_subtitles == False`，根本没去取。
 
@@ -99,7 +99,7 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 没有 `--max-height` 一类参数，4 分钟视频按 2160p 下载并烧录，成品 463 MB。HANDOFF 记录「4K/8K 不设上限」是有意设计，但「只要 1080p 成品」是常见需求。若接受，落点在下载格式选择与烧录前的缩放，两处都要进烧录 fingerprint。
 
-### E13 `--source-strategy subtitles` 不隐含请求平台字幕 — △ 推断，`待决策`
+### E13 `--source-strategy subtitles` 不隐含请求平台字幕 — △ 推断，**已随 E1 修复**
 
 `dispatch.py:69` 只认 `youtube_subtitles`，所以 `xvt run URL --source-strategy subtitles` 这一意图明确的命令会在**下载完整视频之后**失败，并报 `platform_subtitles_missing`（`source_selection.py:131-134` 的 FAIL 分支，与 E1 同一个 reason）。本次未实跑触发（不愿再下一次 4K）。若 E1 修复时一并处理，这条自然消解。
 

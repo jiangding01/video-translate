@@ -93,6 +93,27 @@ def _record_candidate_qa(
     return path
 
 
+def platform_manual_subtitle_languages(job: Job) -> tuple[str, ...] | None:
+    """平台人工字幕语言；``None`` 表示这根本不是远程 Job。
+
+    ``None``（无 ``remote_info``，即本地文件输入）与 ``()``（远程但平台没有人工
+    字幕）**必须分开**：本地 Job 没有「平台」可言，不能因为它没开
+    ``--youtube-subtitles`` 就被记成 ``platform_subtitles_not_requested``。
+    只看人工字幕：自动字幕另有 ``--allow-auto-subtitles`` 把关，且未必强于 ASR，
+    把 170 多种自动字幕语言摆给用户只是噪声。
+    """
+
+    remote_path = valid_artifact_path(job, "remote_info")
+    if remote_path is None:
+        return None
+    try:
+        return tuple(_load_remote_info(remote_path).subtitle_languages)
+    except (OSError, UnicodeError, ValueError):
+        # 平台元数据读不出来时按「远程但不知道有什么」处理：仍是远程 Job，
+        # 但给不出可用语言，于是提示自然退化成不提示，而不是让整条命令失败。
+        return ()
+
+
 def _record_source_selection(
     job: Job,
     *,
@@ -102,8 +123,19 @@ def _record_source_selection(
     reason: str,
     reference_allowed: bool,
     alignment_confidence: float | None,
+    available_platform_subtitles: tuple[str, ...] = (),
     event_sink: EventSink | None,
 ) -> Path:
+    """登记源选择结果。
+
+    ``available_platform_subtitles`` **只进事件、不进 artifact**：
+    ``tests/test_provider_protocol_snapshot.py`` 冻结了 ``source-selection.json``
+    的内容 checksum，往里加字段会让协议快照整片变红（AGENTS 第 8 条：重构期间出现
+    diff 一律回退而不是更新 golden）。而这份信息并没有丢——平台有哪些人工字幕本来
+    就记在 ``remote_info`` artifact 里，selection 里再存一份属于重复。事件侧带上它
+    是为了让 CLI 在「平台有字幕却没被请求」时能当场把出路打出来。
+    """
+
     source_checksum = artifact_checksum_for(job, "source_cues")
     if source_checksum is None:
         raise RuntimeError("source selection requires a registered source_cues artifact")
@@ -130,6 +162,7 @@ def _record_source_selection(
                 candidate_kind=candidate_kind.value,
                 selected_kind=selected_kind,
                 reason=reason,
+                available_platform_subtitles=list(available_platform_subtitles),
                 report_path=str(path),
             )
         )

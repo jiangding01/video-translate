@@ -280,6 +280,7 @@ mux 完才删中间文件，所以按两份算；单文件格式按一份算。�
 | `candidate_kind` | string | `none`、`user`、`manual` 或 `automatic` |
 | `selected_kind` | string | 最终时间轴来源（`subtitles`、`aligned_subtitles` 或 `asr`） |
 | `reason` | string | 稳定选择原因码 |
+| `available_platform_subtitles` | array | 平台可用的**人工**字幕语言码；本地 Job 与平台无人工字幕时为空数组。自动字幕不计入（另有 `--allow-auto-subtitles` 把关，且未必强于 ASR） |
 | `report_path` | string | `source-selection.json` 路径 |
 
 `rebuild-source --strategy asr` 复用此事件记录重建后的选择（`strategy=asr`、`selected_kind=asr`）；不新增事件类型。命令成功后的 CLI JSONL 终态仍为既有 `cli_completed`。

@@ -28,6 +28,7 @@ from xvt.pipeline.transcription.shared import (
     _render_source_srt,
     _run_source_subtitle_qa,
     _segmentation_config,
+    platform_manual_subtitle_languages,
 )
 from xvt.process import run_command
 from xvt.qa import check_subtitles
@@ -264,17 +265,35 @@ def _process_adaptive_media(
         has_translation_goal = bool(
             workflow is not None and (workflow.target_language is not None or workflow.burn)
         )
+        # 平台字幕是 opt-in，没请求就没有候选。只有**远程** Job 才谈得上「没去要」：
+        # platform_manual_subtitle_languages 返回 None 即本地输入，此时照旧按
+        # platform_subtitles_missing 处理（本地 Job 没有平台可言）。
+        platform_manual = platform_manual_subtitle_languages(job)
+        platform_subtitles_requested = platform_manual is None or bool(
+            job.config.get("youtube_subtitles")
+        )
         plan = plan_source_selection(
             strategy,
             candidate_kind=candidate_kind,
             candidate_has_errors=bool(evaluation and evaluation.has_errors),
             has_translation_goal=has_translation_goal,
+            platform_subtitles_requested=platform_subtitles_requested,
         )
         if align_subtitles:
             plan = plan.__class__(SourceSelectionAction.ALIGN, "manual_subtitles_aligned", False)
         elif plan.action is SourceSelectionAction.ALIGN and imported_cues is None:
             plan = plan.__class__(SourceSelectionAction.ASR, "candidate_qa_failed", False)
         if plan.action is SourceSelectionAction.FAIL:
+            if plan.reason == "platform_subtitles_not_requested":
+                hint = (
+                    f" (platform has manual subtitles: {', '.join(platform_manual)})"
+                    if platform_manual
+                    else ""
+                )
+                raise ValueError(
+                    "--source-strategy subtitles needs platform subtitles to be requested: "
+                    f"add --youtube-subtitles --subtitle-language LANG{hint}"
+                )
             raise ValueError("requested source subtitles are not available")
         if plan.action is SourceSelectionAction.SUBTITLES and imported_cues is None:
             raise ValueError("subtitle candidate contains no usable cues")
@@ -421,6 +440,7 @@ def _process_adaptive_media(
             reason=selection_reason,
             reference_allowed=reference_allowed,
             alignment_confidence=alignment_confidence,
+            available_platform_subtitles=platform_manual or (),
             event_sink=event_sink,
         )
 

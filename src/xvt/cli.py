@@ -934,6 +934,15 @@ class _HumanEventSink(_TrackedEventSink):
                 str(data.get("selected_kind")), str(data.get("selected_kind"))
             )
             self._line(f"[选择] 源字幕：{selected}（{data.get('reason')}）")
+            # 平台明明有人工字幕却没被请求时，把出路直接给出来。只在人读模式打这行，
+            # _line 是人读输出的唯一漏斗，--events-jsonl 走的是另一条通道。
+            available = data.get("available_platform_subtitles") or []
+            if data.get("reason") == "platform_subtitles_not_requested" and available:
+                languages = "、".join(str(item) for item in available)
+                self._line(
+                    f"       平台有 {languages} 人工字幕未被使用；加 --youtube-subtitles "
+                    f"--subtitle-language {available[0]} 可改用，省去一次转写"
+                )
         elif event.type == EventType.TRANSLATION_BATCH_STARTED:
             self._seen_translation = True
             self._flush_pending_skips()

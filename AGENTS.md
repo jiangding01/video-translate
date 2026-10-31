@@ -48,7 +48,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/textwidth.py` | 零依赖叶子：显示宽度与显示单位上限等六个纯宽度函数，`qa.py` 原名 re-export |
 | `src/xvt/qa.py` | 时间轴、文本完整性和显示宽度检查 |
 | `src/xvt/candidate_qa.py` | 候选译文 QA 判定，以及 QA message 中行宽/上限的**唯一**解析实现（`overflow_limits`，零依赖叶子，供 recovery / pipeline.revision 共用）；其它模块一律复用它，不得就地重造这条正则 |
-| `src/xvt/source_selection.py` | 源字幕候选的确定性 QA 与选择决策（`SourceStrategy` / `SourceCandidateKind` / `SourceSelectionAction`） |
+| `src/xvt/source_selection.py` | 源字幕候选的确定性 QA 与选择决策（`SourceStrategy` / `SourceCandidateKind` / `SourceSelectionAction`）。`plan_source_selection` 的 `platform_subtitles_requested` **只应在远程 Job 上传 `False`**——本地文件输入的 Job 永远没请求过平台字幕，照此传会把它误记成 `platform_subtitles_not_requested`，等于用一个谎话换另一个；调用方以「有没有 `remote_info` artifact」为准（`transcription.shared.platform_manual_subtitle_languages` 返回 `None` 即本地 Job） |
 | `src/xvt/render.py` | 双语 ASS 样式和平台字体选择 |
 | `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
 | `src/xvt/paths.py` | **用户可指定路径的写盘出口**共用的绝对路径解析与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact）。烧录 `--output`、预览 `--output` 与 `build-translation-context --export-glossary` 都走这一道；**新增这类出口必须接入**，否则一条手滑的路径就能盖掉已登记 artifact 并让 Job 的 checksum 失效（`--glossary` 一类只读输入不在其内） |
@@ -99,8 +99,8 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 8. **协议快照不得被重构改写**：`tests/test_provider_protocol_snapshot.py` 冻结 provider 编排的事件序列、artifact 内容 checksum、manifest 键序与 fingerprint，golden 在 `tests/fixtures/provider-protocol-snapshot.json`。重构期间它出现 diff，一律回退改动而不是更新期望值；只有刻意的协议变更才允许重新生成 golden，且必须同步 Changelog 与相关文档。
 9. CLI 参数、默认行为、artifact、事件或安全边界变化后，同步检查 README、架构、恢复契约、Changelog、Roadmap、Skill 和 HANDOFF。**同步 HANDOFF 不等于往里堆**：它 ≤ 200 行且 ≤ 32KB，单条日期条目 ≤ 2KB，超出就把最旧的条目滚进 [HANDOFF 历史档案](docs/HANDOFF_ARCHIVE.md)（按日期倒序，插在对应日期分组最前面）。实证过程、否决记录、复现数据属于 `docs/REVIEW_FINDINGS_*.md` 或对应专项方案，HANDOFF 条目只留结论、影响和链接。这条由 `tests/test_handoff_budget.py` 强制，不是自觉——2026-10 期间它曾在 4 天内从 61KB 涨到 240KB。
 10. **提交前硬门槛（不可跳过）**：
-    1. 对照 diff 做一遍代码 review（正确性、边界、与既有语义一致性、安全边界、文档是否漏改）。
-    2. 有问题先修再测；未修干净不得 `git commit`。
+    1. **用 `/check` skill 做 review**，不是随手对照 diff 看一遍——它有固定检查面（范围漂移、同类站点普查、过度设计、硬停项、回归测试在旧代码上是否真会红），能逼出自查漏掉的东西。review 范围与重点要在调用时写清（正确性、边界、与既有语义一致性、安全边界、文档是否漏改）。
+    2. 高/中优先级问题必须修复，修完**重新跑 `/check`**，循环到没有阻断性问题；未修干净不得 `git commit`。同一任务最多三轮，第三轮仍冒出新问题就回头质疑方案本身而不是继续打补丁。
     3. 跑通约定验证命令（至少 ruff + 相关/全量 pytest）；通过后才提交。
     4. 向用户简要说明 review 结论（无问题 / 修了什么）后再推送或开 PR。
 

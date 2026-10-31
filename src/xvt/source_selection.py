@@ -116,9 +116,30 @@ def plan_source_selection(
     candidate_kind: SourceCandidateKind,
     candidate_has_errors: bool,
     has_translation_goal: bool,
+    platform_subtitles_requested: bool = True,
 ) -> SourceSelectionPlan:
+    """给定候选与策略，决定源时间轴从哪来。纯判定，无副作用。
+
+    ``platform_subtitles_requested`` 区分「没有候选」的两种成因，默认 ``True``
+    保持历史行为。平台字幕是 opt-in（``--youtube-subtitles``），不请求就没有候选，
+    此前这与「平台真的没有字幕」共用 ``platform_subtitles_missing`` 一个原因码——
+    2026-11-01 的真实验收实测到它的代价：同一个 Job 的 ``remote_info`` 记着
+    ``subtitle_languages == ["en"]``，选择记录却说平台字幕缺失，用户据此以为只能
+    走 ASR，于是白跑一次转写、ASR 把产品名错听三次、最后停在本可避免的人工修订。
+
+    调用方只应在**远程 Job** 上传 ``False``：本地文件输入的 Job 没有「平台」可言，
+    它的 ``youtube_subtitles`` 永远是假，照此传 ``False`` 只是把一个谎话换成另一个。
+    """
+
     candidate_present = candidate_kind is not SourceCandidateKind.NONE
     reference_allowed = candidate_present and not candidate_has_errors
+    # 「没去要」与「要了但没有」共用一处派生，两个分支（SUBTITLES 的 FAIL 与 AUTO
+    # 的 ASR 降级）必须同口径，否则同一个 Job 会因为策略不同给出互相矛盾的说法。
+    missing_reason = (
+        "platform_subtitles_missing"
+        if platform_subtitles_requested
+        else "platform_subtitles_not_requested"
+    )
 
     if strategy is SourceStrategy.ASR:
         return SourceSelectionPlan(
@@ -131,7 +152,7 @@ def plan_source_selection(
         if not candidate_present:
             return SourceSelectionPlan(
                 SourceSelectionAction.FAIL,
-                "platform_subtitles_missing",
+                missing_reason,
                 False,
             )
         if candidate_kind is SourceCandidateKind.USER:
@@ -147,7 +168,7 @@ def plan_source_selection(
     if candidate_kind is SourceCandidateKind.NONE:
         return SourceSelectionPlan(
             SourceSelectionAction.ASR,
-            "platform_subtitles_missing",
+            missing_reason,
             False,
         )
     if candidate_kind is SourceCandidateKind.USER:

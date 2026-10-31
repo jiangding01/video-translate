@@ -137,6 +137,58 @@ class SourceSelectionTest(unittest.TestCase):
         self.assertEqual(forced_asr.action, SourceSelectionAction.ASR)
         self.assertTrue(forced_asr.reference_allowed)
 
+    def test_unrequested_platform_subtitles_get_their_own_reason(self) -> None:
+        """「没去要」不能和「要了但没有」共用一个原因码。
+
+        两条策略分支必须同口径：auto 降级 ASR 与 subtitles 策略失败，说的都该是
+        同一件事。2026-11-01 验收实测过混用的代价——选择记录说「平台字幕缺失」，
+        而同一个 Job 的 remote_info 里明明记着 subtitle_languages == ["en"]。
+        """
+
+        auto = plan_source_selection(
+            SourceStrategy.AUTO,
+            candidate_kind=SourceCandidateKind.NONE,
+            candidate_has_errors=False,
+            has_translation_goal=True,
+            platform_subtitles_requested=False,
+        )
+        forced = plan_source_selection(
+            SourceStrategy.SUBTITLES,
+            candidate_kind=SourceCandidateKind.NONE,
+            candidate_has_errors=False,
+            has_translation_goal=False,
+            platform_subtitles_requested=False,
+        )
+
+        self.assertEqual(auto.action, SourceSelectionAction.ASR)
+        self.assertEqual(auto.reason, "platform_subtitles_not_requested")
+        self.assertEqual(forced.action, SourceSelectionAction.FAIL)
+        self.assertEqual(forced.reason, "platform_subtitles_not_requested")
+
+    def test_requested_but_absent_still_reports_missing(self) -> None:
+        """不该红时不红：真的请求过而平台没有，仍是 platform_subtitles_missing。
+
+        默认值 True 也由这条钉住——调用方不传时行为必须与改动前逐字一致。
+        """
+
+        explicit = plan_source_selection(
+            SourceStrategy.AUTO,
+            candidate_kind=SourceCandidateKind.NONE,
+            candidate_has_errors=False,
+            has_translation_goal=True,
+            platform_subtitles_requested=True,
+        )
+        defaulted = plan_source_selection(
+            SourceStrategy.AUTO,
+            candidate_kind=SourceCandidateKind.NONE,
+            candidate_has_errors=False,
+            has_translation_goal=True,
+        )
+
+        self.assertEqual(explicit.reason, "platform_subtitles_missing")
+        self.assertEqual(defaulted.reason, "platform_subtitles_missing")
+        self.assertEqual(explicit.action, defaulted.action)
+
     def test_invalid_candidate_is_a_failed_diagnostic(self) -> None:
         evaluation = invalid_source_candidate(
             SourceCandidateKind.AUTOMATIC,

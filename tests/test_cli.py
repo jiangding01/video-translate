@@ -4251,3 +4251,56 @@ class MissingJobFileTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceSelectionHintTest(unittest.TestCase):
+    """平台有人工字幕却没被请求时，人读输出要把出路直接给出来。
+
+    2026-11-01 验收时这条信息只存在于 artifact 里：CLI 只打一句
+    `platform_subtitles_missing`，用户据此以为平台没有字幕、只能走 ASR。
+    """
+
+    def _render(self, *, reason: str, available: list[str]) -> str:
+        stream = StringIO()
+        sink = _HumanEventSink(stream=stream)
+        sink(
+            create_event(
+                EventType.SOURCE_SELECTED,
+                job_id="job-1",
+                job_file="/tmp/job.json",
+                strategy="auto",
+                candidate_kind="none",
+                selected_kind="asr",
+                reason=reason,
+                available_platform_subtitles=available,
+                report_path="/tmp/source-selection.json",
+            )
+        )
+        return stream.getvalue()
+
+    def test_hint_names_languages_and_the_exact_flags(self) -> None:
+        rendered = self._render(reason="platform_subtitles_not_requested", available=["en", "ja"])
+
+        self.assertIn("[选择] 源字幕：采用 ASR 字幕（platform_subtitles_not_requested）", rendered)
+        self.assertIn("平台有 en、ja 人工字幕未被使用", rendered)
+        # 给的是可直接复制的参数，不是「请参阅文档」。
+        self.assertIn("--youtube-subtitles --subtitle-language en", rendered)
+
+    def test_no_hint_when_platform_really_has_none(self) -> None:
+        """不该红时不红之一：没请求、但平台本来也没有人工字幕，就没有出路可指。"""
+
+        rendered = self._render(reason="platform_subtitles_not_requested", available=[])
+
+        self.assertIn("platform_subtitles_not_requested", rendered)
+        self.assertNotIn("未被使用", rendered)
+
+    def test_no_hint_when_subtitles_were_requested(self) -> None:
+        """不该红时不红之二：请求过而平台确实没有，提示无意义。
+
+        这条同时钉住提示只挂在新原因码上，不会泄漏到 platform_subtitles_missing。
+        """
+
+        rendered = self._render(reason="platform_subtitles_missing", available=["en"])
+
+        self.assertIn("platform_subtitles_missing", rendered)
+        self.assertNotIn("未被使用", rendered)
