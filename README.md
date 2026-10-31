@@ -56,7 +56,7 @@ xvt batch DIR --output DIR ...
 xvt batch-continue BATCH.json
 ```
 
-`resume`、`translate`、`burn`、`preview`、`resegment-translation` 等是**原子/修复**入口（`xvt --help` 中标为 `[advanced]`）。端到端 Job 不要用 `resume` 代替 `continue`：前者只恢复转写 checkpoint，后者完成 `job.config.workflow` 里的目标。
+`resume`、`translate`、`burn`、`preview`、`resegment-translation`、`build-translation-context` 等是**原子/修复**入口（`xvt --help` 中标为 `[advanced]`）。端到端 Job 不要用 `resume` 代替 `continue`：前者只恢复转写 checkpoint，后者完成 `job.config.workflow` 里的目标。
 
 ## 完整命令与参数参考
 
@@ -484,6 +484,22 @@ xvt acknowledge-translation-review JOB_FILE [--events-jsonl]
 
 - 位置参数：`job_file`。
 - 可选参数：`--events-jsonl`。日常路径也可使用 `continue --acknowledge-translation-review`。
+
+</details>
+
+<details>
+<summary><code>xvt build-translation-context</code>：抽取术语候选包（advanced）</summary>
+
+```text
+xvt build-translation-context JOB_FILE [--export-glossary PATH] [--events-jsonl]
+```
+
+- 位置参数：`job_file`。
+- 可选参数：`--export-glossary`、`--events-jsonl`。
+- 零模型调用、零 API 成本：全部判据是确定性的，产物是**候选**而不是事实。它不进翻译 prompt、不进任何指纹，也不改 stage；候选只有经你审核后通过 `--glossary` 传回才会影响翻译。
+- `--export-glossary PATH` 写出一份可审核的术语表骨架：只含高置信的单词候选（多词短语不进骨架），`target` 预填 `source`，每条带 `_evidence` 指回原文 cue。**请逐条审核**：不需要在译文里保持原文的条目要删掉，否则就是要求译文里出现该英文原词，会被确定性 QA 判 `glossary_violation`。
+- 导出路径与烧录输出共用同一道覆盖保护：盖不掉 job 文件、源媒体、你的原始输入文件或任何已登记 artifact，目标目录不存在也会被拒（两者都是退出码 2，且在写任何文件、登记任何 artifact 之前就拒绝）。
+- **只对拉丁字母源文有效**。主判据是「只出现大写形态且至少一次出现在非句首位置」，它要求源语言「句中普通名词小写」。中日韩没有大小写形态、德语所有名词大写、源语言为 `auto`（未知）时一律降级：不产出专名候选，在产物的 `extractor_degraded` 里写明原因（`no_case_signal` / `no_sentence_boundary`），退出码仍为 0。形态可辨的候选（型号、产品名、缩写、代码标识符）不依赖大小写，降级时照旧产出。
 
 </details>
 
@@ -982,6 +998,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 **按 Job 登记表取产物，不要按固定文件名取。** 上表是典型命名，不是契约：产物的有效性只认 Job 登记表里的内容 checksum（`xvt status --json` 的 `recovery_plan.reusable_artifacts`、`job.json` 的 `artifacts[]`，`xvt verify` 逐项复核）。两类情况会让固定路径取到错误内容：
 
 - 源文修订（`apply-source-review-fixes`）把 `source_cues` / `source_srt` / `subtitle_qa` 重新指向 `source-reviewed-cues-<fp12>.json`、`source-reviewed-<fp12>.srt`、`source-review-qa-<fp12>.json`，而**带旧文本的 `artifacts/source.srt` 仍留在原地**。
+- `rebuild-source` / `resegment-translation` / 源文修订会一并失效 `translation-context.json`：候选包的 `evidence.cue_ids` 与 `source_cues_checksum` 都绑定旧那套 cue，留着就是一份讲不清现状的旧证据。需要时重跑 `xvt build-translation-context`。
 - `rebuild-source` / `resegment-translation` 失效下游后，`translated.srt`、`bilingual.srt`、`bilingual.ass`、`qa-translated.json` 会被移出登记表，但**文件本身仍以陈旧内容留在目录里**。
 
 这些残留文件是刻意保留的恢复证据，不会被自动删除。按固定路径读取产物的脚本请改读 Job 登记表，或先用 `xvt verify JOB` 确认。
@@ -1025,7 +1042,7 @@ uv run --no-sync xvt batch-continue "/path/to/batch.json" --events-jsonl
 
 任务创建后会立即显示 `job.json` 路径。后续失败时，普通模式会显示失败阶段、任务路径和结构化恢复建议；已有 Job 的原子命令同样保留任务路径。恢复建议按「待编辑文件 → 前置命令 → 首选命令 → 备选命令」固定顺序输出，只有失败/中断和 `status` 这两个需要溯源的场景才额外列出报告路径；同一修订通道的 JSON 与同名 SRT 不各占一行，只列 JSON 并在行尾注明「（同名 .srt 亦可）」，两副载体都照旧接受。等待态里 `恢复建议：` 与紧邻的 `[等待] 翻译需要输入：` 逐字相同时不重复打印；这一去重仅在事件流与 stdout 同时连到终端（TTY）时生效，任一侧被重定向（例如 `xvt run … > out.txt`）时 `恢复建议：` 仍会打印，避免管道或日志里丢掉这条原因。用户按 Ctrl-C（SIGINT）或向进程发送 SIGTERM 时，外部命令的整个进程组会被清理，当前运行阶段记录为失败，CLI 分别返回退出码 130 和 143 并重新计算恢复计划；被打断阶段的错误文本为 `interrupted by user`。独立 `preview` 被打断不会生成正式工作流恢复计划，而是提示重新运行 `preview`。批处理在任何时刻被打断都会落盘：仍在运行的条目降级为 `interrupted`，`batch.json` 的 `status` 同样写成 `interrupted` 并带上 `next_action`（继续用 `xvt batch-continue`），不会停在 `running` 且没有下一步。字幕 QA 失败只展示报告和人工修复提示，不会错误建议继续烧录。字幕 QA 的 error 级问题记为 `failed`，纯 `needs_review` 记为 `awaiting_input`，两者都会停止工作流、不允许继续烧录；原子命令同样不会误发 `cli_completed`。 对 `needs_review` 级的报告（例如导入字幕折叠后超宽），确认可接受后可用 `xvt continue JOB --acknowledge-subtitle-review` 显式放行：确认记录绑定当前字幕内容、被确认的那份 QA 报告与具体问题集合，源字幕或译文变化（报告随之变化）或出现新的 review 问题后自动失效；error 级问题（时间轴无效、缺失译文、术语违规等）永远不能通过该通道放行。当前 schema 的 Job 缺少必填字段、stage 或正确字段类型时会返回无效输入错误，不输出 Python traceback；`source-cues.json`、`translated-cues.json` 等 cue 产物结构损坏时同样收口为无效输入错误（退出码 2 并发出 `cli_failed`），未知字段按前向兼容忽略。命令行里给出的 `job.json` / `batch.json` 路径不存在（或指向目录），以及 Agent response 文件缺失、不是 UTF-8 编码或不是合法 JSON，都以退出码 2（`invalid_input`）报错并给出路径，不再归入依赖故障（退出码 3）——这些位置参数永远来自用户输入。响应文件的编码要求与输入字幕一致（UTF-8，容忍 BOM），非 UTF-8 时 `xvt apply` 会附上转码建议（例如 `iconv -f gb18030 -t utf-8 old.json > new.json`）。这类回填失败只影响这一次命令：校验是只读的，Job 状态不变，原本在等的那一步仍在等，换对文件重来即可。反过来，Job 内**已登记**的 artifact 文件缺失不是用户输入错误：路径来自 Job 自己，仍按依赖或工作流问题处理，用 `xvt status` / `xvt verify` 定位。远程端到端任务即使尚未形成媒体 checkpoint，也可以用 `xvt continue JOB` 重试检查和下载；重新提供 `--cookies-from-browser` 或 `--proxy` 时，这些参数同时用于远程检查与素材下载。任务创建前的参数或输入错误仍需修正后重新执行。
 
-`run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply`、`apply-translation`、`polish-translation`、`apply-polish-translation`、`apply-semantic-review`、`acknowledge-translation-review`、`import-translation`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_started`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。完整步骤计划 `workflow_planned` **只有 `run` 首跑会发**：`continue` 只发带 `continuation=true` 的 `workflow_started`、不重发计划，它的剩余步骤由 `status` / `recovery_plan` 的 `advance_steps` 给出。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数（签名查询参数的脱敏与有没有 `https://` 前缀无关：yt-dlp 与 urllib3 那种只带 `/videoplayback?sig=…` 路径、或协议相对 `//host/…?sig=…` 的失败消息同样覆盖）；翻译提供方 HTTP 错误里回显的响应体，以及写进 `job.json`、由 `status --json` 原样输出的失败原因，在产生消息处就套用同一套脱敏，不依赖事件边界。
+`run`、`continue`、`batch`、`batch-continue`、`translate`、`prepare-translation`、`apply`、`apply-translation`、`polish-translation`、`apply-polish-translation`、`apply-semantic-review`、`acknowledge-translation-review`、`import-translation`、`build-translation-context`、`resegment-translation`、`retranslate-cues`、`apply-cue-retranslation`、`preview` 和 `burn` 支持 `--events-jsonl`。该模式保留机器接口：stdout 只输出逐行 JSON 事件，不混入普通进度文本；端到端链路还会输出 `workflow_started`、`workflow_waiting`、`workflow_completed`、`download_progress`、`transcription_progress` 和 `burn_progress`，其中完成事件会列出 checksum 有效的用户产物，仅生成源字幕时也包含 `source.srt`。完整步骤计划 `workflow_planned` **只有 `run` 首跑会发**：`continue` 只发带 `continuation=true` 的 `workflow_started`、不重发计划，它的剩余步骤由 `status` / `recovery_plan` 的 `advance_steps` 给出。批处理会输出 `batch_started`、逐项终态和带汇总计数的 `batch_finished`，预览会输出 `preview_started`、`preview_progress` 和 `preview_completed`。`transcription_progress` 的 `determinate=true` 表示可用真实百分比（当前为 faster-whisper），MLX 使用 `determinate=false` 和 `elapsed_seconds`，只有词级时间戳验证成功后才发送 100%。完成或失败时以结构化终态事件收口；批处理存在失败项或等待输入项时不会发出 `cli_completed`。命令事件和批处理错误报告会脱敏代理账号、密码、Cookie、鉴权请求头和常见签名查询参数（签名查询参数的脱敏与有没有 `https://` 前缀无关：yt-dlp 与 urllib3 那种只带 `/videoplayback?sig=…` 路径、或协议相对 `//host/…?sig=…` 的失败消息同样覆盖）；翻译提供方 HTTP 错误里回显的响应体，以及写进 `job.json`、由 `status --json` 原样输出的失败原因，在产生消息处就套用同一套脱敏，不依赖事件边界。
 
 `apply-translation-review-fixes` 同样支持 `--events-jsonl`，并通过 `translation_review_input_ready` / `translation_review_revised` 表达模板准备和修订接受；事件不会携带字幕正文。
 

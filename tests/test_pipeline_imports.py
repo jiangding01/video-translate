@@ -6,6 +6,7 @@ PIPELINE_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt" / "pipelin
 
 # 声明的依赖白名单，见 AGENTS.md「代码结构」一节的依赖方向说明：
 # common ← review ← {transcription.shared, translation, burnin}
+# common ← context（翻译上下文候选包，零兄弟依赖）
 # common ← semantic_state ← {review, revision}
 # semantic 与 retranslate 依赖 translation；semantic 还依赖 review / revision / semantic_state
 # resegment 只依赖 common；burnin 依赖 common 与 review（共用 QA 放行谓词）
@@ -23,6 +24,7 @@ PIPELINE_DIR = Path(__file__).resolve().parent.parent / "src" / "xvt" / "pipelin
 EXPECTED_DEPENDENCIES: dict[str, set[str]] = {
     "burnin": {"common", "review"},
     "common": set(),
+    "context": {"common"},
     "polish": {"common", "translation"},
     "resegment": {"common"},
     "retranslate": {"common", "translation"},

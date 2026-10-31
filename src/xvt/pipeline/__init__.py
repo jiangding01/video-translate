@@ -3,6 +3,7 @@
 本文件只做 re-export，不含业务逻辑。子模块职责与依赖方向（无环）：
 
 - ``common``：输入探测、stage 记账、原子 JSON 写入、artifact 登记与失效。
+- ``context``：源 cue 的确定性翻译上下文候选包（仅依赖 ``common``）。
 - ``review``：字幕 QA ``needs_review`` 的人工确认通道。
 - ``revision``：人工源文/译文修订与严格回填。
 - ``transcription``：素材获取、音频规范化、Whisper 转写、分段、对齐与恢复。
@@ -26,6 +27,7 @@ from xvt.pipeline.common import (
     pending_translation_import_blocker,
     resolved_translation_policy,
 )
+from xvt.pipeline.context import TranslationContextResult, build_translation_context
 from xvt.pipeline.polish import (
     agent_translation_polish_manifest_valid,
     apply_agent_translation_polish,
@@ -127,6 +129,8 @@ __all__ = [
     "apply_subtitle_translation",
     "apply_source_review_fixes",
     "apply_translation_review_fixes",
+    "TranslationContextResult",
+    "build_translation_context",
     "burn_translated_job",
     "complete_agent_polished_outputs",
     "complete_acknowledged_semantic_review",
