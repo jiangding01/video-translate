@@ -54,6 +54,10 @@ LEGACY_RESEGMENT_INVALIDATION = {
     "subtitle_qa",
     # Q2：选择报告包含最终 source cue checksum，重分段后不得保留旧选择记录。
     "source_selection",
+    # Q7a：翻译上下文候选包的 evidence.cue_ids 与 source_cues_checksum 都绑定
+    # 重分段前的那套 cue，重分段后必须一并失效——留着就是一份讲不清现状的旧证据，
+    # 而它还会被 --export-glossary 导成术语表骨架。
+    "translation_context",
     # Q5a：润色草稿、批次、进度和结果都直接或间接引用 source_cues。
     "translation_draft_cues",
     "translation_polish_batches",

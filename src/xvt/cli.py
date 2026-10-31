@@ -44,6 +44,7 @@ from xvt.pipeline import (
     apply_source_review_fixes,
     apply_subtitle_translation,
     apply_translation_review_fixes,
+    build_translation_context,
     burn_translated_job,
     complete_acknowledged_semantic_review,
     cue_retranslation_waiting,
@@ -520,6 +521,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     acknowledge_translation_parser.add_argument("job_file")
     acknowledge_translation_parser.add_argument("--events-jsonl", action="store_true")
+
+    translation_context_parser = subparsers.add_parser(
+        "build-translation-context",
+        help="[advanced] Extract deterministic terminology candidates from the source cues",
+    )
+    translation_context_parser.add_argument("job_file")
+    translation_context_parser.add_argument(
+        "--export-glossary",
+        help="Write a reviewable glossary skeleton (high-confidence single-word candidates only)",
+    )
+    translation_context_parser.add_argument("--events-jsonl", action="store_true")
 
     resegment_parser = subparsers.add_parser(
         "resegment-translation",
@@ -2061,6 +2073,36 @@ def _cmd_acknowledge_translation_review(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_build_translation_context(arguments: argparse.Namespace) -> int:
+    event_sink = _event_sink(arguments)
+    result = build_translation_context(
+        arguments.job_file,
+        export_glossary=arguments.export_glossary,
+        event_sink=event_sink,
+    )
+    artifacts = [str(result.report_path)]
+    if result.glossary_path is not None:
+        artifacts.append(str(result.glossary_path))
+    if arguments.events_jsonl:
+        _complete(
+            arguments,
+            artifacts=artifacts,
+            candidate_count=result.candidate_count,
+            degraded_reason=result.degraded_reason,
+            glossary_term_count=result.glossary_term_count,
+        )
+        return 0
+    _print_safe(f"候选包: {result.report_path}")
+    _print_safe(f"候选数: {result.candidate_count}")
+    if result.degraded_reason is not None:
+        # 降级不是失败：抽取器照既定契约放弃了专名候选并说明原因，退出码仍为 0。
+        _print_safe(f"已降级: {result.degraded_reason}（未产出专名候选，仅形态类候选）")
+    if result.glossary_path is not None:
+        _print_safe(f"术语表骨架: {result.glossary_path}（{result.glossary_term_count} 条）")
+        _print_safe("请逐条审核后再用 --glossary 传回；不需要在译文里保持原文的条目请删除。")
+    return 0
+
+
 def _cmd_resegment_translation(arguments: argparse.Namespace) -> int:
     event_sink = _event_sink(arguments)
     result = resegment_translation(arguments.job_file, event_sink=event_sink)
@@ -2425,6 +2467,7 @@ _COMMAND_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "prepare-source-review": _cmd_prepare_source_review,
     "apply-source-review-fixes": _cmd_apply_source_review_fixes,
     "acknowledge-translation-review": _cmd_acknowledge_translation_review,
+    "build-translation-context": _cmd_build_translation_context,
     "resegment-translation": _cmd_resegment_translation,
     "retranslate-cues": _cmd_retranslate_cues,
     "apply-cue-retranslation": _cmd_apply_cue_retranslation,
@@ -2467,6 +2510,7 @@ _JOB_MUTATING_COMMANDS = frozenset(
         "retranslate-cues",
         "apply-cue-retranslation",
         "resegment-translation",
+        "build-translation-context",
         "preview",
         "burn",
     }

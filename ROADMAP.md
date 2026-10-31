@@ -28,7 +28,7 @@
     1. ~~使用公开素材完成 polished Agent 路径真实 E2E 与默认质量决策。~~ 2026-10-11 已完成英文人工字幕 → Agent 翻译润色与语义校对 → 1080p 整段烧录，24 个 artifact 校验通过；默认继续保持 `standard + faithful`。本次不覆盖 ASR 或有问题时的语义修复分支，多样本质量对照仍待开展。见 [验收记录](docs/POLISHED_AGENT_E2E_ACCEPTANCE.md)。
     2. ~~完成 Q6.2 剩余的语义复查收敛验证。~~ **2026-10-17 落槌：移出近期计划**，见「暂不规划」。已落地的部分（JSON/SRT 修订只读预检、实际 ASS 行宽测量、20 个历史 Job 的最小离线回归集）保持有效，见 [收敛基线](docs/Q6_2_CONVERGENCE_BASELINE.md)。
     3. 先完成 R3.1 统一 provider 传输与 R3.2 内容寻址 step 缓存，再设计 Q7 翻译上下文与术语候选包，避免为新增模型调用重复实现传输和恢复。R3.1 拆为 5 个独立可合阶段，Phase 1（协议快照回归网）/ 2（消函数级 import 环）/ 4a / 4b / 4c 均已于 2026-10-17 完成——四条链路现共用 `run_provider_batches` 一份批次循环；原 Phase 3 因实测只有 2 处 ~8 行重复而折入 4b，**Phase 5 已于 2026-10-20 关闭**，R3.1 至此收尾。**R3.2 已于 2026-10-20 取消**，所以这一条原先的「先 R3.1 → R3.2 再设计 Q7」不再成立：Q7 可直接设计，新增的模型步骤按既有 `run_provider_batches` + fingerprint checkpoint 接入。拆分与已更正的前提见 [架构改进与工程加固技术方案](docs/ARCH_IMPROVEMENT_PLAN.md)。
-    4. Q7 只生成可审计的主题、专名和术语候选；用户 glossary 仍是强约束，平台元数据可作为高置信证据，模型推断不得自动改写源文或成为强制术语。人工确认保持可选，只有检测到高风险专名时才建议介入。
+    4. Q7 只生成可审计的主题、专名和术语候选；用户 glossary 仍是强约束，平台元数据可作为高置信证据，模型推断不得自动改写源文或成为强制术语。人工确认保持可选，只有检测到高风险专名时才建议介入。**按三阶段推进，把协议变更隔离在最后一阶段**：**Q7a 已完成**（`xvt build-translation-context`，确定性抽取 + 可审核的 glossary 骨架导出，零模型调用、零协议影响、不进翻译 prompt 与指纹，只对拉丁字母源文有效）；**Q7b** 接模型推断腿（`run_provider_batches` + fingerprint checkpoint，API / Agent 双模式，新等待步骤要登记进 `AWAIT_STEPS` 与 `cli._STEP_ROUTES`），补上 CJK 与德语这两类确定性判据够不着的语料，仍不进翻译 prompt；**Q7c** 才把确认后的上下文接进翻译 prompt（prompt 版本升级、重生成协议快照、在途 API checkpoint 重置），届时 `translation_context` 成为翻译指纹的一部分。
     5. 增加可视化校对工作台，消费现有 JSONL 事件、`job.json`、QA artifact、人工修订 SRT 和预览能力，不复制媒体、时间轴或 QA 内核。
     6. WhisperX、Demucs 人声分离和更多 ASR 后端只作为独立质量基准候选；真实噪声音频证明收益明显后再决定是否引入依赖。
 

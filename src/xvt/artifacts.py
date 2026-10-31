@@ -31,6 +31,7 @@ class ArtifactKind(StrEnum):
     SOURCE_SELECTION = "source_selection"
     SOURCE_SRT = "source_srt"
     SUBTITLE_QA = "subtitle_qa"
+    TRANSLATION_CONTEXT = "translation_context"
     TRANSLATION_RESEGMENTATION = "translation_resegmentation"
     SOURCE_REVIEW_REVISION = "source_review_revision"
     TRANSLATION_BATCHES = "translation_batches"
@@ -105,6 +106,13 @@ DERIVES_FROM: dict[ArtifactKind, frozenset[ArtifactKind]] = {
             ArtifactKind.DOWNLOADED_SUBTITLES,
             ArtifactKind.MEDIA_INFO,
         }
+    ),
+    # 翻译上下文候选包：源 cue 的文本决定候选，平台元数据（标题）只作为加分证据。
+    # 与 SOURCE_CANDIDATE_QA 一样是「可选来源的并集」——本地 Job 没有 remote_info
+    # 不影响这条边成立。它目前不是任何产物的上游：候选要经用户审核后通过
+    # --glossary 显式传回才影响翻译（接进翻译 prompt 是 Q7c 的事）。
+    ArtifactKind.TRANSLATION_CONTEXT: frozenset(
+        {ArtifactKind.SOURCE_CUES, ArtifactKind.REMOTE_INFO}
     ),
     ArtifactKind.SOURCE_CUES: frozenset(
         {

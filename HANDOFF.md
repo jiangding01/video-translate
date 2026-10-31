@@ -1,6 +1,8 @@
 # 项目交接说明
 
-更新时间：2026-10-24（HEAD `c65198f`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-10-31（HEAD `b3e13b8`，`main`，工作树干净；写于 Claude Opus 5 会话）
+
+2026-10-31 **`xvt build-translation-context`：确定性术语候选包与可审核的 glossary 骨架（Q7a）。** Q7 拆三阶段，协议变更隔离在最后一阶段：Q7a 零模型调用、不进翻译 prompt 与指纹、不改 stage、不接 `plan_advance_steps`（协议快照零 diff），Q7b 接模型推断腿，Q7c 才把上下文接进 prompt。**主判据是实测挑的，不是设计出来的**：规则 D「只出现大写形态且至少一次非句首」在一份真实英文人工字幕（52 cue）上精度与召回各 6/6；两条更直觉的替代各漏 4/6——「出现 ≥2 次才收」漏掉 `Apple` / `CarPlay` / `Android` / `Auto`（各只出现一次，恰是最该统一译名的产品名），「只收形态可辨的」同样漏 4。句边界靠句末标点在**跨 cue 拼成的文本流**上判（cue 常切在句中），`>>` 与 `[...]` 在 token 化前剥除。缺标点或缺大小写双形态时记 `extractor_degraded` 并放弃专名候选、退出码仍 0，所以**只对拉丁字母源文有效**（CJK / 德语 / `auto` 全走降级；CJK 要分词器，归 Q7b）。骨架只导高置信单词、按 casefold 去重、多词短语永不进——`load_translation_policy` 判重复时 casefold 并直接抛，而短语恒等映射会踩 error 级 `glossary_violation`（无 `--acknowledge` 出口）。自查两处：早一版只看连字符，把 `low-slung` / `two-seater` 收成术语并导进骨架（恒等映射＝要求译文出现英文原词），现要求 token 含大写；判定顺序原先让形态规则先跑，`MX-5` 被错标成 `code_identifier`，改成专名优先。五个坏实现各注入一次，对应用例都变红。它在 `downstream_of(SOURCE_CUES)` 里，重分段 / 源文修订 / `rebuild-source` 会一并失效它。骨架导出接了 `paths` 的覆盖保护，盖不掉已登记 artifact。
 
 2026-10-24 **无 Cookie / 非 YouTube 的完整视频下载也做容量预检；B2 剩余层就此收口。** 上一轮的预检只挂在 Cookie YouTube 画质比较路径（靠那条路现成的 `_probe_video` 数据），而无 Cookie / 非 YouTube 的完整视频走直接下载路径、同样 GB 级却零探测。现在新增 `_probe_download_size` 自己探一次，**刻意不复用 `_probe_video`**（后者为画质比较做严格字段校验，非 YouTube 站点过不了；容量预检只要一个大小，不该因元数据形状不同就把下载弄挂），捕获一切失败降级成「未知」跳过预检；探测 flag 照**下载命令**构造（`_probe_video` 在无 Cookie 时总加 `--ignore-config`，直接路径不是），否则量的不是要下的，有用例钉住。`_check_download_space` 入参从 `VideoSelection` 解耦成 `_DownloadSize`，判定一字未改，不新增事件。**剩下两项评估后都不做**：`audio_only` 是 `bestaudio/best`、几十 MB 量级，不值一次网络往返；烧录前估算**只在硬件编码路径有可信依据**（`-b:v` 是我们给的目标码率，可按 码率 × 时长 算），软件编码走 `-crf 18`、码率随内容变，而「用源文件大小当门槛」不成立——源既非上界也非下界（ProRes 源重编码后小得多 → 误拦；已压缩源可能变大 → 漏报），且非 macOS 一律走 CRF、正好没有保护。自查：`_probe_download_size` 的 `except` 初稿把 `TypeError` 也捕了，结果**吞掉了测试桩不接 `timeout` 这个调用约定错误**——6 条受影响的既有用例当时全是绿的，预检被静默跳过而我以为没有影响面。收窄 `except` 后它们如实变红，逐条适配。
 
@@ -34,7 +36,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1170 个测试、341 个子测试，全部通过（2026-10-24） |
+| 自动化测试 | 1195 个测试、343 个子测试，全部通过（2026-10-31） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
@@ -65,6 +67,7 @@
 
 - 译文超硬显示阈值时，能按禁则切成最多 2 行的已由确定性换行自动放行（记 `target_wrapped` warning）；切不开或切完仍超的仍由 QA 阻断——`_KATAKANA_RUN` 落地后「片假名连续段整体放不下」也是切不开的一种（硬形态，刻意不退回按字切；真撞上频繁 review 时的退路写在 `segment.py` 该常量的注释里）。libass 像素驱动的二分换行与重译缩短未实现（方案见 [docs/TARGET_LINE_WRAP_PLAN.md](docs/TARGET_LINE_WRAP_PLAN.md)）。
 - 新 Job 默认生成单遍语义组译文，也可显式选择 `--translation-quality polished`；Agent 主链真实 E2E 已通过，但默认切换仍需多样本质量与成本对照。
+- `build-translation-context` 的确定性判据只对「句中普通名词小写」的拉丁语言成立：CJK 没有大小写形态、德语所有名词大写、源语言为 `auto` 时一律降级，只剩形态类候选（型号、产品名、缩写、代码标识符）。CJK 专名抽取要词法边界（分词器），与译文切分的词法边界是同一个卡点，归 Q7b 的模型腿。另外 `H.264` 这类「字母+点+数字」型号名抓不到（点后首字符是数字，不符合任何形态规则）。
 - `rebuild-source` 只适用于有媒体的 Job；纯字幕 Job 的源字幕问题仍需人工修复。
 - 高级命令 `retranslate-cues` 已与主翻译共用传输/结构重试和 retry 事件语义，但仍只在全部选定 cue 翻译完成后写最终响应；中途失败会重复请求该次命令中已成功的批次，因此不会提前发送意味着已持久化的 `translation_batch_completed`。端到端主翻译的逐批 checkpoint 不受影响。
 - 回填失败后的等待保持已修复（契约见 [架构说明](docs/ARCHITECTURE.md) 的「Job 与 Artifact」：用户模式的 `apply-cue-retranslation` / `apply-translation` / `import-translation` 校验失败不改写 stage，`cue_retranslation_waiting` 另外接受 `failed` 以兜住 API 模式重译失败与历史 Job）。仍存在的限制：stage 语义不区分「重译失败」与「等待被放弃」，放弃一次已请求的重译没有专门命令，靠重跑 `retranslate-cues` 重建 manifest，或直接开一轮整轮翻译取代它（`prepare_agent_translation` 会移走重译 manifest，且在途整轮请求优先）。用户模式的回填错误也不在 Job 上留痕（只有命令行报错，stage 不记 `error`），排查要看命令输出而不是 `job.json`。等待期间 `TRANSLATE` stage 停在 `awaiting_input` / `failed` 是表象，不影响判定。
@@ -95,7 +98,7 @@
 1. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
 2. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
 3. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
-4. **Q7 翻译上下文与术语候选包**：ROADMAP 近期第一顺位新功能，前置已随 R3.2 取消而解除，新模型步骤直接接 `run_provider_batches` + fingerprint checkpoint。范围边界见 ROADMAP「后续按以下顺序推进」第 4 条。
+4. **Q7b：术语候选的模型推断腿**（Q7a 已落地，见上）。接 `run_provider_batches` + fingerprint checkpoint，API / Agent 双模式，补上 CJK 与德语这两类确定性判据够不着的语料；新等待步骤必须先登记进 `workflow.AWAIT_STEPS`，再在 `cli._STEP_ROUTES` 与 `_UNROUTABLE_AWAIT_STEPS` 之一表态（`AwaitStepsCoverageTest` 用 AST 强制）。仍**不**进翻译 prompt。**前置**：先拿 Q7a 在几份真实多语言素材上的候选清单做人工判读，确认模型腿要补的是召回而不是精度。再之后才是 Q7c（接进 prompt，属协议变更：升 prompt 版本、重生成协议快照、在途 API checkpoint 重置）。范围边界见 ROADMAP 第 4 条。
 
 ## 接手步骤
 
