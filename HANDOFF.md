@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-10-31（HEAD `b3e13b8`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-11-01（HEAD `d46d550`，`main`，工作树干净；写于 Claude Opus 5 会话）
 
 2026-10-31 **`xvt build-translation-context`：确定性术语候选包与可审核的 glossary 骨架（Q7a）。** Q7 拆三阶段，协议变更隔离在最后一阶段：Q7a 零模型调用、不进翻译 prompt 与指纹、不改 stage、不接 `plan_advance_steps`（协议快照零 diff），Q7b 接模型推断腿，Q7c 才把上下文接进 prompt。**主判据是实测挑的，不是设计出来的**：规则 D「只出现大写形态且至少一次非句首」在一份真实英文人工字幕（52 cue）上精度与召回各 6/6；两条更直觉的替代各漏 4/6——「出现 ≥2 次才收」漏掉 `Apple` / `CarPlay` / `Android` / `Auto`（各只出现一次，恰是最该统一译名的产品名），「只收形态可辨的」同样漏 4。句边界靠句末标点在**跨 cue 拼成的文本流**上判（cue 常切在句中），`>>` 与 `[...]` 在 token 化前剥除。缺标点或缺大小写双形态时记 `extractor_degraded` 并放弃专名候选、退出码仍 0，所以**只对拉丁字母源文有效**（CJK / 德语 / `auto` 全走降级；CJK 要分词器，归 Q7b）。骨架只导高置信单词、按 casefold 去重、多词短语永不进——`load_translation_policy` 判重复时 casefold 并直接抛，而短语恒等映射会踩 error 级 `glossary_violation`（无 `--acknowledge` 出口）。自查两处：早一版只看连字符，把 `low-slung` / `two-seater` 收成术语并导进骨架（恒等映射＝要求译文出现英文原词），现要求 token 含大写；判定顺序原先让形态规则先跑，`MX-5` 被错标成 `code_identifier`，改成专名优先。五个坏实现各注入一次，对应用例都变红。它在 `downstream_of(SOURCE_CUES)` 里，重分段 / 源文修订 / `rebuild-source` 会一并失效它。骨架导出接了 `paths` 的覆盖保护，盖不掉已登记 artifact。
 
@@ -97,8 +97,8 @@
 
 1. **三行布局的行距**（观感）。`render.py` 样式块两种 Style 共用 `marginv=16`，译文第二行与源文偏紧（真实抽帧见 `docs/TARGET_LINE_WRAP_PLAN.md` 验证节）。只调样式参数，不改切分；改后必须重跑 `.github/scripts/verify_layout_measurement.py` 与一次真实 `xvt preview` 抽帧肉眼确认，并注意 `layout["style_options"]` 进了复用绑定——样式一变旧报告自然不复用，属预期。
 2. **A2：翻译侧预算按阅读单位计并在 prompt 解释口径**（ROADMAP 近期已立项，**协议变更**）。`translate.py:458/540` 的 `max_target_characters` 改用 `textwidth.reading_units` 口径并去掉或重审 `character_limit=18` 封顶；`translation_provider.py` 翻译 prompt v5→v6、polish v3→v4 向模型说明「标点不计、CJK 下 Latin 半字」并加 BaoCut 的双向表述（`Length is part of correctness` + 预算不压过语义）；按 AGENTS 第 8 条重生成协议快照 golden；CHANGELOG 写明在途 API checkpoint 重置。**前置条件**：先拿到「模型因预算过紧砍掉术语或因果关系」的真实样本，没有样本不动。
-3. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（`output/jobs/*/artifacts/translation-*.json`），漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
-4. **Q7b：术语候选的模型推断腿**（Q7a 已落地，见上）。接 `run_provider_batches` + fingerprint checkpoint，API / Agent 双模式，补上 CJK 与德语这两类确定性判据够不着的语料；新等待步骤必须先登记进 `workflow.AWAIT_STEPS`，再在 `cli._STEP_ROUTES` 与 `_UNROUTABLE_AWAIT_STEPS` 之一表态（`AwaitStepsCoverageTest` 用 AST 强制）。仍**不**进翻译 prompt。**前置**：先拿 Q7a 在几份真实多语言素材上的候选清单做人工判读，确认模型腿要补的是召回而不是精度。再之后才是 Q7c（接进 prompt，属协议变更：升 prompt 版本、重生成协议快照、在途 API checkpoint 重置）。范围边界见 ROADMAP 第 4 条。
+3. **先测量再决定的两条**（不要直接实现）：① 翻译响应「id 对但内容漂到邻句」的实际漂移率——BaoCut 用 `|源首词..源末词|` 引用标记检测，XVT 靠 id 对账抓不到；写一个只读统计脚本跑历史 Job（**按 `job.json` 递归找，不要写死 `output/jobs/*`**：Job 目录是 `<output_root>/jobs/<id>`，`output_root` 由 `--output` 决定、可以在仓库外——2026-11-01 就因为照那个不存在的 glob 查，误判过「本机零历史 Job」）。漂移率有数据再决定是否改载体。② `duration_ms` 对译文质量有无贡献——BaoCut 实测去掉时间信息省 14% 输入；A/B 实测后再决定是否从 `TranslationItem` 去掉。
+4. **Q7b 改为待评估：先比较「模型推断腿」与「CJK 分词器」两条路线**（Q7a 已落地，见上）。**前置判读已完成**（2026-11-01，n=2 真实英语素材）：规则 D 的**召回两份都是满的**——mazda 那份 6/6，Claude 模型选择那份（70 cue）也是 6/6，其 16 个「只大写」词收 6 弃 10、弃的全是句首词、一个真专名没误弃；**精度 6/8**，唯一误收 `Title` 落在一句读不通的 ASR 转写上（cue 62「…and name Title Fable」，**原话未核音频**），规则判得对、是语料有噪声。漏项全是**语义性**的：`Fable 5.1`（版本号不以字母开头，token 正则够不着）与 `medium` / `low` effort 档位名（普通词构成的产品术语，语料里大小写都有，确定性判据必然排除）。**所以这条原先写的前置结论「要补的是召回而不是精度」被实测推翻：该补的是精度与语义。** 据此 Q7b 不直接立项——它最大的价值是 CJK 覆盖，而那块用分词器（确定性）可能比模型腿更合适，且能同时解掉 [2026-10-17 review 发现清单](docs/REVIEW_FINDINGS_2026_10_17.md) 里「译文切分的词法边界」，两个卡点一个依赖，值得先评估再决定要不要为此引入模型调用。真要走模型腿时，新等待步骤必须先登记进 `workflow.AWAIT_STEPS`，再在 `cli._STEP_ROUTES` 与 `_UNROUTABLE_AWAIT_STEPS` 之一表态（`AwaitStepsCoverageTest` 用 AST 强制）。Q7c（接进翻译 prompt）照旧排最后，属协议变更：升 prompt 版本、重生成协议快照、在途 API checkpoint 重置。范围边界见 ROADMAP 第 4 条。
 
 ## 接手步骤
 
