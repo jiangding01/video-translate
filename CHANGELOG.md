@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- **glossary 骨架给多词专名的组成部分加 `_covered_by` 标注。** `Remote Control` 拆出的 `Remote` / `Control` 各自不是专名，带恒等映射传回 `--glossary` 就是要求译文出现孤立英文词。但「被覆盖就排除」被真实样本否掉：`Claude` 同时被 `Claude Code` 与 `Claude GitHub` 覆盖，却出现 18 次、命中平台标题，排除它等于丢掉最核心的专名；mazda 样本的 `Apple` / `CarPlay` / `Android` / `Auto` 同理。形态上没有可确定性检测的差别，差别在语义——而语义是 Q7a 不做的事。所以改为标注：被覆盖的条目照进骨架并带 `_covered_by`，CLI 导出时当场列出几条，判断交给用户。覆盖关系用全部多词候选、不按 confidence 过滤（`Claude Code` 是 medium，过滤会漏掉用户最关心的那条）。产物结构未变，`translation-context.json` 一个字节没动。
+
 - **源选择不再把「没去要平台字幕」说成「平台没有字幕」。** 平台字幕是 opt-in，不传 `--youtube-subtitles` 就不会去取，而此前「没有候选」的两种成因共用 `platform_subtitles_missing` 一个原因码。2026-11-01 的真实验收量到了它的代价：同一个 Job 的 `remote_info` 记着 `subtitle_languages == ["en"]`，`source-selection.json` 却说平台字幕缺失，用户据此以为只能走 ASR——于是白跑一次 4 分钟转写、ASR 把产品名错听三次（两处 `Cloud`→`Claude`）、最后停在本可避免的人工修订。现在未请求时记新原因码 `platform_subtitles_not_requested`，`source_selected` 事件新增 `available_platform_subtitles`（平台可用的**人工**字幕语言），CLI 在这种情况下直接打出可复制的参数：`平台有 en 人工字幕未被使用；加 --youtube-subtitles --subtitle-language en 可改用，省去一次转写`。**本地文件输入的 Job 不受影响**：它没有「平台」可言，照旧记 `platform_subtitles_missing`，这条边界由 `plan_source_selection` 的调用方把关并有用例钉住。同一个原因码也用于 `--source-strategy subtitles` 的失败分支，那条的错误文案随之从指错原因改为直接给出 `--youtube-subtitles` 的出路。新字段只进事件不进 artifact——`source-selection.json` 的内容 checksum 被协议快照冻结，而平台有哪些人工字幕本来就记在 `remote_info` 里，无需重复。协议快照零 diff。
 
 ### Added

@@ -36,6 +36,14 @@
 - 多词候选（``capitalized_run``）**永不进** glossary 骨架。短语级的恒等映射是个强
   主张：译文把 ``Android Auto`` 写成「安卓 Auto」就会触发 error 级
   ``glossary_violation``，而那条没有 ``--acknowledge`` 出口。短语要不要固定由人决定。
+- 多词专名拆出的单词**照进骨架**，只加 ``_covered_by`` 标注，**不排除**。「被多词覆盖
+  就排除」看着对，被真实样本否掉：2026-11-01 验收那份语料里 ``Claude`` 同时被
+  ``Claude Code`` 与 ``Claude GitHub`` 覆盖，却出现 18 次、命中平台标题，是整份语料
+  最核心的专名——排除它等于把最该固定译名的词丢出骨架。mazda 样本是同一问题的另一
+  面：``Apple CarPlay`` / ``Android Auto`` 拆出的四个词各自也是合理专名，而且它们在
+  语料里**只**在多词串中出现过，连「是否独立出现」都区分不了。形态上 ``Remote``
+  （该删）与 ``Claude``（必留）没有任何可确定性检测的差别，差别在语义，而语义是本
+  模块不做的事。所以这里只给证据、不替用户下判断。
 - 非语音标记只剥 ``[...]`` 与 ``>>``（真实样本里各出现 9 次与 8 次）。``(laughs)``
   一类圆括号形态没有实测样本，不猜——圆括号也出现在正常口播里。
 - ``H.264`` 这类「字母+点+数字」的型号名抓不到：点后首字符是数字，不符合任何一条
@@ -675,6 +683,29 @@ def extract_translation_context(
     }
 
 
+def _covering_runs(report: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """casefold 后的词 -> 覆盖它的多词候选 source（字母序）。
+
+    **用全部 ``capitalized_run`` 候选，不论 confidence。** confidence 只决定「进不进
+    骨架」，不决定「这个词是不是那个短语的组成部分」这个事实成不成立，两者不是一回
+    事——统一过滤条件会把它改坏。实测踩过：``Claude Code`` 是 medium（它的
+    ``all_rule_d`` 不成立），只按 high 算会让 ``Claude`` 的 ``_covered_by`` 漏掉它，
+    而那恰是那份语料里用户最关心的术语。
+    """
+
+    covering: dict[str, set[str]] = defaultdict(set)
+    for candidate in report.get("candidates", []):
+        if candidate.get("kind") != KIND_CAPITALIZED_RUN:
+            continue
+        phrase = str(candidate.get("source") or "").strip()
+        if not phrase:
+            continue
+        for word in phrase.split():
+            # casefold 与骨架自身的去重同口径，免得 `Auto` 与 `auto` 一个命中一个不中。
+            covering[word.casefold()].add(phrase)
+    return {word: tuple(sorted(phrases)) for word, phrases in covering.items()}
+
+
 def glossary_skeleton_terms(report: dict[str, Any]) -> list[dict[str, Any]]:
     """候选包 -> glossary 骨架条目，按 casefold 去重。
 
@@ -685,8 +716,12 @@ def glossary_skeleton_terms(report: dict[str, Any]) -> list[dict[str, Any]]:
       否则导出的文件根本加载不了。
     - 只导 ``confidence == "high"`` 且**非多词**的候选。多词恒等映射是强主张
       （模块 docstring 有理由），低置信条目留在产物里备查而不进骨架。
+    - 多词专名拆出的单词照进骨架，只加 ``_covered_by``（覆盖它的多词 source，字母
+      序）。**不排除**——理由与那个 ``Claude`` 反例见模块 docstring。没有被覆盖的
+      条目不带这个键，而不是带个空数组。
     """
 
+    covering = _covering_runs(report)
     terms: list[dict[str, Any]] = []
     seen: set[str] = set()
     for candidate in report.get("candidates", []):
@@ -699,15 +734,17 @@ def glossary_skeleton_terms(report: dict[str, Any]) -> list[dict[str, Any]]:
         if not source or folded in seen:
             continue
         seen.add(folded)
-        terms.append(
-            {
-                "source": source,
-                # 专名最常见的处理就是保持原文，所以预填恒等映射：用户只改真正需要
-                # 译的那几条。留空会被 load_translation_policy 的非空校验直接拒掉，
-                # 等于交一份不能用的文件。
-                "target": source,
-                "_evidence": dict(candidate.get("evidence") or {}),
-                "_kind": candidate.get("kind"),
-            }
-        )
+        entry: dict[str, Any] = {
+            "source": source,
+            # 专名最常见的处理就是保持原文，所以预填恒等映射：用户只改真正需要
+            # 译的那几条。留空会被 load_translation_policy 的非空校验直接拒掉，
+            # 等于交一份不能用的文件。
+            "target": source,
+            "_evidence": dict(candidate.get("evidence") or {}),
+            "_kind": candidate.get("kind"),
+        }
+        covered_by = covering.get(folded)
+        if covered_by:
+            entry["_covered_by"] = list(covered_by)
+        terms.append(entry)
     return terms

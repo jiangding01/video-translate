@@ -497,7 +497,7 @@ xvt build-translation-context JOB_FILE [--export-glossary PATH] [--events-jsonl]
 - 位置参数：`job_file`。
 - 可选参数：`--export-glossary`、`--events-jsonl`。
 - 零模型调用、零 API 成本：全部判据是确定性的，产物是**候选**而不是事实。它不进翻译 prompt、不进任何指纹，也不改 stage；候选只有经你审核后通过 `--glossary` 传回才会影响翻译。
-- `--export-glossary PATH` 写出一份可审核的术语表骨架：只含高置信的单词候选（多词短语不进骨架），`target` 预填 `source`，每条带 `_evidence` 指回原文 cue。**请逐条审核**：不需要在译文里保持原文的条目要删掉，否则就是要求译文里出现该英文原词，会被确定性 QA 判 `glossary_violation`。
+- `--export-glossary PATH` 写出一份可审核的术语表骨架：只含高置信的单词候选（多词短语不进骨架），`target` 预填 `source`，每条带 `_evidence` 指回原文 cue。属于某个多词专名的条目另带 `_covered_by`（覆盖它的短语），CLI 也会当场列出几条——`Remote` 这类碎片该删，`Claude`（同时属于 `Claude Code` 与 `Claude GitHub`）这类必须留，工具只给证据不替你判断；要固定整词译名就删掉组成部分、手动加一条整词条目。**请逐条审核**：不需要在译文里保持原文的条目要删掉，否则就是要求译文里出现该英文原词，会被确定性 QA 判 `glossary_violation`。
 - 导出路径与烧录输出共用同一道覆盖保护：盖不掉 job 文件、源媒体、你的原始输入文件或任何已登记 artifact，目标目录不存在也会被拒（两者都是退出码 2，且在写任何文件、登记任何 artifact 之前就拒绝）。
 - **只对拉丁字母源文有效**。主判据是「只出现大写形态且至少一次出现在非句首位置」，它要求源语言「句中普通名词小写」。中日韩没有大小写形态、德语所有名词大写、源语言为 `auto`（未知）时一律降级：不产出专名候选，在产物的 `extractor_degraded` 里写明原因（`no_case_signal` / `no_sentence_boundary`），退出码仍为 0。形态可辨的候选（型号、产品名、缩写、代码标识符）不依赖大小写，降级时照旧产出。
 

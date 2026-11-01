@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -229,6 +231,119 @@ class SkeletonLoadsTest(unittest.TestCase):
         self.assertIn("Open AI", by_source["OpenAI"]["variants"])
 
 
+# 抄自 2026-11-01 真实端到端验收的候选包（Claude 官方频道「Coding on the go with
+# Claude Code」，242 秒、en-US）。原始数值：Claude = proper_name / high / 18 次 /
+# 命中 title；Claude Code = capitalized_run / **medium**；Claude GitHub 与
+# Remote Control = capitalized_run / high；Remote、Control、GitHub、Slack =
+# proper_name / high。medium 那条是关键——覆盖关系若按 confidence 过滤就会漏掉它。
+_ACCEPTANCE_CANDIDATES: list[dict[str, object]] = [
+    {
+        "source": "Claude",
+        "kind": "proper_name",
+        "confidence": "high",
+        "occurrence_count": 18,
+        "evidence": {"cue_ids": [1, 4, 24], "metadata": ["title"]},
+    },
+    {
+        "source": "GitHub",
+        "kind": "proper_name",
+        "confidence": "high",
+        "occurrence_count": 6,
+        "evidence": {"cue_ids": [28], "metadata": []},
+    },
+    {
+        "source": "Claude Code",
+        "kind": "capitalized_run",
+        "confidence": "medium",
+        "occurrence_count": 1,
+        "evidence": {"cue_ids": [53], "metadata": []},
+    },
+    {
+        "source": "Claude GitHub",
+        "kind": "capitalized_run",
+        "confidence": "high",
+        "occurrence_count": 1,
+        "evidence": {"cue_ids": [33], "metadata": []},
+    },
+    {
+        "source": "Remote Control",
+        "kind": "capitalized_run",
+        "confidence": "high",
+        "occurrence_count": 1,
+        "evidence": {"cue_ids": [70], "metadata": []},
+    },
+    {
+        "source": "Remote",
+        "kind": "proper_name",
+        "confidence": "high",
+        "occurrence_count": 1,
+        "evidence": {"cue_ids": [70], "metadata": []},
+    },
+    {
+        "source": "Control",
+        "kind": "proper_name",
+        "confidence": "high",
+        "occurrence_count": 1,
+        "evidence": {"cue_ids": [70], "metadata": []},
+    },
+    {
+        "source": "Slack",
+        "kind": "proper_name",
+        "confidence": "high",
+        "occurrence_count": 1,
+        "evidence": {"cue_ids": [71], "metadata": []},
+    },
+]
+
+
+class SkeletonCoveredByTest(unittest.TestCase):
+    """多词专名拆出的单词：标注而不排除。"""
+
+    def _terms(self) -> dict[str, dict]:
+        return {
+            term["source"]: term
+            for term in glossary_skeleton_terms({"candidates": _ACCEPTANCE_CANDIDATES})
+        }
+
+    def test_claude_stays_in_the_skeleton_with_both_covering_phrases(self) -> None:
+        """真实反例，这条是方向锚：`Claude` 被两个短语覆盖，却必须留在骨架里。
+
+        它出现 18 次、命中平台标题，是整份语料最核心的专名——「被多词覆盖就排除」
+        的实现会把最该固定译名的词丢出骨架，那条测试会在这里红。
+        `Claude Code` 的 confidence 是 medium，所以覆盖关系不能按 confidence 过滤，
+        否则 `_covered_by` 只剩 `Claude GitHub`，而用户最关心的恰是 `Claude Code`。
+        """
+
+        claude = self._terms()["Claude"]
+        self.assertEqual(claude["_covered_by"], ["Claude Code", "Claude GitHub"])
+        self.assertEqual(claude["target"], "Claude")
+
+    def test_fragments_carry_the_phrase_that_covers_them(self) -> None:
+        """真实正例：`Remote` / `Control` 各自不是专名，标注让用户判断得出来。"""
+
+        terms = self._terms()
+        self.assertEqual(terms["Remote"]["_covered_by"], ["Remote Control"])
+        self.assertEqual(terms["Control"]["_covered_by"], ["Remote Control"])
+        # 多词本身仍不进骨架：短语级恒等映射是强主张，见模块 docstring。
+        self.assertNotIn("Remote Control", terms)
+
+    def test_uncovered_terms_have_no_covered_by_key(self) -> None:
+        """不该红时不红：没被覆盖的条目不带这个键，而不是带个空数组。"""
+
+        self.assertNotIn("_covered_by", self._terms()["Slack"])
+
+    def test_skeleton_with_covered_by_still_loads(self) -> None:
+        """闭环：额外注释键不能破坏 `load_translation_policy`。"""
+
+        terms = glossary_skeleton_terms({"candidates": _ACCEPTANCE_CANDIDATES})
+        self.assertTrue(any("_covered_by" in term for term in terms))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "glossary.json"
+            path.write_text(json.dumps({"terms": terms}), encoding="utf-8")
+            policy = load_translation_policy(path)
+        self.assertIn("Claude", [term.source for term in policy.terms])
+
+
 def _job_with_source_cues(root: Path, cues: list[Cue]) -> tuple[Path, Path]:
     job = create_job("/tmp/input.mp4", root)
     artifacts = root / "jobs" / job.id / "artifacts"
@@ -397,6 +512,55 @@ class CliTest(unittest.TestCase):
             artifact = next(item for item in job.artifacts if item.kind == "translation_context")
             report = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
             self.assertEqual(report["extractor_degraded"]["reason"], DEGRADED_NO_CASE_SIGNAL)
+
+    def test_export_hint_names_the_covered_fragments(self) -> None:
+        """骨架里有多词碎片时，CLI 当场把覆盖关系打出来，不留在 JSON 里等人翻。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _ = _job_with_source_cues(
+                root,
+                _cues(
+                    "The Remote Control feature shipped today.",
+                    "Our Remote Control works offline.",
+                ),
+            )
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(
+                    [
+                        "build-translation-context",
+                        str(job_file),
+                        "--export-glossary",
+                        str(root / "glossary.json"),
+                    ]
+                )
+            self.assertEqual(code, 0)
+            output = buffer.getvalue()
+            self.assertIn("多词专名的组成部分", output)
+            self.assertIn("⊂ Remote Control", output)
+
+    def test_no_covered_hint_when_nothing_is_covered(self) -> None:
+        """不该红时不红：没有多词串就不打那一行。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file, _ = _job_with_source_cues(
+                root,
+                _cues("We tested Mazda last week.", "Our Mazda was quick."),
+            )
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(
+                    [
+                        "build-translation-context",
+                        str(job_file),
+                        "--export-glossary",
+                        str(root / "glossary.json"),
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertNotIn("多词专名的组成部分", buffer.getvalue())
 
 
 if __name__ == "__main__":
