@@ -64,6 +64,7 @@ from xvt.pipeline import (
     run_translation,
     run_translation_polish,
     run_translation_semantic_review,
+    semantic_review_issue_summaries,
     semantic_review_waiting,
 )
 from xvt.process import CommandCancelled, CommandError
@@ -1102,8 +1103,9 @@ def _print_safe(message: str, *, file: TextIO | None = None) -> None:
 
 
 # 恢复导航的两套方言前缀：中文（人读事件流、等待终态）与英文（原子命令 / status 导航）。
-# 键固定为 report / input / srt_note / prerequisite / primary / alternative，值是纯前缀，
-# 与路径、命令直接拼接——不能用 str.format，路径里的 `{}` 会被当成占位符。
+# 键固定为 report / input / srt_note / prerequisite / primary / alternative / issue /
+# issue_more，值是纯前缀，与路径、命令直接拼接——不能用 str.format，路径里的 `{}`
+# 会被当成占位符。
 _ZH_RECOVERY_LABELS: dict[str, str] = {
     "report": "报告: ",
     "input": "待编辑: ",
@@ -1111,6 +1113,8 @@ _ZH_RECOVERY_LABELS: dict[str, str] = {
     "prerequisite": "  ",
     "primary": "  ",
     "alternative": "  或：",
+    "issue": "  ",
+    "issue_more": "  还有 {count} 条，见报告",
 }
 _EN_RECOVERY_LABELS: dict[str, str] = {
     "report": "report: ",
@@ -1119,7 +1123,61 @@ _EN_RECOVERY_LABELS: dict[str, str] = {
     "prerequisite": "before: ",
     "primary": "next: ",
     "alternative": "alternative: ",
+    "issue": "issue: ",
+    "issue_more": "issue: and {count} more, see report",
 }
+
+# 人读摘要的两个上限。message 来自模型、长度不受控（实测单条 90–180 字符），整段铺开
+# 会把下面的导航命令顶出屏幕；而报告路径本来就列在导航里，截断不丢信息。
+_ISSUE_SUMMARY_LIMIT = 5
+_ISSUE_MESSAGE_LIMIT = 120
+
+
+def _format_cue_ids(cue_ids: tuple[int, ...]) -> str:
+    """把 cue id 列表压成人读区间：连号合并成 `21–22`，断号各自列出。"""
+
+    if not cue_ids:
+        return ""
+    runs: list[list[int]] = [[cue_ids[0]]]
+    for cue_id in cue_ids[1:]:
+        if cue_id == runs[-1][-1] + 1:
+            runs[-1].append(cue_id)
+        else:
+            runs.append([cue_id])
+    return ", ".join(str(run[0]) if len(run) == 1 else f"{run[0]}\u2013{run[-1]}" for run in runs)
+
+
+def _semantic_issue_summary_lines(job_file: str | Path, *, labels: dict[str, str]) -> list[str]:
+    """语义校对 issue 的人读摘要行；没有 issue（或报告读不出来）时返回空列表。
+
+    为什么只进人读输出、不进 `RecoveryPlan`：`recovery_plan` 是 JSONL 事件协议的一部分
+    （见 docs/EVENTS.md），而这里产出的是**截断过的展示文本**。机器消费方手里已经有
+    `report_paths` 指向完整报告，读 JSON 比读摘要准确；把展示层的截断文本塞进数据层，
+    下游反而会去解析它。EVENTS.md 对 `reason` 也写着「自由文本，消费方不应解析」。
+
+    message 原样透出，不翻译不改写——模型产出的 issue 语言不固定（实测同一份报告里
+    两英一中），那是 prompt 侧的问题，在这里动手只会让摘要与报告对不上。
+    """
+
+    try:
+        summaries = semantic_review_issue_summaries(load_job(job_file))
+    except (XvtError, OSError, RuntimeError, ValueError):
+        # 摘要是锦上添花：读不出来就不打，绝不能让它挡住下面真正的导航命令。
+        return []
+    lines: list[str] = []
+    for cue_ids, message in summaries[:_ISSUE_SUMMARY_LIMIT]:
+        head = f"cue {_format_cue_ids(cue_ids)}" if cue_ids else "cue ?"
+        # `_issue_set` 把缺失的 message 规范成空串；此时只打 cue 区间，仍比现状多给信息。
+        if message:
+            text = message
+            if len(text) > _ISSUE_MESSAGE_LIMIT:
+                text = text[:_ISSUE_MESSAGE_LIMIT].rstrip() + "…"
+            lines.append(f"{labels['issue']}{head}: {text}")
+        else:
+            lines.append(f"{labels['issue']}{head}")
+    if len(summaries) > _ISSUE_SUMMARY_LIMIT:
+        lines.append(labels["issue_more"].format(count=len(summaries) - _ISSUE_SUMMARY_LIMIT))
+    return lines
 
 
 def _recovery_lines(
@@ -1736,6 +1794,10 @@ def _print_workflow_result(result: object, *, printed_waiting_reason: str | None
         if plan is not None:
             if plan.reason != printed_waiting_reason:
                 _print_safe(f"恢复建议：{plan.reason}")
+            # 先说「是什么问题」，再说「去改哪个文件」：reason 只给分类，具体是哪几句、
+            # 错在哪此前只存在于报告 JSON 里，用户得自己打开才知道。
+            for line in _semantic_issue_summary_lines(job_file, labels=_ZH_RECOVERY_LABELS):
+                _print_safe(line)
             for line in _recovery_lines(plan, labels=_ZH_RECOVERY_LABELS, verbose=False):
                 _print_safe(line)
         elif message:
@@ -1894,6 +1956,9 @@ def _cmd_status(arguments: argparse.Namespace) -> int:
         _print_safe(f"recovery: {plan.category} - {plan.reason}")
         if plan.advance_steps:
             _print_safe(f"steps: {', '.join(plan.advance_steps)}")
+        # 与等待终态同口径：status 是中断后的导航入口，没有理由比终态少给信息。
+        for line in _semantic_issue_summary_lines(arguments.job_file, labels=_EN_RECOVERY_LABELS):
+            _print_safe(line)
         for line in _recovery_lines(plan, labels=_EN_RECOVERY_LABELS, verbose=True):
             _print_safe(line)
         if not plan.primary_command and plan.category in {"manual_fix", "awaiting_input"}:

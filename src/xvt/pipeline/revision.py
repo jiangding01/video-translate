@@ -540,25 +540,54 @@ def _describe_unchanged_qa_cues(qa_issues: list[dict[str, Any]]) -> str:
     return f"{len(grouped)} QA-blocked cue(s) still fail candidate QA: {details}"
 
 
-def source_suspect_cue_ids(job: Job) -> tuple[int, ...]:
+def _semantic_review_issues(job: Job) -> list[dict[str, Any]]:
+    """语义校对报告里规范化后的 issue 列表；报告缺失或不可解析时返回空。
+
+    `source_suspect_cue_ids` 与 `semantic_review_issue_summaries` 共用这一段解析——
+    两者都要读同一份报告，各写一遍迟早会在 except 口径或 `_issue_set` 的调用方式上
+    分叉。这里的 except 刻意保持既有口径（含 `UserInputError`：报告不要求修订时
+    `_issue_set` 会抛它，对调用方而言等同于「没有可报的 issue」），不要放宽。
+    """
+
     target = _target_kinds(job)
     if target is None:
-        return ()
+        return []
     _report_kind, _candidate_kind, report_path, _candidate_path = target
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
-        issues = _issue_set(report)
+        return _issue_set(report)
     except (OSError, TypeError, ValueError, json.JSONDecodeError, UserInputError):
-        return ()
+        return []
+
+
+def source_suspect_cue_ids(job: Job) -> tuple[int, ...]:
     return tuple(
         sorted(
             {
                 cue_id
-                for issue in issues
+                for issue in _semantic_review_issues(job)
                 if issue["category"] == "source_suspect"
                 for cue_id in issue["cue_ids"]
             }
         )
+    )
+
+
+def semantic_review_issue_summaries(job: Job) -> tuple[tuple[tuple[int, ...], str], ...]:
+    """每条语义校对 issue 的 `(cue_ids, message)`，顺序与报告一致（`_issue_set` 已排序）。
+
+    只读，不写盘、不改 stage。给 CLI 的人读摘要用：报告里的 message 定位到 cue、带
+    推理过程，而终态此前只打一句「语义校对发现源文可能有误」加一串路径，用户必须自己
+    打开 JSON 才知道是哪几句、错在哪。
+
+    message 原样透出，**不翻译也不改写**：模型产出的 issue 语言不固定（实测同一份报告
+    里两条英文一条中文），那是 prompt 侧的问题（发现清单 E6），在这里动手只会让摘要与
+    报告对不上。`_issue_set` 已把缺失的 message 规范成空串，调用方据此只打 cue 区间。
+    """
+
+    return tuple(
+        (tuple(issue["cue_ids"]), str(issue.get("message") or ""))
+        for issue in _semantic_review_issues(job)
     )
 
 

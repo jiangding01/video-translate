@@ -9,12 +9,16 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from xvt.cli import main
+from xvt.cli import _EN_RECOVERY_LABELS, _semantic_issue_summary_lines, main
 from xvt.events import EventType
 from xvt.job_store import create_job, load_job, save_job
 from xvt.media import MediaInfo
 from xvt.models import Artifact, StageName, StageStatus, Transcript, Word
-from xvt.pipeline import pending_translation_import_blocker, retranslate_cues
+from xvt.pipeline import (
+    pending_translation_import_blocker,
+    retranslate_cues,
+    semantic_review_issue_summaries,
+)
 from xvt.process import CommandResult
 from xvt.recovery import (
     _candidate_qa_blocker_reason,
@@ -3193,3 +3197,174 @@ class AlignmentPostQaDeadlockExitTest(unittest.TestCase):
                 load_job(job_file).stages[StageName.TRANSLATE].status,
                 StageStatus.SUCCEEDED,
             )
+
+
+class SemanticIssueSummaryTest(AtomicPolishedTranslationWaitPrecedenceTest):
+    """语义校对 issue 的人读摘要（E5）。
+
+    复用上面那套真实搭建（`_normal_semantic_wait_job` + `apply-semantic-review`）而不是
+    手搓报告：摘要读的是 `semantic_review_target` 绑定过的那份报告，手搓的 JSON 绑不上
+    就只会测出一条「没有 issue」的空路径，绿着什么也没验到。
+
+    message 抄自 2026-11-01 真实验收那份 `translation-semantic-qa.json`（三条
+    `source_suspect`，cue 21–22 / 33 / 53，长度约 260 / 230 / 90 字符，**两条英文一条
+    中文**——模型产出的语言不固定，摘要原样透出，不翻译不改写）。该 Job 只有两条 cue，
+    所以 `cue_ids` 用 [1,2] / [1] / [2] 占位，验的是区间合并、截断与多语言透出。
+    """
+
+    _REAL_MESSAGES = (
+        "The source span 'reveal the result in the morning' (cues 21-22) is suspicious: "
+        "in context the user starts a cloud task before leaving work and later checks the "
+        "result, so 'you ... reveal the result' is implausible; the target's 查看结果 "
+        "suggests the source likely intended 'review the result in the morning'.",
+        "Source cue 33 says “Cloud GitHub app”, but the surrounding setup flow (cue 28 "
+        "already refers to giving Claude access to GitHub) strongly suggests the product "
+        "name is “Claude GitHub app”; “Cloud” is likely a mistranscription.",
+        "源文第53条中的 “Cloud Code” 疑为误听或误写：同一语境后续多次出现 "
+        "“Claude app”/“Claude Code”，建议人工核对源文。",
+    )
+
+    def _waiting_job_with_issues(self, root: Path, issues: list[dict]) -> Path:
+        job_file = self._normal_semantic_wait_job(root)
+        report_path = valid_artifact_path(load_job(job_file), "translation_semantic_qa")
+        assert report_path is not None
+        fingerprint = json.loads(report_path.read_text(encoding="utf-8"))["fingerprint"]
+        review = root / "semantic-issue.json"
+        review.write_text(
+            json.dumps(
+                {"fingerprint": fingerprint, "initial_results": [{"batch": 1, "issues": issues}]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        with redirect_stdout(StringIO()):
+            self.assertEqual(main(["apply-semantic-review", str(job_file), str(review)]), 0)
+        return job_file
+
+    @staticmethod
+    def _issue(cue_ids: list[int], message: str | None) -> dict:
+        issue = {
+            "category": "source_suspect",
+            "cue_ids": cue_ids,
+            "severity": "review",
+            "suggested_items": [],
+        }
+        if message is not None:
+            issue["message"] = message
+        return issue
+
+    def _status_output(self, job_file: Path) -> str:
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            self.assertEqual(main(["status", str(job_file)]), 0)
+        return buffer.getvalue()
+
+    def test_status_summarises_each_issue_with_its_cue_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_with_issues(
+                root,
+                [
+                    self._issue([1, 2], self._REAL_MESSAGES[0]),
+                    self._issue([1], self._REAL_MESSAGES[1]),
+                    self._issue([2], self._REAL_MESSAGES[2]),
+                ],
+            )
+            output = self._status_output(job_file)
+            # 连号合并成 en dash，断号各自成行。
+            self.assertIn("issue: cue 1–2:", output)
+            self.assertIn("issue: cue 1:", output)
+            self.assertIn("issue: cue 2:", output)
+            # 中文那条原样透出，不翻译不改写。
+            self.assertIn("疑为误听或误写", output)
+            # 摘要排在导航命令之前：先说是什么问题，再说去改哪个文件。
+            self.assertLess(output.index("issue: cue"), output.index("next: "))
+
+    def test_long_message_is_truncated_but_report_path_still_listed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_with_issues(
+                root, [self._issue([1], self._REAL_MESSAGES[0])]
+            )
+            output = self._status_output(job_file)
+            self.assertIn("…", output)
+            issue_line = next(line for line in output.splitlines() if line.startswith("issue: cue"))
+            # 截断上限之外还有 `issue: cue N: ` 前缀，留出余量再断言。
+            self.assertLess(len(issue_line), 160)
+            self.assertNotIn(self._REAL_MESSAGES[0][-20:], output)
+            # 截断不丢信息：完整报告路径仍在导航里。
+            self.assertIn("translation-semantic-qa.json", output)
+
+    def test_issue_without_message_prints_only_the_cue_range(self) -> None:
+        """issue 缺 message 不能崩，只少一行内容。
+
+        **这条走不通正常回填路径**：`apply-semantic-review` 的写入边界会以
+        `semantic review issue message must be non-empty text`（translate.py）拒收，
+        所以空 message 只可能来自被手工改坏或截断过的报告文件。这里直接改报告来构造
+        那种状态——摘要是只读展示，遇到坏报告该少打一行而不是把整条导航带崩。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_with_issues(
+                root, [self._issue([1], self._REAL_MESSAGES[1])]
+            )
+            report_path = valid_artifact_path(load_job(job_file), "translation_semantic_qa")
+            assert report_path is not None
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            for issue in report["issues"]:
+                issue.pop("message", None)
+            report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+            # 产物有效性只认内容 checksum：不同步登记值的话这份报告直接失效，
+            # `semantic_review_target` 会返回 None，测到的就只是「报告读不出来」那条
+            # 空路径，而不是「报告里的 message 是空的」。
+            job = load_job(job_file)
+            for artifact in job.artifacts:
+                if artifact.kind == "translation_semantic_qa":
+                    artifact.checksum = file_checksum(report_path)
+            save_job(job)
+            summaries = semantic_review_issue_summaries(load_job(job_file))
+            self.assertEqual([message for _cue_ids, message in summaries], [""])
+            lines = _semantic_issue_summary_lines(job_file, labels=_EN_RECOVERY_LABELS)
+            self.assertEqual(lines, ["issue: cue 1"])
+
+    def test_more_than_five_issues_are_capped_with_a_tail_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_with_issues(
+                root,
+                [
+                    # 该 Job 只有 3 条 cue；回填校验拒收重复 issue，所以用 7 个互不相同
+                    # 的 cue_ids 组合把条数顶到上限之上。
+                    self._issue(list(combo), f"issue {index}")
+                    for index, combo in enumerate(
+                        ([1], [2], [3], [1, 2], [1, 3], [2, 3], [1, 2, 3])
+                    )
+                ],
+            )
+            output = self._status_output(job_file)
+            self.assertEqual(len([x for x in output.splitlines() if x.startswith("issue: cue")]), 5)
+            self.assertIn("and 2 more, see report", output)
+
+    def test_machine_mode_stdout_stays_pure_json(self) -> None:
+        """机器通道的 stdout 只出 JSON，摘要一行都不能混进去。
+
+        用 `status --json` 而不是 `continue --events-jsonl`：本用例搭的是**原子** Job
+        （没有持久化 workflow 目标），`continue` 会在渲染之前就以退出码 2 拒绝，于是
+        那条断言根本走不到渲染代码——绿得毫无意义。拆掉 `_cmd_status` 的 `--json`
+        闸门时本用例会红，实测过。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._waiting_job_with_issues(
+                root, [self._issue([1], self._REAL_MESSAGES[1])]
+            )
+            buffer = StringIO()
+            with redirect_stdout(buffer):
+                self.assertEqual(main(["status", str(job_file), "--json"]), 0)
+            output = buffer.getvalue()
+            self.assertNotIn("issue: cue", output)
+            self.assertNotIn("Cloud GitHub app", output)
+            # 整段必须是一个可解析的 JSON 文档，混入任何文本行都会在这里炸。
+            json.loads(output)
