@@ -30,6 +30,7 @@ from xvt.segment import TARGET_WRAP_MAX_LINES
 from xvt.subtitles import load_review_srt, save_review_srt, save_subtitles
 from xvt.translation_provider import SEMANTIC_REVIEW_PROMPT_VERSION
 from xvt.workflow_config import (
+    WorkflowConfig,
     clear_burn_fingerprint,
     get_workflow_config,
     resolve_target_language,
@@ -251,12 +252,27 @@ def _source_qa_context(job: Job) -> dict[str, int | None]:
     }
 
 
-def apply_source_review_fixes(
+@dataclass
+class _SourceRevision:
+    job: Job
+    workflow: WorkflowConfig | None
+    fingerprint: str
+    reviewed: list[Cue]
+    changed_ids: set[int]
+    qa: SubtitleQaReport
+
+
+def _prepare_source_revision(
     job_file: str | Path,
     response_file: str | Path,
-    *,
-    event_sink: EventSink | None = None,
-) -> tuple[Path, ...]:
+) -> _SourceRevision:
+    """只读地走完源文修订的全部校验与计算，含修订后的源字幕 QA。
+
+    切点取在 `apply_source_review_fixes` 第一次 `write_json` 之前：这里只读 Job 与
+    响应文件、算出修订后的 cue 与 QA 报告，不写盘、不改 stage、不登记 artifact。
+    `preflight_source_review_fixes` 与正式 apply 共用这一份，避免预检与实际行为分叉。
+    """
+
     job = load_job(job_file)
     workflow = get_workflow_config(job)
     _require_source_review_supported(job)
@@ -312,6 +328,64 @@ def apply_source_review_fixes(
     reviewed = [
         replace(cue, source_text=changes.get(cue.id, cue.source_text)) for cue in source_cues
     ]
+    qa = check_subtitles(reviewed, **_source_qa_context(job))
+    return _SourceRevision(job, workflow, expected_fingerprint, reviewed, changed_ids, qa)
+
+
+def _source_revision_preflight_result(revision: _SourceRevision) -> dict[str, Any]:
+    """预检结论。
+
+    **`valid` 的语义与译文侧不同，不要混用。** 译文侧 `valid: false` 表示 apply 会被
+    拒绝、一个字节都不写；源文侧 apply 在 QA 失败时**照旧写盘并失效全部下游**，只是
+    不产出 `source_srt`、给 `SUBTITLE_QA` 记 error，最后才抛 `RuntimeError`
+    （`apply_source_review_fixes` 末尾，事件都已发出）。所以这里的 `valid: false` 读作
+    「这份修订存得进去，但存完 Job 就是坏的、译文与下游已经白白失效」——**预检要帮
+    用户避免的正是这件事**，因为那一步不可逆、重新翻译要再付一次钱。
+
+    `blockers` 只收 error 级：`needs_review` 不会让 apply 抛错，归在 `qa_status` 里由
+    调用方自行判断，不与真正的失败混为一谈。
+    """
+
+    blockers = [asdict(issue) for issue in revision.qa.issues if issue.severity == "error"]
+    return {
+        "task": "source_review_preflight",
+        "valid": revision.qa.status != "failed",
+        "changed_ids": sorted(revision.changed_ids),
+        "qa_status": revision.qa.status,
+        "blockers": blockers,
+        "qa": asdict(revision.qa),
+    }
+
+
+def preflight_source_review_fixes(
+    job_file: str | Path,
+    response_file: str | Path,
+) -> dict[str, Any]:
+    """只读校验源文修订与修订后的源字幕 QA；不写 Job、不改 stage、不调用模型。"""
+
+    return _source_revision_preflight_result(_prepare_source_revision(job_file, response_file))
+
+
+def apply_source_review_fixes(
+    job_file: str | Path,
+    response_file: str | Path,
+    *,
+    event_sink: EventSink | None = None,
+) -> tuple[Path, ...]:
+    # 校验与计算全部走 `_prepare_source_revision`，与 `preflight_source_review_fixes`
+    # 共用同一份——预检与实际写入各算一遍迟早会分叉，那会让 `--check` 报的结论与
+    # apply 的真实结果对不上，比没有预检更糟。
+    #
+    # 刻意**不**在这里因 QA 失败提前返回：源文修订的既有契约是「照旧写盘、失效下游、
+    # 最后抛 RuntimeError」（本函数末尾，`tests/test_pipeline_revision.py` 钉住了它），
+    # 改成提前拒绝会动到不该动的行为。预检的价值在于让用户事先知道这一步会把 Job
+    # 带到哪里，而不是改变这一步本身。
+    revision = _prepare_source_revision(job_file, response_file)
+    job = revision.job
+    workflow = revision.workflow
+    expected_fingerprint = revision.fingerprint
+    reviewed = revision.reviewed
+    changed_ids = revision.changed_ids
 
     artifacts_dir = get_job_directory(job) / "artifacts"
     suffix = expected_fingerprint[:12]
@@ -334,7 +408,8 @@ def apply_source_review_fixes(
             "items": [{"id": cue.id, "text": cue.source_text} for cue in reviewed],
         },
     )
-    report = check_subtitles(reviewed, **_source_qa_context(job))
+    # 复用预检算出的那份，不重算：两次结果必须是同一个，重算只是给分叉留口子。
+    report = revision.qa
     write_json(qa_path, asdict(report))
     previous_selection = _load_previous_source_selection(job)
     write_json(
