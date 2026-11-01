@@ -1,6 +1,6 @@
 # 项目交接说明
 
-更新时间：2026-11-01（HEAD `0542f93`，`main`，工作树干净；写于 Claude Opus 5 会话）
+更新时间：2026-11-01（基于 `main` 的 `b63036e`，工作树干净；写于 Claude Opus 5 会话）
 
 2026-11-01 **布局 QA 绑定实际生效的字体与字号（E2）；方案阶段一处前提被独立 review 证伪。** `layout` 此前只记用户显式覆盖，真实字体由 `font_for_language` 按平台推导却从未落盘，于是 macOS 产出的报告拷到 Linux 后 `style_options` 逐字节相同、字体却是 Hiragino 对 Noto，复用判定把两种环境混同（约束 4 的画幅记了、字体没记）。新增 `render.resolved_style_binding` 作为唯一推导，**qa 报告与 ASS 渲染共用它**（各推一遍会让报告记的不是测量时真用的样式，比不记更糟；对象身份与行为两层钉子，两个方向的漂移各被抓住）。**原方案说「加字段必然改 checksum、必须重生成协议快照 golden」是错的**：快照场景全是纯字幕 Job、无画幅，`check_subtitles` 不构建 layout 块，golden 零 diff，已把该覆盖面钉成显式守卫。另补两处原方案漏的：`review.py` 的确认绑定也整块比较 layout（在途已确认的 `needs_review` 会失效一次，属预期，同 wrap v2）；`_styled_subtitles` 不传 `platform_name`，helper 因此穿了可选参数供跨平台用例。残留缺口：两边显式指定同名字体时仍照常复用，字体**文件**身份属下一层，本次不做。
 
@@ -34,7 +34,7 @@
 | Python | 3.11 及以上 |
 | 当前主线 | 先完成字幕质量与自适应源字幕闭环，再评估 App |
 | Job schema | v1（端到端目标为可选 `config.workflow` / `WorkflowConfig`） |
-| 自动化测试 | 1195 个测试、343 个子测试，全部通过（2026-10-31） |
+| 自动化测试 | 1243 个测试、341 个子测试，全部通过（2026-11-01） |
 | 静态检查 | Ruff lint 和 formatter 通过 |
 | 打包 | wheel 和 source distribution 已验证 |
 | CI | GitHub Actions（ubuntu + macos × Python 3.11/3.13 矩阵）跑 ruff、pytest、CLI 冒烟与 `uv build` |
