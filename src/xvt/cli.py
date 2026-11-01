@@ -34,6 +34,7 @@ from xvt.pipeline import (
     REVISION_FINGERPRINT_LENGTH,
     SOURCE_REVIEW_STEM_PREFIX,
     TRANSLATION_REVIEW_STEM_PREFIX,
+    SourceRevisionResult,
     TranslationRunResult,
     acknowledge_subtitle_review,
     acknowledge_translation_review,
@@ -2421,6 +2422,33 @@ def _cmd_prepare_source_review(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _print_source_revision_impact(result: SourceRevisionResult) -> None:
+    """源文修订写盘之后的影响面摘要。
+
+    这条命令不可逆：它失效译文、润色与全部下游，要重新付费翻译。此前人读输出只有四五行
+    artifact 路径加一行导航，用户看不到自己刚改了几条 cue、失效了多少产物——代价最高的
+    操作反而是说得最少的那个。
+
+    措辞保持英文：本命令既有的人读输出（artifact 路径 + `recovery:` 导航）全是英文，
+    往里插一段中文就是在一条命令的输出里现造一处中英混用。CLI 整体的语言统一是 E6 的
+    范围，不在这里顺手半做。
+    """
+
+    shown = _format_cue_ids(result.changed_ids)
+    _print_safe(f"revised {len(result.changed_ids)} source cue(s): {shown}")
+    if result.invalidated_kinds:
+        # 计数只含真的要重新产出的下游：就地替换掉的那几项不算损失（见
+        # `SourceRevisionResult` 的 docstring）。
+        kinds = ", ".join(result.invalidated_kinds)
+        _print_safe(f"invalidated {len(result.invalidated_kinds)} downstream artifact(s): {kinds}")
+    if result.retranslation_required:
+        # 这句按 Job 有没有目标语言推导，不写死：纯源字幕 Job 本来没有译文产物，不该被
+        # 告知要重新付费（判定理由见 `SourceRevisionResult` 的 docstring）。
+        _print_safe("the translation is no longer valid; producing it again costs model calls")
+    if result.qa_status == "needs_review":
+        _print_safe("source subtitle QA needs human review; no source SRT was produced")
+
+
 def _cmd_apply_source_review_fixes(arguments: argparse.Namespace) -> int:
     if getattr(arguments, "check", False):
         result = preflight_source_review_fixes(arguments.job_file, arguments.response_file)
@@ -2440,17 +2468,28 @@ def _cmd_apply_source_review_fixes(arguments: argparse.Namespace) -> int:
             _complete(arguments, preflight=result)
         return 0
     event_sink = _event_sink(arguments)
-    paths = apply_source_review_fixes(
+    result = apply_source_review_fixes(
         arguments.job_file,
         arguments.response_file,
         event_sink=event_sink,
     )
     if arguments.events_jsonl:
         if not getattr(arguments, "_defer_cli_complete", False):
-            _complete(arguments, artifacts=[str(path) for path in paths])
+            _complete(
+                arguments,
+                artifacts=[str(path) for path in result.paths],
+                changed_cue_count=len(result.changed_ids),
+                invalidated_kinds=list(result.invalidated_kinds),
+                qa_status=result.qa_status,
+                # 人读那四句与这里必须是同一组信号。`retranslation_required` 尤其不能只给
+                # 人看：机器侧从 `invalidated_kinds` 推不出来——翻译还没开跑的目标语言 Job
+                # 里一个译文 kind 都没有，但它照样要付一次翻译的钱。
+                retranslation_required=result.retranslation_required,
+            )
     else:
-        for path in paths:
+        for path in result.paths:
             print(path)
+        _print_source_revision_impact(result)
         _print_recovery_navigation(arguments.job_file)
     return 0
 

@@ -366,12 +366,38 @@ def preflight_source_review_fixes(
     return _source_revision_preflight_result(_prepare_source_revision(job_file, response_file))
 
 
+@dataclass(frozen=True)
+class SourceRevisionResult:
+    """源文修订写盘之后的产出与影响面。
+
+    `invalidated_kinds` 只记**真的要重新产出**的下游，已经排除本次就地替换掉的那几项
+    （`source_cues` / `source_selection` / `subtitle_qa` / `source_review_revision`，以及
+    QA 放行时一并重写的 `source_srt`）——它们同在 `downstream_of` 的失效闭包里，但用户
+    拿到的是新的那份，把它们算进「失效 N 项」是讲重了。这个推导顺带把两种真实差异处理
+    对了：QA `needs_review` 时不产出 `source_srt`，旧的那份就是真的没了，会如实计入；
+    没有目标语言的 Job 本来没有译文产物，也就不会被报成「译文要重新翻译」。
+
+    `retranslation_required` 只看 Job 有没有目标语言。有目标语言的 Job 一律为真，不管翻译
+    此前走到哪一步：源 cue 变了，而译文家族整族都在 `downstream_of(SOURCE_CUES)` 里，重新
+    翻译是必然的。反过来**不去枚举「付过钱的那些 kind」**——那张清单有十几项（progress /
+    response / draft / polished / repaired / reviewed / translated…），手写它迟早漏，而漏掉
+    的恰好会是「翻了一半」这类真花了钱的局面；也不去读 TRANSLATE stage 状态：这句话讲的是
+    产物没了、要再付一次钱，拿流程记账去推产物结论是多绕一层。
+    """
+
+    paths: tuple[Path, ...]
+    changed_ids: tuple[int, ...]
+    invalidated_kinds: tuple[str, ...]
+    qa_status: str
+    retranslation_required: bool
+
+
 def apply_source_review_fixes(
     job_file: str | Path,
     response_file: str | Path,
     *,
     event_sink: EventSink | None = None,
-) -> tuple[Path, ...]:
+) -> SourceRevisionResult:
     # 校验与计算全部走 `_prepare_source_revision`，与 `preflight_source_review_fixes`
     # 共用同一份——预检与实际写入各算一遍迟早会分叉，那会让 `--check` 报的结论与
     # apply 的真实结果对不上，比没有预检更糟。
@@ -442,7 +468,14 @@ def apply_source_review_fixes(
     elif report.status == "needs_review":
         qa_message = SUBTITLE_REVIEW_REQUIRED_MESSAGE
     else:
-        qa_message = "subtitle QA failed; inspect the QA artifact and repair subtitles"
+        # 这条是整个命令代价最高的出口：用户没跑 `--check` 就动手，写盘与下游失效
+        # 都已经发生了，只说「QA 挂了，去看报告」等于瞒掉真正的损失。`review.py` 里
+        # 那句同字面量属于另一个上下文（正常流程的源字幕 QA，不伴随任何失效），两边
+        # 分开措辞是对的，不该抽成共享常量。
+        qa_message = (
+            "subtitle QA failed; inspect the QA artifact and repair subtitles; "
+            "the revision was still written and every downstream artifact is now invalid"
+        )
 
     replacement_kinds = {artifact.kind for artifact in replacements}
     job.artifacts = [
@@ -524,7 +557,16 @@ def apply_source_review_fixes(
         )
     if report.status == "failed":
         raise RuntimeError(qa_message)
-    return tuple(Path(artifact.path) for artifact in replacements)
+    lost_kinds = sorted(
+        {artifact.kind for artifact in invalidated} - replacement_kinds,
+    )
+    return SourceRevisionResult(
+        paths=tuple(Path(artifact.path) for artifact in replacements),
+        changed_ids=tuple(sorted(changed_ids)),
+        invalidated_kinds=tuple(lost_kinds),
+        qa_status=report.status,
+        retranslation_required=resolve_target_language(job) is not None,
+    )
 
 
 def _target_kinds(job: Job) -> tuple[str, str, Path, Path] | None:

@@ -473,6 +473,8 @@ xvt apply-source-review-fixes JOB_FILE RESPONSE_FILE [--events-jsonl]
 
 - 位置参数：`job_file`、`response_file`；支持生成的 JSON 模板或固定命名的源文修订 SRT。
 - 可选参数：`--events-jsonl`。修改源文后会重跑源字幕 QA，并失效旧翻译及全部下游产物；回填后先运行 `xvt status JOB_FILE`，再按恢复计划继续。
+- **写盘之后直接给出影响面**：修订了几条源 cue（连号压成区间）、哪几个下游 kind 真的失效要重新产出、译文是否要重新付费翻译、修订后的源字幕 QA 是否需人工确认。计数**不含**本次就地替换掉的 `source_cues` / `source_selection` / `subtitle_qa` / `source_review_revision`（以及 QA 放行时一并重写的 `source_srt`）——那几项你拿到的是新的那份，算进「失效 N 项」是讲重了。`--events-jsonl` 的 `cli_completed` 带同一组字段（`changed_cue_count` / `invalidated_kinds` / `qa_status` / `retranslation_required`），机器侧不必解析人读摘要。
+- QA 失败时（error 级问题）照旧写盘、失效下游，最后以 `RuntimeError` 退出——错误文案自己说明这点。要在动手之前预演，用 `xvt apply JOB FILE --check`（只读，会把修订后的源字幕 QA 提前算出来）。
 
 </details>
 

@@ -81,11 +81,23 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 `apply --check` 明确只支持人工**译文**修订。而源文修订才是不可逆的那个：失效译文、润色与全部下游，必须重新付费翻译。风险更高的操作反而不能预演。AGENTS 约束 4 只对人工译文 `apply --check` 作了要求，所以这是设计范围问题而非违约。
 
-**已修**：`apply --check` 扩到源文修订。`_prepare_source_revision` 从 `apply_source_review_fixes` 第一次写盘之前切出来，`preflight_source_review_fixes` 只调它、正式 apply 也先调它（不 valid 就拒绝写入，与译文侧同口径）。预检**会跑修订后的源字幕 QA**——只验格式没什么价值，那些错误 apply 时本来就立刻报；值钱的是提前知道改完之后 QA 会不会挂。实跑验证：改一条日文源文后 `--check` 返回 `valid: true` / `qa_status: needs_review` 并指出 `cue 36 行宽 38 超过 36`，而 Job 目录文件数 56 → 56、一字节未写。只读性由全目录 checksum 快照测试钉住（注入一次写盘后该测试立刻变红）。
+**已修**：`apply --check` 扩到源文修订。`_prepare_source_revision` 从 `apply_source_review_fixes` 第一次写盘之前切出来，`preflight_source_review_fixes` 只调它、正式 apply 也先调它（**源文侧不因 QA 失败拒绝写入**，与译文侧不同口径：它照旧写盘、失效下游、最后才抛 `RuntimeError`）。预检**会跑修订后的源字幕 QA**——只验格式没什么价值，那些错误 apply 时本来就立刻报；值钱的是提前知道改完之后 QA 会不会挂。实跑验证：改一条日文源文后 `--check` 返回 `valid: true` / `qa_status: needs_review` 并指出 `cue 36 行宽 38 超过 36`，而 Job 目录文件数 56 → 56、一字节未写。只读性由全目录 checksum 快照测试钉住（注入一次写盘后该测试立刻变红）。
 
-### E8 源文修订的输出没有影响面摘要 — ○ 已观察，`待修`
+### E8 源文修订的输出没有影响面摘要 — ● 已修
 
 `apply-source-review-fixes` 成功后只打印 5 个 artifact 路径加一条 `next`，没有「修订了 N 条源 cue、失效了 M 个下游产物」。这是高成本操作，影响面应当可见。
+
+**已修**：`apply_source_review_fixes` 返回 `SourceRevisionResult`（取代 `tuple[Path, ...]`；E7 抽出的 `_prepare_source_revision` 已经算好 `changed_ids`，不重算），人读与 `--events-jsonl` 两条出口给同一组信号：改了几条 cue、哪几个下游 kind 真的失效、译文要不要重新付费、QA 要不要人工确认。
+
+三处落点是实测或推理定下来的，不要捡回被否的写法：
+
+- **失效计数排除就地替换的 kind**。`invalidated` 是失效闭包的全集，含本次当场重写的 `source_cues` / `source_selection` / `subtitle_qa` / `source_review_revision`（QA 放行时还含 `source_srt`）。算进去就是「用一个数字讲重了」——`drop-imported-translation` 为同一个坑留过注释。实测一个有译文的 Job：不排除时报 6 项（含 `source_cues` / `source_srt`），排除后报 2 项（`translated_cues` / `translation_review_revision`）。红先验证过：去掉 `- replacement_kinds` 后测试以 `AssertionError: 'source_cues' unexpectedly found` 变红。
+- **「要重新付费翻译」按目标语言推导，不枚举 kind、也不读 stage 状态**。译文家族有十几项（progress / response / draft / polished / repaired / reviewed / translated…），手写清单迟早漏，而漏掉的恰好会是「翻了一半」这类真花过钱的局面；读 TRANSLATE stage 则是拿流程记账去推产物结论，多绕一层。源 cue 变了而译文整族都在 `downstream_of(SOURCE_CUES)` 里，有目标语言就必然要重新翻译。
+- **cue 列表复用 `_format_cue_ids` 压成区间，不截断**。改一整段源文时它就是 `1–300` 七个字符；`_ISSUE_SUMMARY_LIMIT` / `_ISSUE_MESSAGE_LIMIT` 那两个上限针对的是模型产出的不受控长文本，这里的输入是用户手改的 cue 数量，没有同类风险。完整清单另有一份落在 `source-review-revision` artifact 的 `changed_ids` 里。
+
+**QA 失败那条出口一并补齐**：它照旧写盘、失效下游、最后抛 `RuntimeError`（E7 钉住的既有契约，本次没动），但错误文案此前只说「QA 挂了去看报告」——没跑 `--check` 就动手的用户只会看到这一句，等于瞒掉译文已经失效。现在文案自己说明修订已写入、全部下游已失效。核验过没有解析方：`error_category` 看异常属性不看文本，`review.py:286` 那处按文本精确比对的消费方比的是 `SUBTITLE_REVIEW_REQUIRED_MESSAGE`（`needs_review` 常量）且读的是 TRANSLATE stage，与本次改的 `failed` 字面量无关；`review.py:190` 的同字面量属另一上下文（正常流程的源字幕 QA，不伴随任何失效），分开措辞是对的，不该抽共享常量。
+
+**未扫的同类站点（advisory）**：`rebuild-source --strategy asr` 是同一类不可逆高成本命令（ASR 换掉源时间轴、失效译文与全部下游），人读输出同样不报失效了多少——它至少当场给出「已存译文套不回去」的真出口。本条不在 E8 范围内，需要时单独立项。
 
 ### E9 下载进度不可信 — ○ 已观察，`待决策`
 

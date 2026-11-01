@@ -25,7 +25,7 @@ from xvt.workflow_config import WorkflowConfig, set_workflow_config
 
 
 class SourceReviewPipelineTest(unittest.TestCase):
-    def _job(self, root: Path) -> Path:
+    def _job(self, root: Path, *, target_language: str | None = "zh-CN") -> Path:
         source = root / "source.srt"
         source.write_text(
             "1\n00:00:00,000 --> 00:00:01,000\nGPT's 5.6 soul.\n\n"
@@ -66,7 +66,7 @@ class SourceReviewPipelineTest(unittest.TestCase):
         set_workflow_config(
             job,
             WorkflowConfig(
-                target_language="zh-CN",
+                target_language=target_language,
                 translation_quality="polished",
                 provider="agent",
             ),
@@ -111,6 +111,55 @@ class SourceReviewPipelineTest(unittest.TestCase):
         template = prepare_source_review(job_file, cue_ids)
         return template
 
+    def test_apply_reports_only_the_downstream_that_is_really_lost(self) -> None:
+        """影响面摘要里的「失效 N 项」不能把就地替换掉的那几项算成损失。
+
+        `source_cues` / `source_selection` / `subtitle_qa` / `source_review_revision` 同在
+        `downstream_of(SOURCE_CUES)` 的失效闭包里，但本次 apply 当场写了新的那份，用户
+        手里并没有少东西；把它们算进去就是又一次「用一个数字讲重了」——
+        `drop-imported-translation` 已经为同一个坑留过注释。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory))
+            response = self._response(job_file, [1])
+            payload = json.loads(response.read_text(encoding="utf-8"))
+            payload["items"][0]["text"] = "GPT-5.6 does in these categories."
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            result = apply_source_review_fixes(job_file, response)
+
+            self.assertEqual(result.changed_ids, (1,))
+            self.assertEqual(result.qa_status, "warning")
+            self.assertTrue(result.retranslation_required)
+            # 真的没了的：译文与那份作废的译文修订登记。
+            self.assertIn("translated_cues", result.invalidated_kinds)
+            self.assertIn("translation_review_revision", result.invalidated_kinds)
+            for replaced in (
+                "source_cues",
+                "source_selection",
+                "subtitle_qa",
+                "source_review_revision",
+                "source_srt",
+            ):
+                self.assertNotIn(replaced, result.invalidated_kinds, replaced)
+            registered = {artifact.path for artifact in load_job(job_file).artifacts}
+            self.assertTrue({str(path) for path in result.paths} <= registered)
+
+    def test_apply_does_not_claim_a_retranslation_cost_without_a_target_language(self) -> None:
+        """纯源字幕 Job 没有译文产物，不该被告知要重新付费翻译。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            job_file = self._job(Path(directory), target_language=None)
+            response = self._response(job_file, [1])
+            payload = json.loads(response.read_text(encoding="utf-8"))
+            payload["items"][0]["text"] = "GPT-5.6 does in these categories."
+            response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            result = apply_source_review_fixes(job_file, response)
+
+            self.assertFalse(result.retranslation_required)
+
     def test_prepare_and_apply_preserve_timeline_and_invalidate_downstream(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_file = self._job(Path(directory))
@@ -123,7 +172,8 @@ class SourceReviewPipelineTest(unittest.TestCase):
             payload["items"][0]["text"] = "GPT-5.6 does in these categories."
             response.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-            paths = apply_source_review_fixes(job_file, response)
+            result = apply_source_review_fixes(job_file, response)
+            paths = result.paths
 
             job = load_job(job_file)
             source_path = valid_artifact_path(job, "source_cues")
@@ -388,8 +438,13 @@ class SourceReviewPipelineTest(unittest.TestCase):
             self.assertTrue(result["blockers"])
             self.assertEqual(before, self._snapshot(root), "预检不得写盘，即便结论是失败")
 
-            # 既有契约未变：照旧写盘、失效下游，最后才抛错。
-            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+            # 既有契约未变：照旧写盘、失效下游，最后才抛错。错误文案必须自己说清这点
+            # ——没跑 `--check` 就动手的用户只会看到这一句，只说「QA 挂了去看报告」等于
+            # 瞒掉译文已经失效、要重新付费翻译。
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "subtitle QA failed.*every downstream artifact is now invalid",
+            ):
                 apply_source_review_fixes(job_file, response)
             self.assertNotEqual(before, self._snapshot(root), "apply 确实写了盘")
 

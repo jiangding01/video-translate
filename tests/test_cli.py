@@ -34,6 +34,7 @@ from xvt.models import Artifact, Job, StageName, StageStatus
 from xvt.pipeline import (
     RebuildSourceResult,
     ResegmentationResult,
+    SourceRevisionResult,
     TranslationRunResult,
     apply_agent_semantic_review,
     apply_agent_translation,
@@ -67,6 +68,29 @@ class _TtyStringIO(StringIO):
 
     def isatty(self) -> bool:
         return True
+
+
+def _source_revision_result(
+    paths: tuple[Path, ...],
+    *,
+    changed_ids: tuple[int, ...] = (1,),
+    invalidated_kinds: tuple[str, ...] = (),
+    qa_status: str = "pass",
+    retranslation_required: bool = False,
+) -> SourceRevisionResult:
+    """`apply_source_review_fixes` 的桩返回值。
+
+    影响面默认为空，这样既有那几条只关心「响应被转发了、导航被打印了」的用例不必关心
+    摘要内容；要验摘要的用例自己传。
+    """
+
+    return SourceRevisionResult(
+        paths=paths,
+        changed_ids=changed_ids,
+        invalidated_kinds=invalidated_kinds,
+        qa_status=qa_status,
+        retranslation_required=retranslation_required,
+    )
 
 
 class CliTest(unittest.TestCase):
@@ -905,11 +929,109 @@ class CliTest(unittest.TestCase):
         self.assertIn("/tmp/source-review.srt", output.getvalue())
         self.assertIn("apply-source-review-fixes", output.getvalue())
 
+    def test_apply_source_review_fixes_prints_the_impact_summary(self) -> None:
+        """源文修订是不可逆的高成本操作，人读输出必须说清它把 Job 带到了哪里。
+
+        此前只有四五行 artifact 路径加一行导航：用户看不到自己改了几条 cue、失效了多少
+        下游、译文要不要重新付费翻译。
+        """
+
+        paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed-cues.json"))
+        output = StringIO()
+        with (
+            patch(
+                "xvt.cli.apply_source_review_fixes",
+                return_value=_source_revision_result(
+                    paths,
+                    changed_ids=(3, 4, 5, 9),
+                    invalidated_kinds=("bilingual_ass", "translated_cues", "translated_srt"),
+                    qa_status="needs_review",
+                    retranslation_required=True,
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            return_code = main(["apply-source-review-fixes", "/tmp/job.json", "/tmp/response.json"])
+
+        self.assertEqual(return_code, 0)
+        printed = output.getvalue()
+        # 连号压成区间走的是既有的 _format_cue_ids，不另造一套展示规则。
+        self.assertIn("revised 4 source cue(s): 3\u20135, 9", printed)
+        self.assertIn("invalidated 3 downstream artifact(s): ", printed)
+        self.assertIn("translated_cues", printed)
+        self.assertIn("costs model calls", printed)
+        self.assertIn("needs human review", printed)
+
+    def test_apply_source_review_fixes_omits_the_cost_line_without_a_target_language(self) -> None:
+        """纯源字幕 Job 没有译文产物，不该被告知要重新付费翻译。"""
+
+        output = StringIO()
+        with (
+            patch(
+                "xvt.cli.apply_source_review_fixes",
+                return_value=_source_revision_result(
+                    (Path("/tmp/revision.json"),),
+                    changed_ids=(1,),
+                    invalidated_kinds=("translation_context",),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            return_code = main(["apply-source-review-fixes", "/tmp/job.json", "/tmp/response.json"])
+
+        self.assertEqual(return_code, 0)
+        printed = output.getvalue()
+        self.assertIn("revised 1 source cue(s): 1", printed)
+        self.assertNotIn("costs model calls", printed)
+        self.assertNotIn("needs human review", printed)
+
+    def test_apply_source_review_fixes_puts_the_impact_on_the_jsonl_terminal_event(self) -> None:
+        """机器消费方走同一组字段，不必去解析人读摘要。"""
+
+        events = StringIO()
+        with (
+            patch(
+                "xvt.cli.apply_source_review_fixes",
+                return_value=_source_revision_result(
+                    (Path("/tmp/revision.json"),),
+                    changed_ids=(2, 7),
+                    invalidated_kinds=("translated_cues",),
+                    qa_status="warning",
+                    retranslation_required=True,
+                ),
+            ),
+            redirect_stdout(events),
+        ):
+            return_code = main(
+                [
+                    "apply-source-review-fixes",
+                    "/tmp/job.json",
+                    "/tmp/response.json",
+                    "--events-jsonl",
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        completed = [
+            json.loads(line)
+            for line in events.getvalue().splitlines()
+            if line.strip() and json.loads(line)["type"] == "cli_completed"
+        ]
+        self.assertEqual(len(completed), 1)
+        payload = completed[0]["data"]
+        self.assertEqual(payload["changed_cue_count"], 2)
+        self.assertEqual(payload["invalidated_kinds"], ["translated_cues"])
+        self.assertEqual(payload["qa_status"], "warning")
+        # 机器侧从 invalidated_kinds 推不出这一条，必须显式给。
+        self.assertIs(payload["retranslation_required"], True)
+
     def test_apply_source_review_fixes_forwards_response_and_prints_status(self) -> None:
         paths = (Path("/tmp/revision.json"), Path("/tmp/reviewed-cues.json"))
         output = StringIO()
         with (
-            patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+            patch(
+                "xvt.cli.apply_source_review_fixes", return_value=_source_revision_result(paths)
+            ) as apply,
             redirect_stdout(output),
         ):
             return_code = main(["apply-source-review-fixes", "/tmp/job.json", "/tmp/response.json"])
@@ -928,7 +1050,9 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             response = self._write_response(directory, {"task": "source_review_fixes"})
             with (
-                patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+                patch(
+                    "xvt.cli.apply_source_review_fixes", return_value=_source_revision_result(paths)
+                ) as apply,
                 redirect_stdout(StringIO()),
             ):
                 return_code = main(["apply", "/tmp/job.json", response])
@@ -1335,7 +1459,9 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             response = self._write_response(directory, {"task": "source_review_fixes"})
             with (
-                patch("xvt.cli.apply_source_review_fixes", return_value=paths),
+                patch(
+                    "xvt.cli.apply_source_review_fixes", return_value=_source_revision_result(paths)
+                ),
                 redirect_stdout(completed),
             ):
                 main(["apply", "/tmp/job.json", response, "--events-jsonl"])
@@ -1493,7 +1619,9 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                patch("xvt.cli.apply_source_review_fixes", return_value=paths) as apply,
+                patch(
+                    "xvt.cli.apply_source_review_fixes", return_value=_source_revision_result(paths)
+                ) as apply,
                 redirect_stdout(StringIO()),
             ):
                 return_code = main(["apply", "/tmp/job.json", str(review)])
