@@ -7,7 +7,12 @@ from typing import Any
 
 from xvt.models import Cue
 from xvt.process import CommandError
-from xvt.render import AssStyleOptions, FontGlyphError, measure_bilingual_line_widths
+from xvt.render import (
+    AssStyleOptions,
+    FontGlyphError,
+    measure_bilingual_line_widths,
+    resolved_style_binding,
+)
 from xvt.segment import (
     TARGET_WRAP_MAX_LINES,
     target_wrap_binding,
@@ -267,6 +272,16 @@ def check_subtitles(
             "target_font": render_options.target_font,
             "source_font": render_options.source_font,
             "style_options": asdict(render_options),
+            # style_options 回答「用户指定了什么」（取证与复现命令用），resolved_style 回答
+            # 「实际用了什么」（绑定用）。顶层 target_font / source_font 是前者的历史快捷方式，
+            # 保持原样不动。三者各答各的，别把它们当重复信息合并掉。
+            #
+            # 推导与 render._styled_subtitles 共用一份，测量用的就是这里记下的样式。
+            # measurement 为 unavailable 时照样记：样式是确定的（不依赖测量是否成功），
+            # 而那种报告本来就不会被复用——burnin 要求 measurement == "measured"。
+            "resolved_style": resolved_style_binding(
+                cues, video_height=video_height, options=render_options
+            ),
             "measurement": "unavailable",
             # 绑定译文换行算法：烧录腿只复用 wrap 绑定一致的报告（D4）。
             "wrap": target_wrap_binding(),
