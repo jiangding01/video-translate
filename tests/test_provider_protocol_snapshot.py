@@ -919,6 +919,47 @@ def _golden() -> dict[str, Any]:
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))["scenarios"]
 
 
+class SnapshotScopeTest(unittest.TestCase):
+    """快照覆盖面本身的回归保护：它量不到的东西，不该被当成它在守。
+
+    2026-11-01 的 E2 方案一度写着「往 layout 加字段必然改 artifact checksum、必然要
+    重新生成 golden」，实际不成立：这里全部场景都是**纯字幕 Job**，没有画幅，
+    `check_subtitles` 的 layout 块只在有画幅时构建（qa.py），所以 golden 里根本没有
+    layout。照那个错误前提做，就会在一次本不该动 golden 的改动里动它。
+
+    这条把"快照量不到 layout"钉成显式期望：哪天场景里加进带画幅的 Job，它会变红，
+    提醒改动者重新判断 layout 相关改动对协议快照的影响。
+    """
+
+    def test_scenarios_are_subtitle_only_so_layout_never_reaches_golden(self) -> None:
+        golden = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+        kinds = set()
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                kind = node.get("kind")
+                if isinstance(kind, str):
+                    kinds.add(kind)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(golden)
+        self.assertTrue(kinds, "golden 里应当有 artifact kind，扫不到说明结构变了")
+        media_kinds = sorted(
+            kind for kind in kinds if any(word in kind for word in ("media", "video", "audio"))
+        )
+        self.assertEqual(
+            media_kinds,
+            [],
+            "快照场景出现了带媒体的 Job：layout 块会随之进入 golden，"
+            "layout 相关改动对协议快照的影响需要重新判断",
+        )
+        self.assertNotIn("layout", GOLDEN_PATH.read_text(encoding="utf-8"))
+
+
 class ProviderProtocolSnapshotTest(unittest.TestCase):
     maxDiff = None
 

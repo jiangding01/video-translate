@@ -6,6 +6,7 @@ from unittest.mock import patch
 from xvt.candidate_qa import overflow_limits
 from xvt.models import Cue
 from xvt.qa import check_subtitles, target_overflow_cue_ids
+from xvt.render import resolved_style_binding
 from xvt.segment import target_wrap_binding
 
 
@@ -298,6 +299,54 @@ class TargetWrapQaTest(unittest.TestCase):
         )
         self.assertEqual(overflow_limits(issue.message), (530, 492))
         self.assertEqual(report.layout["wrap"], target_wrap_binding())
+
+    def test_layout_records_the_style_actually_used(self) -> None:
+        """E2：layout 要记**实际生效**的字体字号，而不只是用户的显式覆盖。
+
+        `style_options` 在未指定字体时跨平台逐字节相同，光绑它挡不住「macOS 测量、
+        Linux 复用」；`resolved_style` 绑的是推导之后的输出，且与渲染腿共用一份推导。
+        measurement 失败时照样记——样式本身是确定的，不依赖测量成功与否。
+        """
+
+        cues = [
+            Cue(
+                1,
+                0,
+                1000,
+                "Hello",
+                target_text="你好",
+                source_language="en",
+                target_language="zh-CN",
+            )
+        ]
+        expected = resolved_style_binding(cues, video_height=1080)
+        with patch(
+            "xvt.qa.measure_bilingual_line_widths",
+            return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+        ):
+            report = check_subtitles(
+                cues,
+                media_duration_ms=1000,
+                video_width=1920,
+                video_height=1080,
+                require_translation=True,
+                measure_layout=True,
+            )
+        self.assertEqual(report.layout["resolved_style"], expected)
+        # 用户没指定字体时 style_options 里仍是 None，正是它挡不住跨机错配的原因。
+        self.assertIsNone(report.layout["style_options"]["target_font"])
+
+        with patch("xvt.qa.measure_bilingual_line_widths", side_effect=ValueError("no font")):
+            degraded = check_subtitles(
+                cues,
+                media_duration_ms=1000,
+                video_width=1920,
+                video_height=1080,
+                require_translation=True,
+                measure_layout=True,
+            )
+        self.assertEqual(degraded.layout["measurement"], "unavailable")
+        self.assertEqual(degraded.layout["resolved_style"], expected)
 
     def test_rendered_fit_after_wrapping_is_a_target_wrapped_warning(self) -> None:
         with patch(

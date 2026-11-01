@@ -37,13 +37,13 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 **落点**：让选择判定能区分两种情况。最小改法是给 `SourceCandidateKind` 增加一个「未请求」取值，或由调用方把 `youtube_subtitles` 传进 `plan_source_selection`，并新增 reason（如 `platform_subtitles_not_requested`）。文案要同时改，`reason` 是写进 artifact 的，属协议面。
 
-### E2 `layout` 从不记录实际使用的字体，跨机复用判定会混同 — ✅ 已核验，`待修`
+### E2 `layout` 从不记录实际使用的字体，跨机复用判定会混同 — ✅ 已核验，**已修（本轮）**
 
 `qa.py:267` 写进报告的是 `render_options.target_font`，即**用户显式指定值**；未指定就是 `null`。而真实字体在 `render.py:163` 才由 `options.target_font or font_for_language(target_language)` 推导，**推导结果从未进 `layout`**。本次验收的 `qa-translated.json` 与 `translation-candidate-qa.json` 里 `target_font` / `source_font` / `target_size` / `source_size` 全是 `null`，只有 `video_width/height` 和 `margin_vertical` 有值。
 
 后果：同一 Job 在 macOS（`Hiragino Sans GB`）产出布局 QA，拷到 Linux（`Noto Sans CJK SC`）继续时，两边 `layout` 块逐字节相同，`burnin._reusable_rendered_layout` 据此判定「样式一致、可复用」，而实际字体与行宽都不同。AGENTS 约束 4 要求「不跨画幅或字体复用」——画幅记了，字体没有。
 
-**落点**：把 `font_for_language` 的推导结果（实际家族名）与实际字号一并写进 `layout`，纳入复用绑定。这是 BaoCut 调研 B3（绑定字体**文件**身份）的更基础一层，应排在 B3 之前。改动会使旧报告的 `layout` 块结构变化，按既有口径同步升版并写明在途 Job 的布局 QA 不复用。
+**已修**：`render.resolved_style_binding` 产出实际生效的字体与字号，`_styled_subtitles` 与 `qa.check_subtitles` 共用这一份（两层同源钉子），`layout["resolved_style"]` 落盘并进 `burnin` 的复用绑定。**方案阶段有一处判断被独立 review 证伪**：原以为「往 layout 加字段必然改 artifact checksum、必须重新生成协议快照 golden」，实际快照场景全是纯字幕 Job、没有画幅，`check_subtitles` 根本不构建 layout 块，golden 零 diff；已把这个覆盖面钉成显式守卫。另补两处原方案漏掉的：`pipeline/review.py` 的确认绑定也整块比较 layout（在途已确认的 `needs_review` 会失效一次，已写进 CHANGELOG 与恢复契约），以及 `_styled_subtitles` 调 `font_for_language` 时不传 `platform_name`，所以 helper 穿了一个可选参数供跨平台用例使用。原落点：这是 BaoCut 调研 B3（绑定字体**文件**身份）的更基础一层，应排在 B3 之前。改动会使旧报告的 `layout` 块结构变化，按既有口径同步升版并写明在途 Job 的布局 QA 不复用。
 
 ### E3 Q7a 多词专名被拆成碎片进 glossary 骨架 — ✅ 已核验，**已修（本轮）**
 

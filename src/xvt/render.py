@@ -5,6 +5,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pysubs2
 
@@ -139,6 +140,46 @@ def default_target_size(video_height: int) -> int:
     return 20
 
 
+def resolved_style_binding(
+    cues: list[Cue],
+    *,
+    video_height: int,
+    options: AssStyleOptions = AssStyleOptions(),
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    """实际生效的 ASS 样式：字体与字号**推导之后的输出**，不是「用户指定了什么」。
+
+    ``AssStyleOptions`` 记的是用户的显式覆盖（没指定就是 ``None``），而真正拿去渲染与
+    测量的字体由 ``font_for_language`` 按语言与平台推导、字号由 ``default_target_size``
+    按画幅推导。只绑定前者挡不住跨机错配：同一个 Job 在 macOS 与 Linux 上
+    ``style_options`` 逐字节相同、实际字体却是 Hiragino 与 Noto，布局 QA 的复用判定会把
+    两种环境混同——而约束 4 要求「不跨画幅或字体复用」，画幅记了、字体一直没记。
+
+    字号一并记，理由不是顺手：``default_target_size`` 或 ``/1.7`` 比例一改，
+    ``style_options`` 加画幅的比较照样相等、复用照样放行，而旧报告的测量已经失真。
+    绑定的是推导算法的**输出**，字体字号同理。
+
+    ``qa.check_subtitles`` 与 ``_styled_subtitles`` **共用这一份**，不是各自实现一遍相同
+    推导：两边一旦漂移，报告记下的就不是测量时真正用的样式，而它看起来像绑定了——那比
+    不记更糟，因为复用判定会拿一个假值去比对。``tests/test_render.py`` 有对象身份与行为
+    两层钉子守着这件事。
+
+    ``platform_name`` 只为可测性存在（``font_for_language`` 本就收这个参数）：留空走
+    ``sys.platform``，跨平台用例显式传值，免得测试去 mock 全局状态。
+    """
+
+    target_size = options.target_size or default_target_size(video_height)
+    source_size = options.source_size or max(8, round(target_size / 1.7))
+    target_language = next((cue.target_language for cue in cues if cue.target_language), None)
+    source_language = next((cue.source_language for cue in cues if cue.source_language), None)
+    return {
+        "target_font": options.target_font or font_for_language(target_language, platform_name),
+        "source_font": options.source_font or font_for_language(source_language, platform_name),
+        "target_size": target_size,
+        "source_size": source_size,
+    }
+
+
 def _styled_subtitles(
     cues: list[Cue],
     *,
@@ -149,10 +190,8 @@ def _styled_subtitles(
     if video_width <= 0 or video_height <= 0:
         raise ValueError("video dimensions must be positive")
 
-    target_size = options.target_size or default_target_size(video_height)
-    source_size = options.source_size or max(8, round(target_size / 1.7))
-    target_language = next((cue.target_language for cue in cues if cue.target_language), None)
-    source_language = next((cue.source_language for cue in cues if cue.source_language), None)
+    # 与 qa 报告 layout["resolved_style"] 共用同一份推导，不在这里重算（见该函数 docstring）。
+    binding = resolved_style_binding(cues, video_height=video_height, options=options)
 
     subtitles = pysubs2.SSAFile()
     subtitles.info["PlayResY"] = "288"
@@ -160,8 +199,8 @@ def _styled_subtitles(
     subtitles.info["WrapStyle"] = "2"
     subtitles.info["ScaledBorderAndShadow"] = "yes"
     subtitles.styles["Target"] = pysubs2.SSAStyle(
-        fontname=options.target_font or font_for_language(target_language),
-        fontsize=target_size,
+        fontname=binding["target_font"],
+        fontsize=binding["target_size"],
         bold=True,
         alignment=pysubs2.Alignment.BOTTOM_CENTER,
         marginv=options.margin_vertical,
@@ -169,8 +208,8 @@ def _styled_subtitles(
         shadow=0,
     )
     subtitles.styles["Source"] = pysubs2.SSAStyle(
-        fontname=options.source_font or font_for_language(source_language),
-        fontsize=source_size,
+        fontname=binding["source_font"],
+        fontsize=binding["source_size"],
         bold=False,
         alignment=pysubs2.Alignment.BOTTOM_CENTER,
         marginv=options.margin_vertical,

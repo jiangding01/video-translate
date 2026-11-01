@@ -5,16 +5,105 @@ from unittest.mock import patch
 
 import pysubs2
 
+import xvt.qa
+import xvt.render
 from xvt.models import Cue
 from xvt.process import CommandResult
 from xvt.qa import display_width_limit
 from xvt.render import (
     AssStyleOptions,
+    _styled_subtitles,
+    default_target_size,
     font_for_language,
     measure_bilingual_line_widths,
+    resolved_style_binding,
     save_bilingual_ass,
 )
 from xvt.segment import SegmentationConfig
+
+
+class ResolvedStyleBindingTest(unittest.TestCase):
+    """`resolved_style_binding` 是 qa 报告与 ASS 渲染**共用**的样式推导。
+
+    E2（2026-11-01 验收发现清单）：`layout` 此前只记 `AssStyleOptions` 里用户的显式
+    覆盖，实际字体由 `font_for_language` 按语言与平台推导却从未落盘，于是同一个 Job
+    在 macOS 与 Linux 上 `style_options` 逐字节相同、真实字体却不同，烧录腿的复用判定
+    把两种环境混同了。
+    """
+
+    @staticmethod
+    def _cues() -> list[Cue]:
+        return [
+            Cue(
+                1,
+                0,
+                1000,
+                "Hello",
+                target_text="你好",
+                source_language="en",
+                target_language="zh-CN",
+            )
+        ]
+
+    def test_platform_changes_the_resolved_fonts(self) -> None:
+        """E2 要防的就是这个：同一份输入，换平台就该换字体。"""
+
+        darwin = resolved_style_binding(self._cues(), video_height=1080, platform_name="darwin")
+        linux = resolved_style_binding(self._cues(), video_height=1080, platform_name="linux")
+        self.assertEqual(darwin["target_font"], "Hiragino Sans GB")
+        self.assertEqual(linux["target_font"], "Noto Sans CJK SC")
+        self.assertNotEqual(darwin, linux)
+
+    def test_explicit_options_win_over_platform_defaults(self) -> None:
+        """用户显式指定时不走 font_for_language，两个平台结果相同。"""
+
+        options = AssStyleOptions(target_font="My Sans", source_font="My Serif", target_size=30)
+        darwin = resolved_style_binding(
+            self._cues(), video_height=1080, options=options, platform_name="darwin"
+        )
+        linux = resolved_style_binding(
+            self._cues(), video_height=1080, options=options, platform_name="linux"
+        )
+        self.assertEqual(darwin, linux)
+        self.assertEqual(darwin["target_font"], "My Sans")
+        self.assertEqual(darwin["source_font"], "My Serif")
+        self.assertEqual(darwin["target_size"], 30)
+
+    def test_missing_languages_degrade_deterministically(self) -> None:
+        """cue 没有语言字段时取值仍确定（走 font_for_language 的兜底分支）。"""
+
+        bare = [Cue(1, 0, 1000, "Hello", target_text="你好")]
+        first = resolved_style_binding(bare, video_height=1080, platform_name="linux")
+        second = resolved_style_binding(bare, video_height=1080, platform_name="linux")
+        self.assertEqual(first, second)
+        self.assertEqual(first["target_font"], "DejaVu Sans")
+
+    def test_sizes_follow_the_derivation_not_just_the_frame(self) -> None:
+        """字号记的是推导**输出**：画幅相同也要跟着 default_target_size 的结果走。"""
+
+        binding = resolved_style_binding(self._cues(), video_height=1080, platform_name="linux")
+        self.assertEqual(binding["target_size"], default_target_size(1080))
+        self.assertEqual(binding["source_size"], max(8, round(binding["target_size"] / 1.7)))
+
+    def test_styled_subtitles_really_uses_the_shared_binding(self) -> None:
+        """行为级同源钉子：ASS 样式里的字体字号必须等于 binding 的输出。
+
+        光靠「qa 与 render import 同一个函数」钉不住 `_styled_subtitles` 内部是否真的
+        走了它——内部完全可以自己再推一遍。这条比对真实产出的 SSAFile，漂移即红。
+        """
+
+        cues = self._cues()
+        binding = resolved_style_binding(cues, video_height=1080)
+        subtitles = _styled_subtitles(cues, video_width=1920, video_height=1080)
+        self.assertEqual(subtitles.styles["Target"].fontname, binding["target_font"])
+        self.assertEqual(subtitles.styles["Source"].fontname, binding["source_font"])
+        self.assertEqual(subtitles.styles["Target"].fontsize, binding["target_size"])
+        self.assertEqual(subtitles.styles["Source"].fontsize, binding["source_size"])
+
+    def test_qa_and_render_share_one_implementation(self) -> None:
+        """对象身份钉子：qa 侧不得自己复制一份推导。"""
+
+        self.assertIs(xvt.qa.resolved_style_binding, xvt.render.resolved_style_binding)
 
 
 class RenderTest(unittest.TestCase):

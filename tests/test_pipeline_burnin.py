@@ -15,7 +15,7 @@ from xvt.models import Artifact, Cue, StageName, StageStatus
 from xvt.pipeline import burn_translated_job, preview_translated_job
 from xvt.pipeline.burnin import _check_render_layout
 from xvt.recovery import file_checksum
-from xvt.render import AssStyleOptions, FontGlyphError
+from xvt.render import AssStyleOptions, FontGlyphError, resolved_style_binding
 from xvt.segment import target_wrap_binding
 
 _QA_KIND = "translated_subtitle_qa"
@@ -819,11 +819,17 @@ class BurnPreviewPipelineTest(unittest.TestCase):
         status: str = "pass",
         issues: list[dict] | None = None,
         wrap: dict | None | object = ...,
+        resolved_style: dict | None | object = ...,
     ) -> tuple[Path, Path]:
         """补上「渲染腿已经跑完」的 Job 状态：带 layout 块的 QA 报告 + 已登记的 ASS。
 
         `layout` 的字段名与 `qa.check_subtitles` 实际落盘的一致，烧录腿的复用判定
-        读的就是这一块。``wrap=None`` 模拟换行引入前、没有 ``wrap`` 键的旧报告。
+        读的就是这一块。``wrap=None`` 模拟换行引入前、没有 ``wrap`` 键的旧报告，
+        ``resolved_style=None`` 同理模拟字体绑定引入前的旧报告。
+
+        ``resolved_style`` 默认由 ``render.resolved_style_binding`` 真算，用的是
+        ``_burn_ready_job`` 那条 en → zh-CN 译文 cue：手写字体名会让这份 helper 在
+        macOS 与 Linux 上各对一半（CI 两个平台都跑），真算才跟着本机平台走。
         """
 
         resolved = options or AssStyleOptions()
@@ -836,6 +842,24 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             "style_options": asdict(resolved),
             "measurement": measurement,
         }
+        if resolved_style is ...:
+            layout["resolved_style"] = resolved_style_binding(
+                [
+                    Cue(
+                        1,
+                        0,
+                        1000,
+                        "Hello",
+                        target_text="你好",
+                        source_language="en",
+                        target_language="zh-CN",
+                    )
+                ],
+                video_height=video_height,
+                options=resolved,
+            )
+        elif resolved_style is not None:
+            layout["resolved_style"] = resolved_style
         if wrap is ...:
             layout["wrap"] = target_wrap_binding()
         elif wrap is not None:
@@ -895,6 +919,72 @@ class BurnPreviewPipelineTest(unittest.TestCase):
             persisted = load_job(job_file)
             self.assertIs(persisted.stages[StageName.BURN].status, StageStatus.SUCCEEDED)
             self.assertIs(persisted.stages[StageName.MEDIA_QA].status, StageStatus.SUCCEEDED)
+
+    def test_workflow_burn_refuses_to_reuse_a_layout_measured_with_other_fonts(self) -> None:
+        """E2：报告测量时用的是别的平台的字体，照旧现场重测（fail closed）。
+
+        手工塞一份异平台的 `resolved_style` 而不是 mock `sys.platform`——要防的场景
+        本就是「报告在另一台机器上产出」，直接构造那份报告比改本机全局状态更贴近真实，
+        也不会在 CI 的 ubuntu / macos 两个矩阵上各对一半。
+        """
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            local = resolved_style_binding(
+                [
+                    Cue(
+                        1,
+                        0,
+                        1000,
+                        "Hello",
+                        target_text="你好",
+                        source_language="en",
+                        target_language="zh-CN",
+                    )
+                ],
+                video_height=1080,
+            )
+            foreign = dict(local)
+            foreign["target_font"] = "Some Other Sans"
+            self.assertNotEqual(foreign, local)
+            self._register_rendered_layout(job, artifacts, resolved_style=foreign)
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
+
+    def test_workflow_burn_refuses_to_reuse_a_layout_without_resolved_style(self) -> None:
+        """字体绑定引入前的旧报告没有这个键，一律重测重渲（与 wrap 引入时同口径）。"""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "xvt.qa.measure_bilingual_line_widths",
+                return_value={(1, "target"): (40, 492), (1, "source"): (27, 492)},
+            ) as measure,
+        ):
+            root = Path(directory)
+            media = root / "input.mp4"
+            media.write_bytes(b"video")
+            job, artifacts = self._burn_ready_job(root, media)
+            self._register_rendered_layout(job, artifacts, resolved_style=None)
+            job_file = save_job(job)
+
+            result = self._run_burn(job_file, artifacts, media, persist_workflow_qa=True)
+
+            self.assertTrue(result.exists())
+            measure.assert_called_once()
 
     def test_workflow_burn_refuses_to_reuse_a_layout_from_another_frame_size(self) -> None:
         """复用必须绑定画幅：报告测的是别的画幅时照旧现场重测（fail closed）。"""
