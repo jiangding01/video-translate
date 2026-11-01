@@ -100,7 +100,7 @@ python3 -m venv /tmp/cjk-eval && /tmp/cjk-eval/bin/pip install -q budoux jieba
 
 ### 5.1 卡点 1（CJK 专名抽取）不做的后果
 
-- CJK 源的 `build-translation-context` 继续降级：无 `proper_name`/`capitalized_run` 候选，但 `shaped_term`（`MX-5`、ASCII 缩写、代码标识符）照常产出，`extractor_degraded` 如实记录，退出码 0。**降级是诚实且部分有产出的，不是全损。** [代码]
+- CJK 源的 `build-translation-context` 继续降级：无 `proper_name`/`capitalized_run` 候选，但 `shaped_term`（`MX-5`、ASCII 缩写、代码标识符）照常产出，`extractor_degraded` 如实记录，退出码 0。**降级是诚实且部分有产出的，不是全损。** [代码] （**2026-11-01 实测补注**：拿一份真实日语素材跑过——51 cue、5 条含片假名、唯一的 ASCII 是 `2030年` 里的数字，候选产出为 **0**。所以「降级仍有产出」只在源文含形态可辨的 ASCII 串时成立，纯 CJK 素材实测就是零。）
 - 影响面：**今天为零**。`output/` 下全部历史 Job 均为英文源（[实测-sub] 遍历 SRT 核实），CJK 源降级路径从未被真实任务走到。HANDOFF 的 n=2 实测也全是英文素材。
 - 严重度：**潜在而非现实**。真实后果出现的前提是"用户开始跑日文/中文源视频且需要 glossary 候选"——届时再决策，损失的只是这段时间里一个没人用的功能。
 
