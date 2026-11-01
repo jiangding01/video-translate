@@ -13,7 +13,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 1. 时间轴只由 ASR 或用户提供的源字幕确定。翻译阶段不得修改 cue ID、起止时间、顺序或数量。
 2. 用户提供源字幕时，默认保留原时间轴。只有用户明确要求，才运行 Whisper 对齐。
 3. 翻译模型只负责文本。媒体获取、分段、时间轴、QA、渲染和烧录必须由确定性代码完成。
-4. 字幕 QA 或媒体 QA 失败时，任务必须失败或等待人工处理，不能继续烧录或宣告完成。已知画幅的译文行宽以实际 ASS 字体、字号和描边测量为准；测量异常回退保守规则，确认绑定布局，不跨画幅或字体复用。同一条 `run` / `continue` 里烧录腿复用渲染腿已测的那份布局 QA 时，必须绑定该报告 `layout` 块所记的画幅与 ASS 样式（见 [恢复与回填契约](docs/RECOVERY.md#烧录腿复用渲染腿的布局-qa-与-ass)），且放行判定仍排在复用判定之前——复用只省掉结论必然相同的重算，不得省掉任何一次判定。人工译文 `apply --check` 必须只读，正式 apply 在写入前重复预检。
+4. 字幕 QA 或媒体 QA 失败时，任务必须失败或等待人工处理，不能继续烧录或宣告完成。已知画幅的译文行宽以实际 ASS 字体、字号和描边测量为准；测量异常回退保守规则，确认绑定布局，不跨画幅或字体复用——**「字体」指推导之后实际生效的那个**（`layout["resolved_style"]`），不是 `style_options` 里用户的显式覆盖：后者在未指定字体时跨平台逐字节相同，单绑它挡不住「一台机器测量、另一台复用」。同一条 `run` / `continue` 里烧录腿复用渲染腿已测的那份布局 QA 时，必须绑定该报告 `layout` 块所记的画幅与 ASS 样式（见 [恢复与回填契约](docs/RECOVERY.md#烧录腿复用渲染腿的布局-qa-与-ass)），且放行判定仍排在复用判定之前——复用只省掉结论必然相同的重算，不得省掉任何一次判定。人工译文 `apply --check` 必须只读，正式 apply 在写入前重复预检。
 5. API Key 只从环境变量读取。Cookie 内容、代理凭据、签名 URL、本地媒体和生成产物不得提交到仓库，也不得原样写入事件。翻译提供方的 Base URL 与模型可以固化进 Job，但只在首个批次成功后写回，且 `resolve_provider` 在确认一条 Base URL 真的会被用来发请求时拒绝带用户名密码或 query 串的地址（`InvalidURL` 消息不带 scheme，脱敏规则够不着它；配置不齐全时 `auto` 仍按契约降级，那条 Base URL 既不发请求也不落盘）；API Key 永不落盘。错误文本的脱敏在**边界**集中做，不靠调用方自觉：事件走 `create_event`，`job.json` 走 `pipeline.common.set_stage`（它在写 `record.error` 之前统一调用 `redact_text`，两条出口给出同一份文本）。新增持久化出口时要么接入既有边界，要么在新边界上补一道，不要在调用点逐处补 `redact_text`。
 6. 外部命令必须以参数数组执行，不拼接 shell 字符串。`src/xvt/` 下只有 `process.py` 可以 import `subprocess`，全仓任何位置都不得出现 `shell=True`、`os.system` 或 `os.popen`。这条由 `tests/test_subprocess_boundary.py` 的 AST 守卫强制，不再只靠自觉。
 7. Job、batch manifest 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。烧录成品重新关联只能由 checksum 有效的 v2 proof 授权，proof 必须绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum；legacy fingerprint 不得绕过重烧。
@@ -49,7 +49,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/qa.py` | 时间轴、文本完整性和显示宽度检查 |
 | `src/xvt/candidate_qa.py` | 候选译文 QA 判定，以及 QA message 中行宽/上限的**唯一**解析实现（`overflow_limits`，零依赖叶子，供 recovery / pipeline.revision 共用）；其它模块一律复用它，不得就地重造这条正则 |
 | `src/xvt/source_selection.py` | 源字幕候选的确定性 QA 与选择决策（`SourceStrategy` / `SourceCandidateKind` / `SourceSelectionAction`）。`plan_source_selection` 的 `platform_subtitles_requested` **只应在远程 Job 上传 `False`**——本地文件输入的 Job 永远没请求过平台字幕，照此传会把它误记成 `platform_subtitles_not_requested`，等于用一个谎话换另一个；调用方以「有没有 `remote_info` artifact」为准（`transcription.shared.platform_manual_subtitle_languages` 返回 `None` 即本地 Job） |
-| `src/xvt/render.py` | 双语 ASS 样式和平台字体选择 |
+| `src/xvt/render.py` | 双语 ASS 样式和平台字体选择；`resolved_style_binding` 是「实际生效的字体与字号」的**唯一**推导（`font_for_language` / `default_target_size` 之后的输出），`_styled_subtitles` 与 `qa.check_subtitles` 的 `layout["resolved_style"]` **共用这一份**——两边各推一遍会让报告记的不是测量时真正用的样式，而它看着像绑定了，比不记更糟；对象身份与行为两层钉子在 `tests/test_render.py` |
 | `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
 | `src/xvt/paths.py` | **用户可指定路径的写盘出口**共用的绝对路径解析与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact）。烧录 `--output`、预览 `--output` 与 `build-translation-context --export-glossary` 都走这一道；**新增这类出口必须接入**，否则一条手滑的路径就能盖掉已登记 artifact 并让 Job 的 checksum 失效（`--glossary` 一类只读输入不在其内） |
 | `src/xvt/events.py` | JSONL 事件和通用 URL 脱敏 |

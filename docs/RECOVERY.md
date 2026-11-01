@@ -398,8 +398,11 @@ legacy proof、媒体 QA、proof 或 fingerprint 无效的 Job 都不具备重�
 - 报告 status 是 `pass` 或 `warning`。**已确认的 `needs_review` 刻意不复用**：那条路径的放行来自存档确认，`complete_qa_stage` 要为它发一条 `subtitle_review_acknowledged`（「这次放行依据哪条确认」的唯一事件证据），而布局确认正是约束 4 点名要绑定的东西，省下的一次测量不值这笔；
 - `translated_subtitle_qa` 与 `bilingual_ass` 都 checksum 有效（两者都在 `downstream_of(TRANSLATED_CUES)` 的失效闭包里，译文一变登记当场被摘掉，复用不到旧产物）；
 - 报告**自己**的 `layout` 块里 `measurement == "measured"`、`video_width` / `video_height` / `style_options` 与本次烧录真正要用的画幅和 `AssStyleOptions` 完全一致——画幅与字体的绑定取自那份报告被测量时的真实输入，不是「当前配置碰巧长这样」的推断，手改 `job.json` 的字体也绕不过去；
+- 报告 `layout.resolved_style` 必须等于当前 `render.resolved_style_binding()` 的输出（实际生效的字体与字号）。`style_options` 只记用户的**显式覆盖**，未指定字体时它在两台机器上逐字节相同而真实字体一个是 Hiragino 一个是 Noto，所以单绑它挡不住「macOS 测量、Linux 复用」；这一项绑的是 `font_for_language` 与 `default_target_size` 推导**之后**的值。qa 报告与 ASS 渲染共用同一份推导（`render.resolved_style_binding`），因此报告记下的就是那次测量真正用的样式。引入前的旧报告没有这个键，一律不复用（fail closed）。**残留缺口**：两边都显式指定同名字体时这一项相等、照常复用，而字体文件与版本仍可能不同——那属于绑定字体**文件**身份的范围，当前不覆盖。
 - 报告 `layout.wrap` 必须等于当前绑定的 `{version: 2, max_lines: 2}`（译文超宽的确定性换行规则；`version` 2 自 2026-10-24 把片假名连续段并成一个 token 起，1 是换行刚落地时的按字切）。旧报告没有该键一律不复用、照旧重测重渲：旧 QA 量的是单行，新代码烧出去的可能是两行，复用就是量的与烧的不一致；
 - 本次烧录媒体的时长已知，且全部 cue 都落在时长内。媒体时长没有记进报告，所以这一项不推断而**就地重判**：时长在整份报告里只影响 `outside_media`（error 级）一条，按本次媒体重算一次即可，时长未知（0）时拒绝复用。
+
+`layout` 块还有**第二个**整块比较的消费点：`pipeline/review.py` 的 `subtitle_review_acknowledgment` 绑定（`record.get("layout") != report.get("layout")`）。因此给 `layout` 加字段会让**在途已确认的 `needs_review`** 失效一次：报告被重算后 layout 与 checksum 都变，用户要对同样的问题重新确认。`resolved_style` 引入（2026-11-01）与 `wrap` v2 引入都走过这一遭，属预期而非回归。
 
 术语表不参与比对：两腿都调 `required_glossary_terms(job)`，同一个 Job 必然同值，且该判定与画幅、字体、媒体一概无关。
 

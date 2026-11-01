@@ -34,7 +34,7 @@ from xvt.pipeline.common import (
 from xvt.pipeline.review import complete_qa_stage, review_gate_satisfied
 from xvt.qa import check_subtitles
 from xvt.recovery import atomic_translated_qa_rebuild_command, valid_artifact_path
-from xvt.render import AssStyleOptions, save_bilingual_ass
+from xvt.render import AssStyleOptions, resolved_style_binding, save_bilingual_ass
 from xvt.segment import target_wrap_binding
 from xvt.workflow_config import get_workflow_config
 
@@ -168,6 +168,10 @@ def _reusable_rendered_layout(
     - **画幅与 ASS 样式**：取自报告**自己**的 `layout` 块（`video_width` /
       `video_height` / `style_options` 自 Q4 起就落盘），因此是那份报告被测量时的
       真实输入，不是「现在的配置碰巧长这样」的推断。手改 `job.json` 字体也绕不过去。
+    - **实际字体与字号**：报告 `layout["resolved_style"]` 必须等于当前
+      `render.resolved_style_binding()`。`style_options` 只记用户的显式覆盖，未指定时
+      两台机器上它逐字节相同而真实字体一个是 Hiragino 一个是 Noto；这一项绑的是推导
+      之后的输出，跨机换字体即拒绝复用。引入前的旧报告没有这个键，同样不复用。
     - **译文换行算法**：报告 `layout["wrap"]` 必须等于当前 `segment.target_wrap_binding()`。
       换行引入前的旧报告没有这个键，它量的是单行译文，而现在烧出去的是两行，一律不复用
       （fail closed），烧录腿照旧重测重渲。
@@ -216,6 +220,13 @@ def _reusable_rendered_layout(
     if layout.get("style_options") != asdict(options):
         return None
     if layout.get("wrap") != target_wrap_binding():
+        return None
+    # 实际生效的字体与字号：style_options 只记用户的显式覆盖，未指定时它在 macOS 与
+    # Linux 上逐字节相同而真实字体是 Hiragino 与 Noto，行宽并不一样。旧报告没有这个键，
+    # 取值 None 自然不等，于是一律重测重渲——fail closed，与 wrap 引入时同口径。
+    if layout.get("resolved_style") != resolved_style_binding(
+        translated, video_height=media_info.height, options=options
+    ):
         return None
     if not media_info.duration_ms:
         return None
