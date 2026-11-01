@@ -36,7 +36,9 @@ _GLOSSARY_SKELETON_NOTE = (
     "the source spelling, and replace the placeholder target with the wording you want. "
     "Targets are pre-filled with the source text because proper names most often stay as-is; "
     "an unreviewed entry forces that literal text into the translation and is checked by "
-    "deterministic QA."
+    "deterministic QA. Entries carrying `_covered_by` are parts of a multi-word proper name "
+    "(the listed phrases): keep the part only if it is a term on its own, otherwise delete it "
+    "and add the whole phrase as its own entry with the wording you want."
 )
 
 
@@ -47,6 +49,9 @@ class TranslationContextResult:
     degraded_reason: str | None
     glossary_path: Path | None
     glossary_term_count: int
+    # 骨架里属于某个多词专名的条目：``(词, 覆盖它的第一个短语)``，供 CLI 当场提示。
+    # 不是 artifact 的一部分——骨架是用户指定路径的文件，产物结构一个字节未变。
+    covered_skeleton_terms: tuple[tuple[str, str], ...] = ()
 
 
 def build_translation_context(
@@ -134,6 +139,11 @@ def build_translation_context(
         terms = glossary_skeleton_terms(report)
         write_json(glossary_target, {"_note": _GLOSSARY_SKELETON_NOTE, "terms": terms})
 
+    covered = tuple(
+        (str(term["source"]), str(term["_covered_by"][0]))
+        for term in terms
+        if term.get("_covered_by")
+    )
     degraded = report.get("extractor_degraded")
     return TranslationContextResult(
         report_path=report_path,
@@ -141,4 +151,5 @@ def build_translation_context(
         degraded_reason=degraded["reason"] if isinstance(degraded, dict) else None,
         glossary_path=glossary_target,
         glossary_term_count=len(terms),
+        covered_skeleton_terms=covered,
     )

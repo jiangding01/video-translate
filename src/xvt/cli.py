@@ -2109,6 +2109,17 @@ def _cmd_build_translation_context(arguments: argparse.Namespace) -> int:
     if result.glossary_path is not None:
         _print_safe(f"术语表骨架: {result.glossary_path}（{result.glossary_term_count} 条）")
         _print_safe("请逐条审核后再用 --glossary 传回；不需要在译文里保持原文的条目请删除。")
+        if result.covered_skeleton_terms:
+            # 这些条目是多词专名拆出来的部分。工具不替用户判断该留哪个（形态上
+            # `Remote` 与 `Claude` 没有可检测的差别），但要把关系摆到眼前，否则它
+            # 只存在于骨架 JSON 的 _covered_by 里等人翻。
+            examples = "、".join(
+                f"{source} ⊂ {phrase}" for source, phrase in result.covered_skeleton_terms[:2]
+            )
+            _print_safe(
+                f"其中 {len(result.covered_skeleton_terms)} 条是多词专名的组成部分"
+                f"（如 {examples}）；见 _covered_by，按需删除或改成整词条目。"
+            )
     return 0
 
 

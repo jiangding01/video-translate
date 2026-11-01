@@ -45,13 +45,13 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 **落点**：把 `font_for_language` 的推导结果（实际家族名）与实际字号一并写进 `layout`，纳入复用绑定。这是 BaoCut 调研 B3（绑定字体**文件**身份）的更基础一层，应排在 B3 之前。改动会使旧报告的 `layout` 块结构变化，按既有口径同步升版并写明在途 Job 的布局 QA 不复用。
 
-### E3 Q7a 多词专名被拆成碎片进 glossary 骨架 — ✅ 已核验，`待修`
+### E3 Q7a 多词专名被拆成碎片进 glossary 骨架 — ✅ 已核验，**已修（本轮）**
 
 本次候选包里 `Remote Control` 是完整功能名，但 `Remote` 与 `Control` 各自也满足规则 D（只出现大写形态、至少一次非句首），于是三条都成为候选；而 `glossary_skeleton_terms` 排除 `capitalized_run`、只导单词候选，结果**骨架里有两个孤立碎片却没有整体**。带恒等映射传回 `--glossary`，就是要求译文里出现孤立的 `Remote` 和 `Control`。
 
 回看 2026-10-31 的 mazda 样本，`Apple CarPlay` / `Android Auto` 是同一结构——只是 `Apple`、`CarPlay`、`Android`、`Auto` 四个组成部分恰好各自也是合理专名，把问题掩盖了。所以这不是本素材特有。
 
-**落点**：被某个 `capitalized_run` 完整覆盖的单词候选，要么不进骨架，要么降 confidence；或者反过来让多词候选有条件进骨架。两种取舍都要重估「多词恒等映射是强主张」那条理由（见 `translation_context.py` 模块 docstring）。
+**已修**：原落点写的「被覆盖就不进骨架」在设计 review 阶段被真实样本否掉——同一份语料里 `Claude` 同时被 `Claude Code` 与 `Claude GitHub` 覆盖，却出现 18 次、命中平台标题，排除它等于把最核心的专名丢出骨架；mazda 样本的 `Apple` / `CarPlay` / `Android` / `Auto` 同理，且它们只在多词串中出现过，连「是否独立出现」都区分不了。形态上 `Remote`（该删）与 `Claude`（必留）没有可确定性检测的差别，差别在语义，而语义是 Q7a 不做的事。最终改为**标注而非排除**：被覆盖的条目照进骨架并带 `_covered_by`（覆盖它的短语，字母序），CLI 当场列出几条，判断交给用户。覆盖关系用全部多词候选、不按 confidence 过滤（`Claude Code` 是 medium，过滤会漏掉用户最关心的那条）。多词本身仍不进骨架，既有理由不变。
 
 ### E4 `xvt run --help` 全部参数零帮助文案 — ✅ 已核验，`待修`
 
