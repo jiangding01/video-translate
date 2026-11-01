@@ -57,6 +57,7 @@ from xvt.pipeline.revision import (
     ensure_translation_review_input,
     preflight_translation_review_fixes,
     prepare_source_review,
+    semantic_review_issue_summaries,
     source_review_input_path,
     source_review_stem,
     source_review_supported,
@@ -175,6 +176,7 @@ __all__ = [
     "source_review_stem",
     "source_review_supported",
     "source_selection_matches",
+    "semantic_review_issue_summaries",
     "source_suspect_cue_ids",
     "agent_semantic_review_waiting",
 ]

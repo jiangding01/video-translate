@@ -63,11 +63,11 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 **已修**：`cli._ARG_HELP` 作为 55 条文案的唯一事实来源，复用到 180 个位置；三条守卫测试（每个参数都有非空 help、同名参数 help 一致、表里没有够不着的键）把它钉住。实测规模：193 个参数里 180 个缺 help（93%），31 个子命令全部中招，但去重后只有 55 个唯一参数名。上线守卫时**顺带查出两个此前不知道的既有分歧**——`--check` 与 `--fail-on-waiting` 在 `apply` 那组变体上多了约束（「不能与 --continue 同用」「仅在带 --continue 时生效」），一条文案覆盖不了，已连同 `--cue`（三处可重复 vs preview 一处单值）登记进 `HELP_DIVERGENCE_ALLOWED` 并写明理由。
 
-### E5 终态把最有价值的信息藏进 JSON — ✅ 已核验，`待修`
+### E5 终态把最有价值的信息藏进 JSON — ✅ 已核验，**已修（本轮）**
 
 语义校对的三条 issue message 质量很高（定位到 cue、给出上下文推理、把译文「查看结果」当作反推源文的证据），但 CLI 终态只打印「语义校对发现源文可能有误」加若干长路径。用户必须自己打开 `translation-semantic-qa.json` 才知道是哪几句、错在哪。
 
-**落点**：`awaiting_input` 终态按 issue 摘要若干行（cue 区间 + 截断后的 message），人类可读模式打印，`--events-jsonl` 模式不变。
+**已修**：`revision.semantic_review_issue_summaries` 把既有解析里被丢掉的 message 捡回来（与 `source_suspect_cue_ids` 共用 `_semantic_review_issues` 这一段，不重复读盘）；`cli` 在等待终态与 `status` 两处人读输出里按 `cue 区间: message` 摘要，单条截到 120 字符、最多 5 条、超出补一行。**刻意不进 `RecoveryPlan`**：它是 JSONL 事件协议的一部分（EVENTS.md），而摘要是截断过的展示文本，机器消费方手里已有 `report_paths` 指向完整报告，读 JSON 比读摘要准确。
 
 ## 可优化
 
