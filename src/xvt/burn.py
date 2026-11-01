@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from xvt.events import EventSink, EventType, create_event
 from xvt.process import CommandError, CommandResult, run_command
@@ -101,6 +102,42 @@ def build_burn_command(
     return command
 
 
+# ffmpeg 的 `-progress` 块在「这一帧还没输出完」时把 out_time / speed / bitrate 全写成
+# 字面量 `N/A`（实测：3840x2160 + `-preset placebo` 的首帧必现）。这两个 helper 是它的
+# 唯一归一处——归一放在**事件边界**，不放渲染层：事件是协议，让它带着 `"N/A"` 出门，
+# 每个消费方都得自己认一遍这个字面量。
+_FFMPEG_PROGRESS_UNAVAILABLE = "N/A"
+
+
+def _progress_field(value: str | None) -> str | None:
+    """ffmpeg 进度字段的展示值；`N/A` 与空串都归一成 ``None``。"""
+
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped == _FFMPEG_PROGRESS_UNAVAILABLE:
+        return None
+    return stripped
+
+
+def _parse_out_time_ms(progress_state: dict[str, str]) -> int | None:
+    """从进度块解析已输出时长（毫秒）；解析不出来返回 ``None`` 而不是 0。
+
+    两个键都是**微秒**——`out_time_ms` 这个名字是 ffmpeg 的历史遗留，它装的也是微秒，
+    所以两者同样 ``// 1000``。
+    """
+
+    for key in ("out_time_us", "out_time_ms"):
+        raw = _progress_field(progress_state.get(key))
+        if raw is None:
+            continue
+        try:
+            return int(raw) // 1000
+        except ValueError:
+            continue
+    return None
+
+
 def burn_subtitles(
     media: str | Path,
     subtitles: str | Path,
@@ -132,39 +169,55 @@ def burn_subtitles(
     media_path = media_path.resolve()
     subtitle_path = subtitle_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    runner_kwargs = {}
-    if event_sink:
+
+    def progress_kwargs() -> dict[str, Any]:
+        """每次 ``runner`` 调用都新建一份进度回调与它的状态。
+
+        **不能跨调用共用**：硬件编码失败会回退软件编码再跑一次（见下面两个 ``runner``），
+        而「N/A 块沿用上一个已知 out_time」要的是*本次*编码的进度。共用一份状态时，回退
+        那次开头的 N/A 块会沿用到硬件那次的 99%，于是显示 99% 而实际从零重编——比原来
+        显示 0% 更能骗人。
+        """
+
+        if event_sink is None:
+            return {}
         progress_state: dict[str, str] = {}
+        last_out_time_ms: int | None = None
 
         def handle_line(_stream: str, line: str) -> None:
+            nonlocal last_out_time_ms
             key, separator, value = line.partition("=")
             if not separator:
                 return
             progress_state[key] = value
             if key != "progress":
                 return
-            try:
-                out_time_ms = (
-                    int(progress_state.get("out_time_us") or progress_state.get("out_time_ms") or 0)
-                    // 1000
-                )
-            except ValueError:
-                out_time_ms = 0
+            parsed = _parse_out_time_ms(progress_state)
+            if parsed is not None:
+                last_out_time_ms = parsed
+            # 解析不出来时沿用本次编码上一个已知值，一次都没拿到过就发 None。
+            # **绝不兜底成 0**：ffmpeg 每 0.5 秒定时发一块，这一帧还没输出完的那块里
+            # out_time_us / out_time_ms / speed / bitrate 全是字面量 `N/A`（2160p +
+            # libass 的首帧实测会命中），兜底成 0 就让进度条当场倒退回 0%。
+            out_time_ms = last_out_time_ms
             event_sink(
                 create_event(
                     progress_event_type,
                     out_time_ms=out_time_ms,
                     duration_ms=duration_ms,
                     percent=(
-                        round(min(out_time_ms / duration_ms * 100, 100), 2) if duration_ms else None
+                        round(min(out_time_ms / duration_ms * 100, 100), 2)
+                        if duration_ms and out_time_ms is not None
+                        else None
                     ),
-                    frame=progress_state.get("frame"),
-                    speed=progress_state.get("speed"),
+                    frame=_progress_field(progress_state.get("frame")),
+                    speed=_progress_field(progress_state.get("speed")),
                     state=value,
                 )
             )
 
-        runner_kwargs["line_callback"] = handle_line
+        return {"line_callback": handle_line}
+
     try:
         runner(
             build_burn_command(
@@ -177,7 +230,7 @@ def burn_subtitles(
                 start_ms=start_ms,
                 clip_duration_ms=clip_duration_ms,
             ),
-            **runner_kwargs,
+            **progress_kwargs(),
         )
     except CommandError as error:
         if not hardware_encoding or not _is_hardware_encoder_error(error):
@@ -193,6 +246,6 @@ def burn_subtitles(
                 start_ms=start_ms,
                 clip_duration_ms=clip_duration_ms,
             ),
-            **runner_kwargs,
+            **progress_kwargs(),
         )
     return output_path

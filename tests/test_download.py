@@ -316,6 +316,99 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(events[0].type, "download_progress")
         self.assertEqual(events[0].data["percent"], 50.0)
 
+    def _download_with_progress(self, payloads):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded = root / "source.mp4"
+
+            def runner(args, **kwargs):
+                if "--dump-single-json" in args:
+                    # 容量预检的探测：本用例只验进度事件，返回空元数据让预检跳过。
+                    return CommandResult(tuple(args), 0, "{}", "")
+                downloaded.write_bytes(b"video")
+                for payload in payloads:
+                    kwargs["line_callback"]("stderr", f"XVT_PROGRESS:{json.dumps(payload)}")
+                return CommandResult(tuple(args), 0, f"{downloaded}\n", "")
+
+            download_remote_media(
+                "https://youtu.be/abc",
+                root,
+                event_sink=events.append,
+                runner=runner,
+            )
+        return [event.data for event in events if event.type == "download_progress"]
+
+    def test_download_withholds_speed_and_eta_until_the_stream_warms_up(self) -> None:
+        """yt-dlp 的速度与 ETA 是**当前流**的累计平均，开头那几百毫秒没有意义。
+
+        `downloader/common.py` 的 `calc_speed(start, now, bytes) = bytes / (now - start)` 以
+        该流的 `start_time` 为起点，所以每条流刚开始时平均值是个极小的数——实测表现为速度
+        读出 15 KB/s、ETA 报「剩余 18:52」而几秒后就结束了。证据不足时一个数都不报，比报
+        一个错的好。
+        """
+
+        cold, warm = self._download_with_progress(
+            [
+                {
+                    "downloaded_bytes": 20_000,
+                    "total_bytes": 100_000_000,
+                    "elapsed": 0.4,
+                    "speed": 15_000.0,
+                    "eta": 1132,
+                    "filename": "source.f399.mp4",
+                },
+                {
+                    "downloaded_bytes": 50_000_000,
+                    "total_bytes": 100_000_000,
+                    "elapsed": 27.0,
+                    "speed": 1_850_000.0,
+                    "eta": 27,
+                    "filename": "source.f399.mp4",
+                },
+            ]
+        )
+
+        self.assertIsNone(cold["speed"], "预热期不得报速度")
+        self.assertIsNone(cold["eta_seconds"], "预热期不得报 ETA")
+        self.assertEqual(cold["percent"], 0.02, "百分比照旧报，它不依赖速率")
+        self.assertEqual(warm["speed"], 1_850_000.0)
+        self.assertEqual(warm["eta_seconds"], 27)
+
+    def test_download_numbers_each_stream_so_the_reset_is_not_a_retry(self) -> None:
+        """`bv*+ba` 是两条流，第二条从 0% 重新走一遍不是失败重试。
+
+        不标出流序号的话，用户看到的就是「100% 之后从 1% 重来」。`filename` 在 HTTP 与
+        分片两条下载腿都有，用它认流。
+        """
+
+        events = self._download_with_progress(
+            [
+                {"downloaded_bytes": 10, "total_bytes": 10, "filename": "source.f399.mp4"},
+                {"downloaded_bytes": 1, "total_bytes": 10, "filename": "source.f251.webm"},
+                {"downloaded_bytes": 10, "total_bytes": 10, "filename": "source.f251.webm"},
+            ]
+        )
+
+        self.assertEqual([item["stream_index"] for item in events], [1, 2, 2])
+        self.assertEqual([item["percent"] for item in events], [100.0, 10.0, 100.0])
+
+    def test_download_does_not_claim_zero_percent_from_an_unparsable_byte_count(self) -> None:
+        """字节数解析不出来是「不知道下了多少」，不是「下了 0 字节」。
+
+        带着 0 去除 total 会报出 0%，和烧录侧刚修掉的那个「进度倒退回 0%」是同一类兜底：
+        用最差的那个值填解析失败。`downloaded_bytes` 本身照既有契约仍报 0（协议里是
+        非空 int），但不再拿它推百分比。
+        """
+
+        (event,) = self._download_with_progress(
+            [{"downloaded_bytes": "NA", "total_bytes": 100_000, "elapsed": 9.0, "speed": 1000.0}]
+        )
+
+        self.assertIsNone(event["percent"], "解析失败不得报成 0%")
+        self.assertIsNone(event["speed"], "字节数未知时速度也不可信")
+        self.assertEqual(event["total_bytes"], 100_000)
+
     def test_download_ignores_unknown_progress_totals(self) -> None:
         events = []
         with tempfile.TemporaryDirectory() as directory:
