@@ -53,13 +53,15 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 **已修**：原落点写的「被覆盖就不进骨架」在设计 review 阶段被真实样本否掉——同一份语料里 `Claude` 同时被 `Claude Code` 与 `Claude GitHub` 覆盖，却出现 18 次、命中平台标题，排除它等于把最核心的专名丢出骨架；mazda 样本的 `Apple` / `CarPlay` / `Android` / `Auto` 同理，且它们只在多词串中出现过，连「是否独立出现」都区分不了。形态上 `Remote`（该删）与 `Claude`（必留）没有可确定性检测的差别，差别在语义，而语义是 Q7a 不做的事。最终改为**标注而非排除**：被覆盖的条目照进骨架并带 `_covered_by`（覆盖它的短语，字母序），CLI 当场列出几条，判断交给用户。覆盖关系用全部多词候选、不按 confidence 过滤（`Claude Code` 是 medium，过滤会漏掉用户最关心的那条）。多词本身仍不进骨架，既有理由不变。
 
-### E4 `xvt run --help` 全部参数零帮助文案 — ✅ 已核验，`待修`
+### E4 `xvt run --help` 全部参数零帮助文案 — ✅ 已核验，**已修（本轮）**
 
 `--youtube-subtitles`、`--source-strategy`、`--allow-auto-subtitles`、`--align-subtitles`、`--subtitle-language` 等在 `--help` 里只有裸参数名，没有一个字的说明。而 AGENTS 把 `xvt --help` 与 README 并列为「用户可见行为」的事实来源。README 写得很详细，`--help` 等于没写。
 
 叠加 E1 后果加重：用户看 `--help` 无从知道平台字幕需要显式开启，也不知道 `workflow.py:171` 要求 `--youtube-subtitles` 必须配 `--subtitle-language`（只有报错时才知道）。
 
 **落点**：给 `build_parser()` 的参数补 `help=`。工作量中等但机械，可一次做完；补完顺带让 `--source-strategy` 的说明点出它与 `--youtube-subtitles` 的关系。
+
+**已修**：`cli._ARG_HELP` 作为 55 条文案的唯一事实来源，复用到 180 个位置；三条守卫测试（每个参数都有非空 help、同名参数 help 一致、表里没有够不着的键）把它钉住。实测规模：193 个参数里 180 个缺 help（93%），31 个子命令全部中招，但去重后只有 55 个唯一参数名。上线守卫时**顺带查出两个此前不知道的既有分歧**——`--check` 与 `--fail-on-waiting` 在 `apply` 那组变体上多了约束（「不能与 --continue 同用」「仅在带 --continue 时生效」），一条文案覆盖不了，已连同 `--cue`（三处可重复 vs preview 一处单值）登记进 `HELP_DIVERGENCE_ALLOWED` 并写明理由。
 
 ### E5 终态把最有价值的信息藏进 JSON — ✅ 已核验，`待修`
 

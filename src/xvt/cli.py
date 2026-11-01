@@ -113,6 +113,170 @@ for end-to-end jobs (resume ≠ continue).
 """
 
 
+_ARG_HELP: dict[str, str] = {
+    "input": "Local media file or a remote URL (YouTube and other yt-dlp sites)",
+    "input_directory": "Directory whose media and subtitle files become one job each",
+    "job_file": "Path to the job.json of an existing job",
+    "batch_file": "Path to the batch.json written by `xvt batch`",
+    "response_file": "Path to the response or revision file to apply",
+    "subtitle_file": "Path to the existing translated subtitle file to import",
+    "existing_video": "Path to the burned video to re-link to this job",
+    "new_media": "New path of the source media after it was moved",
+    "--output": (
+        "Output directory or output file; the exact meaning depends on the command. `run` "
+        "and `batch` require it as the job output directory, `doctor` checks it for "
+        "writability and free space, `preview` and `burn` take a media output path"
+    ),
+    "--json": "Print a single machine-readable JSON document instead of human-readable text",
+    "--events-jsonl": (
+        "Print only v1 JSONL events on stdout; human-readable progress is kept off stdout so "
+        "the stream stays machine-readable"
+    ),
+    "--fail-on-waiting": (
+        "Exit with code 10 when the command stops at awaiting_input (default: 0; not a failure)"
+    ),
+    "--recursive": "Also scan sub-directories; by default only the top level is scanned",
+    "--engine": (
+        "ASR engine; when the chosen backend is not installed XVT falls back to the other "
+        "one, emits a transcription_fallback event and records the engine it actually used "
+        "in the job config"
+    ),
+    "--language": (
+        "Source language code such as `en`. ASR auto-detects it when omitted; imported "
+        "subtitles should usually set it explicitly, otherwise it is stored as `auto`"
+    ),
+    "--source-language": "Source language code of the subtitles being imported, such as `en`",
+    "--subtitles": (
+        "Use this subtitle file as the source timeline; its cue IDs and timings are kept and "
+        "ASR is skipped"
+    ),
+    "--source-strategy": (
+        "How the source timeline is chosen: `auto` picks between a platform candidate and "
+        "ASR, `subtitles` forces the candidate, `asr` forces speech recognition. Note that "
+        "`subtitles` does NOT imply --youtube-subtitles; pass both for platform subtitles"
+    ),
+    "--align-subtitles": (
+        "Additionally run ASR over the explicit --subtitles file and correct overall offset "
+        "or drift. Requires --subtitles and cannot be combined with --source-strategy asr; "
+        "error-level QA issues after alignment fail instead of silently falling back"
+    ),
+    "--min-alignment-confidence": "Minimum confidence an alignment result must reach",
+    "--allow-low-confidence-alignment": (
+        "Accept an alignment below the confidence threshold. This only waives the confidence "
+        "bar, not error-level QA issues, and the result still has to pass subtitle QA"
+    ),
+    "--segmentation-preset": (
+        "Cue segmentation preset for ASR output; it never changes the timeline of imported "
+        "subtitles"
+    ),
+    "--strategy": "How to rebuild the source timeline; `asr` re-runs speech recognition",
+    "--youtube-subtitles": (
+        "Request platform subtitle candidates for a YouTube input. Without it XVT does not "
+        "fetch them at all and the source selection records "
+        "platform_subtitles_not_requested. Must be combined with --subtitle-language"
+    ),
+    "--subtitle-language": (
+        "Platform subtitle language to download, such as `en`; used to pick among several "
+        "languages or variants. Required together with --youtube-subtitles"
+    ),
+    "--allow-auto-subtitles": (
+        "Allow downloading YouTube auto-generated subtitles as a candidate when no manual "
+        "subtitles are available. Requires --youtube-subtitles"
+    ),
+    "--cookies-from-browser": (
+        "Let yt-dlp read login cookies from this browser, such as `chrome`; only the browser "
+        "name is recorded, never the cookie contents"
+    ),
+    "--proxy": (
+        "Proxy for remote inspection and downloads; credentials are redacted in events and "
+        "error messages"
+    ),
+    "--target-language": "Target language code such as `zh-CN`",
+    "--translation-subtitles": (
+        "Import an existing translated subtitle file instead of calling a translation "
+        "provider, mapping it onto the source cue timeline. Cannot be combined with "
+        "--glossary"
+    ),
+    "--translation-quality": (
+        "Translation quality chain; `polished` adds a polish pass, semantic review and at "
+        "most one targeted repair. Falls back to the job's stored setting when omitted"
+    ),
+    "--provider": (
+        "Translation provider: `auto` calls the compatible API when base URL, model and API "
+        "key are all available and otherwise prepares Agent batches. Falls back to the job's "
+        "stored setting when omitted"
+    ),
+    "--base-url": (
+        "Root address of the OpenAI-compatible API; XVT posts to "
+        "<base-url>/chat/completions. Read from XVT_TRANSLATION_BASE_URL when omitted. A URL "
+        "carrying credentials or a query string is rejected; put the key in the API key "
+        "environment variable instead"
+    ),
+    "--model": (
+        "Translation model name; read from XVT_TRANSLATION_MODEL when omitted. End-to-end "
+        "jobs store the effective value after the first successful batch"
+    ),
+    "--api-key-env": (
+        "Name of the environment variable holding the API key; the value is the variable "
+        "name, never the key itself. The key is never written to disk"
+    ),
+    "--batch-size": (
+        "Maximum number of cues per translation request; semantic groups are never split "
+        "across batches. Falls back to the job's stored setting when omitted"
+    ),
+    "--max-retries": (
+        "Extra retries after a translation transport failure, on top of the first attempt. "
+        "Structurally invalid responses have their own separate correction budget. Falls "
+        "back to the job's stored setting when omitted"
+    ),
+    "--timeout-seconds": (
+        "Timeout for a single translation API request. Falls back to the job's stored "
+        "setting when omitted"
+    ),
+    "--glossary": (
+        "JSON glossary file; terms that appear in a source cue are sent with the request and "
+        "checked by deterministic QA. Cannot be combined with --translation-subtitles, since "
+        "the check assumes XVT produced the translation from this glossary"
+    ),
+    "--translation-style": "Translation style. Falls back to the job's stored setting when omitted",
+    "--export-glossary": (
+        "Write a reviewable glossary skeleton (high-confidence single-word candidates only)"
+    ),
+    "--acknowledge-subtitle-review": (
+        "Acknowledge the current needs_review subtitle QA report and continue; it cannot "
+        "waive deterministic QA failures"
+    ),
+    "--acknowledge-translation-review": (
+        "Acknowledge the current semantic translation review and continue; it cannot waive "
+        "deterministic subtitle QA"
+    ),
+    "--check": "Read-only preflight for human translation review JSON/SRT",
+    "--continue": "Apply the response and continue the same end-to-end workflow in one command",
+    # 这条是可重复版（prepare-source-review / retranslate-cues / apply-cue-retranslation）。
+    # preview 的 --cue 是单值版、文案另写，见那处注释。
+    "--cue": "Cue ID to act on; repeat the flag to pass several, order matters",
+    "--burn": (
+        "Also render the bilingual ASS, burn the video and run media QA as part of the "
+        "end-to-end workflow"
+    ),
+    "--burn-media": "Video to burn onto for a local audio-only job",
+    "--burn-output": (
+        "Final burned file for `run`; it must be a safe absolute output path and may not "
+        "overwrite the source media, the job file or a registered artifact"
+    ),
+    "--media": "Video media to use for `preview` or the atomic `burn`",
+    "--software": (
+        "Force software encoding. Without it `run` and `burn` prefer hardware encoding and "
+        "fall back only on an explicit encoder failure, while `preview` reuses the encoding "
+        "settings stored on the job"
+    ),
+    "--target-font": "Font for the target-language subtitle line",
+    "--source-font": "Font for the source-language subtitle line",
+    "--start": "Preview start position in seconds; mutually exclusive with --cue",
+    "--duration": "Preview duration in seconds",
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xvt",
@@ -130,78 +294,107 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect",
         help="[advanced] Inspect local media or a remote URL",
     )
-    inspect_parser.add_argument("input")
-    inspect_parser.add_argument("--json", action="store_true")
+    inspect_parser.add_argument("input", help=_ARG_HELP["input"])
+    inspect_parser.add_argument("--json", action="store_true", help=_ARG_HELP["--json"])
 
     doctor_parser = subparsers.add_parser("doctor", help="Check runtime dependencies")
-    doctor_parser.add_argument("--output")
-    doctor_parser.add_argument("--json", action="store_true")
+    doctor_parser.add_argument("--output", help=_ARG_HELP["--output"])
+    doctor_parser.add_argument("--json", action="store_true", help=_ARG_HELP["--json"])
 
     run_parser = subparsers.add_parser(
         "run",
         help="Create a job and run the end-to-end workflow (transcribe / translate / burn)",
     )
-    run_parser.add_argument("input")
-    run_parser.add_argument("--output", required=True)
+    run_parser.add_argument("input", help=_ARG_HELP["input"])
+    run_parser.add_argument("--output", required=True, help=_ARG_HELP["--output"])
     run_parser.add_argument(
         "--engine",
         choices=["mlx", "faster"],
         default=DEFAULT_ENGINE,
-        help=(
-            "ASR engine; when the chosen backend is not installed XVT falls back to "
-            "the other one, emits a transcription_fallback event and records the "
-            "engine it actually used in the job config"
-        ),
+        help=_ARG_HELP["--engine"],
     )
-    run_parser.add_argument("--language")
-    run_parser.add_argument("--subtitles")
+    run_parser.add_argument("--language", help=_ARG_HELP["--language"])
+    run_parser.add_argument("--subtitles", help=_ARG_HELP["--subtitles"])
     run_parser.add_argument(
-        "--source-strategy", choices=["auto", "subtitles", "asr"], default="auto"
+        "--source-strategy",
+        choices=["auto", "subtitles", "asr"],
+        default="auto",
+        help=_ARG_HELP["--source-strategy"],
     )
-    run_parser.add_argument("--align-subtitles", action="store_true")
     run_parser.add_argument(
-        "--min-alignment-confidence", type=float, default=DEFAULT_MIN_ALIGNMENT_CONFIDENCE
+        "--align-subtitles", action="store_true", help=_ARG_HELP["--align-subtitles"]
     )
-    run_parser.add_argument("--allow-low-confidence-alignment", action="store_true")
-    run_parser.add_argument("--cookies-from-browser")
-    run_parser.add_argument("--proxy")
-    run_parser.add_argument("--youtube-subtitles", action="store_true")
-    run_parser.add_argument("--subtitle-language")
-    run_parser.add_argument("--allow-auto-subtitles", action="store_true")
-    run_parser.add_argument("--translation-subtitles")
-    run_parser.add_argument("--target-language")
     run_parser.add_argument(
-        "--translation-quality", choices=["standard", "polished"], default="standard"
+        "--min-alignment-confidence",
+        type=float,
+        default=DEFAULT_MIN_ALIGNMENT_CONFIDENCE,
+        help=_ARG_HELP["--min-alignment-confidence"],
+    )
+    run_parser.add_argument(
+        "--allow-low-confidence-alignment",
+        action="store_true",
+        help=_ARG_HELP["--allow-low-confidence-alignment"],
+    )
+    run_parser.add_argument("--cookies-from-browser", help=_ARG_HELP["--cookies-from-browser"])
+    run_parser.add_argument("--proxy", help=_ARG_HELP["--proxy"])
+    run_parser.add_argument(
+        "--youtube-subtitles", action="store_true", help=_ARG_HELP["--youtube-subtitles"]
+    )
+    run_parser.add_argument("--subtitle-language", help=_ARG_HELP["--subtitle-language"])
+    run_parser.add_argument(
+        "--allow-auto-subtitles", action="store_true", help=_ARG_HELP["--allow-auto-subtitles"]
+    )
+    run_parser.add_argument("--translation-subtitles", help=_ARG_HELP["--translation-subtitles"])
+    run_parser.add_argument("--target-language", help=_ARG_HELP["--target-language"])
+    run_parser.add_argument(
+        "--translation-quality",
+        choices=["standard", "polished"],
+        default="standard",
+        help=_ARG_HELP["--translation-quality"],
     )
     run_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
         default=DEFAULT_PROVIDER,
+        help=_ARG_HELP["--provider"],
     )
-    run_parser.add_argument("--base-url")
-    run_parser.add_argument("--model")
-    run_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
-    run_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-    run_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
-    run_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    run_parser.add_argument("--glossary")
+    run_parser.add_argument("--base-url", help=_ARG_HELP["--base-url"])
+    run_parser.add_argument("--model", help=_ARG_HELP["--model"])
+    run_parser.add_argument(
+        "--api-key-env", default=DEFAULT_API_KEY_ENV, help=_ARG_HELP["--api-key-env"]
+    )
+    run_parser.add_argument(
+        "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help=_ARG_HELP["--batch-size"]
+    )
+    run_parser.add_argument(
+        "--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help=_ARG_HELP["--max-retries"]
+    )
+    run_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=_ARG_HELP["--timeout-seconds"],
+    )
+    run_parser.add_argument("--glossary", help=_ARG_HELP["--glossary"])
     run_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
         default=DEFAULT_TRANSLATION_STYLE,
+        help=_ARG_HELP["--translation-style"],
     )
     run_parser.add_argument(
         "--segmentation-preset",
         choices=sorted(SEGMENTATION_PRESETS),
         default=DEFAULT_SEGMENTATION_PRESET,
+        help=_ARG_HELP["--segmentation-preset"],
     )
-    run_parser.add_argument("--burn", action="store_true")
-    run_parser.add_argument("--burn-media")
-    run_parser.add_argument("--burn-output")
-    run_parser.add_argument("--software", action="store_true")
-    run_parser.add_argument("--target-font")
-    run_parser.add_argument("--source-font")
-    run_parser.add_argument("--events-jsonl", action="store_true")
+    run_parser.add_argument("--burn", action="store_true", help=_ARG_HELP["--burn"])
+    run_parser.add_argument("--burn-media", help=_ARG_HELP["--burn-media"])
+    run_parser.add_argument("--burn-output", help=_ARG_HELP["--burn-output"])
+    run_parser.add_argument("--software", action="store_true", help=_ARG_HELP["--software"])
+    run_parser.add_argument("--target-font", help=_ARG_HELP["--target-font"])
+    run_parser.add_argument("--source-font", help=_ARG_HELP["--source-font"])
+    run_parser.add_argument("--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"])
     run_parser.add_argument(
         "--fail-on-waiting",
         action="store_true",
@@ -213,54 +406,72 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser = subparsers.add_parser(
         "batch", help="Process supported files in a directory as independent jobs"
     )
-    batch_parser.add_argument("input_directory")
-    batch_parser.add_argument("--output", required=True)
-    batch_parser.add_argument("--recursive", action="store_true")
+    batch_parser.add_argument("input_directory", help=_ARG_HELP["input_directory"])
+    batch_parser.add_argument("--output", required=True, help=_ARG_HELP["--output"])
+    batch_parser.add_argument("--recursive", action="store_true", help=_ARG_HELP["--recursive"])
     batch_parser.add_argument(
         "--engine",
         choices=["mlx", "faster"],
         default=DEFAULT_ENGINE,
-        help=(
-            "ASR engine; when the chosen backend is not installed XVT falls back to "
-            "the other one, emits a transcription_fallback event and records the "
-            "engine it actually used in the job config"
-        ),
+        help=_ARG_HELP["--engine"],
     )
-    batch_parser.add_argument("--language")
+    batch_parser.add_argument("--language", help=_ARG_HELP["--language"])
     batch_parser.add_argument(
-        "--source-strategy", choices=["auto", "subtitles", "asr"], default="auto"
+        "--source-strategy",
+        choices=["auto", "subtitles", "asr"],
+        default="auto",
+        help=_ARG_HELP["--source-strategy"],
     )
-    batch_parser.add_argument("--target-language")
+    batch_parser.add_argument("--target-language", help=_ARG_HELP["--target-language"])
     batch_parser.add_argument(
-        "--translation-quality", choices=["standard", "polished"], default="standard"
+        "--translation-quality",
+        choices=["standard", "polished"],
+        default="standard",
+        help=_ARG_HELP["--translation-quality"],
     )
     batch_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
         default=DEFAULT_PROVIDER,
+        help=_ARG_HELP["--provider"],
     )
-    batch_parser.add_argument("--base-url")
-    batch_parser.add_argument("--model")
-    batch_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
-    batch_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-    batch_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
-    batch_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    batch_parser.add_argument("--glossary")
+    batch_parser.add_argument("--base-url", help=_ARG_HELP["--base-url"])
+    batch_parser.add_argument("--model", help=_ARG_HELP["--model"])
+    batch_parser.add_argument(
+        "--api-key-env", default=DEFAULT_API_KEY_ENV, help=_ARG_HELP["--api-key-env"]
+    )
+    batch_parser.add_argument(
+        "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help=_ARG_HELP["--batch-size"]
+    )
+    batch_parser.add_argument(
+        "--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help=_ARG_HELP["--max-retries"]
+    )
+    batch_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=_ARG_HELP["--timeout-seconds"],
+    )
+    batch_parser.add_argument("--glossary", help=_ARG_HELP["--glossary"])
     batch_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
         default=DEFAULT_TRANSLATION_STYLE,
+        help=_ARG_HELP["--translation-style"],
     )
     batch_parser.add_argument(
         "--segmentation-preset",
         choices=sorted(SEGMENTATION_PRESETS),
         default=DEFAULT_SEGMENTATION_PRESET,
+        help=_ARG_HELP["--segmentation-preset"],
     )
-    batch_parser.add_argument("--burn", action="store_true")
-    batch_parser.add_argument("--software", action="store_true")
-    batch_parser.add_argument("--target-font")
-    batch_parser.add_argument("--source-font")
-    batch_parser.add_argument("--events-jsonl", action="store_true")
+    batch_parser.add_argument("--burn", action="store_true", help=_ARG_HELP["--burn"])
+    batch_parser.add_argument("--software", action="store_true", help=_ARG_HELP["--software"])
+    batch_parser.add_argument("--target-font", help=_ARG_HELP["--target-font"])
+    batch_parser.add_argument("--source-font", help=_ARG_HELP["--source-font"])
+    batch_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
     batch_parser.add_argument(
         "--fail-on-waiting",
         action="store_true",
@@ -272,8 +483,10 @@ def build_parser() -> argparse.ArgumentParser:
     batch_continue_parser = subparsers.add_parser(
         "batch-continue", help="Continue incomplete jobs from a persisted batch"
     )
-    batch_continue_parser.add_argument("batch_file")
-    batch_continue_parser.add_argument("--events-jsonl", action="store_true")
+    batch_continue_parser.add_argument("batch_file", help=_ARG_HELP["batch_file"])
+    batch_continue_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
     batch_continue_parser.add_argument(
         "--fail-on-waiting",
         action="store_true",
@@ -286,67 +499,81 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="Show job stages and the next recovery command (primary navigation)",
     )
-    status_parser.add_argument("job_file")
-    status_parser.add_argument("--json", action="store_true")
+    status_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    status_parser.add_argument("--json", action="store_true", help=_ARG_HELP["--json"])
 
     verify_parser = subparsers.add_parser(
         "verify",
         help="Recompute artifact checksums and report integrity",
     )
-    verify_parser.add_argument("job_file")
-    verify_parser.add_argument("--json", action="store_true")
+    verify_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    verify_parser.add_argument("--json", action="store_true", help=_ARG_HELP["--json"])
 
     relink_burned_parser = subparsers.add_parser(
         "relink-burned-output",
         help="Relink a moved burned video after verifying its original checksum",
     )
-    relink_burned_parser.add_argument("job_file")
-    relink_burned_parser.add_argument("existing_video")
-    relink_burned_parser.add_argument("--events-jsonl", action="store_true")
+    relink_burned_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    relink_burned_parser.add_argument("existing_video", help=_ARG_HELP["existing_video"])
+    relink_burned_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     relink_source_media_parser = subparsers.add_parser(
         "relink-source-media",
         help="[advanced] Repoint the persisted burn source media after verifying its checksum",
     )
-    relink_source_media_parser.add_argument("job_file")
-    relink_source_media_parser.add_argument("new_media")
-    relink_source_media_parser.add_argument("--events-jsonl", action="store_true")
+    relink_source_media_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    relink_source_media_parser.add_argument("new_media", help=_ARG_HELP["new_media"])
+    relink_source_media_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     resume_parser = subparsers.add_parser(
         "resume",
         help="[advanced] Resume transcription checkpoints only (not end-to-end goals)",
     )
-    resume_parser.add_argument("job_file")
-    resume_parser.add_argument("--events-jsonl", action="store_true")
+    resume_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    resume_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     rebuild_source_parser = subparsers.add_parser(
         "rebuild-source",
         help="[advanced] Rebuild source cues with ASR and invalidate downstream outputs",
     )
-    rebuild_source_parser.add_argument("job_file")
-    rebuild_source_parser.add_argument("--strategy", choices=["asr"], required=True)
-    rebuild_source_parser.add_argument("--cookies-from-browser")
-    rebuild_source_parser.add_argument("--proxy")
-    rebuild_source_parser.add_argument("--events-jsonl", action="store_true")
+    rebuild_source_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    rebuild_source_parser.add_argument(
+        "--strategy", choices=["asr"], required=True, help=_ARG_HELP["--strategy"]
+    )
+    rebuild_source_parser.add_argument(
+        "--cookies-from-browser", help=_ARG_HELP["--cookies-from-browser"]
+    )
+    rebuild_source_parser.add_argument("--proxy", help=_ARG_HELP["--proxy"])
+    rebuild_source_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     continue_parser = subparsers.add_parser(
         "continue",
         help="Finish a persisted end-to-end goal (translation / burn); use after status",
     )
-    continue_parser.add_argument("job_file")
-    continue_parser.add_argument("--cookies-from-browser")
-    continue_parser.add_argument("--proxy")
+    continue_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    continue_parser.add_argument("--cookies-from-browser", help=_ARG_HELP["--cookies-from-browser"])
+    continue_parser.add_argument("--proxy", help=_ARG_HELP["--proxy"])
     continue_parser.add_argument(
         "--acknowledge-subtitle-review",
         action="store_true",
-        help="Acknowledge the current needs_review subtitle QA report and proceed",
+        help=_ARG_HELP["--acknowledge-subtitle-review"],
     )
     continue_parser.add_argument(
         "--acknowledge-translation-review",
         action="store_true",
-        help="Acknowledge the current semantic translation review report and proceed",
+        help=_ARG_HELP["--acknowledge-translation-review"],
     )
-    continue_parser.add_argument("--events-jsonl", action="store_true")
+    continue_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
     continue_parser.add_argument(
         "--fail-on-waiting",
         action="store_true",
@@ -359,8 +586,8 @@ def build_parser() -> argparse.ArgumentParser:
         "apply",
         help="Auto-route an Agent response to the correct apply command",
     )
-    unified_apply_parser.add_argument("job_file")
-    unified_apply_parser.add_argument("response_file")
+    unified_apply_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    unified_apply_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
     unified_apply_parser.add_argument(
         "--check",
         action="store_true",
@@ -370,9 +597,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--continue",
         dest="continue_after_apply",
         action="store_true",
-        help="Apply the response and continue the same end-to-end workflow",
+        help=_ARG_HELP["--continue"],
     )
-    unified_apply_parser.add_argument("--events-jsonl", action="store_true")
+    unified_apply_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
     unified_apply_parser.add_argument(
         "--fail-on-waiting",
         action="store_true",
@@ -386,224 +615,308 @@ def build_parser() -> argparse.ArgumentParser:
         "prepare-translation",
         help="[advanced] Create deterministic translation batches for an agent",
     )
-    prepare_parser.add_argument("job_file")
-    prepare_parser.add_argument("--source-language", required=True)
-    prepare_parser.add_argument("--target-language", required=True)
-    prepare_parser.add_argument("--translation-quality", choices=["standard", "polished"])
+    prepare_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    prepare_parser.add_argument(
+        "--source-language", required=True, help=_ARG_HELP["--source-language"]
+    )
+    prepare_parser.add_argument(
+        "--target-language", required=True, help=_ARG_HELP["--target-language"]
+    )
+    prepare_parser.add_argument(
+        "--translation-quality",
+        choices=["standard", "polished"],
+        help=_ARG_HELP["--translation-quality"],
+    )
     # 与 polish-translation 同口径：不给默认值，让「未显式指定」可被识别并回退到
     # Job 固化的 workflow 策略与 batch_size（端到端 Job 上不回退会丢术语表）。
-    prepare_parser.add_argument("--batch-size", type=int)
-    prepare_parser.add_argument("--glossary")
+    prepare_parser.add_argument("--batch-size", type=int, help=_ARG_HELP["--batch-size"])
+    prepare_parser.add_argument("--glossary", help=_ARG_HELP["--glossary"])
     prepare_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
+        help=_ARG_HELP["--translation-style"],
     )
-    prepare_parser.add_argument("--events-jsonl", action="store_true")
+    prepare_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     apply_parser = subparsers.add_parser(
         "apply-translation",
         help="Apply Agent translation JSON, next step: xvt continue (needed after awaiting_input)",
     )
-    apply_parser.add_argument("job_file")
-    apply_parser.add_argument("response_file")
-    apply_parser.add_argument("--target-language", required=True)
-    apply_parser.add_argument("--events-jsonl", action="store_true")
+    apply_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    apply_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
+    apply_parser.add_argument(
+        "--target-language", required=True, help=_ARG_HELP["--target-language"]
+    )
+    apply_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     import_translation_parser = subparsers.add_parser(
         "import-translation",
         help="[advanced] Merge an existing translated subtitle file onto source cue timing",
     )
-    import_translation_parser.add_argument("job_file")
-    import_translation_parser.add_argument("subtitle_file")
-    import_translation_parser.add_argument("--target-language", required=True)
-    import_translation_parser.add_argument("--events-jsonl", action="store_true")
+    import_translation_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    import_translation_parser.add_argument("subtitle_file", help=_ARG_HELP["subtitle_file"])
+    import_translation_parser.add_argument(
+        "--target-language", required=True, help=_ARG_HELP["--target-language"]
+    )
+    import_translation_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     drop_imported_translation_parser = subparsers.add_parser(
         "drop-imported-translation",
         help="[advanced] Abandon the imported translation and return to provider translation",
     )
-    drop_imported_translation_parser.add_argument("job_file")
-    drop_imported_translation_parser.add_argument("--events-jsonl", action="store_true")
+    drop_imported_translation_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    drop_imported_translation_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     translate_parser = subparsers.add_parser(
         "translate",
         help="[advanced] Atomic translate entry (prefer run/continue for end-to-end jobs)",
     )
-    translate_parser.add_argument("job_file")
-    translate_parser.add_argument("--target-language", required=True)
-    translate_parser.add_argument("--translation-quality", choices=["standard", "polished"])
+    translate_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    translate_parser.add_argument(
+        "--target-language", required=True, help=_ARG_HELP["--target-language"]
+    )
+    translate_parser.add_argument(
+        "--translation-quality",
+        choices=["standard", "polished"],
+        help=_ARG_HELP["--translation-quality"],
+    )
     translate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
         default=DEFAULT_PROVIDER,
+        help=_ARG_HELP["--provider"],
     )
-    translate_parser.add_argument("--base-url")
-    translate_parser.add_argument("--model")
-    translate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    translate_parser.add_argument("--base-url", help=_ARG_HELP["--base-url"])
+    translate_parser.add_argument("--model", help=_ARG_HELP["--model"])
+    translate_parser.add_argument(
+        "--api-key-env", default=DEFAULT_API_KEY_ENV, help=_ARG_HELP["--api-key-env"]
+    )
     # batch-size / translation-style 不给默认值：见 prepare-translation 上的同款说明。
-    translate_parser.add_argument("--batch-size", type=int)
-    translate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
-    translate_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    translate_parser.add_argument("--glossary")
+    translate_parser.add_argument("--batch-size", type=int, help=_ARG_HELP["--batch-size"])
+    translate_parser.add_argument(
+        "--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help=_ARG_HELP["--max-retries"]
+    )
+    translate_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=_ARG_HELP["--timeout-seconds"],
+    )
+    translate_parser.add_argument("--glossary", help=_ARG_HELP["--glossary"])
     translate_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
+        help=_ARG_HELP["--translation-style"],
     )
-    translate_parser.add_argument("--events-jsonl", action="store_true")
+    translate_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     polish_parser = subparsers.add_parser(
         "polish-translation",
         help="[advanced] Polish valid translated cues with a recoverable checkpoint",
     )
-    polish_parser.add_argument("job_file")
+    polish_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     polish_parser.add_argument(
-        "--provider",
-        choices=["auto", "openai-compatible", "agent"],
+        "--provider", choices=["auto", "openai-compatible", "agent"], help=_ARG_HELP["--provider"]
     )
-    polish_parser.add_argument("--base-url")
-    polish_parser.add_argument("--model")
-    polish_parser.add_argument("--api-key-env")
-    polish_parser.add_argument("--batch-size", type=int)
-    polish_parser.add_argument("--max-retries", type=int)
-    polish_parser.add_argument("--timeout-seconds", type=float)
-    polish_parser.add_argument("--events-jsonl", action="store_true")
+    polish_parser.add_argument("--base-url", help=_ARG_HELP["--base-url"])
+    polish_parser.add_argument("--model", help=_ARG_HELP["--model"])
+    polish_parser.add_argument("--api-key-env", help=_ARG_HELP["--api-key-env"])
+    polish_parser.add_argument("--batch-size", type=int, help=_ARG_HELP["--batch-size"])
+    polish_parser.add_argument("--max-retries", type=int, help=_ARG_HELP["--max-retries"])
+    polish_parser.add_argument("--timeout-seconds", type=float, help=_ARG_HELP["--timeout-seconds"])
+    polish_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     apply_polish_parser = subparsers.add_parser(
         "apply-polish-translation",
         help="Apply Agent polish JSON, next step: xvt continue",
     )
-    apply_polish_parser.add_argument("job_file")
-    apply_polish_parser.add_argument("response_file")
-    apply_polish_parser.add_argument("--events-jsonl", action="store_true")
+    apply_polish_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    apply_polish_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
+    apply_polish_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     apply_semantic_parser = subparsers.add_parser(
         "apply-semantic-review",
         help="Apply Agent semantic review and one-repair JSON, next step: xvt continue",
     )
-    apply_semantic_parser.add_argument("job_file")
-    apply_semantic_parser.add_argument("response_file")
-    apply_semantic_parser.add_argument("--events-jsonl", action="store_true")
+    apply_semantic_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    apply_semantic_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
+    apply_semantic_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     apply_review_fixes_parser = subparsers.add_parser(
         "apply-translation-review-fixes",
         help="Apply human translation review edits, next step: xvt continue",
     )
-    apply_review_fixes_parser.add_argument("job_file")
-    apply_review_fixes_parser.add_argument("response_file")
+    apply_review_fixes_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    apply_review_fixes_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
     apply_review_fixes_parser.add_argument(
         "--check",
         action="store_true",
         help="Read-only preflight for human translation review JSON/SRT",
     )
-    apply_review_fixes_parser.add_argument("--events-jsonl", action="store_true")
+    apply_review_fixes_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     prepare_source_review_parser = subparsers.add_parser(
         "prepare-source-review",
         help="Prepare an editable source cue review file",
     )
-    prepare_source_review_parser.add_argument("job_file")
+    prepare_source_review_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     prepare_source_review_parser.add_argument(
-        "--cue", dest="cue_ids", type=int, action="append", required=True
+        "--cue", dest="cue_ids", type=int, action="append", required=True, help=_ARG_HELP["--cue"]
     )
-    prepare_source_review_parser.add_argument("--events-jsonl", action="store_true")
+    prepare_source_review_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     apply_source_review_parser = subparsers.add_parser(
         "apply-source-review-fixes",
         help="Apply human source cue edits, re-run source QA, then inspect status",
     )
-    apply_source_review_parser.add_argument("job_file")
-    apply_source_review_parser.add_argument("response_file")
-    apply_source_review_parser.add_argument("--events-jsonl", action="store_true")
+    apply_source_review_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    apply_source_review_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
+    apply_source_review_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     acknowledge_translation_parser = subparsers.add_parser(
         "acknowledge-translation-review",
         help="[advanced] Acknowledge the current semantic translation review report",
     )
-    acknowledge_translation_parser.add_argument("job_file")
-    acknowledge_translation_parser.add_argument("--events-jsonl", action="store_true")
+    acknowledge_translation_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    acknowledge_translation_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     translation_context_parser = subparsers.add_parser(
         "build-translation-context",
         help="[advanced] Extract deterministic terminology candidates from the source cues",
     )
-    translation_context_parser.add_argument("job_file")
+    translation_context_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     translation_context_parser.add_argument(
         "--export-glossary",
-        help="Write a reviewable glossary skeleton (high-confidence single-word candidates only)",
+        help=_ARG_HELP["--export-glossary"],
     )
-    translation_context_parser.add_argument("--events-jsonl", action="store_true")
+    translation_context_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     resegment_parser = subparsers.add_parser(
         "resegment-translation",
         help="[advanced] Re-segment overflowing ASR cues and invalidate their translations",
     )
-    resegment_parser.add_argument("job_file")
-    resegment_parser.add_argument("--events-jsonl", action="store_true")
+    resegment_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    resegment_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     retranslate_parser = subparsers.add_parser(
         "retranslate-cues",
         help="[advanced] Re-translate selected cues without changing their timing",
     )
-    retranslate_parser.add_argument("job_file")
+    retranslate_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     retranslate_parser.add_argument(
-        "--cue", dest="cue_ids", type=int, action="append", required=True
+        "--cue", dest="cue_ids", type=int, action="append", required=True, help=_ARG_HELP["--cue"]
     )
-    retranslate_parser.add_argument("--target-language", required=True)
+    retranslate_parser.add_argument(
+        "--target-language", required=True, help=_ARG_HELP["--target-language"]
+    )
     retranslate_parser.add_argument(
         "--provider",
         choices=["auto", "openai-compatible", "agent"],
         default=DEFAULT_PROVIDER,
+        help=_ARG_HELP["--provider"],
     )
-    retranslate_parser.add_argument("--base-url")
-    retranslate_parser.add_argument("--model")
-    retranslate_parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
-    retranslate_parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    retranslate_parser.add_argument("--base-url", help=_ARG_HELP["--base-url"])
+    retranslate_parser.add_argument("--model", help=_ARG_HELP["--model"])
     retranslate_parser.add_argument(
-        "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS
+        "--api-key-env", default=DEFAULT_API_KEY_ENV, help=_ARG_HELP["--api-key-env"]
     )
-    retranslate_parser.add_argument("--events-jsonl", action="store_true")
+    retranslate_parser.add_argument(
+        "--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help=_ARG_HELP["--max-retries"]
+    )
+    retranslate_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=_ARG_HELP["--timeout-seconds"],
+    )
+    retranslate_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     apply_retranslation_parser = subparsers.add_parser(
         "apply-cue-retranslation",
         help="[advanced] Apply selected cue translations and re-run subtitle QA",
     )
-    apply_retranslation_parser.add_argument("job_file")
-    apply_retranslation_parser.add_argument("response_file")
+    apply_retranslation_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    apply_retranslation_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
     apply_retranslation_parser.add_argument(
-        "--cue", dest="cue_ids", type=int, action="append", required=True
+        "--cue", dest="cue_ids", type=int, action="append", required=True, help=_ARG_HELP["--cue"]
     )
-    apply_retranslation_parser.add_argument("--target-language", required=True)
-    apply_retranslation_parser.add_argument("--events-jsonl", action="store_true")
+    apply_retranslation_parser.add_argument(
+        "--target-language", required=True, help=_ARG_HELP["--target-language"]
+    )
+    apply_retranslation_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     preview_parser = subparsers.add_parser(
         "preview",
         help="[advanced] Render a short bilingual preview without changing the workflow goal",
     )
-    preview_parser.add_argument("job_file")
+    preview_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     preview_position = preview_parser.add_mutually_exclusive_group()
-    preview_position.add_argument("--cue", type=int)
-    preview_position.add_argument("--start", type=float)
-    preview_parser.add_argument("--duration", type=float, default=15)
-    preview_parser.add_argument("--media")
-    preview_parser.add_argument("--output")
-    preview_parser.add_argument("--software", action="store_true", default=None)
-    preview_parser.add_argument("--target-font")
-    preview_parser.add_argument("--source-font")
-    preview_parser.add_argument("--events-jsonl", action="store_true")
+    # 显式例外：另三处 --cue 是「要操作哪些 cue」的可重复入参，这里是「从哪条 cue 起预览」
+    # 的单值入参，一条文案说不准两边，所以不走 _ARG_HELP。守卫测试的
+    # HELP_DIVERGENCE_ALLOWED 登记了这个例外。
+    preview_position.add_argument(
+        "--cue", type=int, help="Cue ID to preview from; mutually exclusive with --start"
+    )
+    preview_position.add_argument("--start", type=float, help=_ARG_HELP["--start"])
+    preview_parser.add_argument("--duration", type=float, default=15, help=_ARG_HELP["--duration"])
+    preview_parser.add_argument("--media", help=_ARG_HELP["--media"])
+    preview_parser.add_argument("--output", help=_ARG_HELP["--output"])
+    preview_parser.add_argument(
+        "--software", action="store_true", default=None, help=_ARG_HELP["--software"]
+    )
+    preview_parser.add_argument("--target-font", help=_ARG_HELP["--target-font"])
+    preview_parser.add_argument("--source-font", help=_ARG_HELP["--source-font"])
+    preview_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
 
     burn_parser = subparsers.add_parser(
         "burn",
         help="[advanced] Atomic burn entry (prefer run/continue --burn for end-to-end jobs)",
     )
-    burn_parser.add_argument("job_file")
-    burn_parser.add_argument("--media")
-    burn_parser.add_argument("--output")
-    burn_parser.add_argument("--software", action="store_true")
-    burn_parser.add_argument("--cookies-from-browser")
-    burn_parser.add_argument("--proxy")
-    burn_parser.add_argument("--target-font")
-    burn_parser.add_argument("--source-font")
-    burn_parser.add_argument("--events-jsonl", action="store_true")
+    burn_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
+    burn_parser.add_argument("--media", help=_ARG_HELP["--media"])
+    burn_parser.add_argument("--output", help=_ARG_HELP["--output"])
+    burn_parser.add_argument("--software", action="store_true", help=_ARG_HELP["--software"])
+    burn_parser.add_argument("--cookies-from-browser", help=_ARG_HELP["--cookies-from-browser"])
+    burn_parser.add_argument("--proxy", help=_ARG_HELP["--proxy"])
+    burn_parser.add_argument("--target-font", help=_ARG_HELP["--target-font"])
+    burn_parser.add_argument("--source-font", help=_ARG_HELP["--source-font"])
+    burn_parser.add_argument(
+        "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
+    )
     return parser
 
 
