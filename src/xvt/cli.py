@@ -1459,6 +1459,11 @@ class _HumanEventSink(_TrackedEventSink):
 
     def _render_download(self, data: dict[str, object]) -> None:
         parts = ["[进行中] 下载源视频"]
+        # 只在第二条流起才标——第一条流的输出与改动前逐字相同，而 100% 之后冒出「流 2」
+        # 正好解释了百分比为什么从头再走一遍（`bv*+ba` 是两条流，不是失败重试）。
+        stream_index = data.get("stream_index")
+        if isinstance(stream_index, int) and stream_index >= 2:
+            parts.append(f"流 {stream_index}")
         percent = data.get("percent")
         if isinstance(percent, int | float):
             parts.append(f"{percent:.0f}%")

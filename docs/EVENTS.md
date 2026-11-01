@@ -220,11 +220,12 @@ yt-dlp 下载进度（`download.py`）。
 ### `download_progress`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `downloaded_bytes` | int | 已下载字节数 |
+| `downloaded_bytes` | int | 已下载字节数（yt-dlp 没报或报了个解析不出来的值时为 `0`） |
 | `total_bytes` | int? | 总字节数（未知时为 `null`） |
-| `percent` | float? | 进度百分比（未知时为 `null`） |
-| `speed` | number? | 下载速度（字节/秒） |
-| `eta_seconds` | number? | 预计剩余秒数 |
+| `percent` | float? | 进度百分比（未知时为 `null`）。**字节数解析不出来时为 `null` 而不是 `0`**——拿兜底的 0 去除 total 会报出 0%，看着像进度倒退 |
+| `speed` | number? | 下载速度（字节/秒）。**当前流累计不足 3 秒或零字节时为 `null`**：这个数是 yt-dlp 按该流 `start_time` 算的累计平均（`downloader/common.py` 的 `calc_speed`），而 `bv*+ba` 的每条流各自重置起点，开头几百毫秒的平均值没有意义（实测读出 15 KB/s 而真实速率 1.8 MB/s） |
+| `eta_seconds` | number? | 预计剩余秒数。闸门同 `speed`——它由同一个速率推出，预热期报出来就是「剩余 18:52」然后几秒结束 |
+| `stream_index` | int? | 当前是第几条流（1 起）。`bv*+ba` 下载两条流，每条流各自从 0% 走到 100%；没有这个序号时第二条流开始看着就是「100% 之后从 1% 重来」。按 yt-dlp 进度载荷里的 `filename` 变化识别，一条都认不出来时为 `null` |
 
 ### `download_space_insufficient`
 下载**之前**的容量预检判定不通过，整单以 `DependencyError`（退出码 3）失败，一个字节都不下载。
@@ -382,12 +383,12 @@ FFmpeg 烧录进度（`burn.py`）与预览片段（`pipeline/burnin.py`）。
 ### `burn_progress`
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `out_time_ms` | int | 已输出时长毫秒数 |
+| `out_time_ms` | int? | 已输出时长毫秒数。ffmpeg 每 0.5 秒定时发一个进度块，**这一帧还没输出完的那块里 `out_time` / `speed` / `bitrate` 全是字面量 `N/A`**（实测 3840x2160 + `-preset placebo` 的首帧必现）。那种块沿用本次编码上一个已知值，一次都没拿到过时为 `null`——**绝不兜底成 `0`**，那会让进度当场倒退回 0% |
 | `duration_ms` | int? | 总时长毫秒数 |
-| `percent` | float? | 进度百分比 |
-| `frame` | string? | 当前帧号 |
-| `speed` | string? | 编码速度 |
-| `state` | string | FFmpeg progress 状态 |
+| `percent` | float? | 进度百分比（`out_time_ms` 或 `duration_ms` 未知时为 `null`） |
+| `frame` | string? | 当前帧号；`N/A` 与空串归一成 `null` |
+| `speed` | string? | 编码速度（如 `10.2x`）；`N/A` 与空串归一成 `null`，并去掉 ffmpeg 按宽度补的空格 |
+| `state` | string | FFmpeg progress 状态（`continue` / `end`）。**`end` 不代表 100%**：进度被截断时强报 100% 就是假完成信号，烧录完成由 `burn_completed` 负责 |
 
 ### `preview_started`
 | 字段 | 类型 | 含义 |

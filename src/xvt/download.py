@@ -466,6 +466,39 @@ def _looks_like_http_403(text: str) -> bool:
     )
 
 
+# yt-dlp 的 `speed` / `eta` 是**整段下载的累计平均**（`downloader/common.py` 的
+# `calc_speed(start, now, bytes) = bytes / (now - start)`，`start` 取该流的 `start_time`），
+# 不是瞬时值。累计平均在一条流内很稳，问题出在**每条流各自重置 start_time**：`bv*+ba`
+# 的第二条流刚开头那几百毫秒，平均值是个没意义的小数字，于是速度读出 15 KB/s、ETA 报
+# 「剩余 18:52」，几秒后就结束了。所以不换算法——换成 XVT 自己的滑动窗口对稳定下载只会
+# 更抖——只在证据不足时闭嘴：当前流累计不到这么久就一个数都不报。
+_DOWNLOAD_RATE_WARMUP_SECONDS = 3.0
+
+
+def _warm_download_rate(
+    progress: dict[str, Any],
+    downloaded_bytes: int | None,
+) -> tuple[float | None, float | None]:
+    """预热够了才把 yt-dlp 的速度与 ETA 透出去，否则两个都给 ``None``。
+
+    `elapsed` 是**当前流**已下载的秒数，HTTP 与分片两条腿都带它。缺字段时按「证据不足」
+    处理：少显示一个数，而不是显示一个错的。
+    """
+
+    try:
+        elapsed = float(progress.get("elapsed"))
+    except (TypeError, ValueError):
+        return None, None
+    if not downloaded_bytes or downloaded_bytes < 0 or elapsed < _DOWNLOAD_RATE_WARMUP_SECONDS:
+        return None, None
+    speed = progress.get("speed")
+    eta = progress.get("eta")
+    return (
+        speed if isinstance(speed, int | float) else None,
+        eta if isinstance(eta, int | float) else None,
+    )
+
+
 def _reraise_media_download_failure(error: CommandError) -> NoReturn:
     """将 yt-dlp 媒体下载失败转为更可操作的错误；非 403 原样抛出。"""
 
@@ -683,8 +716,11 @@ def download_remote_media(
 
     runner_kwargs = {}
     if event_sink:
+        stream_name: str | None = None
+        stream_index = 0
 
         def handle_line(_stream: str, line: str) -> None:
+            nonlocal stream_name, stream_index
             if not line.startswith("XVT_PROGRESS:"):
                 return
             try:
@@ -692,23 +728,40 @@ def download_remote_media(
             except json.JSONDecodeError:
                 return
             try:
-                downloaded = int(float(progress.get("downloaded_bytes") or 0))
+                downloaded: int | None = int(float(progress.get("downloaded_bytes") or 0))
             except (TypeError, ValueError):
-                downloaded = 0
+                # 解析不出来就是「不知道下了多少」，**不是「下了 0 字节」**：带着 0 去除
+                # total 会报出 0%，正是烧录侧刚修掉的那个「进度倒退回 0%」。
+                downloaded = None
             try:
                 total = int(
                     float(progress.get("total_bytes") or progress.get("total_bytes_estimate") or 0)
                 )
             except (TypeError, ValueError):
                 total = 0
+            # `bv*+ba` 下载两条流，每条流各自从 0% 走到 100%。不标出来的话第二条流开始时
+            # 看着就是「100% 之后从 1% 重来」，形似失败重试。`filename` 在 HTTP 与分片两条
+            # 下载腿的 downloading / finished 四个 hook 里都有，且一律是最终文件名而不是
+            # `.part` 临时名（yt-dlp 的 `downloader/http.py` 与 `downloader/fragment.py`），
+            # 所以只认这一个键——再退到 `tmpfilename` 只会在两者不一致时把一条流数成两条。
+            name = progress.get("filename")
+            if isinstance(name, str) and name and name != stream_name:
+                stream_name = name
+                stream_index += 1
+            speed, eta_seconds = _warm_download_rate(progress, downloaded)
             event_sink(
                 create_event(
                     EventType.DOWNLOAD_PROGRESS,
-                    downloaded_bytes=downloaded,
+                    downloaded_bytes=downloaded if downloaded is not None else 0,
                     total_bytes=total or None,
-                    percent=round(downloaded / total * 100, 2) if total else None,
-                    speed=progress.get("speed"),
-                    eta_seconds=progress.get("eta"),
+                    percent=(
+                        round(downloaded / total * 100, 2)
+                        if total and downloaded is not None
+                        else None
+                    ),
+                    speed=speed,
+                    eta_seconds=eta_seconds,
+                    stream_index=stream_index or None,
                 )
             )
 

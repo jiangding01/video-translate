@@ -111,6 +111,129 @@ class BurnTest(unittest.TestCase):
         self.assertIn("h264_videotoolbox", calls[0])
         self.assertIn("libx264", calls[1])
 
+    # 2026-11-01 实测抓到的真实块：`ffmpeg -f lavfi -i testsrc=size=3840x2160 -preset placebo
+    # -progress pipe:1`，首帧还没输出完的那 0.5 秒里 out_time / speed / bitrate 全是字面量
+    # `N/A`。不手编格式，照抄实测输出。
+    _NA_BLOCK = (
+        "frame=0",
+        "fps=0.00",
+        "stream_0_0_q=0.0",
+        "bitrate=N/A",
+        "total_size=0",
+        "out_time_us=N/A",
+        "out_time_ms=N/A",
+        "out_time=N/A",
+        "dup_frames=0",
+        "drop_frames=0",
+        "speed=N/A",
+        "progress=continue",
+    )
+    _VALID_BLOCK = (
+        "frame=750",
+        "fps=307.11",
+        "bitrate=  83.3kbits/s",
+        "out_time_us=990000",
+        "out_time_ms=990000",
+        "dup_frames=0",
+        "speed=10.2x",
+        "progress=continue",
+    )
+
+    def _burn_with_lines(self, lines, *, duration_ms=1000):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            subtitles = root / "subtitle.ass"
+            media.write_bytes(b"video")
+            subtitles.write_text("subtitle", encoding="utf-8")
+
+            def runner(args, **kwargs):
+                for line in lines:
+                    kwargs["line_callback"]("stdout", line)
+                return CommandResult(tuple(args), 0, "", "")
+
+            burn_subtitles(
+                media,
+                subtitles,
+                root / "output.mp4",
+                duration_ms=duration_ms,
+                event_sink=events.append,
+                runner=runner,
+            )
+        return events
+
+    def test_progress_does_not_fall_back_to_zero_on_an_unavailable_block(self) -> None:
+        """ffmpeg 的 N/A 块不得被兜底成 0%——那正是「99% 之后回退到 0% N/A」的来源。
+
+        把解析失败当成「已输出 0 毫秒」是在用最差的那个值兜底：进度条当场倒退，用户看着
+        像失败重跑。拿不到就沿用本次编码上一个已知值，一次都没拿到过就什么都不报。
+        """
+
+        events = self._burn_with_lines([*self._NA_BLOCK, *self._VALID_BLOCK, *self._NA_BLOCK])
+
+        first, second, third = (event.data for event in events[:3])
+        # 开头那块一次都还没拿到过，报 None 而不是 0。
+        self.assertIsNone(first["out_time_ms"])
+        self.assertIsNone(first["percent"])
+        self.assertIsNone(first["speed"], "N/A 不得作为展示值出门")
+        # frame=0 是真值不是缺值，照原样出门；归一只针对字面量 N/A。
+        self.assertEqual(first["frame"], "0")
+        self.assertEqual(second["percent"], 99.0)
+        self.assertEqual(second["speed"], "10.2x")
+        # 中途再来一块 N/A：沿用 99%，绝不回退。
+        self.assertEqual(third["out_time_ms"], 990)
+        self.assertEqual(third["percent"], 99.0)
+
+    def test_progress_state_does_not_leak_into_the_software_fallback(self) -> None:
+        """硬件编码失败回退软件编码时，进度必须从本次编码重新算。
+
+        两次 runner 调用共用一份状态的话，回退那次开头的 N/A 块会沿用到硬件那次的进度，
+        于是显示「快完成了」而实际在从零重编——比原来显示 0% 更能骗人。
+        """
+
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "input.mp4"
+            subtitles = root / "subtitle.ass"
+            media.write_bytes(b"video")
+            subtitles.write_text("subtitle", encoding="utf-8")
+            calls = []
+
+            def runner(args, **kwargs):
+                calls.append(args)
+                if len(calls) == 1:
+                    for line in self._VALID_BLOCK:
+                        kwargs["line_callback"]("stdout", line)
+                    raise CommandError(
+                        CommandResult(
+                            tuple(args),
+                            1,
+                            "",
+                            "Error while opening encoder for output stream",
+                        )
+                    )
+                for line in self._NA_BLOCK:
+                    kwargs["line_callback"]("stdout", line)
+                return CommandResult(tuple(args), 0, "", "")
+
+            burn_subtitles(
+                media,
+                subtitles,
+                root / "output.mp4",
+                duration_ms=1000,
+                event_sink=events.append,
+                runner=runner,
+            )
+
+        self.assertEqual(len(calls), 2, "本用例要走到软件回退那条腿")
+        self.assertEqual(events[0].data["percent"], 99.0)
+        self.assertIsNone(
+            events[-1].data["percent"],
+            "回退后第一块是 N/A，不得沿用上一次编码的 99%",
+        )
+
     def test_burn_emits_structured_progress(self) -> None:
         events = []
         with tempfile.TemporaryDirectory() as directory:

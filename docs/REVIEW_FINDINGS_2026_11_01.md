@@ -99,17 +99,52 @@ ASR 错听实录（全部由语义校对正确检出）：cue 21 `reveal the res
 
 **未扫的同类站点（advisory）**：`rebuild-source --strategy asr` 是同一类不可逆高成本命令（ASR 换掉源时间轴、失效译文与全部下游），人读输出同样不报失效了多少——它至少当场给出「已存译文套不回去」的真出口。本条不在 E8 范围内，需要时单独立项。
 
-### E9 下载进度不可信 — ○ 已观察，`待决策`
+### E9 下载进度不可信 — ● 已修
 
-速度在 1.8 MB/s 与 15 KB/s 之间跳变，出现过「剩余 18:52」而实际数秒后完成；分离格式的视频流与音频流都标注为「下载源视频」，进度走到 100% 后从 1% 重新开始，形似失败重试。ETA 来自 yt-dlp 瞬时速率，XVT 侧可考虑不展示 ETA 或区分两个流。
+速度在 1.8 MB/s 与 15 KB/s 之间跳变，出现过「剩余 18:52」而实际数秒后完成；分离格式的视频流与音频流都标注为「下载源视频」，进度走到 100% 后从 1% 重新开始，形似失败重试。
 
-### E10 烧录进度在 99% 后回退到 0% — ○ 已观察，`待决策`
+**本条原来写的成因是错的。** 原文说「ETA 来自 yt-dlp 瞬时速率」——读了 yt-dlp 2026.10.26 的源码，`downloader/common.py` 的 `calc_speed(start, now, bytes) = bytes / (now - start)` 以该流的 `start_time` 为起点，是**整段下载的累计平均**，不是瞬时值。累计平均在一条流内不可能从 1.8 MB/s 掉到 15 KB/s。
 
-输出序列为 `99% → 0% N/A → 100%`。推测是 ffmpeg 进度解析在 flush/收尾阶段拿到空值后按 0 处理（未读代码确认）。
+**真正的成因是三个症状共用的那一个**：`VIDEO_FORMAT_SELECTOR = "bv*+ba/b"` 下载两条流，**每条流各自重置 `start_time`**，第二条流开头几百毫秒的累计平均是个没意义的小数字 → 速度读出 15 KB/s → ETA 报「剩余 18:52」→ 平均值爬上来后 ETA 瞬间塌掉。所以速度跳变、ETA 不可信、100% 后从 1% 重来**不是两三个问题，是一个**。
+
+**已修**，两步，都不换算法：
+
+- **预热闸门**。yt-dlp 的累计平均在预热之后可信，所以按当前流的 `elapsed` 把闸门设在 3 秒（并要求字节数 > 0），不足就 `speed` / `eta_seconds` 都发 `null`，人读那行只剩百分比。**被否的替代方案**：在 XVT 侧自己算 8 秒滑动窗口替掉 yt-dlp 的数字——对一条稳定下载来说滑动窗口比累计平均**更**抖，而且根本没碰到「每条流重置起点」这个真问题。不要捡回来。
+- **流序号**。事件加 1-based `stream_index`，按进度载荷的 `filename` 变化识别；人读只在 `stream_index ≥ 2` 时显示「流 N」，于是第一条流的输出与改动前逐字相同，而百分比重走一遍的那一刻旁边多出「流 2」。**只认 `filename` 这一个键**：它在 HTTP 与分片两条下载腿的 downloading / finished 四个 hook 里都有，且一律是最终文件名而不是 `.part` 临时名（`downloader/http.py:305`/`:351`、`downloader/fragment.py:235`/`:312`），再退到 `tmpfilename` 只会在两者不一致时把一条流数成两条。
+
+`elapsed` 缺失时按「证据不足」处理（少报一个数而不是报一个错的）：读过源码，它只在「文件已存在跳过下载」与「断点续传长度不匹配」两种 hook 里缺，那两种场景本来就没有有意义的速率。
+
+**顺带修掉同形兜底**：`download.py` 里 `downloaded_bytes` 解析失败兜底成 `0`，而 `total` 有效时 `percent = round(0/total*100) = 0.0`——和 E10 是同一个 bug 类。已改成不拿解析失败的字节数推百分比（`downloaded_bytes` 本身照既有契约仍报 `0`，协议里它是非空 int）。既有的 `test_download_ignores_unknown_progress_totals` 之所以看着是绿的，是因为它把 `total` 也设成 `"NA"`，percent 正好因 total 缺失而为 `null`，把 downloaded 这一半遮掉了。
+
+### E10 烧录进度在 99% 后回退到 0% — ● 已修
+
+输出序列为 `99% → 0% N/A → 100%`。原文记的是「推测……未读代码确认」，现已读代码并**实测复现**。
+
+**机制已确证。** ffmpeg 每 0.5 秒定时发一个 `-progress` 块，**这一帧还没输出完的那块里 `out_time_us` / `out_time_ms` / `out_time` / `speed` / `bitrate` 全是字面量 `N/A`**。2026-11-01 实测复现命令与输出：
+
+```
+ffmpeg -y -f lavfi -i testsrc=size=3840x2160:rate=30:duration=2 \
+  -c:v libx264 -preset placebo -progress pipe:1 -nostats -loglevel error out.mp4
+→ frame=0 / bitrate=N/A / out_time_us=N/A / out_time_ms=N/A / speed=N/A / progress=continue
+```
+
+接着 `int("N/A")` 抛 `ValueError`，被 `except ValueError: out_time_ms = 0` 兜底成 0 → `percent = 0.0`；`speed="N/A"` 则被 `_render_burn` 的 `if speed := data.get("speed")` 原样打出来（`"N/A"` 是真值）。`0% N/A` 就是这一个块。**把解析失败兜底成最差的那个值，是这条 bug 的全部。**
+
+**已修**：解析出不来时沿用本次编码上一个已知值，一次都没拿到过就发 `null`（人读不显示数字，而不是显示 0%）；`N/A` 与空串在**事件边界**归一成 `null`，不在渲染层各自防；顺带去掉 ffmpeg 按宽度补的空格（同一个 `speed` 字段实测既有 `speed= 117x` 也有 `speed=10.2x`，靠精确等值认 `"N/A"` 在补了空格的版本上会漏判）。
+
+**调研顺带挖出的第二个问题**：`progress_state` 原先定义在回调外面，而 `burn.py` 有**两次** `runner` 调用（硬件编码失败回退软件编码）。两次共用一份状态时，「沿用上一个已知值」会把硬件那次的 99% 带进从零开始的软件重编——**比原来显示 0% 更能骗人**。所以进度回调与它的状态改成每次 `runner` 调用新建一份，并有专门的回归测试钉住。
+
+**`progress=end` 不强报 100%**：进度被截断（取消、提前结束）时强报 100% 就是一次假完成信号，而「烧完了」由 `burn_completed` 事件负责，不由进度事件负责。
+
+**真实渲染已复核**（不只看事件）：真 ffmpeg 烧 1920x1080 + ASS，人读输出为 `[进行中] 烧录视频  98%  14.9x`——无 `N/A`、无 `0%`。
 
 ### E11 MLX 模型下载的 huggingface 进度条泄漏进输出 — ○ 已观察，`待决策`
 
 `Fetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 7410.43it/s]` 混在 `[进行中] xxx` 的输出里，破坏格式一致性。**需要先确认它走 stdout 还是 stderr**：若是 stdout，则违反「`--events-jsonl` 模式 stdout 只输出逐行 JSON 事件」的既有契约；若是 stderr，仅为观感问题。本次用 `2>&1` 合并了输出，无法区分。
+
+**已确认走 stderr（tqdm 默认），因此不违反 stdout 契约，只是观感。**
+
+**2026-11-01 E9/E10 一并处理时明确排除，理由记下来免得下次当成「一行就能关」**：`huggingface_hub` 的进度条可以用 `HF_HUB_DISABLE_PROGRESS_BARS=1` 关掉，但关掉不是修。模型下载发生在 `mlx_whisper.transcribe` 里面，而 `transcribe.py:141` 的 `_start_mlx_heartbeat` 在那个调用**之前**就起了，所以下载期间 XVT 自己是有心跳的——问题是它打的是 `[进行中] 转写音频（mlx）  已运行 03:20`，**在下载 1.5 GB 模型的阶段这个标签是错的**，而且没有字节数和百分比。关掉 HF 那个条，等于把一处格式不一致换成一个错误的阶段标签加零进度细节。诚实的修法是把模型下载做成它自己的阶段、带自己的进度事件（接 `huggingface_hub` 的进度回调），那是独立一项。
 
 ### E12 无法限制下载与烧录画质 — △ 推断，`待决策`
 

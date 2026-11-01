@@ -19,6 +19,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 7. Job、batch manifest 和 artifact 是恢复依据。新增阶段或产物时，要同步持久化状态、checksum 和 JSONL 事件。烧录成品重新关联只能由 checksum 有效的 v2 proof 授权，proof 必须绑定 fingerprint、成品 checksum 和实际源媒体内容 checksum；legacy fingerprint 不得绕过重烧。
 8. 每个 Job 当前只支持一个目标语言。不要在现有 schema 上隐式加入多目标语言。
 9. 产物有效性只认内容 checksum。size、mtime 等文件元数据只能用于**证伪**（与登记值不符即失效），不得用于**证实**有效；`cp -p`、`rsync -a` 和备份还原都会保留 mtime。
+10. **进度字段解析失败一律报「未知」，不得兜底成最差的那个值。** 外部进度源会给出字面量缺值（ffmpeg 的 `N/A`、yt-dlp 偶发的非数值），把它当成「已完成 0」会让进度条当场倒退，用户读作失败重跑——2026-11-01 的 E9 / E10 就是同一个兜底长在两处（`burn.py` 的 `out_time`、`download.py` 的 `downloaded_bytes`）。归一放在**事件边界**，不放渲染层：事件是协议，让它带着 `"N/A"` 出门，每个消费方都得自己认一遍这个字面量。
 
 ## 代码结构
 
@@ -36,7 +37,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/models.py` | Job、stage、artifact、cue 和 transcript 数据模型 |
 | `src/xvt/stages.py` | Stage 计划表：给定输入组合声明转写阶段跳过哪些 stage（先计划、后执行的单一事实来源） |
 | `src/xvt/job_store.py` | Job 创建、加载和原子写入 |
-| `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载 |
+| `src/xvt/download.py` | yt-dlp 检查、字幕下载、音频或视频下载。进度事件的速率有**预热闸门**：yt-dlp 的 `speed` / `eta` 是按该流 `start_time` 算的累计平均，`bv*+ba` 的每条流各自重置起点，所以当前流不足 3 秒一律不报；流序号按进度载荷的 `filename` 变化识别（只认这个键，退到 `tmpfilename` 会把一条流数成两条） |
 | `src/xvt/media.py` | ffprobe 媒体检查 |
 | `src/xvt/transcribe.py` | MLX Whisper 和 faster-whisper 适配 |
 | `src/xvt/segment.py` | 词级时间戳到字幕 cue 的分段；禁則処理（行首行尾禁则）的**唯一**谓词 `forbidden_break`——cue 边界有四个产出点（主循环的句末/停顿/超时切、`_soft_cut`、`_partition_words` 的宽度切，以及展示侧译文超宽换行 `wrap_target_lines`），四处都走它，新增切分出口必须接入 |
@@ -50,7 +51,7 @@ XVT 是一个本地优先的视频转写、字幕翻译和双语字幕烧录 CLI
 | `src/xvt/candidate_qa.py` | 候选译文 QA 判定，以及 QA message 中行宽/上限的**唯一**解析实现（`overflow_limits`，零依赖叶子，供 recovery / pipeline.revision 共用）；其它模块一律复用它，不得就地重造这条正则 |
 | `src/xvt/source_selection.py` | 源字幕候选的确定性 QA 与选择决策（`SourceStrategy` / `SourceCandidateKind` / `SourceSelectionAction`）。`plan_source_selection` 的 `platform_subtitles_requested` **只应在远程 Job 上传 `False`**——本地文件输入的 Job 永远没请求过平台字幕，照此传会把它误记成 `platform_subtitles_not_requested`，等于用一个谎话换另一个；调用方以「有没有 `remote_info` artifact」为准（`transcription.shared.platform_manual_subtitle_languages` 返回 `None` 即本地 Job） |
 | `src/xvt/render.py` | 双语 ASS 样式和平台字体选择；`resolved_style_binding` 是「实际生效的字体与字号」的**唯一**推导（`font_for_language` / `default_target_size` 之后的输出），`_styled_subtitles` 与 `qa.check_subtitles` 的 `layout["resolved_style"]` **共用这一份**——两边各推一遍会让报告记的不是测量时真正用的样式，而它看着像绑定了，比不记更糟；对象身份与行为两层钉子在 `tests/test_render.py` |
-| `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析 |
+| `src/xvt/burn.py` | FFmpeg 烧录、编码选择和进度解析。进度回调与它的状态**按每次 `runner` 调用新建**：硬件编码失败会回退软件编码再跑一次，共用一份状态会把上一次的进度沿用进重新编码 |
 | `src/xvt/paths.py` | **用户可指定路径的写盘出口**共用的绝对路径解析与覆盖保护（源媒体、job 文件、Job 记着的用户原始输入、已登记 artifact）。烧录 `--output`、预览 `--output` 与 `build-translation-context --export-glossary` 都走这一道；**新增这类出口必须接入**，否则一条手滑的路径就能盖掉已登记 artifact 并让 Job 的 checksum 失效（`--glossary` 一类只读输入不在其内） |
 | `src/xvt/events.py` | JSONL 事件和通用 URL 脱敏 |
 | `src/xvt/process.py` | 无 shell 外部进程、流式输出和命令参数脱敏 |
