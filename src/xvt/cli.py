@@ -52,6 +52,7 @@ from xvt.pipeline import (
     inspect_input,
     interrupt_running_stage,
     pending_translation_import_blocker,
+    preflight_source_review_fixes,
     preflight_translation_review_fixes,
     prepare_agent_translation,
     prepare_source_review,
@@ -2421,6 +2422,23 @@ def _cmd_prepare_source_review(arguments: argparse.Namespace) -> int:
 
 
 def _cmd_apply_source_review_fixes(arguments: argparse.Namespace) -> int:
+    if getattr(arguments, "check", False):
+        result = preflight_source_review_fixes(arguments.job_file, arguments.response_file)
+        if not arguments.events_jsonl:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["valid"]:
+            details = "; ".join(
+                f"cue {item['cue_id']}: {item['message']}" for item in result["blockers"]
+            )
+            # 与译文侧不同，这里**不能**说 "no changes saved"：源文修订真跑起来会照旧
+            # 写盘、失效全部下游，最后才以 QA 失败告终。预检的意义正是在动手前说清这点。
+            raise UserInputError(
+                "source review preflight failed; applying it would still rewrite the job "
+                f"and invalidate every downstream artifact; {details}"
+            )
+        if arguments.events_jsonl:
+            _complete(arguments, preflight=result)
+        return 0
     event_sink = _event_sink(arguments)
     paths = apply_source_review_fixes(
         arguments.job_file,
@@ -2791,8 +2809,10 @@ def _cmd_apply(arguments: argparse.Namespace) -> int:
         routed.target_language = target_language
     continue_after_apply = bool(getattr(arguments, "continue_after_apply", False))
     if getattr(arguments, "check", False):
-        if route != "apply-translation-review-fixes":
-            raise UserInputError("--check only supports human translation review JSON/SRT")
+        if route not in {"apply-translation-review-fixes", "apply-source-review-fixes"}:
+            raise UserInputError(
+                "--check only supports human review JSON/SRT (translation or source)"
+            )
         if continue_after_apply:
             raise UserInputError("--check is read-only and cannot be combined with --continue")
     if continue_after_apply and route == "apply-source-review-fixes":

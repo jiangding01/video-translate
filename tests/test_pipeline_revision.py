@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -5,12 +7,14 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
+from xvt.cli import main
 from xvt.errors import UserInputError
 from xvt.job_store import get_job_directory, get_job_file, load_job, save_job
 from xvt.models import Artifact, Cue, StageName, StageStatus, Word
 from xvt.pipeline import (
     acknowledge_subtitle_review,
     apply_source_review_fixes,
+    preflight_source_review_fixes,
     prepare_source_review,
     run_subtitle_transcription,
 )
@@ -302,6 +306,121 @@ class SourceReviewPipelineTest(unittest.TestCase):
             stale = response.with_name(f"{source_review_stem('0' * 32)}.srt")
             with self.assertRaisesRegex(UserInputError, "stale"):
                 apply_source_review_fixes(job_file, stale)
+
+    def _snapshot(self, root: Path) -> dict[str, str]:
+        """Job 目录的全文件 checksum 快照。
+
+        排除 `.xvt.lock`：它是取 Job 锁留下的执行痕迹（跑任何命令都会重写，内容只是
+        PID），不是产物写入。把它算进来会让「只读」断言在走 CLI 的用例上必然红，而
+        那红的是锁不是预检。
+        """
+
+        return {
+            str(p.relative_to(root)): file_checksum(p)
+            for p in root.rglob("*")
+            if p.is_file() and p.name != ".xvt.lock"
+        }
+
+    def _overlap_timeline(self, job_file: Path) -> None:
+        """把两条 cue 的时间轴改成重叠，让修订后的源字幕 QA 必然判 failed。"""
+
+        job = load_job(job_file)
+        source_path = valid_artifact_path(job, "source_cues")
+        assert source_path is not None
+        cues = json.loads(source_path.read_text(encoding="utf-8"))
+        cues[1]["start_ms"] = cues[0]["start_ms"]
+        cues[1]["end_ms"] = cues[0]["end_ms"]
+        source_path.write_text(json.dumps(cues), encoding="utf-8")
+        for artifact in job.artifacts:
+            if artifact.kind == "source_cues":
+                artifact.checksum = file_checksum(source_path)
+        save_job(job)
+
+    def test_source_preflight_is_read_only(self) -> None:
+        """最要紧的一条：预检一个字节都不许写。
+
+        `_prepare_source_revision` 是从 `apply_source_review_fixes` 第一次 `write_json`
+        之前切出来的，而「那一段全是只读」是读代码得出的判断——万一其中某个 helper
+        内部悄悄 `save_job`，预检就不再只读，直接违反 AGENTS 约束 4。所以这里对整个
+        Job 目录做 checksum 快照来钉死，而不是靠再读一遍代码确认。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            response = prepare_source_review(job_file, [1]).with_suffix(".srt")
+            response.write_text(
+                response.read_text(encoding="utf-8").replace("GPT's 5.6 soul.", "GPT-5.6 soul."),
+                encoding="utf-8",
+            )
+            before = self._snapshot(root)
+            result = preflight_source_review_fixes(job_file, response)
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["task"], "source_review_preflight")
+            self.assertEqual(result["changed_ids"], [1])
+            self.assertEqual(before, self._snapshot(root))
+
+    def test_source_preflight_predicts_the_qa_failure_before_anything_is_written(self) -> None:
+        """预检先报 failed，正式 apply 再如实走到「写盘之后才抛错」。
+
+        这正是本条要防的局面：源文修订的既有契约是 QA 失败也照旧写盘、失效全部下游，
+        最后才抛 RuntimeError（`apply_source_review_fixes` 末尾）。预检的价值是让用户
+        在动手前就知道会被带到哪里，而不是改掉那条契约——所以这里同时断言预检报
+        `valid: false`，以及 apply 的行为一字未变。
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            self._overlap_timeline(job_file)
+            response = prepare_source_review(job_file, [2]).with_suffix(".srt")
+            response.write_text(
+                response.read_text(encoding="utf-8").replace(
+                    "Keep this line.", "Corrected second cue."
+                ),
+                encoding="utf-8",
+            )
+
+            before = self._snapshot(root)
+            result = preflight_source_review_fixes(job_file, response)
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["qa_status"], "failed")
+            self.assertTrue(result["blockers"])
+            self.assertEqual(before, self._snapshot(root), "预检不得写盘，即便结论是失败")
+
+            # 既有契约未变：照旧写盘、失效下游，最后才抛错。
+            with self.assertRaisesRegex(RuntimeError, "subtitle QA failed"):
+                apply_source_review_fixes(job_file, response)
+            self.assertNotEqual(before, self._snapshot(root), "apply 确实写了盘")
+
+    def test_cli_check_now_accepts_source_review_and_still_refuses_continue(self) -> None:
+        """`apply --check` 放宽到源文修订，但两条既有拒绝保持不动。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_file = self._job(root)
+            response = prepare_source_review(job_file, [1]).with_suffix(".srt")
+            response.write_text(
+                response.read_text(encoding="utf-8").replace("GPT's 5.6 soul.", "GPT-5.6 soul."),
+                encoding="utf-8",
+            )
+
+            before = self._snapshot(root)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(["apply", str(job_file), str(response), "--check"])
+            self.assertEqual(code, 0)
+            payload = json.loads(buffer.getvalue())
+            self.assertEqual(payload["task"], "source_review_preflight")
+            self.assertTrue(payload["valid"])
+            self.assertEqual(before, self._snapshot(root), "CLI 预检同样不得写盘")
+
+            # --check 与 --continue 不能组合；源文修订本身也拒绝 --continue。
+            self.assertEqual(
+                main(["apply", str(job_file), str(response), "--check", "--continue"]), 2
+            )
+            self.assertEqual(main(["apply", str(job_file), str(response), "--continue"]), 2)
+            self.assertEqual(before, self._snapshot(root), "被拒绝的组合不得留下痕迹")
 
     def test_source_review_srt_uses_marker_to_disambiguate_shared_timing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
