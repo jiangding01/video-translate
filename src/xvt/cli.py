@@ -202,12 +202,11 @@ _ARG_HELP: dict[str, str] = {
     ),
     "--translation-quality": (
         "Translation quality chain; `polished` adds a polish pass, semantic review and at "
-        "most one targeted repair. Falls back to the job's stored setting when omitted"
+        "most one targeted repair"
     ),
     "--provider": (
         "Translation provider: `auto` calls the compatible API when base URL, model and API "
-        "key are all available and otherwise prepares Agent batches. Falls back to the job's "
-        "stored setting when omitted"
+        "key are all available and otherwise prepares Agent batches"
     ),
     "--base-url": (
         "Root address of the OpenAI-compatible API; XVT posts to "
@@ -225,23 +224,19 @@ _ARG_HELP: dict[str, str] = {
     ),
     "--batch-size": (
         "Maximum number of cues per translation request; semantic groups are never split "
-        "across batches. Falls back to the job's stored setting when omitted"
+        "across batches"
     ),
     "--max-retries": (
         "Extra retries after a translation transport failure, on top of the first attempt. "
-        "Structurally invalid responses have their own separate correction budget. Falls "
-        "back to the job's stored setting when omitted"
+        "Structurally invalid responses have their own separate correction budget"
     ),
-    "--timeout-seconds": (
-        "Timeout for a single translation API request. Falls back to the job's stored "
-        "setting when omitted"
-    ),
+    "--timeout-seconds": "Timeout for a single translation API request",
     "--glossary": (
         "JSON glossary file; terms that appear in a source cue are sent with the request and "
         "checked by deterministic QA. Cannot be combined with --translation-subtitles, since "
         "the check assumes XVT produced the translation from this glossary"
     ),
-    "--translation-style": "Translation style. Falls back to the job's stored setting when omitted",
+    "--translation-style": "Translation style",
     "--export-glossary": (
         "Write a reviewable glossary skeleton (high-confidence single-word candidates only)"
     ),
@@ -257,7 +252,7 @@ _ARG_HELP: dict[str, str] = {
     "--continue": "Apply the response and continue the same end-to-end workflow in one command",
     # 这条是可重复版（prepare-source-review / retranslate-cues / apply-cue-retranslation）。
     # preview 的 --cue 是单值版、文案另写，见那处注释。
-    "--cue": "Cue ID to act on; repeat the flag to pass several, order matters",
+    "--cue": "Cue ID to act on; repeat the flag to pass several",
     "--burn": (
         "Also render the bilingual ASS, burn the video and run media QA as part of the "
         "end-to-end workflow"
@@ -278,6 +273,35 @@ _ARG_HELP: dict[str, str] = {
     "--start": "Preview start position in seconds; mutually exclusive with --cue",
     "--duration": "Preview duration in seconds",
 }
+
+# 「省略时回退 Job 固化值」按**命令**成立与否不同：带硬默认值的注册点省略时拿到的是那个
+# 默认值，永远走不到回退分支。这句话此前写在 `_ARG_HELP` 的共享文案里，于是 28 个注册点
+# 里有 18 个在说谎——`run` / `batch` 的 6 个翻译参数全错（它们创建新 Job，连「已存设置」
+# 都不存在），`translate` / `retranslate-cues` 的 `--provider` / `--max-retries` /
+# `--timeout-seconds` 也带着硬默认。所以它不进共享文案，由各注册点按自己有没有 default
+# 显式拼上。`tests/test_cli_command_tables.py` 两头各钉一道：带了这句的不得有 default，
+# 而同名参数的**基础**文案仍必须完全一致（受控后缀是唯一允许的差异，不是自由发挥的口子）。
+_JOB_FALLBACK_SENTENCE = "Falls back to the job's stored setting when omitted"
+
+# `--cue` 的顺序语义三处各不相同，一条共享文案说不准，所以也在注册点分别写明：
+# `retranslate-cues` 按传入顺序分配批次编号并把它压进 manifest fingerprint；
+# `apply-cue-retranslation` 要照那个顺序重算 manifest 再逐字节比对；
+# `prepare-source-review` 两头都走 `sorted(cue_ids)`，顺序根本不影响结果。
+_CUE_HELP_BUILDS_MANIFEST = (
+    _ARG_HELP["--cue"] + ". Order matters: batch numbers follow the order you pass them and "
+    "go into the manifest fingerprint"
+)
+_CUE_HELP_MUST_MATCH_MANIFEST = (
+    _ARG_HELP["--cue"] + ". Order must match the one used for `xvt retranslate-cues`: the "
+    "manifest is recomputed from it and compared byte for byte, so a different order is "
+    "rejected as a manifest mismatch"
+)
+
+
+def _help_with_job_fallback(key: str) -> str:
+    """给省略时**真的**会回退 Job 固化值的注册点拼上那句说明。"""
+
+    return f"{_ARG_HELP[key]}. {_JOB_FALLBACK_SENTENCE}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -628,16 +652,18 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument(
         "--translation-quality",
         choices=["standard", "polished"],
-        help=_ARG_HELP["--translation-quality"],
+        help=_help_with_job_fallback("--translation-quality"),
     )
     # 与 polish-translation 同口径：不给默认值，让「未显式指定」可被识别并回退到
     # Job 固化的 workflow 策略与 batch_size（端到端 Job 上不回退会丢术语表）。
-    prepare_parser.add_argument("--batch-size", type=int, help=_ARG_HELP["--batch-size"])
+    prepare_parser.add_argument(
+        "--batch-size", type=int, help=_help_with_job_fallback("--batch-size")
+    )
     prepare_parser.add_argument("--glossary", help=_ARG_HELP["--glossary"])
     prepare_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        help=_ARG_HELP["--translation-style"],
+        help=_help_with_job_fallback("--translation-style"),
     )
     prepare_parser.add_argument(
         "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
@@ -689,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument(
         "--translation-quality",
         choices=["standard", "polished"],
-        help=_ARG_HELP["--translation-quality"],
+        help=_help_with_job_fallback("--translation-quality"),
     )
     translate_parser.add_argument(
         "--provider",
@@ -703,7 +729,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-key-env", default=DEFAULT_API_KEY_ENV, help=_ARG_HELP["--api-key-env"]
     )
     # batch-size / translation-style 不给默认值：见 prepare-translation 上的同款说明。
-    translate_parser.add_argument("--batch-size", type=int, help=_ARG_HELP["--batch-size"])
+    translate_parser.add_argument(
+        "--batch-size", type=int, help=_help_with_job_fallback("--batch-size")
+    )
     translate_parser.add_argument(
         "--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help=_ARG_HELP["--max-retries"]
     )
@@ -717,7 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
     translate_parser.add_argument(
         "--translation-style",
         choices=["faithful", "natural", "concise"],
-        help=_ARG_HELP["--translation-style"],
+        help=_help_with_job_fallback("--translation-style"),
     )
     translate_parser.add_argument(
         "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
@@ -729,14 +757,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     polish_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     polish_parser.add_argument(
-        "--provider", choices=["auto", "openai-compatible", "agent"], help=_ARG_HELP["--provider"]
+        "--provider",
+        choices=["auto", "openai-compatible", "agent"],
+        help=_help_with_job_fallback("--provider"),
     )
     polish_parser.add_argument("--base-url", help=_ARG_HELP["--base-url"])
     polish_parser.add_argument("--model", help=_ARG_HELP["--model"])
     polish_parser.add_argument("--api-key-env", help=_ARG_HELP["--api-key-env"])
-    polish_parser.add_argument("--batch-size", type=int, help=_ARG_HELP["--batch-size"])
-    polish_parser.add_argument("--max-retries", type=int, help=_ARG_HELP["--max-retries"])
-    polish_parser.add_argument("--timeout-seconds", type=float, help=_ARG_HELP["--timeout-seconds"])
+    polish_parser.add_argument(
+        "--batch-size", type=int, help=_help_with_job_fallback("--batch-size")
+    )
+    polish_parser.add_argument(
+        "--max-retries", type=int, help=_help_with_job_fallback("--max-retries")
+    )
+    polish_parser.add_argument(
+        "--timeout-seconds", type=float, help=_help_with_job_fallback("--timeout-seconds")
+    )
     polish_parser.add_argument(
         "--events-jsonl", action="store_true", help=_ARG_HELP["--events-jsonl"]
     )
@@ -835,7 +871,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retranslate_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     retranslate_parser.add_argument(
-        "--cue", dest="cue_ids", type=int, action="append", required=True, help=_ARG_HELP["--cue"]
+        "--cue",
+        dest="cue_ids",
+        type=int,
+        action="append",
+        required=True,
+        help=_CUE_HELP_BUILDS_MANIFEST,
     )
     retranslate_parser.add_argument(
         "--target-language", required=True, help=_ARG_HELP["--target-language"]
@@ -871,7 +912,12 @@ def build_parser() -> argparse.ArgumentParser:
     apply_retranslation_parser.add_argument("job_file", help=_ARG_HELP["job_file"])
     apply_retranslation_parser.add_argument("response_file", help=_ARG_HELP["response_file"])
     apply_retranslation_parser.add_argument(
-        "--cue", dest="cue_ids", type=int, action="append", required=True, help=_ARG_HELP["--cue"]
+        "--cue",
+        dest="cue_ids",
+        type=int,
+        action="append",
+        required=True,
+        help=_CUE_HELP_MUST_MATCH_MANIFEST,
     )
     apply_retranslation_parser.add_argument(
         "--target-language", required=True, help=_ARG_HELP["--target-language"]

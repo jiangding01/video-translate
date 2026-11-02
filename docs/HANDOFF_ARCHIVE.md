@@ -8,7 +8,8 @@
 
 ## 日期目录
 
-- [2026-10-23](#2026-10-23)（2 条）
+- [2026-10-24](#2026-10-24)（2 条）
+- [2026-10-23](#2026-10-23)（3 条）
 - [2026-10-22](#2026-10-22)（1 条）
 - [2026-10-20](#2026-10-20)（14 条）
 - [2026-10-18](#2026-10-18)（13 条）
@@ -16,15 +17,23 @@
 - [2026-10-11](#2026-10-11)（3 条）
 - [2026-10-04](#2026-10-04)（1 条）
 
+## 2026-10-24
+
+2026-10-24 **`xvt doctor` 有了 `warn` 档，顺带修掉「非 macOS 上整体永远 fail」（B2 剩余层①）。** 8 个检查项此前只有 `pass` / `fail` 两档、聚合是 `all(status == "pass")`，而 `h264_videotoolbox` 是 Apple 独有的——非 macOS 上 `hardware_encoder` 必然缺失、整体永远 `fail`、退出码永远 3，整份报告没有信号价值；而 `burn.py` 本来就回退软件编码，缺它是慢不是跑不了。现在三档聚合（**fail 优先于 warn**）、`hardware_encoder` 缺失记 `warn`、退出码只在 `fail` 时为 3。`missing_status` 只覆盖「ffmpeg 正常返回但没有这个 token」，ffmpeg 缺失与探测超时是**判不出来**，照旧 fail。`--output` 新增 `output_free_space`（低于 2 GiB 记 warn、**永不 fail**，`OSError` 时这一项整个不出现）：阈值是经验值，没有资格拦东西，真闸门是下载前那道按实际大小的预检；可写性与余量共用一份路径解析。其余 6 项与 `asr` 的 fail 语义一字未动。三个坏实现各自注入过（聚合反序、OSError 记 warn、hardware 退回 fail），对应用例都变红。本机实跑 `xvt doctor --output` 为 10 项全 PASS、`output_free_space: 245.6 GiB`（与 `df` 的 246Gi 一致）、退出码 0。
+
+2026-10-24 **CI 固定 uv 版本并收紧 permissions；「传 GITHUB_TOKEN」被查证为无效改动。** #148 的 macos/3.11 挂在 `Install uv`（`Connect Timeout`），日志里那句「No (valid) GitHub token provided」把它说成了认证问题——读 `setup-uv` 源码后确认那是 `getLatestVersion` 的 **catch-all** 分支文案（任何错误都打它），而 `github-token` 的默认值本来就是 `${{ github.token }}`、与 `secrets.GITHUB_TOKEN` 同值，显式再传零效果。真正的失败点是「不固定版本就要先查一次 latest release」那次 API 调用，所以改成 `version: "0.12.1"`（本机实测版本，让本地验过的就是 CI 跑的；已核该 tag 真实存在且含 arm64 macOS 与 x86_64 Linux 资产，pin 一个不存在的版本会让四个矩阵项全挂）。顺带显式声明 `permissions: contents: read`（与本次故障无关的独立收紧，缓存读写走 `ACTIONS_RUNTIME_TOKEN`、不受它约束）。**两条都不保证 CI 不再抖**，只是去掉一个本不必要的网络依赖。教训：别照着错误日志的字面归因动手——那句话是 catch-all 打的，我第一次就被它带偏、提过一个无效方案。
+
 ## 2026-10-23
+
+2026-10-23 **YouTube 画质平局且仅 Cookie 侧提取不完整时改走干净的匿名侧（#145）。** `download._download_compared_video` 本来就有「Cookie 侧受损就回退匿名侧」的机制，但换路条件写的是**严格**更高画质，于是两侧画质相同时留在脏的 Cookie 侧、随后被「格式提取不完整」护栏整单拦下。YouTube 的 SABR 实验按账号开启后 Cookie 侧**每次**都报 `web_embedded ... formats have been skipped`、而匿名侧零警告且选中同一个 1080p，于是这类账号下**任何** YouTube 视频都卡死在这条护栏上（2026-10-23 真实端到端验收撞到，当时只能靠 yt-dlp 垫片绕过）。现在平局且仅 Cookie 侧脏时也换路，`reason` 记新取值 `anonymous_clean_extraction`。**护栏本身一个字未改**：`incomplete` 判定、标记清单与错误文案全部保留，脏的一侧永远不会被下载；匿名侧画质更低（那才是 `5ae28e8` 要防的静默降级）、匿名侧也脏、缺原音轨、音轨语言不一致四类仍然失败。真实验收（不带垫片、真实 Cookie 打真实 YouTube）：修复前报「视频格式提取不完整」，修复后以 `access=anonymous`、`reason=anonymous_clean_extraction` 拿到 1080p 原音轨，format_id 与 Cookie 侧选中的完全相同。方案见 [YouTube 下载画质方案](YOUTUBE_DOWNLOAD_QUALITY_PLAN.md)。
 
 2026-10-23 **人工修订模板的宽度标注补 `max_lines`（#141 的尾巴）。** `pipeline/revision.py` 的宽度标注此前只给 `limit`，而换行落地后那是「每行上限」，模板读者看到 36 会以为要把整句缩进一行。现在同一分支里补一个 `max_lines`（取 `segment.TARGET_WRAP_MAX_LINES`，不写死 2），只标在 `target` 的宽度项上——源文永不换行，给它标两行就是说谎。`candidate_qa.overflow_limits` 的正则一字未改（行数是代码常量，不从 message 解析），`recovery.py:282` 的等待原因文案零改动。已生成的模板不会被改写：`revision_fingerprint` 不含标注内容，要重新生成才带上该键。
 
-2026-10-23 **字体缺字不再静默降级：点名到码位、cue 与腿，可见字符停烧录。** 此前 libass 报缺字只被子串匹配认出来，收成一条 `cue_id=0` 的 `layout_measurement_unavailable` warning，行宽 QA 整份退保守上限而报告照样放行，成品是一屏豆腐块。现在解析 libass 本就带着的码位与字体名（逐帧重复，去重后用 `render.FontGlyphError` 带出），按 cue 与腿产出 `font_missing_glyph`：可见字符 `review`（停 `needs_review`，`--acknowledge-subtitle-review` 可放行），零宽/控制字符与变体选择符 `warning`。缺字之外的测量失败文案与严重度一字未动；候选 QA 里缺字刻意不作为阻断项（否则语义收尾会停在「要求修订但模板里没有可改项」的死局，已加守卫测试）。`xvt doctor` 的字体检查从只探 zh-CN 扩到 zh/ja/ko/en 四种。顺带补上了 [2026-10-17 review 发现清单](docs/REVIEW_FINDINGS_2026_10_17.md) 欠的实证：五种缺字字符各真跑一次测量，确认缺字分支真的会触发。来源是 [BaoCut 增量复查](docs/reviews/baocut-rescan-2026-10-23.md) 的 B1。
+2026-10-23 **字体缺字不再静默降级：点名到码位、cue 与腿，可见字符停烧录。** 此前 libass 报缺字只被子串匹配认出来，收成一条 `cue_id=0` 的 `layout_measurement_unavailable` warning，行宽 QA 整份退保守上限而报告照样放行，成品是一屏豆腐块。现在解析 libass 本就带着的码位与字体名（逐帧重复，去重后用 `render.FontGlyphError` 带出），按 cue 与腿产出 `font_missing_glyph`：可见字符 `review`（停 `needs_review`，`--acknowledge-subtitle-review` 可放行），零宽/控制字符与变体选择符 `warning`。缺字之外的测量失败文案与严重度一字未动；候选 QA 里缺字刻意不作为阻断项（否则语义收尾会停在「要求修订但模板里没有可改项」的死局，已加守卫测试）。`xvt doctor` 的字体检查从只探 zh-CN 扩到 zh/ja/ko/en 四种。顺带补上了 [2026-10-17 review 发现清单](REVIEW_FINDINGS_2026_10_17.md) 欠的实证：五种缺字字符各真跑一次测量，确认缺字分支真的会触发。来源是 [BaoCut 增量复查](reviews/baocut-rescan-2026-10-23.md) 的 B1。
 
 ## 2026-10-22
 
-2026-10-22 **BaoCut 对标落地三个 PR，剩余项见「下一步待办」。** 对开源剪辑软件 BaoCut（`/Users/jiangding/baocut`，Rust + Electron）做了转写/翻译链路与 CLI 两路调研并经独立核验，结论：可借鉴的是算法与协议而非其常驻 Runtime 架构；XVT 在 libass 真实行宽测量、Q6 语义校对、任务级 `recovery_plan` 三处强于它。据此落地：#140 HANDOFF 拆分归档（741 行→93 行，`tests/test_handoff_budget.py` 守卫）；#141 译文超宽先做 cue 内确定性换行（最多 2 行、禁则后检、QA 与 ASS 同源、`layout.wrap` 绑定，方案 [docs/TARGET_LINE_WRAP_PLAN.md](docs/TARGET_LINE_WRAP_PLAN.md)）；#142 ja/ko 阅读速度上限 13 + QA 阅读单位口径改细（标点不计、CJK 下 Latin 半字，只影响 `reading_speed` warning）。两处自查教训已写进对应文件注释：新守卫要照项目既有正确做法写（`test_events.py` 按标题切块）；「不该红时不红」也要有测试。
+2026-10-22 **BaoCut 对标落地三个 PR，剩余项见「下一步待办」。** 对开源剪辑软件 BaoCut（`/Users/jiangding/baocut`，Rust + Electron）做了转写/翻译链路与 CLI 两路调研并经独立核验，结论：可借鉴的是算法与协议而非其常驻 Runtime 架构；XVT 在 libass 真实行宽测量、Q6 语义校对、任务级 `recovery_plan` 三处强于它。据此落地：#140 HANDOFF 拆分归档（741 行→93 行，`tests/test_handoff_budget.py` 守卫）；#141 译文超宽先做 cue 内确定性换行（最多 2 行、禁则后检、QA 与 ASS 同源、`layout.wrap` 绑定，方案 [docs/TARGET_LINE_WRAP_PLAN.md](TARGET_LINE_WRAP_PLAN.md)）；#142 ja/ko 阅读速度上限 13 + QA 阅读单位口径改细（标点不计、CJK 下 Latin 半字，只影响 `reading_speed` warning）。两处自查教训已写进对应文件注释：新守卫要照项目既有正确做法写（`test_events.py` 按标题切块）；「不该红时不红」也要有测试。
 
 ## 2026-10-20
 
