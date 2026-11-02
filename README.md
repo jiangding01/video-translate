@@ -10,6 +10,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 - MLX Whisper 或 faster-whisper 转写，保留词级时间戳；超宽 ASR 片段会优先按语义边界切分；faster-whisper 显示真实完成比例，MLX 显示诚实的运行时长
 - 导入 SRT、VTT、ASS、SSA 源字幕，默认保留原时间轴；输入字幕必须是 UTF-8（容忍 BOM）
 - YouTube 平台字幕仅在显式请求时下载；新 Job 以候选 QA 和 `--source-strategy auto|subtitles|asr` 选择最终时间轴
+- `xvt build-translation-context` 从源 cue 确定性抽取专名与术语候选，并可导出可审核的 glossary 骨架；零模型调用，候选只有经你审核后由 `--glossary` 传回才生效
 - OpenAI-compatible Chat Completions 翻译，或 Agent 翻译批次协议；确定性语义组避免在 provider 批次边界切开句意
 - 翻译断点续跑、配置指纹、429/5xx 退避和请求超时
 - 已有端到端 Job 可显式补跑可恢复译文润色，支持 API checkpoint 与 Agent 回填
@@ -26,7 +27,7 @@ XVT 是一个本地优先的视频转写、双语字幕翻译与烧录 CLI。它
 
 ## 下一阶段规划
 
-在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环和 R2.4 烧录成品重新关联：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复，以及人工修订和提示词加固。polished API 路径已通过公开素材真实 E2E；polished Agent 主链也已于 2026-10-11 完成真实 E2E，默认保持 `standard + faithful`；下一步依次推进 Q6.2 语义复查收敛与多样本质量对照、R3 provider/checkpoint 收敛，再评估 Q7 翻译上下文与术语候选包，最后进入可视化校对工作台。完整顺序见 [路线图](ROADMAP.md)，字幕质量设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
+在开始可视化校对界面之前，项目已完成 Q1–Q6.1 字幕质量闭环、R2.4 烧录成品重新关联、R3.1 provider 传输收敛和 Q7a 确定性术语候选包：翻译传输可靠性、源字幕自适应选择、既有 Job 的 ASR 源重建、语义组翻译、可恢复润色、语义校对与一次定向修复、人工修订与提示词加固，以及零模型调用的术语候选抽取与可审核 glossary 骨架导出。polished API 路径已通过公开素材真实 E2E；polished Agent 主链也已于 2026-10-11 完成真实 E2E，默认保持 `standard + faithful`。Q6.2 剩余的语义复查收敛实测已移出近期计划（离线部分保留，剩余部分需单独授权与真实 API 成本），R3.2 内容寻址缓存已取消、R3.3 待评估；Q7b（术语候选的模型推断腿）待出现真实 CJK 源 Job 触发，Q7c（把审核后的上下文接进翻译 prompt）排在最后、属协议变更。下一步是可视化校对工作台，消费现有 JSONL 事件、`job.json`、QA artifact、人工修订 SRT 和预览能力，不复制媒体、时间轴或 QA 内核。完整顺序见 [路线图](ROADMAP.md)，字幕质量设计见 [字幕质量与自适应源字幕技术方案](docs/SUBTITLE_QUALITY_PLAN.md)。
 
 该文档同时记录已完成和待实现阶段；当前可用命令和行为仍以本 README 其他章节及 `xvt --help` 为准。
 
@@ -93,12 +94,12 @@ xvt batch-continue BATCH.json
 | `--segmentation-preset conservative\|balanced\|compact` | ASR cue 分段预设，默认 `balanced`；不改变导入字幕的既有时间轴。 |
 | `--youtube-subtitles` | 对 YouTube 输入请求平台字幕候选；**不传就不会去取**，此时源选择记 `platform_subtitles_not_requested`（区别于「请求过但平台没有」的 `platform_subtitles_missing`），平台确有人工字幕时 CLI 会提示可用语言与参数。`--source-strategy subtitles` **不隐含**本旗标，两者要一起传。必须同时给 `--subtitle-language`。 |
 | `--subtitle-language LANG` | 希望下载的平台字幕语言，例如 `en`。下载目录中同时存在多个语言或多个变体的字幕文件时，按该语言优先选取。 |
-| `--allow-auto-subtitles` | 人工字幕不可用时允许下载 YouTube 自动字幕候选。 |
+| `--allow-auto-subtitles` | 人工字幕不可用时允许下载 YouTube 自动字幕候选；需与 `--youtube-subtitles` 同传，单独给它不会去取任何平台字幕。 |
 | `--cookies-from-browser BROWSER` | 让 yt-dlp 从指定浏览器读取登录 Cookie，例如 `chrome`；只记录浏览器名称，不持久化 Cookie 内容。 |
 | `--proxy URL` | 为远程检查与下载显式指定代理；凭据会在事件和错误边界脱敏。 |
 | `--translation-subtitles PATH` | 导入已有译文字幕，跳过翻译提供方并映射到源 cue 时间轴；不能与 `--glossary` 同时使用。 |
 | `--target-language LANG` | 目标语言代码，例如 `zh-CN`。 |
-| `--translation-quality standard\|polished` | 翻译质量链，默认 `standard`；`polished` 增加润色、语义校对和最多一次定向修复。 |
+| `--translation-quality standard\|polished` | 翻译质量链；`polished` 增加润色、语义校对和最多一次定向修复。`run` / `batch` 默认 `standard`；`prepare-translation` / `translate` 省略时回退 Job 已存设置。 |
 | `--provider auto\|openai-compatible\|agent` | 翻译提供方，默认 `auto`：配置完整时调用兼容 API，否则生成 Agent 批次。Job 已固化 Base URL 与模型、当前终端只缺 API Key 时，降级原因会指名缺的是哪个环境变量。 |
 | `--base-url URL` | OpenAI-compatible API 根地址；XVT 请求 `<base-url>/chat/completions`。不传时读 `XVT_TRANSLATION_BASE_URL`；端到端 Job 在首个翻译批次成功后把生效值写回 `job.config.workflow`，此后 `continue` / `status` 不再受该环境变量漂移影响。**不得带用户名密码或 query 串**（`https://user:pw@host/v1`、`https://host/v1?api-version=x`）：这类地址会被直接拒绝，凭据请放进 API Key 环境变量。 |
 | `--model NAME` | 翻译模型名称。不传时读 `XVT_TRANSLATION_MODEL`；写回规则与 `--base-url` 相同。换模型请重新 `run`，或对已有 Job 执行 `xvt translate JOB --model NEW`。 |
@@ -199,7 +200,7 @@ xvt batch INPUT_DIRECTORY --output DIR [--recursive] [转写/翻译/烧录参数
 ```
 
 - 位置参数：`input_directory`；必填参数：`--output`。
-- 扫描：`--recursive`。
+- 扫描：`--recursive` 递归扫描子目录；默认只扫描顶层，不进子目录。
 - 转写：`--engine`、`--language`、`--source-strategy`、`--segmentation-preset`。
 - 翻译：`--target-language`、`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
 - 烧录与输出：`--burn`、`--software`、`--target-font`、`--source-font`、`--events-jsonl`。
@@ -330,7 +331,7 @@ xvt prepare-translation JOB_FILE --source-language LANG --target-language LANG
 ```
 
 - 位置参数：`job_file`。
-- 必填参数：`--source-language`、`--target-language`。
+- 必填参数：`--source-language`（被导入字幕的源语言代码，如 `en`）、`--target-language`。
 - 策略：`--translation-quality`、`--batch-size`、`--glossary`、`--translation-style`。
 - 策略回退：在端到端 Job（有持久化 `config.workflow`）上不传 `--glossary` / `--translation-style` / `--batch-size` 时，逐字段回退到 Job 已固化的术语表、风格与批次大小，与 `continue` / `status` 看到同一套策略；显式传入的字段以显式值为准。没有 `config.workflow` 的原子 Job 仍取各自默认值（风格 `faithful`、批次 `25`）。
 
@@ -393,7 +394,7 @@ xvt translate JOB_FILE --target-language LANG [翻译参数] [--events-jsonl]
 - 位置参数：`job_file`；必填参数：`--target-language`。
 - 翻译：`--translation-quality`、`--provider`、`--base-url`、`--model`、`--api-key-env`、`--batch-size`、`--max-retries`、`--timeout-seconds`、`--glossary`、`--translation-style`。
 - 提供方身份：在端到端 Job（有持久化 `config.workflow`）上不传 `--base-url` / `--model` 时回退到 Job 已固化的值而不是环境变量，与 `continue` / `status` 看到同一套身份；显式传入则覆盖并在首个批次成功后写回 Job。API Key 仍只读环境变量。
-- 策略回退：`--glossary` / `--translation-style` / `--batch-size` 同样在端到端 Job 上逐字段回退 Job 固化值（不回退会让译文丢掉术语表，而译文 QA 仍按 Job 策略判 `glossary_violation`；策略与批次大小都进翻译指纹，漂移会清零批次进度并重付一次翻译费）。原子 Job 取各自默认值。
+- 策略回退：`--glossary` / `--translation-style` / `--batch-size` / `--translation-quality` 同样在端到端 Job 上逐字段回退 Job 固化值（不回退会让译文丢掉术语表，而译文 QA 仍按 Job 策略判 `glossary_violation`；策略与批次大小都进翻译指纹，漂移会清零批次进度并重付一次翻译费）。原子 Job 取各自默认值。
 - 事件：`--events-jsonl`。
 
 </details>
@@ -459,7 +460,7 @@ xvt prepare-source-review JOB_FILE --cue ID [--cue ID ...] [--events-jsonl]
 ```
 
 - 位置参数：`job_file`。
-- 必填可重复参数：`--cue`。
+- 必填可重复参数：`--cue`（不得重复；顺序不影响结果——模板内容与 fingerprint 都按 cue ID 排序）。
 - 可选参数：`--events-jsonl`。命令同时生成同 fingerprint 的 JSON 与 SRT；JSON 供 Agent/脚本编辑，SRT 供字幕工具编辑。
 
 </details>
@@ -529,7 +530,7 @@ xvt retranslate-cues JOB_FILE --cue ID [--cue ID ...] --target-language LANG
 ```
 
 - 位置参数：`job_file`。
-- 必填参数：可重复的 `--cue`、`--target-language`。
+- 必填参数：可重复的 `--cue`（不得重复；**顺序有意义**——批次编号按传入顺序分配，并进 manifest fingerprint）、`--target-language`。
 - 翻译提供方：`--provider`、`--base-url`、`--model`、`--api-key-env`、`--max-retries`、`--timeout-seconds`。
 - 事件：`--events-jsonl`。
 - Agent 模式下 Job 会进入等待：`status` 归为 `awaiting_input`，并给出带具体 cue ID 与目标语言的可复制 `apply-cue-retranslation` 命令；未回填前 `continue` 不会宣告完成，`batch-continue` 也会停在该条目上。
@@ -545,7 +546,7 @@ xvt apply-cue-retranslation JOB_FILE RESPONSE_FILE --cue ID [--cue ID ...]
 ```
 
 - 位置参数：`job_file`、`response_file`。
-- 必填参数：可重复的 `--cue`、`--target-language`。
+- 必填参数：可重复的 `--cue`（**顺序必须与当初 `retranslate-cues` 的完全一致**：回填按它重算 manifest 再与登记的那份逐字节比对，顺序不同会报成「manifest 与当前版本生成的不一致」，而你的输入一个字节都没变。照 `artifacts/cue-retranslation-batches.json` 里 `batches[]` 的顺序读 `items[].id` 就不会错）、`--target-language`。
 - 可选参数：`--events-jsonl`。
 
 </details>
@@ -560,7 +561,7 @@ xvt preview JOB_FILE [--cue ID | --start SECONDS] [--duration SECONDS]
 ```
 
 - 位置参数：`job_file`。
-- 范围：`--cue` 与 `--start` 互斥；`--duration` 默认 `15` 秒。
+- 范围：`--cue` 与 `--start`（预览起点，单位为秒）互斥；`--duration` 默认 `15` 秒。
 - 媒体与输出：`--media`、`--output`、`--software`、`--target-font`、`--source-font`。
 - 事件：`--events-jsonl`。
 - 前置条件：需要 checksum 有效的译文 cue 与译文 QA 报告，并通过与 `burn` 相同的 QA 门；`needs_review` 须已在端到端 Job 上确认。缺产物或 QA 未放行时以退出码 4（`workflow`）失败。
@@ -653,6 +654,8 @@ uv run --no-sync xvt run "https://www.youtube.com/watch?v=VIDEO_ID" \
 请求烧录时，远程视频会在前置阶段下载一次；ASR 和后续烧录复用同一文件。
 
 普通运行无需额外参数即可在终端看到阶段进度。阶段切换会立即显示，下载、faster-whisper 转写和烧录会显示百分比、速度或剩余时间，MLX Whisper 会显示已运行时长，翻译会显示当前批次。进度写入 stderr，最终 Job 和产物路径仍写入 stdout，现有脚本可以继续读取路径。
+
+下载分离格式（视频流 + 音频流各下一次）时按流分段显示：从第二条流起标注「流 N」，每条流各自从 0% 走到 100%，**这不是失败重试**。速度与剩余时间只在当前流已累计 3 秒以上时显示——yt-dlp 给的是按该流起点算的累计平均值，流开头那几百毫秒的平均值没有意义（会报出「剩余 18 分钟」然后几秒就下完）。任何进度字段解析不出来时显示为未知，不会兜底成 0 让进度条倒退。
 
 ### 2. 只创建源字幕作业
 
@@ -984,6 +987,7 @@ uv run --no-sync xvt burn "/path/to/job.json" \
 | 文件 | 用途 |
 | --- | --- |
 | `source.srt` | 原文字幕 |
+| `translation-context.json` | 确定性术语候选包（只在跑过 `build-translation-context` 的 Job 上出现） |
 | `translation-batches.json` | Agent 翻译批次 |
 | `translation-progress.json` | API 翻译断点进度 |
 | `translation-draft-cues.json` | 润色前的不可变译文草稿 |
